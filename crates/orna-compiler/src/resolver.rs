@@ -4888,15 +4888,18 @@ fn action_result_type_is_durable(
         ) if result_type.standard_value_type.is_some()
     ) || matches!(result_type.semantic_type, SemanticType::Reference { .. })
         || matches!(
-            result_type.semantic_type,
-            SemanticType::Named(CheckedTypeId::Existing(type_id))
-                if standard.is_some_and(|standard| {
-                    standard
-                        .verified_snapshot()
-                        .catalogue()
-                        .value_type_by_id(type_id)
-                        .is_some()
-                })
+        result_type.semantic_type,
+        SemanticType::Named(CheckedTypeId::Existing(type_id))
+            if standard.is_some_and(|standard| {
+                standard
+                    .verified_snapshot()
+                    .catalogue()
+                    .value_type_by_id(type_id)
+                    .is_some_and(|value_type| {
+                        value_type.persistence() == ValueTypePersistence::Persistable
+                            || type_id == STD_ACTION_TYPE_ID
+                    })
+            })
         )
 }
 
@@ -5084,6 +5087,23 @@ struct ClientResourceTarget {
     result_type: ClientExpressionType,
 }
 
+fn standard_value_type_scalar(
+    standard: Option<&CheckedStandardLibrary>,
+    type_id: orna_core::TypeId,
+) -> Option<StandardScalar> {
+    standard.and_then(|standard| {
+        standard
+            .value_types()
+            .iter()
+            .find(|value_type| value_type.id() == type_id)
+            .and_then(|value_type| {
+                (value_type.kind() == ValueTypeKind::Primitive)
+                    .then(|| compatibility_scalar(value_type.representation_contract()))
+                    .flatten()
+            })
+    })
+}
+
 fn standard_scalar_type_id(
     standard: Option<&CheckedStandardLibrary>,
     scalar: StandardScalar,
@@ -5126,15 +5146,7 @@ fn client_expression_type_from_core_with_shape(
             None,
         ),
         ResolvedType::Value(type_id) => {
-            let scalar = standard.and_then(|standard| {
-                standard
-                    .value_types()
-                    .iter()
-                    .find(|value_type| value_type.id() == type_id)
-                    .and_then(|value_type| {
-                        compatibility_scalar(value_type.representation_contract())
-                    })
-            });
+            let scalar = standard_value_type_scalar(standard, type_id);
             (
                 scalar.map_or(
                     SemanticType::Named(CheckedTypeId::Existing(type_id)),
@@ -5607,10 +5619,25 @@ fn client_expression_types_compatible(
     actual: ClientExpressionType,
     expected: ClientExpressionType,
 ) -> bool {
-    actual.semantic_type == expected.semantic_type
+    let named_standard_alias = matches!(
+        (
+            actual.semantic_type,
+            expected.semantic_type,
+            actual.standard_value_type,
+            expected.standard_value_type,
+        ),
+        (
+            SemanticType::Named(CheckedTypeId::Existing(actual_id)),
+            SemanticType::Scalar(_),
+            None,
+            Some(expected_id),
+        ) if actual_id == expected_id
+    );
+    (actual.semantic_type == expected.semantic_type || named_standard_alias)
         && actual.result_shape == expected.result_shape
         && (expected.standard_value_type.is_none()
-            || actual.standard_value_type == expected.standard_value_type)
+            || actual.standard_value_type == expected.standard_value_type
+            || named_standard_alias)
 }
 
 fn resource_constructor_kind(name: &QualifiedSemanticName) -> Option<ResourceKind> {
@@ -7129,6 +7156,28 @@ fn client_local_resource_type(
     Some((kind, descriptor))
 }
 
+fn reject_deferred_client_resource_descriptor(
+    descriptor: Option<&TypeSpecification>,
+    local_name: &str,
+    input: &ResolvedClientFunctionInput<'_>,
+    source: &SourceSlice,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    // A successful parse with no typed descriptor is the deferred inline row shape.
+    if descriptor.is_some() {
+        return false;
+    }
+    diagnostics.push(diagnostic(
+        DiagnosticCode::TypeMismatch,
+        format!(
+            "CLIENT local {local_name} uses an inline TABLE/RECORD resource descriptor; row-resource transport is deferred"
+        ),
+        input.logical_path,
+        &source.span,
+    ));
+    true
+}
+
 struct ClientResourceTypeParser<'a> {
     text: &'a str,
     base: usize,
@@ -7850,6 +7899,15 @@ fn check_client_functions(
                     ));
                     return None;
                 };
+                if reject_deferred_client_resource_descriptor(
+                    descriptor.as_ref(),
+                    &local_name,
+                    input,
+                    &local.type_source,
+                    diagnostics,
+                ) {
+                    return None;
+                }
                 let expected_type = match descriptor.as_ref() {
                     Some(descriptor) => {
                         let resolved = resolve_application_type_with_named_standard(
@@ -7965,6 +8023,15 @@ fn check_client_functions(
                             diagnostics.push(diagnostic(DiagnosticCode::TypeMismatch, format!("CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"), input.logical_path, &source.span));
                             return None;
                         };
+                        if reject_deferred_client_resource_descriptor(
+                            descriptor.as_ref(),
+                            &local_name,
+                            input,
+                            source,
+                            diagnostics,
+                        ) {
+                            return None;
+                        }
                         let expected_type = match descriptor.as_ref() {
                             Some(descriptor) => {
                                 let resolved = resolve_application_type_with_named_standard(
@@ -8285,6 +8352,15 @@ fn check_client_functions(
                             ));
                             return None;
                         };
+                        if reject_deferred_client_resource_descriptor(
+                            descriptor.as_ref(),
+                            &local_name,
+                            input,
+                            &local.type_source,
+                            diagnostics,
+                        ) {
+                            return None;
+                        }
                         let expected_type = match descriptor.as_ref() {
                             Some(descriptor) => {
                                 let resolved = resolve_application_type_with_named_standard(
@@ -8621,12 +8697,13 @@ fn resolve_server_function_inputs<'a>(
                 continue;
             }
 
-            let Some(resolved_type) = resolve_application_type(
+            let Some(resolved_type) = resolve_application_type_with_named_standard(
                 &parameter.type_specification,
                 submitted_ids,
                 header.logical_path,
                 diagnostics,
                 standard,
+                true,
             ) else {
                 continue;
             };
@@ -8730,12 +8807,13 @@ fn resolve_server_function_return(
     uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Option<ResolvedServerFunctionReturn> {
     match return_type {
-        FunctionReturnType::Single(specification) => resolve_application_type(
+        FunctionReturnType::Single(specification) => resolve_application_type_with_named_standard(
             specification,
             submitted_ids,
             logical_path,
             diagnostics,
             standard,
+            true,
         )
         .map(|resolved| {
             record_standard_type_use(
@@ -8752,22 +8830,29 @@ fn resolve_server_function_return(
             }
         }),
         FunctionReturnType::Stream { element, span } => {
-            resolve_application_type(element, submitted_ids, logical_path, diagnostics, standard)
-                .map(|resolved| {
-                    record_standard_type_use(
-                        uses,
-                        standard,
-                        CheckedTypeUseKind::Return { owner, ordinal: 0 },
-                        resolved,
-                        type_use_location(element, logical_path),
-                    );
-                    ResolvedServerFunctionReturn::Stream {
-                        semantic_type: resolved.semantic_type,
-                        standard_value_type: resolved.standard_value_type,
-                        location: location(logical_path, span),
-                        reference_location: reference_location(element, logical_path),
-                    }
-                })
+            resolve_application_type_with_named_standard(
+                element,
+                submitted_ids,
+                logical_path,
+                diagnostics,
+                standard,
+                true,
+            )
+            .map(|resolved| {
+                record_standard_type_use(
+                    uses,
+                    standard,
+                    CheckedTypeUseKind::Return { owner, ordinal: 0 },
+                    resolved,
+                    type_use_location(element, logical_path),
+                );
+                ResolvedServerFunctionReturn::Stream {
+                    semantic_type: resolved.semantic_type,
+                    standard_value_type: resolved.standard_value_type,
+                    location: location(logical_path, span),
+                    reference_location: reference_location(element, logical_path),
+                }
+            })
         }
         FunctionReturnType::Rows { columns, span } => {
             if columns.is_empty() {
@@ -8898,10 +8983,20 @@ fn check_server_functions(
                 ));
                 continue;
             }
+            ResolvedServerFunctionReturn::Single {
+                semantic_type: SemanticType::Scalar(_),
+                ..
+            } if body_name == "SELECT" => &[],
             ResolvedServerFunctionReturn::Single { location, .. } => {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    format!("{body_name} SERVER functions require RETURNS ROWS (...)"),
+                    if body_name == "SELECT" {
+                        "SERVER SELECT functions with scalar returns require a scalar projection"
+                    } else if body_name == "DELETE" {
+                        "DELETE SERVER functions require RETURNS ROWS (...)"
+                    } else {
+                        "SERVER functions require RETURNS ROWS (...)"
+                    },
                     location.clone(),
                 ));
                 continue;
@@ -9619,7 +9714,33 @@ fn query_return_matches(
             }
             true
         }
-        ResolvedServerFunctionReturn::Single { .. } => false,
+        ResolvedServerFunctionReturn::Single { semantic_type, .. } => {
+            if projections.len() != 1 {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "SELECT returns {} {}, but RETURNS scalar declares one column",
+                        projections.len(),
+                        if projections.len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        }
+                    ),
+                    return_location.clone(),
+                ));
+                return false;
+            }
+            if projections[0].value_type().semantic_type() != *semantic_type {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "SELECT column 1 does not have the same type as RETURNS scalar",
+                    return_location.clone(),
+                ));
+                return false;
+            }
+            true
+        }
     }
 }
 
@@ -9666,6 +9787,15 @@ fn checked_server_function(
             })
             .collect(),
         return_type: match &input.return_type {
+            ResolvedServerFunctionReturn::Single {
+                semantic_type,
+                standard_value_type,
+                location,
+            } => CheckedServerFunctionReturn::Single {
+                semantic_type: *semantic_type,
+                standard_value_type: *standard_value_type,
+                location: location.clone(),
+            },
             ResolvedServerFunctionReturn::Rows { columns, .. } => {
                 CheckedServerFunctionReturn::Rows(
                     columns
@@ -9690,9 +9820,6 @@ fn checked_server_function(
                 standard_value_type: *standard_value_type,
                 location: location.clone(),
             },
-            ResolvedServerFunctionReturn::Single { .. } => {
-                panic!("checked SERVER functions reject scalar return shapes")
-            }
         },
         security: input.security,
         transaction: input.transaction,
@@ -10125,14 +10252,50 @@ fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueF
 
 fn application_failed(
     parse_report: ParseReport,
-    diagnostics: Vec<CompilerDiagnostic>,
+    mut diagnostics: Vec<CompilerDiagnostic>,
 ) -> ApplicationCheckResult {
+    if parse_report.diagnostics().is_empty() {
+        sort_application_diagnostics(&mut diagnostics, &parse_report);
+    }
     ApplicationCheckResult {
         parse_report,
         diagnostics,
         checked_bundle: None,
         uses: Vec::new(),
     }
+}
+
+fn sort_application_diagnostics(
+    diagnostics: &mut [CompilerDiagnostic],
+    parse_report: &ParseReport,
+) {
+    let unit_indices = source_unit_indices(parse_report);
+    diagnostics.sort_by(|left, right| {
+        let left_location = left.location();
+        let right_location = right.location();
+        (
+            unit_indices
+                .get(left_location.logical_path())
+                .copied()
+                .unwrap_or(usize::MAX),
+            left_location.logical_path(),
+            left_location.span().start(),
+            left_location.span().end(),
+            left.code().as_str(),
+            left.message(),
+        )
+            .cmp(&(
+                unit_indices
+                    .get(right_location.logical_path())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                right_location.logical_path(),
+                right_location.span().start(),
+                right_location.span().end(),
+                right.code().as_str(),
+                right.message(),
+            ))
+    });
 }
 
 fn sort_standard_type_uses(uses: &mut [CheckedApplicationTypeUse], parse_report: &ParseReport) {
@@ -11365,7 +11528,7 @@ mod tests {
     use super::{CheckedClientExpression, CheckedClientFunctionBody, ClientResourceTypeParser};
     use std::{cell::Cell, error::Error};
 
-    use crate::relational::ExpressionKind;
+    use crate::relational::{ExpressionKind, NullOrder, SortDirection};
     use orna_artifact::server_mutation_plan::{
         MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
         RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
@@ -11475,7 +11638,11 @@ mod tests {
         let source = format!("CREATE TYPE app.value AS OBJECT (value {spelling});");
         let parsed = parse(&source);
 
-        assert!(parsed.diagnostics().is_empty(), "{source}");
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics()
+        );
         parsed.object_types()[0].fields[0]
             .type_specification
             .clone()
@@ -11643,6 +11810,88 @@ mod tests {
         assert_eq!(
             diagnostics[0].message(),
             "REF target must be one named object type"
+        );
+    }
+
+    #[test]
+    fn resolves_named_standard_types_in_server_signature_positions() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.row AS OBJECT (value BOOLEAN); \
+            CREATE SERVER FUNCTION app.parameter(p_value BOOLEAN) RETURNS BOOLEAN AS SELECT TRUE FROM app.row r; \
+            CREATE SERVER FUNCTION app.single() RETURNS BOOLEAN AS SELECT TRUE FROM app.row r; \
+            CREATE SERVER FUNCTION app.stream() RETURNS STREAM<BOOLEAN> AS SELECT TRUE FROM app.row r; \
+            CREATE SERVER FUNCTION app.unknown(p_value std.missing) RETURNS std.missing AS SELECT TRUE FROM app.row r;";
+        let parsed = parse_bundle(&bundle([("server-signatures.orna", source)]));
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+
+        let mut assignments = CheckAssignments::new();
+        let mut function_ids = std::collections::HashMap::new();
+        for declaration in parsed.units()[0].parsed().server_functions() {
+            function_ids.insert(
+                super::semantic_name(&declaration.name),
+                assignments.function_id(None),
+            );
+        }
+        let headers = super::resolve_server_function_headers(&parsed, &function_ids);
+        let mut diagnostics = Vec::new();
+        let mut uses = Vec::new();
+        let base = empty_catalogue();
+        let inputs = super::resolve_server_function_inputs(
+            &headers,
+            &std::collections::HashMap::new(),
+            &base,
+            &mut assignments,
+            &mut diagnostics,
+            Some(&standard),
+            &mut uses,
+        );
+
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code() == DiagnosticCode::UnknownQualifiedName)
+        );
+        let boolean = TypeId::from_bytes([3; 16]);
+        assert!(inputs.iter().all(|input| {
+            let return_type = match &input.return_type {
+                super::ResolvedServerFunctionReturn::Single { semantic_type, .. }
+                | super::ResolvedServerFunctionReturn::Stream { semantic_type, .. } => {
+                    *semantic_type
+                }
+                super::ResolvedServerFunctionReturn::Rows { .. } => return false,
+            };
+            return_type == SemanticType::scalar(StandardScalar::Boolean)
+        }));
+        assert_eq!(inputs[0].parameters.len(), 1);
+        assert_eq!(
+            inputs[0].parameters[0].semantic_type,
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert_eq!(inputs[0].parameters[0].standard_value_type, Some(boolean));
+        assert_eq!(uses.len(), 4);
+        assert!(uses.iter().all(|use_| {
+            matches!(
+                use_,
+                CheckedApplicationTypeUse::Value(value) if value.type_id() == boolean
+            )
+        }));
+        assert!(
+            uses.iter()
+                .any(|use_| matches!(use_.kind(), CheckedTypeUseKind::Parameter { .. }))
+        );
+        assert_eq!(
+            uses.iter()
+                .filter(|use_| matches!(use_.kind(), CheckedTypeUseKind::Return { .. }))
+                .count(),
+            3
         );
     }
 
@@ -11898,6 +12147,41 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn application_diagnostics_are_ordered_by_source_unit_and_span() {
+        let first_source = "CREATE SCHEMA app;\nCREATE TYPE app.item AS OBJECT (value app.missing);\nCREATE SCHEMA app;";
+        let second_source = "CREATE SCHEMA other;\nCREATE SCHEMA other;";
+        let report = check(
+            &bundle([("first.orna", first_source), ("second.orna", second_source)]),
+            &empty_catalogue(),
+        );
+
+        let expected = [
+            (
+                "first.orna",
+                first_source.find("app.missing").unwrap(),
+                DiagnosticCode::UnknownQualifiedName,
+            ),
+            (
+                "first.orna",
+                first_source.rfind("app").unwrap(),
+                DiagnosticCode::DuplicateDefinition,
+            ),
+            (
+                "second.orna",
+                second_source.rfind("other").unwrap(),
+                DiagnosticCode::DuplicateDefinition,
+            ),
+        ];
+        assert_eq!(report.diagnostics().len(), expected.len());
+        for (diagnostic, (logical_path, start, code)) in report.diagnostics().iter().zip(expected) {
+            assert_eq!(diagnostic.location().logical_path(), logical_path);
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.code(), code);
+        }
+        assert_no_checked_bundle(&report);
     }
 
     fn catalogue(
@@ -15761,7 +16045,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_function_references_preserve_server_single_return_rejection() {
+    fn accepts_standard_server_scalar_select_and_preserves_references() {
         let standard =
             check_standard_library_source(&verified_standard_library_for_relational_test())
                 .unwrap();
@@ -15773,25 +16057,17 @@ mod tests {
             AS SELECT TRUE FROM app.item item;";
         let report = check_standard_application(&bundle([("application.orna", source)]), &context);
 
-        assert!(report.checked_bundle().is_none());
-        assert_eq!(
-            report
-                .diagnostics()
-                .iter()
-                .map(|diagnostic| (
-                    diagnostic.code(),
-                    diagnostic.message(),
-                    diagnostic.location().span().start(),
-                    diagnostic.location().span().end(),
-                ))
-                .collect::<Vec<_>>(),
-            vec![(
-                DiagnosticCode::TypeMismatch,
-                "SELECT SERVER functions require RETURNS ROWS (...)",
-                source.find("BOOLEAN AS").unwrap(),
-                source.find("BOOLEAN AS").unwrap() + "BOOLEAN".len(),
-            ),]
-        );
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let functions = checked.server_functions().collect::<Vec<_>>();
+        assert_eq!(functions.len(), 1);
+        let function = functions[0];
+        assert_eq!(function.return_columns().count(), 0);
+        assert_eq!(function.references().len(), 1);
+        assert!(matches!(
+            function.references()[0].target(),
+            CheckedDefinitionReferenceTarget::ObjectType(_)
+        ));
     }
 
     #[test]
@@ -15910,8 +16186,8 @@ mod tests {
             return;
         };
         let expected = [
-            ("TRUE = FALSE", source.find("TRUE = FALSE").unwrap()),
             ("TRUE", source.find("TRUE").unwrap()),
+            ("TRUE = FALSE", source.find("TRUE = FALSE").unwrap()),
             ("FALSE", source.find("FALSE").unwrap()),
         ];
         for (diagnostic, (text, start)) in [parent, left, right].into_iter().zip(expected) {
@@ -17722,11 +17998,11 @@ mod tests {
             ),
             (
                 DiagnosticCode::TypeMismatch,
-                "default constant does not match the field type and nullability",
+                "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL",
             ),
             (
                 DiagnosticCode::TypeMismatch,
-                "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL",
+                "default constant does not match the field type and nullability",
             ),
         ];
         assert_eq!(report.diagnostics().len(), expected.len());
@@ -19250,22 +19526,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_single_return_select_at_the_declared_return() {
+    fn accepts_single_return_select_at_the_declared_return() {
         let source = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT); \
             CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT p.name FROM people.person p;";
         let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
-        assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let functions = checked.server_functions();
+        assert_eq!(functions.len(), 1);
+        let function = &functions[0];
+        assert!(matches!(
+            function.return_type(),
+            super::CheckedServerFunctionReturn::Single {
+                semantic_type: super::SemanticType::Scalar(StandardScalar::CharacterLargeObject),
+                ..
+            }
+        ));
+        let query = function.query_plan().expect("scalar SELECT query plan");
+        assert_eq!(query.projections().len(), 1);
         assert_eq!(
-            report.diagnostics()[0].message(),
-            "SELECT SERVER functions require RETURNS ROWS (...)"
+            query.projections()[0].value_type().semantic_type(),
+            super::SemanticType::Scalar(StandardScalar::CharacterLargeObject)
         );
-        assert_eq!(
-            report.diagnostics()[0].location().span().start(),
-            source.rfind("TEXT AS").unwrap()
-        );
-        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -20043,10 +20326,6 @@ mod tests {
             vec![
                 (
                     DiagnosticCode::DomainIncompatible,
-                    "SELECT DISTINCT SERVER functions require zero declared parameters",
-                ),
-                (
-                    DiagnosticCode::DomainIncompatible,
                     "SELECT DISTINCT SERVER functions require SECURITY INVOKER",
                 ),
                 (
@@ -20056,6 +20335,10 @@ mod tests {
                 (
                     DiagnosticCode::DomainIncompatible,
                     "SELECT DISTINCT SERVER functions require VOLATILITY STABLE",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "SELECT DISTINCT SERVER functions require zero declared parameters",
                 ),
             ]
         );
@@ -21581,14 +21864,18 @@ mod tests {
             CREATE CLIENT FUNCTION ui.stateful() RETURNS TEXT IS \
             STATE value TEXT; BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args()); END;";
         let report = check(&bundle([("await-positions.orna", source)]), &base);
-        assert!(
-            report.diagnostics().iter().any(|diagnostic| {
-                diagnostic.code() == DiagnosticCode::DomainIncompatible
-                    && diagnostic.message().contains("AWAIT is only valid")
-            }),
-            "{:?}",
-            report.diagnostics()
-        );
+        assert_eq!(report.diagnostics().len(), 2, "{:?}", report.diagnostics());
+        let await_starts = [
+            source.find("AWAIT").unwrap(),
+            source.rfind("AWAIT").unwrap(),
+        ];
+        for (diagnostic, start) in report.diagnostics().iter().zip(await_starts) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::UnexpectedToken);
+            assert_eq!(diagnostic.message(), "expected a CLIENT expression");
+            assert_eq!(diagnostic.location().logical_path(), "await-positions.orna");
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + "AWAIT".len());
+        }
         assert_no_checked_bundle(&report);
 
         let procedural = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.procedural() RETURNS TEXT IS \
@@ -21600,6 +21887,7 @@ mod tests {
             "{:?}",
             report.diagnostics()
         );
+        assert!(report.checked_bundle().is_some());
     }
 
     #[test]
@@ -22075,26 +22363,14 @@ mod tests {
         let expected = [
             (
                 "z.orna",
-                "the std namespace is owned by the standard library",
-                z_source.find("std").unwrap(),
-                "std".len(),
-            ),
-            (
-                "a.orna",
-                "the std namespace is owned by the standard library",
-                a_source.find("StD.first").unwrap(),
-                "StD.first".len(),
+                "only the standard library can export a type to the prelude",
+                z_source.find("TO PRELUDE").unwrap(),
+                "TO PRELUDE".len(),
             ),
             (
                 "z.orna",
                 "KERNEL CONTRACT is available only to the standard library",
                 z_source.find("KERNEL CONTRACT").unwrap(),
-                "KERNEL CONTRACT".len(),
-            ),
-            (
-                "a.orna",
-                "KERNEL CONTRACT is available only to the standard library",
-                a_source.find("KERNEL CONTRACT").unwrap(),
                 "KERNEL CONTRACT".len(),
             ),
             (
@@ -22104,22 +22380,34 @@ mod tests {
                 "app.second_binding".len(),
             ),
             (
-                "a.orna",
-                "qualified type exports are available only to the standard library",
-                a_source.find("app.first_binding").unwrap(),
-                "app.first_binding".len(),
-            ),
-            (
                 "z.orna",
-                "only the standard library can export a type to the prelude",
-                z_source.find("TO PRELUDE").unwrap(),
-                "TO PRELUDE".len(),
+                "the std namespace is owned by the standard library",
+                z_source.find("std").unwrap(),
+                "std".len(),
             ),
             (
                 "a.orna",
                 "only the standard library can export a type to the prelude",
                 a_source.find("TO PRELUDE").unwrap(),
                 "TO PRELUDE".len(),
+            ),
+            (
+                "a.orna",
+                "KERNEL CONTRACT is available only to the standard library",
+                a_source.find("KERNEL CONTRACT").unwrap(),
+                "KERNEL CONTRACT".len(),
+            ),
+            (
+                "a.orna",
+                "qualified type exports are available only to the standard library",
+                a_source.find("app.first_binding").unwrap(),
+                "app.first_binding".len(),
+            ),
+            (
+                "a.orna",
+                "the std namespace is owned by the standard library",
+                a_source.find("StD.first").unwrap(),
+                "StD.first".len(),
             ),
         ];
         for (diagnostic, (path, message, start, length)) in
@@ -23670,16 +23958,46 @@ mod tests {
     }
 
     #[test]
-    fn application_checker_still_rejects_the_no_input_parameter_select_body() {
-        let source = "CREATE SCHEMA app;\nCREATE SERVER FUNCTION app.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
+    fn application_checker_accepts_scalar_server_select_and_retains_return_identity() {
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.item AS OBJECT (value INTEGER);\nCREATE SERVER FUNCTION app.echo()\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT i.value FROM app.item i;";
         let report = check(&bundle([("app.orna", source)]), &empty_catalogue());
 
-        assert_eq!(report.diagnostics().len(), 1);
-        let diagnostic = &report.diagnostics()[0];
-        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
-        assert_eq!(
-            diagnostic.message(),
-            "SERVER functions do not yet support this body form"
+        assert_eq!(report.diagnostics(), &[]);
+        let function = &report.checked_bundle().unwrap().server_functions()[0];
+        assert!(matches!(
+            function.return_type(),
+            super::CheckedServerFunctionReturn::Single {
+                semantic_type: SemanticType::Scalar(StandardScalar::Integer),
+                standard_value_type: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn scalar_server_select_rejects_projection_count_mismatch() {
+        let source = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER); CREATE SERVER FUNCTION app.echo() RETURNS INTEGER SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT i.value, i.value FROM app.item i;";
+        let report = check(&bundle([("app.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::TypeMismatch)
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn scalar_server_select_rejects_projection_type_mismatch() {
+        let source = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER); CREATE SERVER FUNCTION app.echo() RETURNS TEXT SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT i.value FROM app.item i;";
+        let report = check(&bundle([("app.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::TypeMismatch)
         );
         assert_no_checked_bundle(&report);
     }
@@ -27268,6 +27586,129 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inline_row_resource_descriptors_in_both_procedural_local_paths() {
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x44; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+
+        for descriptor in [
+            "TABLE (task_id UUID, title TEXT)",
+            "RECORD (task_id UUID, title TEXT)",
+        ] {
+            for resource_type in ["Resource", "StreamResource"] {
+                for (path, local) in [
+                    (
+                        "state-less",
+                        format!(
+                            "LET rows std.data.{resource_type}<{descriptor}> := std.data.resource(target => tasks.find, arguments => std.call.args()); BEGIN RETURN AWAIT rows; END;"
+                        ),
+                    ),
+                    (
+                        "BEGIN LET",
+                        format!(
+                            "BEGIN LET rows std.data.{resource_type}<{descriptor}> := std.data.resource(target => tasks.find, arguments => std.call.args()); RETURN AWAIT rows; END;"
+                        ),
+                    ),
+                ] {
+                    let source = format!(
+                        "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS TEXT IS {local}"
+                    );
+                    let source_bundle =
+                        SourceBundle::new([SourceUnit::new("resource.orna", source)]).unwrap();
+                    let report = check(&source_bundle, &base);
+                    assert_eq!(report.diagnostics().len(), 1, "{path} {descriptor}");
+                    assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+                    assert_eq!(
+                        report.diagnostics()[0].message(),
+                        "CLIENT local rows uses an inline TABLE/RECORD resource descriptor; row-resource transport is deferred"
+                    );
+                    assert_no_checked_bundle(&report);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_client_resource_table_descriptor_with_deferred_row_diagnostic() {
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS TEXT IS BEGIN LET rows std.data.Resource<TABLE (task_id UUID, title TEXT)> := std.data.resource(target => tasks.find, arguments => std.call.args()); RETURN AWAIT rows; END;";
+        let parsed = parse(source);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics()
+        );
+
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x41; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x42; 16]),
+                QualifiedSemanticName::new(["tasks"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([0x43; 16]),
+                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+                FunctionDomain::Server,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+                FunctionRevisionId::from_bytes([0x44; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        let report = check(&bundle([("resource-table.orna", source)]), &base);
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT local rows uses an inline TABLE/RECORD resource descriptor; row-resource transport is deferred"
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_client_stream_resource_record_descriptor_with_deferred_row_diagnostic() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); CREATE SERVER FUNCTION tasks.events() RETURNS STREAM<TEXT> AS SELECT t.title FROM tasks.task t; CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.events() RETURNS STREAM<TEXT> IS BEGIN LET rows std.data.StreamResource<RECORD (task_id UUID, title TEXT)> := std.data.stream_resource(target => tasks.events, arguments => std.call.args()); RETURN AWAIT rows; END;";
+        let parsed = parse(source);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics()
+        );
+
+        let report = check(
+            &bundle([("stream-resource-record.orna", source)]),
+            &empty_catalogue(),
+        );
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT local rows uses an inline TABLE/RECORD resource descriptor; row-resource transport is deferred"
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
     fn rejects_malformed_client_resource_local_descriptors() {
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([0x41; 16]),
@@ -27387,20 +27828,13 @@ mod tests {
         let report = check(&bundle([("resource.orna", source)]), &base);
         assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
         let diagnostic = &report.diagnostics()[0];
-        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
-        assert_eq!(
-            diagnostic.message(),
-            "AWAIT is only valid as the CLIENT body return expression"
-        );
+        assert_eq!(diagnostic.code(), DiagnosticCode::UnexpectedToken);
         assert_eq!(diagnostic.location().logical_path(), "resource.orna");
-        let await_text = "AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_name => p_name))";
-        let await_start = source
-            .find(await_text)
-            .expect("await expression is present");
+        let await_start = source.find("AWAIT").expect("await expression is present");
         assert_eq!(diagnostic.location().span().start(), await_start);
         assert_eq!(
             diagnostic.location().span().end(),
-            await_start + await_text.len()
+            await_start + "AWAIT".len()
         );
         assert_no_checked_bundle(&report);
     }
@@ -27518,16 +27952,29 @@ mod tests {
         let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
             panic!("await operand must be a resource constructor");
         };
-        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
-        assert_eq!(operation.target(), super::CheckedFunctionId::Existing(server_target_id));
-        assert_eq!(operation.result_type(), SemanticType::Scalar(StandardScalar::Integer));
-        assert_eq!(function.return_type(), SemanticType::Scalar(StandardScalar::Integer));
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Scalar
+        );
+        assert_eq!(
+            operation.target(),
+            super::CheckedFunctionId::Existing(server_target_id)
+        );
+        assert_eq!(
+            operation.result_type(),
+            SemanticType::Scalar(StandardScalar::Integer)
+        );
+        assert_eq!(
+            function.return_type(),
+            SemanticType::Scalar(StandardScalar::Integer)
+        );
     }
 
     #[test]
     fn accepts_resource_constructor_positional_arguments_before_canonical_id_sorting() {
-        let integer = ResolvedType::Scalar(StandardScalar::Integer);
-        let text = ResolvedType::Scalar(StandardScalar::CharacterLargeObject);
+        let verified_standard = verified_standard_v2_snapshot();
+        let integer = ResolvedType::Value(STD_INTEGER_TYPE_ID);
+        let text = integer;
         let server_target_id = FunctionId::from_bytes([0x91; 16]);
         let number_parameter_id = ParameterId::from_bytes([0x93; 16]);
         let text_parameter_id = ParameterId::from_bytes([0x92; 16]);
@@ -27549,8 +27996,6 @@ mod tests {
                 FunctionVolatility::Stable,
             )],
         );
-        let verified = verified_standard_v2_snapshot();
-        let standard = check_standard_library_source(&verified).unwrap();
         let unit = StoredSourceUnit::new(
             SourceUnitId::from_bytes([0x96; 16]),
             0,
@@ -27574,23 +28019,86 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let hash_context = CatalogueHashContext::version_two(verified.clone());
-        let catalogue_hash =
-            catalogue_digest_with_context(&hash_context, &base, &[], &[], &[], &[]).unwrap();
+        let origin = |identity| {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(SourceUnitId::from_bytes([0x96; 16]), 0, 0).unwrap(),
+            )
+        };
+        let origins = vec![
+            origin(DefinitionIdentity::Schema(SchemaId::from_bytes([0x94; 16]))),
+            origin(DefinitionIdentity::Function(server_target_id)),
+            origin(DefinitionIdentity::Parameter {
+                owner: server_target_id,
+                parameter: number_parameter_id,
+            }),
+            origin(DefinitionIdentity::Parameter {
+                owner: server_target_id,
+                parameter: text_parameter_id,
+            }),
+        ];
+        let target_function = base
+            .function_by_id(server_target_id)
+            .expect("resource target is in the fixture catalogue");
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.test.server",
+            1,
+            vec![0],
+            artifact_payload_digest(&[0]).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version1,
+            target_function,
+            "orna.language/1",
+            &artifact,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let function_revision = FunctionRevisionRecord::new(
+            server_target_id,
+            FunctionRevisionId::from_bytes([0x95; 16]),
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([0x96; 16]), 0, 0).unwrap(),
+            function_declaration_digest(b"").unwrap(),
+            semantic_hash,
+            "orna.language/1",
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version1);
+        let hash_context = CatalogueHashContext::version_two(verified_standard.clone());
+        let catalogue_hash = catalogue_digest_with_context(
+            &hash_context,
+            &base,
+            std::slice::from_ref(&function_revision),
+            &[],
+            &origins,
+            &[],
+        )
+        .unwrap();
         let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
             ActiveDatabaseRevisionInput::new(
                 RevisionPair::new(source.id(), base.revision()),
                 source,
                 base,
                 catalogue_hash,
-                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                ActiveRevisionContent::new(
+                    Vec::new(),
+                    vec![function_revision],
+                    origins,
+                    Vec::new(),
+                ),
             ),
             hash_context,
         )
         .unwrap();
+        let standard = check_standard_library_source(&verified_standard).unwrap();
         let context =
             StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
-        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(7, p_text => 'ok')); END;";
+        let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find(p_number INTEGER, p_text INTEGER) RETURNS INTEGER IS BEGIN RETURN AWAIT std.data.resource(target => tasks.find, arguments => std.call.args(p_number, p_text => p_text)); END;";
         let report =
             check_standard_application(&bundle([("resource-positional.orna", source)]), &context);
         assert!(
@@ -27618,6 +28126,25 @@ mod tests {
             operation.target(),
             super::CheckedFunctionId::Existing(server_target_id)
         );
+        assert_eq!(operation.arguments().len(), 2);
+        assert_eq!(
+            operation.arguments()[0].0,
+            super::CheckedParameterId::Existing(text_parameter_id)
+        );
+        assert!(matches!(
+            &operation.arguments()[0].1,
+            super::CheckedClientExpression::ParameterRead { parameter, .. }
+                if *parameter == function.parameters()[1].id()
+        ));
+        assert_eq!(
+            operation.arguments()[1].0,
+            super::CheckedParameterId::Existing(number_parameter_id)
+        );
+        assert!(matches!(
+            &operation.arguments()[1].1,
+            super::CheckedClientExpression::ParameterRead { parameter, .. }
+                if *parameter == function.parameters()[0].id()
+        ));
         assert_eq!(
             operation.result_type(),
             SemanticType::Scalar(StandardScalar::Integer)
@@ -27650,24 +28177,37 @@ mod tests {
         else {
             panic!("prepared resource plan must contain a resource operation");
         };
-        assert_eq!(operation.kind(), orna_artifact::client_plan::ResourceKind::Scalar);
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Scalar
+        );
         assert_eq!(operation.target(), server_target_id);
         assert_eq!(operation.target_revision(), prepared.candidate_pair());
         assert_eq!(operation.result_type(), STD_INTEGER_TYPE_ID);
+        let caller_parameter = |name: &str| {
+            client
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.name() == name)
+                .unwrap()
+                .id()
+        };
         assert_eq!(
             operation.arguments(),
             &[
                 (
                     text_parameter_id,
-                    orna_artifact::client_plan::ClientExpressionNode::String {
-                        value: "ok".to_owned(),
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: caller_parameter("p_text"),
                     },
                 ),
                 (
                     number_parameter_id,
-                    orna_artifact::client_plan::ClientExpressionNode::Integer { value: 7 },
+                    orna_artifact::client_plan::ClientExpressionNode::ParameterRead {
+                        parameter: caller_parameter("p_number"),
+                    },
                 ),
-            ]
+            ],
         );
     }
 
@@ -27684,7 +28224,7 @@ mod tests {
                     server_target_id,
                     QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
                     FunctionDomain::Server,
-                    Vec::new(),
+                    vec![parameter(0x89, "p_value", 0, integer.clone())],
                     FunctionReturn::Single(integer),
                     FunctionRevisionId::from_bytes([0x87; 16]),
                     FunctionSecurity::Invoker,
@@ -27718,10 +28258,46 @@ mod tests {
                 "resource constructor requires exactly one target and one arguments value",
             ),
             (
+                "single abbreviated positional constructor argument",
+                "std.data.resource(tasks.find)",
+                DiagnosticCode::TypeMismatch,
+                "resource constructor requires exactly one target and one arguments value",
+            ),
+            (
+                "positional constructor arguments",
+                "std.data.resource(tasks.find, std.call.args())",
+                DiagnosticCode::TypeMismatch,
+                "resource constructor arguments must be named target and arguments",
+            ),
+            (
+                "mixed positional and named constructor arguments",
+                "std.data.resource(tasks.find, arguments => std.call.args())",
+                DiagnosticCode::TypeMismatch,
+                "resource constructor arguments must be named target and arguments",
+            ),
+            (
                 "CLIENT resource target",
                 "std.data.resource(target => tasks.client_find, arguments => std.call.args())",
                 DiagnosticCode::DomainIncompatible,
                 "resource target tasks.client_find must be a SERVER function",
+            ),
+            (
+                "unknown resource argument name",
+                "std.data.resource(target => tasks.find, arguments => std.call.args(p_unknown => 7))",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown SERVER resource parameter p_unknown",
+            ),
+            (
+                "trailing positional resource argument",
+                "std.data.resource(target => tasks.find, arguments => std.call.args(7, 8))",
+                DiagnosticCode::TypeMismatch,
+                "too many arguments for SERVER resource target tasks.find",
+            ),
+            (
+                "mistyped resource argument value",
+                "std.data.resource(target => tasks.find, arguments => std.call.args(p_value => TRUE))",
+                DiagnosticCode::TypeMismatch,
+                "resource argument does not match SERVER parameter p_value",
             ),
         ];
 
@@ -27733,11 +28309,15 @@ mod tests {
                 &SourceBundle::new([SourceUnit::new("resource-rejections.orna", source)]).unwrap(),
                 &base,
             );
-            assert_eq!(report.diagnostics().len(), 1, "{label}: {:?}", report.diagnostics());
+            assert_eq!(
+                report.diagnostics().len(),
+                1,
+                "{label}: {:?}",
+                report.diagnostics()
+            );
             assert_eq!(report.diagnostics()[0].code(), code, "{label}");
             assert_eq!(report.diagnostics()[0].message(), message, "{label}");
             assert_no_checked_bundle(&report);
         }
     }
-
 }

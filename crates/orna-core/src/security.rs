@@ -9,10 +9,13 @@ use std::{
     time::SystemTime,
 };
 
+use sha2::{Digest, Sha256};
+
 use crate::{
-    FunctionId, FunctionRevisionId, PrincipalId, SecurityAuditEventId, StandardLibraryRevisionId,
+    FunctionId, FunctionRevisionId, InvocationId, PrincipalId, SecurityAuditEventId,
+    StandardLibraryRevisionId,
     inspect::InspectPrivilege,
-    revision::RevisionPair,
+    revision::{RevisionPair, Sha256Digest},
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
 };
 
@@ -54,6 +57,23 @@ impl Principal {
     /// Creates a principal record.
     pub const fn new(id: PrincipalId, kind: PrincipalKind, status: PrincipalStatus) -> Self {
         Self { id, kind, status }
+    }
+
+    /// Creates a principal record after rejecting the empty identity.
+    ///
+    /// Principal::new remains available for assembling untrusted recovered
+    /// records; SecuritySnapshot validates those records before they can
+    /// participate in a security decision. New callers at an input boundary
+    /// should prefer this checked constructor.
+    pub fn try_new(
+        id: PrincipalId,
+        kind: PrincipalKind,
+        status: PrincipalStatus,
+    ) -> Result<Self, SecuritySnapshotError> {
+        if id == PrincipalId::from_bytes([0; 16]) {
+            return Err(SecuritySnapshotError::EmptyPrincipal);
+        }
+        Ok(Self { id, kind, status })
     }
 
     /// Returns the stable principal identity.
@@ -289,14 +309,49 @@ impl InvocationTarget {
     }
 }
 
+/// An opaque binding for one authenticated session instance.
+///
+/// Clones of an authenticated session retain this binding, while separately
+/// authenticated sessions receive distinct bindings. No principal identity is
+/// carried by this value.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct AuthenticatedSessionBinding(InvocationId);
+
+impl fmt::Debug for AuthenticatedSessionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthenticatedSessionBinding(..)")
+    }
+}
+
+impl AuthenticatedSessionBinding {
+    fn new() -> Self {
+        Self(InvocationId::new())
+    }
+}
+
 /// A session identity bound from trusted authentication state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AuthenticatedSession {
     principal: PrincipalId,
     active_roles: Vec<PrincipalId>,
+    binding: AuthenticatedSessionBinding,
 }
 
+impl PartialEq for AuthenticatedSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.principal == other.principal && self.active_roles == other.active_roles
+    }
+}
+
+impl Eq for AuthenticatedSession {}
+
 impl AuthenticatedSession {
+    /// Returns the opaque identity shared by clones of this authenticated
+    /// session. The binding carries no principal identity.
+    pub const fn binding(&self) -> AuthenticatedSessionBinding {
+        self.binding
+    }
+
     /// Returns the principal established by trusted authentication.
     pub const fn principal(&self) -> PrincipalId {
         self.principal
@@ -376,6 +431,8 @@ impl Error for LocalPeerAuthenticationError {
 /// An invariant violation in recovered or newly prepared security state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecuritySnapshotError {
+    /// A principal record uses the empty identity.
+    EmptyPrincipal,
     /// Two principal records use the same identity.
     DuplicatePrincipal,
     /// Two known-function records use the same identity.
@@ -415,6 +472,7 @@ pub enum SecuritySnapshotError {
 impl fmt::Display for SecuritySnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::EmptyPrincipal => "security snapshot contains an empty principal identity",
             Self::DuplicatePrincipal => "security snapshot contains a duplicate principal",
             Self::DuplicateFunction => "security snapshot contains a duplicate function",
             Self::DuplicateMembership => "security snapshot contains a duplicate membership",
@@ -456,6 +514,7 @@ pub struct AuthorisedInvocation {
     active_roles: Vec<PrincipalId>,
     authorising_principal: PrincipalId,
     target: InvocationTarget,
+    security_context_digest: Sha256Digest,
 }
 
 impl AuthorisedInvocation {
@@ -483,6 +542,15 @@ impl AuthorisedInvocation {
     pub const fn target(&self) -> InvocationTarget {
         self.target
     }
+
+    /// Returns the immutable canonical digest of the validated security snapshot
+    /// that authorised this invocation.
+    ///
+    /// The digest is local decision evidence only; it is not a transport or
+    /// audit field.
+    pub const fn security_context_digest(&self) -> Sha256Digest {
+        self.security_context_digest
+    }
 }
 
 /// The reason a function invocation was denied.
@@ -498,6 +566,9 @@ pub enum ExecuteDenial {
     RevisionMismatch,
     /// No direct or selected-role grant authorises the function.
     MissingExecuteGrant,
+    /// The target uses `SECURITY DEFINER`, which this protected invocation
+    /// boundary cannot execute with its required owner transition semantics.
+    UnsupportedSecurityDefiner,
 }
 
 /// The complete result of an `EXECUTE` authorisation check.
@@ -1634,6 +1705,155 @@ impl SecurityAuditEvent {
     }
 }
 
+const SECURITY_CONTEXT_DIGEST_DOMAIN: &[u8] = b"ORNA-SECURITY-SNAPSHOT-DIGEST\0\x01";
+
+struct SecuritySnapshotDigestEncoder {
+    hasher: Sha256,
+}
+
+impl SecuritySnapshotDigestEncoder {
+    fn new() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(SECURITY_CONTEXT_DIGEST_DOMAIN);
+        Self { hasher }
+    }
+
+    fn field(&mut self, value: &[u8]) {
+        self.hasher.update((value.len() as u64).to_be_bytes());
+        self.hasher.update(value);
+    }
+
+    fn label(&mut self, value: &[u8]) {
+        self.field(value);
+    }
+
+    fn count(&mut self, value: usize) {
+        self.field(&(value as u64).to_be_bytes());
+    }
+
+    fn optional_bytes_16(&mut self, value: Option<[u8; 16]>) {
+        match value {
+            Some(value) => {
+                self.field(&[1]);
+                self.field(&value);
+            }
+            None => self.field(&[0]),
+        }
+    }
+
+    fn finish(self) -> Sha256Digest {
+        Sha256Digest::from_bytes(self.hasher.finalize().into())
+    }
+}
+
+fn principal_kind_discriminator(kind: PrincipalKind) -> u8 {
+    match kind {
+        PrincipalKind::User => 1,
+        PrincipalKind::Role => 2,
+        PrincipalKind::Service => 3,
+    }
+}
+
+fn principal_status_discriminator(status: PrincipalStatus) -> u8 {
+    match status {
+        PrincipalStatus::Active => 1,
+        PrincipalStatus::Disabled => 2,
+    }
+}
+
+fn target_class_discriminator(class: TargetClass) -> u8 {
+    match class {
+        TargetClass::Application => 1,
+        TargetClass::VerifiedStandard => 2,
+    }
+}
+
+fn privilege_class_discriminator(class: PrivilegeClass) -> u8 {
+    match class {
+        PrivilegeClass::Execute => 1,
+        PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation) => 2,
+        PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations) => 3,
+        PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation) => 4,
+        PrivilegeClass::Inspect(InspectPrivilege::Values) => 5,
+        PrivilegeClass::Inspect(InspectPrivilege::Source) => 6,
+        PrivilegeClass::Inspect(InspectPrivilege::SecurityDetails) => 7,
+        PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals) => 8,
+        PrivilegeClass::SecurityAdmin => 9,
+    }
+}
+
+fn security_snapshot_digest(
+    revision: RevisionPair,
+    function_targets: &BTreeMap<FunctionId, SecurityFunctionTarget>,
+    principals: &BTreeMap<PrincipalId, Principal>,
+    memberships: &[RoleMembership],
+    grants: &BTreeSet<ExecuteGrant>,
+    privilege_grants: &BTreeSet<PrivilegeGrant>,
+    local_peer_credentials: &BTreeMap<u32, LocalPeerCredential>,
+) -> Sha256Digest {
+    let mut encoder = SecuritySnapshotDigestEncoder::new();
+
+    encoder.label(b"revision");
+    encoder.field(&revision.source().to_bytes());
+    encoder.field(&revision.catalogue().to_bytes());
+
+    encoder.label(b"function_targets");
+    encoder.count(function_targets.len());
+    for target in function_targets.values() {
+        encoder.field(&target.function().to_bytes());
+        encoder.field(&[target_class_discriminator(target.class())]);
+        encoder.optional_bytes_16(
+            target
+                .standard_revision()
+                .map(StandardLibraryRevisionId::to_bytes),
+        );
+        encoder.optional_bytes_16(
+            target
+                .executable_revision()
+                .map(FunctionRevisionId::to_bytes),
+        );
+    }
+
+    encoder.label(b"principals");
+    encoder.count(principals.len());
+    for principal in principals.values() {
+        encoder.field(&principal.id().to_bytes());
+        encoder.field(&[principal_kind_discriminator(principal.kind())]);
+        encoder.field(&[principal_status_discriminator(principal.status())]);
+    }
+
+    encoder.label(b"memberships");
+    encoder.count(memberships.len());
+    for membership in memberships {
+        encoder.field(&membership.member().to_bytes());
+        encoder.field(&membership.role().to_bytes());
+    }
+
+    encoder.label(b"execute_grants");
+    encoder.count(grants.len());
+    for grant in grants {
+        encoder.field(&grant.grantee().to_bytes());
+        encoder.field(&grant.function().to_bytes());
+    }
+
+    encoder.label(b"privilege_grants");
+    encoder.count(privilege_grants.len());
+    for grant in privilege_grants {
+        encoder.field(&grant.grantee().to_bytes());
+        encoder.field(&[privilege_class_discriminator(grant.class())]);
+        encoder.optional_bytes_16(grant.object().map(FunctionId::to_bytes));
+    }
+
+    encoder.label(b"local_peer_credentials");
+    encoder.count(local_peer_credentials.len());
+    for credential in local_peer_credentials.values() {
+        encoder.field(&credential.uid().to_be_bytes());
+        encoder.field(&credential.principal().to_bytes());
+    }
+
+    encoder.finish()
+}
+
 /// An immutable, validated view of security and function identities.
 ///
 /// The known function set is the canonical, identity-ordered two-class union
@@ -1648,6 +1868,7 @@ pub struct SecuritySnapshot {
     grants: BTreeSet<ExecuteGrant>,
     privilege_grants: BTreeSet<PrivilegeGrant>,
     local_peer_credentials: BTreeMap<u32, LocalPeerCredential>,
+    security_context_digest: Sha256Digest,
 }
 
 fn role_graph_has_cycle(
@@ -1820,6 +2041,9 @@ impl SecuritySnapshot {
 
         let mut principals_by_id = BTreeMap::new();
         for principal in principals {
+            if principal.id == PrincipalId::from_bytes([0; 16]) {
+                return Err(SecuritySnapshotError::EmptyPrincipal);
+            }
             if principals_by_id.insert(principal.id, principal).is_some() {
                 return Err(SecuritySnapshotError::DuplicatePrincipal);
             }
@@ -1897,6 +2121,16 @@ impl SecuritySnapshot {
             }
         }
 
+        let security_context_digest = security_snapshot_digest(
+            revision,
+            &known_functions,
+            &principals_by_id,
+            &validated_memberships,
+            &validated_grants,
+            &validated_privilege_grants,
+            &local_peers_by_uid,
+        );
+
         Ok(Self {
             revision,
             function_targets: known_functions,
@@ -1905,12 +2139,21 @@ impl SecuritySnapshot {
             grants: validated_grants,
             privilege_grants: validated_privilege_grants,
             local_peer_credentials: local_peers_by_uid,
+            security_context_digest,
         })
     }
 
     /// Returns the active revision pair that this snapshot authorises.
     pub const fn revision(&self) -> RevisionPair {
         self.revision
+    }
+
+    /// Returns the immutable canonical digest of this validated security snapshot.
+    ///
+    /// The digest is local decision evidence only; it is not a transport or
+    /// audit field.
+    pub const fn security_context_digest(&self) -> Sha256Digest {
+        self.security_context_digest
     }
 
     /// Iterates over known functions in canonical identity order.
@@ -2003,6 +2246,7 @@ impl SecuritySnapshot {
         Ok(AuthenticatedSession {
             principal,
             active_roles,
+            binding: AuthenticatedSessionBinding::new(),
         })
     }
 
@@ -2090,11 +2334,7 @@ impl SecuritySnapshot {
             return ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant);
         };
 
-        ExecuteDecision::Allowed(Self::allowed_invocation(
-            session,
-            target,
-            authorising_principal,
-        ))
+        ExecuteDecision::Allowed(self.allowed_invocation(session, target, authorising_principal))
     }
 
     /// Decides whether an authenticated session may enter a sealed system function.
@@ -2110,7 +2350,7 @@ impl SecuritySnapshot {
         if let Err(reason) = self.validate_session_and_revision(session, target) {
             return ExecuteDecision::Denied(reason);
         }
-        Self::authorise_system_function_after_validation(session, target)
+        self.authorise_system_function_after_validation(session, target)
     }
 
     /// Checks the exact sealed entry required by one protected invocation.
@@ -2129,6 +2369,7 @@ impl SecuritySnapshot {
     }
 
     fn authorise_system_function_after_validation(
+        &self,
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> ExecuteDecision {
@@ -2141,7 +2382,7 @@ impl SecuritySnapshot {
         if system_function_by_id(target.function).is_none() {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
-        ExecuteDecision::Allowed(Self::allowed_invocation(session, target, session.principal))
+        ExecuteDecision::Allowed(self.allowed_invocation(session, target, session.principal))
     }
 
     /// Decides whether an authenticated session may execute catalogue health.
@@ -2159,7 +2400,7 @@ impl SecuritySnapshot {
         if target.function != CATALOGUE_HEALTH_FUNCTION_ID {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
-        Self::authorise_system_function_after_validation(session, target)
+        self.authorise_system_function_after_validation(session, target)
     }
 
     fn validate_session_and_revision(
@@ -2176,6 +2417,7 @@ impl SecuritySnapshot {
     }
 
     fn allowed_invocation(
+        &self,
         session: &AuthenticatedSession,
         target: InvocationTarget,
         authorising_principal: PrincipalId,
@@ -2186,6 +2428,7 @@ impl SecuritySnapshot {
             active_roles: session.active_roles.clone(),
             authorising_principal,
             target,
+            security_context_digest: self.security_context_digest,
         }
     }
 }
@@ -2254,6 +2497,66 @@ mod tests {
         assert_eq!(evidence.active_roles(), &[]);
         assert_eq!(evidence.authorising_principal(), USER);
         assert_eq!(evidence.target(), InvocationTarget::new(FUNCTION, REVISION));
+    }
+
+    #[test]
+    fn security_context_digest_changes_when_validated_grant_set_changes() {
+        let without_extra_grant = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION, OTHER_FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, FUNCTION)],
+        )
+        .expect("the base snapshot should be valid");
+        let with_extra_grant = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION, OTHER_FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![
+                ExecuteGrant::new(USER, FUNCTION),
+                ExecuteGrant::new(USER, OTHER_FUNCTION),
+            ],
+        )
+        .expect("the expanded grant snapshot should be valid");
+        let first_session = without_extra_grant
+            .bind_authenticated_session(USER, vec![])
+            .expect("the base session should bind");
+        let second_session = with_extra_grant
+            .bind_authenticated_session(USER, vec![])
+            .expect("the expanded session should bind");
+        let target = InvocationTarget::new(FUNCTION, REVISION);
+
+        let ExecuteDecision::Allowed(first_evidence) =
+            without_extra_grant.authorise_execute(&first_session, target)
+        else {
+            panic!("the base grant should allow the target");
+        };
+        let ExecuteDecision::Allowed(second_evidence) =
+            with_extra_grant.authorise_execute(&second_session, target)
+        else {
+            panic!("the common grant should allow the target");
+        };
+
+        assert_ne!(
+            without_extra_grant.security_context_digest(),
+            with_extra_grant.security_context_digest(),
+            "the validated grant set must contribute to snapshot evidence",
+        );
+        assert_eq!(
+            first_evidence.security_context_digest(),
+            without_extra_grant.security_context_digest(),
+        );
+        assert_eq!(
+            second_evidence.security_context_digest(),
+            with_extra_grant.security_context_digest(),
+        );
+        assert_ne!(
+            first_evidence.security_context_digest(),
+            second_evidence.security_context_digest(),
+            "same principal/session/target facts must not share changed grant evidence",
+        );
     }
 
     #[test]
@@ -2369,6 +2672,58 @@ mod tests {
             snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
             ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
         );
+    }
+
+    #[test]
+    fn authenticated_session_binding_is_clone_stable_distinct_and_redacted() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid session-binding snapshot");
+        let first = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("first authenticated session should bind");
+        let clone = first.clone();
+        let second = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("second authenticated session should bind");
+
+        assert_eq!(first.binding(), clone.binding());
+        assert_ne!(first.binding(), second.binding());
+        assert_eq!(
+            format!("{:?}", first.binding()),
+            "AuthenticatedSessionBinding(..)"
+        );
+    }
+
+    #[test]
+    fn authenticated_session_equality_ignores_opaque_binding_identity() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![
+                active(USER, PrincipalKind::User),
+                active(ROLE, PrincipalKind::Role),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![],
+        )
+        .expect("valid session-binding snapshot");
+        let first = snapshot
+            .bind_authenticated_session(USER, vec![ROLE])
+            .expect("first authenticated session should bind");
+        let second = snapshot
+            .bind_authenticated_session(USER, vec![ROLE])
+            .expect("second authenticated session should bind");
+
+        assert_ne!(first.binding(), second.binding());
+        assert_eq!(first, second);
+        assert_eq!(first.principal(), second.principal());
+        assert_eq!(first.active_roles(), second.active_roles());
     }
 
     #[test]
@@ -2973,14 +3328,17 @@ mod tests {
         let unknown_principal = AuthenticatedSession {
             principal: OTHER_PRINCIPAL,
             active_roles: vec![],
+            binding: AuthenticatedSessionBinding::new(),
         };
         let role_pretending = AuthenticatedSession {
             principal: ROLE,
             active_roles: vec![],
+            binding: AuthenticatedSessionBinding::new(),
         };
         let user_with_unreachable_role = AuthenticatedSession {
             principal: USER,
             active_roles: vec![ROLE],
+            binding: AuthenticatedSessionBinding::new(),
         };
 
         for hostile in [
@@ -4011,6 +4369,56 @@ mod tests {
         assert_eq!(
             PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals).to_string(),
             "inspect:runtime-internals"
+        );
+    }
+
+    #[test]
+    fn principal_checked_constructor_rejects_empty_identity() {
+        assert!(matches!(
+            Principal::try_new(
+                PrincipalId::from_bytes([0; 16]),
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            ),
+            Err(SecuritySnapshotError::EmptyPrincipal)
+        ));
+        assert_eq!(
+            Principal::try_new(USER, PrincipalKind::User, PrincipalStatus::Active)
+                .expect("non-empty principal should construct")
+                .id(),
+            USER
+        );
+    }
+
+    #[test]
+    fn security_snapshot_rejects_empty_principal_before_authorisation() {
+        let result = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![Principal::new(
+                PrincipalId::from_bytes([0; 16]),
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        );
+        assert!(matches!(result, Err(SecuritySnapshotError::EmptyPrincipal)));
+    }
+
+    #[test]
+    fn zero_principal_cannot_authenticate_or_authorise() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid security snapshot");
+        assert_eq!(
+            snapshot.bind_authenticated_session(PrincipalId::from_bytes([0; 16]), vec![]),
+            Err(SessionBindingError::UnknownSessionPrincipal)
         );
     }
 

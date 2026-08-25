@@ -245,6 +245,85 @@ impl SemanticChange {
             | Self::ParameterOrdinalChanged { .. } => "parameter",
         }
     }
+
+    // The key is scope, owner identity, nesting depth, member identity, and
+    // category rank. Root changes sort before their nested members.
+    fn canonical_order_key(&self) -> (u8, [u8; 16], u8, [u8; 16], u8) {
+        const ROOT: u8 = 0;
+        const NESTED: u8 = 1;
+        const ZERO_ID: [u8; 16] = [0; 16];
+
+        match self {
+            Self::SchemaAdded { id, .. } => (0, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::SchemaRenamed { id, .. } => (0, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::SchemaDropped { id, .. } => (0, id.to_bytes(), ROOT, ZERO_ID, 2),
+
+            Self::ObjectTypeAdded { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::ObjectTypeRenamed { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::ObjectTypeDropped { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 2),
+            Self::ValueTypeAdded { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::ValueTypeRenamed { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::ValueTypeDropped { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 2),
+            Self::ValueTypeKindChanged { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 3),
+            Self::ValueTypeMutabilityChanged { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 4),
+            Self::ValueTypePersistenceChanged { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 5),
+            Self::ValueTypeRepresentationChanged { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 6),
+            Self::RecordValueTypeAdded { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::RecordValueTypeRenamed { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::RecordValueTypeDropped { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 2),
+            Self::EnumTypeAdded { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::EnumTypeRenamed { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::EnumTypeDropped { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 2),
+            Self::EnumLabelsChanged { id, .. } => (1, id.to_bytes(), ROOT, ZERO_ID, 3),
+
+            Self::FieldAdded { owner, id, .. } => (1, owner.to_bytes(), NESTED, id.to_bytes(), 0),
+            Self::FieldRenamed { owner, id, .. } => (1, owner.to_bytes(), NESTED, id.to_bytes(), 1),
+            Self::FieldDropped { owner, id, .. } => (1, owner.to_bytes(), NESTED, id.to_bytes(), 2),
+            Self::FieldTypeChanged { owner, id, .. } => {
+                (1, owner.to_bytes(), NESTED, id.to_bytes(), 3)
+            }
+            Self::FieldOrdinalChanged { owner, id, .. } => {
+                (1, owner.to_bytes(), NESTED, id.to_bytes(), 4)
+            }
+            Self::FieldNullabilityChanged { owner, id, .. } => {
+                (1, owner.to_bytes(), NESTED, id.to_bytes(), 5)
+            }
+            Self::FieldUniquenessChanged { owner, id, .. } => {
+                (1, owner.to_bytes(), NESTED, id.to_bytes(), 6)
+            }
+            Self::FieldConstraintChanged { owner, id, .. } => {
+                (1, owner.to_bytes(), NESTED, id.to_bytes(), 7)
+            }
+
+            Self::FunctionAdded { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 0),
+            Self::FunctionRenamed { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 1),
+            Self::FunctionDropped { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 2),
+            Self::FunctionReturnChanged { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 3),
+            Self::FunctionDomainChanged { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 4),
+            Self::FunctionSecurityChanged { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 5),
+            Self::FunctionTransactionChanged { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 6),
+            Self::FunctionVolatilityChanged { id, .. } => (2, id.to_bytes(), ROOT, ZERO_ID, 7),
+
+            Self::ParameterAdded { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 0)
+            }
+            Self::ParameterRenamed { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 1)
+            }
+            Self::ParameterDropped { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 2)
+            }
+            Self::ParameterOrdinalChanged { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 3)
+            }
+            Self::ParameterTypeChanged { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 4)
+            }
+            Self::ParameterDefaultChanged { owner, id, .. } => {
+                (2, owner.to_bytes(), NESTED, id.to_bytes(), 5)
+            }
+        }
+    }
 }
 
 /// The complete ordered set of semantic changes from one catalogue to another.
@@ -261,7 +340,8 @@ impl CatalogueSemanticDiff {
         }
     }
 
-    /// Returns the closed change list in deterministic comparison order.
+    /// Returns changes ordered by scope, stable owner identity, nesting depth,
+    /// stable member identity, and category rank.
     pub fn changes(&self) -> &[SemanticChange] {
         &self.changes
     }
@@ -298,6 +378,9 @@ pub fn catalogue_diff(
     diff_enum_types(base, candidate, &mut diff);
     diff_record_value_types(base, candidate, &mut diff);
     diff_functions(base, candidate, &mut diff);
+
+    diff.changes
+        .sort_unstable_by_key(SemanticChange::canonical_order_key);
 
     diff
 }
@@ -1311,17 +1394,17 @@ mod tests {
             &[
                 SemanticChange::ParameterOrdinalChanged {
                     owner: FunctionId::from_bytes([5; 16]),
-                    id: ParameterId::from_bytes([7; 16]),
-                    name: "second".to_owned(),
-                    from: 1,
-                    to: 0,
-                },
-                SemanticChange::ParameterOrdinalChanged {
-                    owner: FunctionId::from_bytes([5; 16]),
                     id: ParameterId::from_bytes([6; 16]),
                     name: "first".to_owned(),
                     from: 0,
                     to: 1,
+                },
+                SemanticChange::ParameterOrdinalChanged {
+                    owner: FunctionId::from_bytes([5; 16]),
+                    id: ParameterId::from_bytes([7; 16]),
+                    name: "second".to_owned(),
+                    from: 1,
+                    to: 0,
                 },
             ]
         );
@@ -1361,15 +1444,30 @@ mod tests {
                     id: TypeId::from_bytes([6; 16]),
                     name: "app.new".to_owned(),
                 },
-                SemanticChange::FunctionAdded {
-                    id: FunctionId::from_bytes([7; 16]),
-                    name: "app.fresh".to_owned(),
-                },
                 SemanticChange::FunctionDropped {
                     id: FunctionId::from_bytes([4; 16]),
                     name: "app.gone".to_owned(),
                 },
+                SemanticChange::FunctionAdded {
+                    id: FunctionId::from_bytes([7; 16]),
+                    name: "app.fresh".to_owned(),
+                },
             ]
+        );
+
+        let permuted_candidate = full_snapshot(
+            vec![schema(5, &["extra"]), schema(1, &["app"])],
+            vec![
+                object(6, &["app", "new"], vec![]),
+                object(2, &["app", "kept"], vec![field(3, "name", 0)]),
+            ],
+            vec![],
+            vec![function(7, &["app", "fresh"], vec![])],
+        );
+        assert_eq!(
+            diff,
+            catalogue_diff(&base, &permuted_candidate),
+            "declaration permutations must preserve canonical change order",
         );
     }
 
@@ -1580,13 +1678,13 @@ mod tests {
             &[
                 SemanticChange::FieldOrdinalChanged {
                     owner: TypeId::from_bytes([2; 16]),
-                    id: FieldId::from_bytes([4; 16]),
-                    name: "second".to_owned(),
+                    id: FieldId::from_bytes([3; 16]),
+                    name: "first".to_owned(),
                 },
                 SemanticChange::FieldOrdinalChanged {
                     owner: TypeId::from_bytes([2; 16]),
-                    id: FieldId::from_bytes([3; 16]),
-                    name: "first".to_owned(),
+                    id: FieldId::from_bytes([4; 16]),
+                    name: "second".to_owned(),
                 },
             ]
         );
@@ -1798,13 +1896,13 @@ mod tests {
                     id: TypeId::from_bytes([2; 16]),
                     name: "app.currency".to_owned(),
                 },
-                SemanticChange::ValueTypeAdded {
-                    id: TypeId::from_bytes([4; 16]),
-                    name: "app.fresh".to_owned(),
-                },
                 SemanticChange::ValueTypeDropped {
                     id: TypeId::from_bytes([3; 16]),
                     name: "app.legacy".to_owned(),
+                },
+                SemanticChange::ValueTypeAdded {
+                    id: TypeId::from_bytes([4; 16]),
+                    name: "app.fresh".to_owned(),
                 },
             ]
         );
@@ -1854,11 +1952,6 @@ mod tests {
                     from: "app.point".to_owned(),
                     to: "app.coordinate".to_owned(),
                 },
-                SemanticChange::FieldAdded {
-                    owner: TypeId::from_bytes([10; 16]),
-                    id: FieldId::from_bytes([15; 16]),
-                    name: "latitude".to_owned(),
-                },
                 SemanticChange::FieldRenamed {
                     owner: TypeId::from_bytes([10; 16]),
                     id: FieldId::from_bytes([11; 16]),
@@ -1880,13 +1973,18 @@ mod tests {
                     id: FieldId::from_bytes([12; 16]),
                     name: "y".to_owned(),
                 },
-                SemanticChange::RecordValueTypeAdded {
-                    id: TypeId::from_bytes([16; 16]),
-                    name: "app.fresh".to_owned(),
+                SemanticChange::FieldAdded {
+                    owner: TypeId::from_bytes([10; 16]),
+                    id: FieldId::from_bytes([15; 16]),
+                    name: "latitude".to_owned(),
                 },
                 SemanticChange::RecordValueTypeDropped {
                     id: TypeId::from_bytes([13; 16]),
                     name: "app.legacy".to_owned(),
+                },
+                SemanticChange::RecordValueTypeAdded {
+                    id: TypeId::from_bytes([16; 16]),
+                    name: "app.fresh".to_owned(),
                 },
             ]
         );

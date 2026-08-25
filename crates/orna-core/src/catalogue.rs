@@ -2416,8 +2416,13 @@ mod tests {
             shape_id,
             name(&["geometry", "shape"]),
             vec![FieldDefinition::new(
-                FieldId::from_bytes([12; 16]), "person", 0,
-                ResolvedType::reference(person_id), false, true, None,
+                FieldId::from_bytes([12; 16]),
+                "person",
+                0,
+                ResolvedType::reference(person_id),
+                false,
+                true,
+                None,
                 Some(OnDeleteAction::Restrict),
             )],
         );
@@ -2425,9 +2430,14 @@ mod tests {
         let point = record(13, &["geometry", "point"], vec![record_field(14, "x", 0)]);
         let catalogue = CatalogueSnapshot::new_with_record_value_types(
             CatalogueRevisionId::from_bytes([7; 16]),
-            vec![schema(1, &["geometry"])], vec![person, shape], vec![], vec![],
-            vec![point], vec![],
-        ).unwrap();
+            vec![schema(1, &["geometry"])],
+            vec![person, shape],
+            vec![],
+            vec![],
+            vec![point],
+            vec![],
+        )
+        .unwrap();
 
         let object_definition = catalogue
             .type_definition_by_name(&TypeLookupName::qualified(name(&["geometry", "shape"])))
@@ -2437,7 +2447,12 @@ mod tests {
         assert!(object_definition.as_object().is_some());
         assert!(object_definition.as_record_value().is_none());
         assert_eq!(
-            object_definition.as_object().unwrap().field_by_name("person").unwrap().resolved_type(),
+            object_definition
+                .as_object()
+                .unwrap()
+                .field_by_name("person")
+                .unwrap()
+                .resolved_type(),
             ResolvedType::reference(person_id)
         );
 

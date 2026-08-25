@@ -4681,11 +4681,14 @@ mod tests {
     const MAP_FLAT: TypeId = TypeId::from_bytes([0x8a; 16]);
     const MAP_INNER: TypeId = TypeId::from_bytes([0x8b; 16]);
     const MAP_OUTER: TypeId = TypeId::from_bytes([0x8c; 16]);
+    const MAP_STD_ENUM_RECORD: TypeId = TypeId::from_bytes([0x8d; 16]);
     const MAP_A_FIELD: FieldId = FieldId::from_bytes([0xa1; 16]);
     const MAP_B_FIELD: FieldId = FieldId::from_bytes([0xa2; 16]);
     const MAP_LEAF_FIELD: FieldId = FieldId::from_bytes([0xa3; 16]);
     const MAP_FIRST_FIELD: FieldId = FieldId::from_bytes([0xa4; 16]);
     const MAP_TAIL_FIELD: FieldId = FieldId::from_bytes([0xa5; 16]);
+    const MAP_STD_ENUM_ENABLED_FIELD: FieldId = FieldId::from_bytes([0xa6; 16]);
+    const MAP_STD_ENUM_FIELD: FieldId = FieldId::from_bytes([0xa7; 16]);
 
     fn map_standard_primitive(type_id: TypeId, name: &str, contract: &str) -> ValueTypeDefinition {
         ValueTypeDefinition::primitive(
@@ -4891,12 +4894,32 @@ mod tests {
                         .unwrap(),
                     ],
                 ),
+                RecordValueTypeDefinition::new(
+                    MAP_STD_ENUM_RECORD,
+                    QualifiedSemanticName::new(["app", "standard_enum_record"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_STD_ENUM_ENABLED_FIELD,
+                            "enabled",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_STD_ENUM_FIELD,
+                            "mode",
+                            1,
+                            TypeDescriptor::named(MAP_STD_ENUM),
+                        )
+                        .unwrap(),
+                    ],
+                ),
             ],
             vec![],
         )
         .unwrap();
         let context = CatalogueHashContext::version_two(standard);
-        let application_content = "x".repeat(12);
+        let application_content = "x".repeat(15);
         let application_content_digest = source_unit_content_digest(&application_content).unwrap();
         let application_unit = StoredSourceUnit::new(
             SourceUnitId::from_bytes([0x93; 16]),
@@ -6572,6 +6595,91 @@ mod tests {
     }
 
     #[test]
+    fn record_value_accepts_a_verified_standard_enum_field_in_declaration_order() {
+        let active = active_map_revision();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("the map fixture pins a verified standard library");
+        let mode = EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "beta")
+            .expect("the verified standard enum declares beta");
+
+        let record = RecordValue::new(
+            &active,
+            MAP_STD_ENUM_RECORD,
+            [
+                (String::from("mode"), RuntimeValue::Enum(mode.clone())),
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .expect("a verified standard enum is an admitted record field type");
+
+        assert_eq!(record.record_type(), MAP_STD_ENUM_RECORD);
+        assert_eq!(record.fields().len(), 2);
+        assert_eq!(record.fields()[0], RuntimeValue::Boolean(true));
+        assert_eq!(record.fields()[1], RuntimeValue::Enum(mode.clone()));
+        let RuntimeValue::Enum(mode_value) = &record.fields()[1] else {
+            panic!("the mode field must retain its enum value");
+        };
+        assert_eq!(mode_value.enum_type(), MAP_STD_ENUM);
+        assert_eq!(mode_value.label(), "beta");
+        assert_eq!(
+            RuntimeValue::Record(record).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(MAP_STD_ENUM_RECORD))
+        );
+    }
+
+    #[test]
+    fn record_value_rejects_a_stale_verified_standard_enum_label() {
+        let active = active_map_revision();
+        let stale = RuntimeValue::Enum(
+            EnumValue::new(
+                &standard_enum_catalogue(&["retired"]),
+                MAP_STD_ENUM,
+                "retired",
+            )
+            .expect("the stale standard catalogue declares retired"),
+        );
+
+        let error = RecordValue::new(
+            &active,
+            MAP_STD_ENUM_RECORD,
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (String::from("mode"), stale),
+            ],
+        )
+        .expect_err("a stale standard enum label must not enter a current record");
+
+        assert_eq!(
+            error,
+            RecordValueError::InactiveEnumLabel {
+                record_type: MAP_STD_ENUM_RECORD,
+                field: MAP_STD_ENUM_FIELD,
+                enum_type: MAP_STD_ENUM,
+                label: String::from("retired"),
+            }
+        );
+    }
+
+    #[test]
+    fn verified_standard_enum_value_rejects_an_undeclared_label() {
+        let active = active_map_revision();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("the map fixture pins a verified standard library");
+
+        assert_eq!(
+            EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "retired"),
+            Err(EnumValueError::UndeclaredLabel {
+                enum_type: MAP_STD_ENUM,
+                label: String::from("retired"),
+            })
+        );
+    }
+
+    #[test]
     fn stale_child_record_value_is_rejected_with_exact_inactive_nested_record_error() {
         let child_type = TypeId::from_bytes([0x31; 16]);
         let outer_type = TypeId::from_bytes([0x30; 16]);
@@ -7092,6 +7200,25 @@ mod tests {
             vec![EnumTypeDefinition::new(
                 ENUM_TYPE,
                 QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn standard_enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x96; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x97; 16]),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                MAP_STD_ENUM,
+                QualifiedSemanticName::new(["std", "mode"]).unwrap(),
                 labels.iter().copied(),
             )],
             vec![],
