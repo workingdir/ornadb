@@ -2209,6 +2209,32 @@ fn resource_action_request_id(action: &ResourceServerFrame) -> orna_core::Invoca
     }
 }
 
+fn resource_action_stream_id(action: &ResourceServerFrame) -> u64 {
+    match action {
+        ResourceServerFrame::Accepted(frame) => frame.stream_id,
+        ResourceServerFrame::Values(frame) => frame.stream_id,
+        ResourceServerFrame::Completed(frame) => frame.stream_id,
+        ResourceServerFrame::Failed(frame) => frame.stream_id,
+        ResourceServerFrame::Cancelled(frame) => frame.stream_id,
+    }
+}
+
+fn pending_resource_error_is_local(
+    request: &ResourceRequest,
+    action: &ResourceServerFrame,
+    source: &ResourceConnectionError,
+) -> bool {
+    resource_action_stream_id(action) == request.stream_id
+        && !matches!(
+            source,
+            ResourceConnectionError::InsufficientCredit { .. }
+                | ResourceConnectionError::UnknownStream { .. }
+                | ResourceConnectionError::StreamNotIncreasing { .. }
+                | ResourceConnectionError::TooManyLiveResources
+                | ResourceConnectionError::RequestIdHistoryExhausted
+        )
+}
+
 fn resource_internal_failure(request: &ResourceRequest) -> VecDeque<ResourceServerFrame> {
     VecDeque::from([ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
         stream_id: request.stream_id,
@@ -3237,23 +3263,33 @@ async fn flush_resource_pending(
                 }
                 break;
             };
-            let disposition = match &action {
+            let mut candidate = connection.clone();
+            let result = match &action {
                 ResourceServerFrame::Cancelled(frame) => {
-                    match connection.apply_cancelled_after_client_cancel(*frame) {
-                        Ok(disposition) => disposition,
-                        Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
-                        Err(source) => {
-                            return Err(LocalRawSocketError::ResourceConnection { source });
-                        }
-                    }
+                    candidate.apply_cancelled_after_client_cancel(*frame)
                 }
-                _ => match version.apply_resource(connection, action.clone()) {
-                    Ok(disposition) => disposition,
-                    Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
-                    Err(source) => {
+                _ => version.apply_resource(&mut candidate, action.clone()),
+            };
+            let disposition = match result {
+                Ok(disposition) => {
+                    *connection = candidate;
+                    disposition
+                }
+                Err(ResourceConnectionError::InsufficientCredit { .. }) => break,
+                Err(source) => {
+                    let Some(request) = requests.get(&stream_id).cloned() else {
+                        return Err(LocalRawSocketError::ResourceConnection { source });
+                    };
+                    if !pending_resource_error_is_local(&request, &action, &source) {
                         return Err(LocalRawSocketError::ResourceConnection { source });
                     }
-                },
+                    let completion = pending
+                        .get_mut(&stream_id)
+                        .expect("pending resource completion exists");
+                    completion.actions = resource_internal_failure(&request);
+                    completion.producer_waiting_bytes = None;
+                    continue;
+                }
             };
             match disposition {
                 ResourceFrameDisposition::DroppedLate => {
@@ -4694,6 +4730,46 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MalformedPendingResourceDispatch;
+
+    impl DispatchService for MalformedPendingResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+            version: RawProtocolVersion,
+        ) -> Option<StartedResourceDispatch> {
+            let mut actions = resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]);
+            if request.stream_id == 1 {
+                let Some(ResourceServerFrame::Values(frame)) = actions.get_mut(1) else {
+                    panic!("resource actions contain values");
+                };
+                frame.item_count = 0;
+            }
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move {
+                    ResourceDispatchCompletion {
+                        actions,
+                        producer: None,
+                        producer_waiting_bytes: None,
+                    }
+                }),
+                cancellation: ResourceCancellation::new(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
     struct MultiValueResourceDispatch;
 
     impl DispatchService for MultiValueResourceDispatch {
@@ -5504,6 +5580,88 @@ mod tests {
             .await
             .is_err()
         );
+
+        client.shutdown().await.unwrap();
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn raw_socket_malformed_pending_resource_values_fails_only_that_stream() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            MalformedPendingResourceDispatch,
+            test_session(),
+            version,
+            server,
+            LocalRawSocketResources::new(),
+            shutdown,
+        ));
+
+        let request = resource_request(revision);
+        let request_id = request.request_id;
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::Request(request),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Accepted(frame)
+                if frame.stream_id == 1 && frame.request_id == request_id
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Failed(frame)
+                if frame.stream_id == 1
+                    && frame.request_id == request_id
+                    && frame.failure == CallFailure::InternalFailure
+        ));
+
+        let mut unrelated = resource_request(revision);
+        unrelated.stream_id = 2;
+        unrelated.request_id = InvocationId::from_bytes([0x22; 16]);
+        unrelated.resource_kind = ResourceKind::Stream;
+        client
+            .write_all(
+                &encode_resource_client_frame(
+                    &active,
+                    &registry,
+                    &ResourceClientFrame::Request(unrelated.clone()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Accepted(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.request_id == unrelated.request_id
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Values(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.values == vec![RuntimeValue::Integer(7)]
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Completed(frame)
+                if frame.stream_id == unrelated.stream_id
+                    && frame.request_id == unrelated.request_id
+        ));
 
         client.shutdown().await.unwrap();
         server_task.await.unwrap().unwrap();
