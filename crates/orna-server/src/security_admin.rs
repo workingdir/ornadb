@@ -521,6 +521,7 @@ fn write_execute_line(
                 ExecuteDenial::UnknownFunction => "execute:unknown-function",
                 ExecuteDenial::RevisionMismatch => "execute:revision-mismatch",
                 ExecuteDenial::MissingExecuteGrant => "execute:missing-grant",
+                ExecuteDenial::UnsupportedSecurityDefiner => "execute:unsupported-security-definer",
             };
             (false, Some(reason))
         }

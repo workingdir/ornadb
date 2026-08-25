@@ -16,7 +16,11 @@
 //! result is rendered to `stdout` as one JSON record per line, with typed
 //! values in their canonical ORV5 hex form.
 
-use std::{collections::{BTreeMap, BTreeSet}, fmt, io, io::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, io,
+    io::Write,
+};
 
 use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUserStateError};
 use orna_core::{
@@ -135,7 +139,8 @@ pub enum InstalledUserStateOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledUserStateErrorKind {
-    /// The local peer could not establish an Orna session.
+    /// The local peer could not establish an Orna session, or a retained
+    /// session no longer binds to the active security snapshot.
     Authentication,
     /// The protected operation failed closed with a state error.
     State,
@@ -292,8 +297,10 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
             .await
             .map_err(AuthenticatedClientStateError::Kernel)?;
         let requested_instances: Vec<_> = if instances.is_empty() {
-            let expected_functions: BTreeSet<_> =
-                expected_types.keys().map(|(function, _)| *function).collect();
+            let expected_functions: BTreeSet<_> = expected_types
+                .keys()
+                .map(|(function, _)| *function)
+                .collect();
             let cell_functions: BTreeSet<_> =
                 cells.iter().map(|cell| cell.key().function()).collect();
             let existing_functions: BTreeSet<_> = staged
@@ -306,11 +313,7 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
                 })
                 .map(|key| key.function())
                 .collect();
-            default_instance_requests(
-                expected_functions,
-                cell_functions,
-                existing_functions,
-            )
+            default_instance_requests(expected_functions, cell_functions, existing_functions)
         } else {
             instances
                 .iter()
@@ -327,9 +330,7 @@ impl<'a> AuthenticatedClientStateAdapter<'a> {
             .map_err(AuthenticatedClientStateError::Client)?;
         } else if !cells.is_empty() {
             return Err(AuthenticatedClientStateError::Client(
-                ClientUserStateError::ContextMismatch(
-                    ClientStateKey::from_user_cell(&cells[0]),
-                ),
+                ClientUserStateError::ContextMismatch(ClientStateKey::from_user_cell(&cells[0])),
             ));
         }
         *store = staged;
@@ -651,6 +652,15 @@ fn map_kernel_error(error: PostgresKernelError) -> InstalledUserStateError {
             InstalledUserStateErrorKind::State,
             format!("USER state value codec failed: {error}"),
         ),
+        PostgresKernelError::StateExecuteDenied {
+            function, reason, ..
+        } => InstalledUserStateError::new(
+            InstalledUserStateErrorKind::Authentication,
+            format!(
+                "the USER state session was rejected for {}: {reason:?}",
+                function.canonical(),
+            ),
+        ),
         PostgresKernelError::LocalPeerAuthentication(error) => InstalledUserStateError::new(
             InstalledUserStateErrorKind::Authentication,
             format!("the local peer could not authenticate: {error}"),
@@ -689,8 +699,9 @@ mod tests {
     use std::time::SystemTime;
 
     use orna_core::{
-        PrincipalId,
-        security::LocalPeerAuthenticationError,
+        CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
+        revision::RevisionPair,
+        security::{ExecuteDenial, LocalPeerAuthenticationError},
         state::{UserStateKey, UserStateKeyWithoutPrincipal, UserStateWriteOutcome},
         value::RuntimeValue,
     };
@@ -1039,6 +1050,18 @@ mod tests {
         ));
         assert_eq!(mapped.kind(), InstalledUserStateErrorKind::Authentication);
         assert_eq!(mapped.code(), None);
+
+        let mapped = map_kernel_error(PostgresKernelError::StateExecuteDenied {
+            pair: RevisionPair::new(
+                SourceRevisionId::from_bytes([0x61; 16]),
+                CatalogueRevisionId::from_bytes([0x62; 16]),
+            ),
+            function: function(0x63),
+            reason: ExecuteDenial::InvalidSession,
+        });
+        assert_eq!(mapped.kind(), InstalledUserStateErrorKind::Authentication);
+        assert_eq!(mapped.code(), None);
+        assert!(mapped.message().contains("USER state session was rejected"));
     }
 
     /// Canonical payloads render as stable lowercase hex.

@@ -15,7 +15,7 @@ use std::{
 };
 
 use orna_compiler::{
-    CompilerDiagnostic, PrepareStandardApplicationError, StandardApplicationCheckContext,
+    PrepareStandardApplicationError, StandardApplicationCheckContext,
     StandardApplicationContextError, StandardLibraryCheckError, check_standard_application,
     check_standard_library_source, prepare_standard_application,
 };
@@ -30,6 +30,7 @@ use orna_standard::StandardLibraryError;
 use crate::{
     EmbeddedHostError, inspect_ready_embedded_host,
     source_apply::{StandardSelectionError, select_accepted_standard},
+    source_diagnostics,
 };
 
 /// The closed result of one installed read-only source diff.
@@ -168,73 +169,47 @@ pub enum InstalledSourceDiffError {
 impl fmt::Display for InstalledSourceDiffError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SourceRead { path, source } => match source {
-                Some(cause) => write!(
-                    formatter,
-                    "orna source diff: could not read {path:?}: {cause}"
-                ),
-                None => write!(
-                    formatter,
-                    "orna source diff: {path:?} is not a regular file"
-                ),
-            },
-            Self::SourceUtf8 { path } => {
-                write!(formatter, "orna source diff: {path:?} is not valid UTF-8")
+            Self::SourceRead { .. } => formatter.write_str("orna: could not read source file"),
+            Self::SourceUtf8 { .. } => formatter.write_str("orna: source file is not valid UTF-8"),
+            Self::SourceBundle { .. } => {
+                formatter.write_str("orna: source diff received an invalid source path")
             }
-            Self::SourceBundle { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: source bundle invalid: {source}"
-                )
+            Self::Host { failure, .. } => formatter.write_str(match failure {
+                InstalledSourceDiffHostFailure::ServiceAccountRequired => {
+                    "orna: source diff must run as the orna service account"
+                }
+                InstalledSourceDiffHostFailure::PackageIncomplete => {
+                    "orna: package maintenance is incomplete"
+                }
+                InstalledSourceDiffHostFailure::InstanceNotInstalled => {
+                    "orna: the default Orna instance is not installed"
+                }
+                InstalledSourceDiffHostFailure::InstanceInvalid => {
+                    "orna: the default Orna instance is invalid"
+                }
+                InstalledSourceDiffHostFailure::EngineInvalid => {
+                    "orna: the embedded PostgreSQL engine is not valid"
+                }
+            }),
+            Self::Attach { .. } => formatter
+                .write_str("orna: source diff could not attach to the default Orna instance"),
+            Self::Recovery { .. } => {
+                formatter.write_str("orna: source diff could not recover the active revision")
             }
-            Self::Host { failure, source } => {
-                write!(formatter, "orna source diff: {failure:?}: {source}")
+            Self::StandardLibrary { .. }
+            | Self::StandardSource { .. }
+            | Self::ApplicationContext { .. }
+            | Self::ActiveStandardMismatch => {
+                formatter.write_str("orna: embedded standard library could not be verified")
             }
-            Self::Attach { source } => {
-                write!(formatter, "orna source diff: could not attach: {source}")
+            Self::Preparation { .. } => {
+                formatter.write_str("orna: source diff could not prepare the source")
             }
-            Self::Recovery { source } => {
-                write!(formatter, "orna source diff: recovery failed: {source}")
+            Self::Output { .. } => {
+                formatter.write_str("orna: source diff could not write its report")
             }
-            Self::StandardLibrary { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: standard library failed: {source}"
-                )
-            }
-            Self::StandardSource { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: standard source check failed: {source}"
-                )
-            }
-            Self::ApplicationContext { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: application context failed: {source}"
-                )
-            }
-            Self::Preparation { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: candidate preparation failed: {source}"
-                )
-            }
-            Self::ActiveStandardMismatch => write!(
-                formatter,
-                "orna source diff: the installed standard library does not match the retained snapshot"
-            ),
-            Self::Output { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: could not write the report: {source}"
-                )
-            }
-            Self::Runtime { source } => {
-                write!(
-                    formatter,
-                    "orna source diff: the private runtime could not start: {source}"
-                )
+            Self::Runtime { .. } => {
+                formatter.write_str("orna: source diff runtime could not start")
             }
         }
     }
@@ -322,7 +297,7 @@ async fn diff_source_bundle(
     if !report.diagnostics().is_empty() {
         return Ok(InstalledSourceDiffOutcome::Diagnostics(
             InstalledSourceDiffDiagnostics {
-                bytes: render_diagnostics(report.diagnostics()),
+                bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
             },
         ));
     }
@@ -438,7 +413,11 @@ fn render_diff_document(
         return Ok(document.into_bytes());
     }
     for change in diff.changes() {
-        let _ = writeln!(document, "{}", render_change(change, candidate.candidate()));
+        let _ = writeln!(
+            document,
+            "{}",
+            render_change_with_catalogues(change, Some(active.catalogue()), candidate.candidate()),
+        );
     }
     for change in revision_changes {
         let _ = writeln!(
@@ -454,73 +433,168 @@ fn render_change(
     change: &SemanticChange,
     candidate: &orna_core::catalogue::CatalogueSnapshot,
 ) -> String {
+    render_change_with_catalogues(change, None, candidate)
+}
+
+fn render_change_with_catalogues(
+    change: &SemanticChange,
+    active: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    candidate: &orna_core::catalogue::CatalogueSnapshot,
+) -> String {
     use std::fmt::Write as _;
 
     let mut line = String::new();
     match change {
         SemanticChange::SchemaAdded { id, name } => {
-            let _ = write!(line, "+ schema {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ schema {} [{}]",
+                render_schema_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::SchemaDropped { id, name } => {
-            let _ = write!(line, "- schema {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- schema {} [{}]",
+                render_schema_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::SchemaRenamed { id, from, to } => {
-            let _ = write!(line, "~ schema {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ schema {} -> {} [{}]",
+                render_schema_name(active.or(Some(candidate)), *id, from),
+                render_schema_name(Some(candidate), *id, to),
+                id.canonical(),
+            );
         }
         SemanticChange::ObjectTypeAdded { id, name } => {
-            let _ = write!(line, "+ object type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ object type {} [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ObjectTypeDropped { id, name } => {
-            let _ = write!(line, "- object type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- object type {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ObjectTypeRenamed { id, from, to } => {
-            let _ = write!(line, "~ object type {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ object type {} -> {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, from),
+                render_type_name(Some(candidate), *id, to),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeAdded { id, name } => {
-            let _ = write!(line, "+ value type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ value type {} [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeDropped { id, name } => {
-            let _ = write!(line, "- value type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- value type {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeRenamed { id, from, to } => {
-            let _ = write!(line, "~ value type {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ value type {} -> {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, from),
+                render_type_name(Some(candidate), *id, to),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeKindChanged { id, name } => {
-            let _ = write!(line, "! value type {name} kind [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! value type {} kind [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeMutabilityChanged { id, name } => {
-            let _ = write!(line, "! value type {name} mutability [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! value type {} mutability [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypePersistenceChanged { id, name } => {
-            let _ = write!(line, "! value type {name} persistence [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "! value type {} persistence [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::ValueTypeRepresentationChanged { id, name } => {
             let _ = write!(
                 line,
-                "! value type {name} representation [{}]",
-                id.canonical()
+                "! value type {} representation [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
             );
         }
         SemanticChange::RecordValueTypeAdded { id, name } => {
-            let _ = write!(line, "+ record value type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ record value type {} [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::RecordValueTypeDropped { id, name } => {
-            let _ = write!(line, "- record value type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- record value type {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::RecordValueTypeRenamed { id, from, to } => {
             let _ = write!(
                 line,
-                "~ record value type {from} -> {to} [{}]",
-                id.canonical()
+                "~ record value type {} -> {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, from),
+                render_type_name(Some(candidate), *id, to),
+                id.canonical(),
             );
         }
         SemanticChange::FieldAdded { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "+ field {owner}.{name} [{}]", id.canonical());
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "+ field {owner_name}.{member_name} [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::FieldDropped { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "- field {owner}.{name} [{}]", id.canonical());
+            let owner_name = render_field_owner_name(active.or(Some(candidate)), *owner);
+            let member_name =
+                render_field_member_name(active.or(Some(candidate)), *owner, *id, name);
+            let _ = write!(
+                line,
+                "- field {owner_name}.{member_name} [{}]",
+                id.canonical()
+            );
         }
         SemanticChange::FieldRenamed {
             owner,
@@ -528,44 +602,84 @@ fn render_change(
             from,
             to,
         } => {
-            let owner = field_owner_name(candidate, *owner);
+            let from_owner = render_field_owner_name(active.or(Some(candidate)), *owner);
+            let to_owner = render_field_owner_name(Some(candidate), *owner);
+            let from_name = render_field_member_name(active.or(Some(candidate)), *owner, *id, from);
+            let to_name = render_field_member_name(Some(candidate), *owner, *id, to);
             let _ = write!(
                 line,
-                "~ field {owner}.{from} -> {owner}.{to} [{}]",
-                id.canonical()
+                "~ field {from_owner}.{from_name} -> {to_owner}.{to_name} [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::EnumTypeAdded { id, name } => {
-            let _ = write!(line, "+ enum type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ enum type {} [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::EnumTypeDropped { id, name } => {
-            let _ = write!(line, "- enum type {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- enum type {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::EnumTypeRenamed { id, from, to } => {
-            let _ = write!(line, "~ enum type {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ enum type {} -> {} [{}]",
+                render_type_name(active.or(Some(candidate)), *id, from),
+                render_type_name(Some(candidate), *id, to),
+                id.canonical(),
+            );
         }
         SemanticChange::FunctionAdded { id, name } => {
-            let _ = write!(line, "+ function {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "+ function {} [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::FunctionDropped { id, name } => {
-            let _ = write!(line, "- function {name} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "- function {} [{}]",
+                render_function_name(active.or(Some(candidate)), *id, name),
+                id.canonical(),
+            );
         }
         SemanticChange::FunctionRenamed { id, from, to } => {
-            let _ = write!(line, "~ function {from} -> {to} [{}]", id.canonical());
+            let _ = write!(
+                line,
+                "~ function {} -> {} [{}]",
+                render_function_name(active.or(Some(candidate)), *id, from),
+                render_function_name(Some(candidate), *id, to),
+                id.canonical(),
+            );
         }
         SemanticChange::ParameterAdded { owner, name, id } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "+ parameter {owner}.{name} [{}]", id.canonical());
+            let owner_name = render_parameter_owner_name(Some(candidate), *owner);
+            let member_name = render_parameter_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "+ parameter {owner_name}.{member_name} [{}]",
+                id.canonical(),
+            );
         }
         SemanticChange::ParameterDropped { owner, name, id } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "- parameter {owner}.{name} [{}]", id.canonical());
+            let owner_name = render_parameter_owner_name(active.or(Some(candidate)), *owner);
+            let member_name =
+                render_parameter_member_name(active.or(Some(candidate)), *owner, *id, name);
+            let _ = write!(
+                line,
+                "- parameter {owner_name}.{member_name} [{}]",
+                id.canonical(),
+            );
         }
         SemanticChange::ParameterRenamed {
             owner,
@@ -573,14 +687,15 @@ fn render_change(
             from,
             to,
         } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let from_owner = render_parameter_owner_name(active.or(Some(candidate)), *owner);
+            let to_owner = render_parameter_owner_name(Some(candidate), *owner);
+            let from_name =
+                render_parameter_member_name(active.or(Some(candidate)), *owner, *id, from);
+            let to_name = render_parameter_member_name(Some(candidate), *owner, *id, to);
             let _ = write!(
                 line,
-                "~ parameter {owner}.{from} -> {owner}.{to} [{}]",
-                id.canonical()
+                "~ parameter {from_owner}.{from_name} -> {to_owner}.{to_name} [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::ParameterOrdinalChanged {
@@ -590,82 +705,123 @@ fn render_change(
             from,
             to,
         } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
+            let owner_name = render_parameter_owner_name(Some(candidate), *owner);
+            let member_name = render_parameter_member_name(Some(candidate), *owner, *id, name);
             let _ = write!(
                 line,
-                "! parameter {owner}.{name} ordinal {from} -> {to} [{}]",
-                id.canonical()
+                "! parameter {owner_name}.{member_name} ordinal {from} -> {to} [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::FieldTypeChanged { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} type [{}]", id.canonical());
-        }
-        SemanticChange::FieldOrdinalChanged { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
-            let _ = write!(line, "! field {owner}.{name} ordinal [{}]", id.canonical());
-        }
-        SemanticChange::FieldNullabilityChanged { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
             let _ = write!(
                 line,
-                "! field {owner}.{name} nullability [{}]",
-                id.canonical()
+                "! field {owner_name}.{member_name} type [{}]",
+                id.canonical(),
+            );
+        }
+        SemanticChange::FieldOrdinalChanged { owner, name, id } => {
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "! field {owner_name}.{member_name} ordinal [{}]",
+                id.canonical(),
+            );
+        }
+        SemanticChange::FieldNullabilityChanged { owner, name, id } => {
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "! field {owner_name}.{member_name} nullability [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::FieldUniquenessChanged { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
             let _ = write!(
                 line,
-                "! field {owner}.{name} uniqueness [{}]",
-                id.canonical()
+                "! field {owner_name}.{member_name} uniqueness [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::FieldConstraintChanged { owner, name, id } => {
-            let owner = field_owner_name(candidate, *owner);
+            let owner_name = render_field_owner_name(Some(candidate), *owner);
+            let member_name = render_field_member_name(Some(candidate), *owner, *id, name);
             let _ = write!(
                 line,
-                "! field {owner}.{name} default/on-delete [{}]",
-                id.canonical()
+                "! field {owner_name}.{member_name} default/on-delete [{}]",
+                id.canonical(),
             );
         }
         SemanticChange::EnumLabelsChanged { id, name } => {
-            let _ = write!(line, "! enum type {name} labels [{}]", id.canonical());
-        }
-        SemanticChange::FunctionReturnChanged { id, name } => {
-            let _ = write!(line, "! function {name} return type [{}]", id.canonical());
-        }
-        SemanticChange::FunctionDomainChanged { id, name } => {
-            let _ = write!(line, "! function {name} domain [{}]", id.canonical());
-        }
-        SemanticChange::FunctionSecurityChanged { id, name } => {
-            let _ = write!(line, "! function {name} security [{}]", id.canonical());
-        }
-        SemanticChange::FunctionTransactionChanged { id, name } => {
-            let _ = write!(line, "! function {name} transaction [{}]", id.canonical());
-        }
-        SemanticChange::FunctionVolatilityChanged { id, name } => {
-            let _ = write!(line, "! function {name} volatility [{}]", id.canonical());
-        }
-        SemanticChange::ParameterTypeChanged { owner, name, id } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
-            let _ = write!(line, "! parameter {owner}.{name} type [{}]", id.canonical());
-        }
-        SemanticChange::ParameterDefaultChanged { owner, name, id } => {
-            let owner = candidate
-                .function_by_id(*owner)
-                .map(|definition| qualified(definition.name()))
-                .unwrap_or_else(|| owner.canonical());
             let _ = write!(
                 line,
-                "! parameter {owner}.{name} default [{}]",
-                id.canonical()
+                "! enum type {} labels [{}]",
+                render_type_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::FunctionReturnChanged { id, name } => {
+            let _ = write!(
+                line,
+                "! function {} return type [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::FunctionDomainChanged { id, name } => {
+            let _ = write!(
+                line,
+                "! function {} domain [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::FunctionSecurityChanged { id, name } => {
+            let _ = write!(
+                line,
+                "! function {} security [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::FunctionTransactionChanged { id, name } => {
+            let _ = write!(
+                line,
+                "! function {} transaction [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::FunctionVolatilityChanged { id, name } => {
+            let _ = write!(
+                line,
+                "! function {} volatility [{}]",
+                render_function_name(Some(candidate), *id, name),
+                id.canonical(),
+            );
+        }
+        SemanticChange::ParameterTypeChanged { owner, name, id } => {
+            let owner_name = render_parameter_owner_name(Some(candidate), *owner);
+            let member_name = render_parameter_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "! parameter {owner_name}.{member_name} type [{}]",
+                id.canonical(),
+            );
+        }
+        SemanticChange::ParameterDefaultChanged { owner, name, id } => {
+            let owner_name = render_parameter_owner_name(Some(candidate), *owner);
+            let member_name = render_parameter_member_name(Some(candidate), *owner, *id, name);
+            let _ = write!(
+                line,
+                "! parameter {owner_name}.{member_name} default [{}]",
+                id.canonical(),
             );
         }
         change @ _ => {
@@ -675,23 +831,160 @@ fn render_change(
     line
 }
 
-fn field_owner_name(
-    candidate: &orna_core::catalogue::CatalogueSnapshot,
+fn render_schema_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    id: orna_core::SchemaId,
+    fallback: &str,
+) -> String {
+    catalogue
+        .and_then(|catalogue| catalogue.schema_by_id(id))
+        .map(|definition| qualified(definition.name()))
+        .unwrap_or_else(|| render_qualified_text(fallback))
+}
+
+fn render_type_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    id: orna_core::TypeId,
+    fallback: &str,
+) -> String {
+    catalogue
+        .and_then(|catalogue| catalogue.type_definition_by_id(id))
+        .map(|definition| qualified(definition.name()))
+        .unwrap_or_else(|| render_qualified_text(fallback))
+}
+
+fn render_function_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    id: orna_core::FunctionId,
+    fallback: &str,
+) -> String {
+    catalogue
+        .and_then(|catalogue| catalogue.function_by_id(id))
+        .map(|definition| qualified(definition.name()))
+        .unwrap_or_else(|| render_qualified_text(fallback))
+}
+
+fn render_field_owner_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
     owner: orna_core::TypeId,
 ) -> String {
-    candidate
-        .object_type_by_id(owner)
-        .map(|definition| qualified(definition.name()))
-        .or_else(|| {
-            candidate
-                .record_value_type_by_id(owner)
+    catalogue
+        .and_then(|catalogue| {
+            catalogue
+                .object_type_by_id(owner)
                 .map(|definition| qualified(definition.name()))
+                .or_else(|| {
+                    catalogue
+                        .record_value_type_by_id(owner)
+                        .map(|definition| qualified(definition.name()))
+                })
         })
         .unwrap_or_else(|| owner.canonical())
 }
 
+fn render_field_member_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    owner: orna_core::TypeId,
+    id: orna_core::FieldId,
+    fallback: &str,
+) -> String {
+    catalogue
+        .and_then(|catalogue| {
+            catalogue
+                .object_type_by_id(owner)
+                .and_then(|definition| definition.field_by_id(id))
+                .map(|field| field.name())
+                .or_else(|| {
+                    catalogue
+                        .record_value_type_by_id(owner)
+                        .and_then(|definition| definition.field_by_id(id))
+                        .map(|field| field.name())
+                })
+        })
+        .map(render_identifier_part)
+        .unwrap_or_else(|| render_identifier_part(fallback))
+}
+
+fn render_parameter_owner_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    owner: orna_core::FunctionId,
+) -> String {
+    catalogue
+        .and_then(|catalogue| catalogue.function_by_id(owner))
+        .map(|definition| qualified(definition.name()))
+        .unwrap_or_else(|| owner.canonical())
+}
+
+fn render_parameter_member_name(
+    catalogue: Option<&orna_core::catalogue::CatalogueSnapshot>,
+    owner: orna_core::FunctionId,
+    id: orna_core::ParameterId,
+    fallback: &str,
+) -> String {
+    catalogue
+        .and_then(|catalogue| {
+            catalogue
+                .function_by_id(owner)
+                .and_then(|definition| definition.parameter_by_id(id))
+                .map(|parameter| parameter.name())
+        })
+        .map(render_identifier_part)
+        .unwrap_or_else(|| render_identifier_part(fallback))
+}
+
+fn render_qualified_text(name: &str) -> String {
+    name.split('.')
+        .map(render_identifier_part)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Escapes one semantic name part for the human-readable report grammar.
+///
+/// Bare identifier parts retain the existing compact spelling. Other parts use
+/// doubled quotes for embedded quotes and backslash escapes for controls so a
+/// name can never introduce another physical report line.
+fn render_identifier_part(part: &str) -> String {
+    let mut characters = part.chars();
+    let is_unquoted = characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && characters.all(|character| {
+            character == '_' || character.is_alphabetic() || character.is_numeric()
+        });
+    if is_unquoted {
+        return part.to_owned();
+    }
+
+    use std::fmt::Write as _;
+
+    let mut rendered = String::with_capacity(part.len() + 2);
+    rendered.push('"');
+    for character in part.chars() {
+        match character {
+            '"' => rendered.push_str("\"\""),
+            '\\' => rendered.push_str("\\\\"),
+            '\u{0008}' => rendered.push_str("\\b"),
+            '\n' => rendered.push_str("\\n"),
+            '\u{000c}' => rendered.push_str("\\f"),
+            '\r' => rendered.push_str("\\r"),
+            '\t' => rendered.push_str("\\t"),
+            character if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') => {
+                let _ = write!(rendered, "\\u{{{:04X}}}", character as u32);
+            }
+            character => rendered.push(character),
+        }
+    }
+    rendered.push('"');
+    rendered
+}
+
 fn qualified(name: &orna_core::catalogue::QualifiedSemanticName) -> String {
-    name.parts().join(".")
+    name.parts()
+        .iter()
+        .map(|part| render_identifier_part(part))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn require_accepted_active_standard(
@@ -716,49 +1009,8 @@ fn require_accepted_active_standard(
     Ok(())
 }
 
-fn render_diagnostics(diagnostics: &[CompilerDiagnostic]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for diagnostic in diagnostics {
-        bytes.extend_from_slice(render_diagnostic(diagnostic).as_bytes());
-    }
-    bytes
-}
-
-fn render_diagnostic(diagnostic: &CompilerDiagnostic) -> String {
-    let location = diagnostic.location();
-    let span = location.span();
-    format!(
-        "{}:{}..{}: {}: {}\n",
-        location.logical_path(),
-        span.start(),
-        span.end(),
-        diagnostic.code().as_str(),
-        escape_message(diagnostic.message()),
-    )
-}
-
-fn escape_message(message: &str) -> String {
-    let mut escaped = String::with_capacity(message.len());
-    for character in message.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{2028}' | '\u{2029}' => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffError> {
+    validate_source_path(path)?;
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
@@ -791,6 +1043,21 @@ fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffErr
     })?;
     SourceBundle::new([SourceUnit::new(path, source)])
         .map_err(|source| InstalledSourceDiffError::SourceBundle { source })
+}
+
+fn validate_source_path(path: &str) -> Result<(), InstalledSourceDiffError> {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(InstalledSourceDiffError::SourceBundle {
+            source: SourceBundleError::EmptyLogicalPath { index: 0 },
+        });
+    }
+
+    Ok(())
 }
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceDiffError {
@@ -831,10 +1098,10 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
 mod tests {
     use super::{
         FunctionRevisionChange, InstalledSourceDiffError, changed_function_revisions, digest_hex,
-        map_recovery_error, read_source_bundle, render_change, render_function_revision_change,
+        map_recovery_error, qualified, read_source_bundle, render_change,
+        render_change_with_catalogues, render_function_revision_change, render_identifier_part,
         run_installed_source_diff,
     };
-    use orna_postgres::PostgresKernelError;
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, SchemaId, SourceUnitId,
         TypeId,
@@ -847,8 +1114,10 @@ mod tests {
             ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, Sha256Digest,
             SourceOrigin,
         },
+        source::SourceBundleError,
         types::TypeDescriptor,
     };
+    use orna_postgres::PostgresKernelError;
 
     fn function_revision(
         function: FunctionId,
@@ -929,6 +1198,16 @@ mod tests {
     }
 
     fn candidate_with_record(record_id: TypeId) -> CatalogueSnapshot {
+        candidate_with_record_name(
+            record_id,
+            QualifiedSemanticName::new(["app", "point"]).unwrap(),
+        )
+    }
+
+    fn candidate_with_record_name(
+        record_id: TypeId,
+        record_name: QualifiedSemanticName,
+    ) -> CatalogueSnapshot {
         let enum_id = TypeId::from_bytes([6; 16]);
         let field = RecordValueFieldDefinition::try_new_descriptor(
             FieldId::from_bytes([7; 16]),
@@ -952,7 +1231,7 @@ mod tests {
             )],
             vec![RecordValueTypeDefinition::new(
                 record_id,
-                QualifiedSemanticName::new(["app", "point"]).unwrap(),
+                record_name,
                 vec![field],
             )],
             Vec::new(),
@@ -1201,7 +1480,7 @@ mod tests {
             format!("+ record value type app.point [{}]", record_id.canonical()),
             format!("- record value type app.point [{}]", record_id.canonical()),
             format!(
-                "~ record value type app.point -> app.coordinate [{}]",
+                "~ record value type app.point -> app.point [{}]",
                 record_id.canonical()
             ),
             format!("+ field app.point.longitude [{}]", field_id.canonical()),
@@ -1230,13 +1509,10 @@ mod tests {
                 "! field app.point.longitude default/on-delete [{}]",
                 field_id.canonical()
             ),
-            format!("+ enum type app.stage [{}]", enum_id.canonical()),
-            format!("- enum type app.stage [{}]", enum_id.canonical()),
-            format!(
-                "~ enum type app.stage -> app.phase [{}]",
-                enum_id.canonical()
-            ),
-            format!("! enum type app.phase labels [{}]", enum_id.canonical()),
+            format!("+ enum type app.axis [{}]", enum_id.canonical()),
+            format!("- enum type app.axis [{}]", enum_id.canonical()),
+            format!("~ enum type app.axis -> app.axis [{}]", enum_id.canonical()),
+            format!("! enum type app.axis labels [{}]", enum_id.canonical()),
             format!("+ function app.read [{}]", function_id.canonical()),
             format!("- function app.read [{}]", function_id.canonical()),
             format!(
@@ -1293,6 +1569,84 @@ mod tests {
     }
 
     #[test]
+    fn renders_qualified_parts_without_ambiguity_or_control_lines() {
+        let name =
+            QualifiedSemanticName::new(["app", "metric.value", "quoted\"part", "line\nbreak"])
+                .unwrap();
+
+        assert_eq!(
+            qualified(&name),
+            r#"app."metric.value"."quoted""part"."line\nbreak""#
+        );
+        assert_eq!(render_identifier_part("field.name"), r#""field.name""#);
+        assert_eq!(
+            render_identifier_part("line\nbreak\u{001b}"),
+            r#""line\nbreak\u{001B}""#,
+        );
+    }
+
+    #[test]
+    fn escapes_qualified_change_names_and_member_names() {
+        let function_id = FunctionId::from_bytes([7; 16]);
+        let field_id = FieldId::from_bytes([5; 16]);
+        let record_id = TypeId::from_bytes([4; 16]);
+        let candidate = candidate_with_record(record_id);
+        let rendered = render_change(
+            &SemanticChange::FunctionAdded {
+                id: function_id,
+                name: "app.line\nbreak".to_owned(),
+            },
+            &candidate,
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "+ function app.\"line\\nbreak\" [{}]",
+                function_id.canonical()
+            )
+        );
+
+        let rendered = render_change(
+            &SemanticChange::FieldAdded {
+                owner: record_id,
+                id: field_id,
+                name: "quoted\"field".to_owned(),
+            },
+            &candidate,
+        );
+        assert_eq!(
+            rendered,
+            format!(
+                "+ field app.point.\"quoted\"\"field\" [{}]",
+                field_id.canonical()
+            )
+        );
+    }
+
+    #[test]
+    fn render_change_recovers_dotted_candidate_parts_by_identity() {
+        let record_id = TypeId::from_bytes([4; 16]);
+        let field_id = FieldId::from_bytes([7; 16]);
+        let candidate = candidate_with_record_name(
+            record_id,
+            QualifiedSemanticName::new(["app", "metric.value"]).unwrap(),
+        );
+        let change = SemanticChange::FieldAdded {
+            owner: record_id,
+            id: field_id,
+            name: "longitude".to_owned(),
+        };
+
+        assert_eq!(
+            render_change_with_catalogues(&change, Some(&candidate), &candidate),
+            format!(
+                "+ field app.\"metric.value\".longitude [{}]",
+                field_id.canonical()
+            )
+        );
+    }
+
+    #[test]
     fn recovery_database_maps_to_recovery_stage_not_attach() {
         let source = "port=invalid"
             .parse::<tokio_postgres::Config>()
@@ -1303,11 +1657,55 @@ mod tests {
         assert!(!matches!(&error, &InstalledSourceDiffError::Attach { .. }));
     }
 
-    #[test]
-    fn escapes_diagnostic_scalars_like_source_check() {
+    fn assert_invalid_source_path_fails_before_io(path: &str) {
+        let error = run_installed_source_diff(path)
+            .expect_err("invalid source path must fail before file or host access");
+        assert!(
+            matches!(
+                &error,
+                InstalledSourceDiffError::SourceBundle {
+                    source: SourceBundleError::EmptyLogicalPath { index: 0 }
+                }
+            ),
+            "invalid path {path:?} must use the closed source-bundle boundary: {error:?}"
+        );
         assert_eq!(
-            super::escape_message("\\\0\u{001B}\u{2028}\u{2029}\n\r\t"),
-            r"\\\u{0000}\u{001B}\u{2028}\u{2029}\n\r\t"
+            error.to_string(),
+            "orna: source diff received an invalid source path"
+        );
+    }
+
+    #[test]
+    fn invalid_source_paths_fail_before_missing_file_or_host_access() {
+        for path in [
+            "",
+            "-leading.orna",
+            "control\u{0007}.orna",
+            "line\nbreak.orna",
+            "line\u{2028}break.orna",
+            "line\u{2029}break.orna",
+        ] {
+            assert_invalid_source_path_fails_before_io(path);
+        }
+    }
+
+    #[test]
+    fn valid_relative_source_path_reaches_file_read_boundary() {
+        let path = format!(
+            "./-orna-source-diff-valid-path-{}-missing.orna",
+            std::process::id()
+        );
+        let error = run_installed_source_diff(&path)
+            .expect_err("the missing valid path must fail at source read before host access");
+        assert!(
+            matches!(
+                &error,
+                InstalledSourceDiffError::SourceRead {
+                    path: submitted,
+                    source: Some(source),
+                } if submitted == &path && source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "valid path must reach filesystem read: {error:?}"
         );
     }
 
