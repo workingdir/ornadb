@@ -11,7 +11,10 @@ It tracks implementation hardening, external release evidence, and the
 contract work that must precede production graphical runtimes, populated
 Inspector projections, Studio, and reflective gateways. The canonical
 specification still marks those broader surfaces as `CURRENT PROPOSAL` or
-`OPEN`; this plan must not turn them into implementation contracts.
+`OPEN`; this plan must not turn them into implementation contracts. Production
+runtime ABI and native-host proof, populated Inspector resource/UI projections,
+reflective gateways, general Rows/object-value semantics, and remote transport
+remain proposal- or contract-gated.
 
 - The external `../TODO.md` checklist records the completed CLIENT, TTY,
   Inspector-core, source, security, presenter, state, resource, action,
@@ -48,15 +51,18 @@ The canonical research plan remains useful as historical evidence, but this
 plan is the current implementation projection. Accepted ADRs and
 `../spec/docs/02-status-decisions.md` remain authoritative.
 
-## Evidence status (2026-08-24)
+## Evidence status (2026-08-25)
 
 - **Current validated focused evidence:** the `work/` checkout records the
   protocol, sealed-server, LSP UTF-16, no-`STATE` dogfood, resource-span,
   buffered-preflight, V3/V5 upgrade, same-revision replacement, selected-package
-  check, formatter, headless workspace unit, and editor-tooling commands listed
-  below; each returned success. Installed evaluator/Inspector-recursion,
-  Compose/Docker, clean-host, Neovim/Vim, live REF, same-major PostgreSQL,
-  and accepted contract gates remain pending.
+  check and formatter commands listed below; prior workspace-unit reports remain
+  historical and were not rerun, while the current static editor-tooling gate is
+  recorded below. Installed evaluator/Inspector-recursion, Compose/Docker,
+  clean-host and editor-runtime checks, manual Zed/VSIX runtime parity, live
+  REF, same-major PostgreSQL, and accepted contract gates remain pending or
+  unclaimed; the static editor result is current and the exact runtime limits are
+  recorded below.
 
 ## Current validated focused evidence (`work/` checkout)
 
@@ -73,20 +79,60 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-client same_revision_terminal_replacement_persists_when_later_expression_fails` — 1 test returned success.
 - `cargo check -p orna-client -p orna-compiler -p orna-lsp -p orna-postgres -p orna-protocol -p orna-server -p orna-standard -p orna-syntax` — returned success with existing dead-code warnings.
 - `cargo fmt --all -- --check` — returned success.
-- `cargo test --workspace --all-targets` — 2545 tests passed, 0 failed, 235 ignored across 40 suites; this is headless workspace unit coverage only, not installed evaluator/Inspector-recursion or broader environment-gated proof.
-- `just editor-tooling-check` — all subchecks returned success, including 14 LSP protocol tests and the 31-case tree-sitter corpus.
+- Historical report (not current validation): a prior `cargo test --workspace --all-targets` run recorded 2545 tests, 0 failed, and 235 ignored across 40 suites; it was not rerun for this checkout, so no current workspace result is claimed.
+- Historical report (not current validation): a later proof report recorded 2578 workspace tests and 14 LSP protocol tests plus 31 accepted tree-sitter cases; these checks were not rerun for this checkout and are not claimed as current passes.
+- Historical report (not current validation): a prior `just editor-tooling-check` run recorded 14 LSP protocol tests and the 31-case tree-sitter corpus; it was not rerun for this checkout.
+- `just editor-tooling-check` passed on 2026-08-25: static editor metadata, generated grammar, tree-sitter accepted corpus, Zed ORDER BY captures, TextMate/Vim/Emacs parity, VS Code checks, Helix configuration, and LSP protocol checks passed. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke rather than host-session proof. Manual Zed/VSIX runtime parity is not claimed.
 - `cargo test -p orna-lsp --test lsp_e2e serves_final_field_name_through_accepted_rename_transition` — 1 final-field rename navigation test returned success; this focused proof is current. Zed ORDER BY highlight parity remains pending.
+- Historical report (not current validation): `cargo test -p orna-client --lib`
+  recorded 278 client unit tests returned success. The current source record in
+  `../TODO.md` (Concurrent follow-up wave, 2026-08-25) reports a later
+  283-test client-library run; this plan does not claim a new execution here.
+  Installed evaluator and USER-state database proofs remain Compose-gated.
+- `cargo test -p orna-client --lib client_user_state_load_rejects_wrong_instance_key_atomically -- --nocapture` — 1 test returned success; a mismatched USER instance key is rejected before admission and prior state remains unchanged.
+- `cargo test -p orna-postgres --lib resource_lineage_validation_ -- --nocapture` — 4 tests returned success; zero request, parent, and call-site lineage identities are rejected before later request validation, and valid identities remain accepted without mutating the request. Live producer/audit database proof remains environment-gated.
+- `cargo test -p orna-compiler --lib named_standard_resource_result_uses_catalogue_value_identity -- --exact --nocapture` — 1 test returned success; standard value identities remain durable in the CLIENT resource plan.
+- Historical/unverified focused report (not current validation):
+  `cargo test -p orna-postgres --lib sealed_output_ -- --nocapture` covered
+  empty or mismatched sink offers failing closed before presenter execution,
+  while exact and generic ByteStream and Document offers pass. The earlier
+  suite count is intentionally omitted because current evidence records
+  disagree.
+- Historical/unverified focused report (not current validation):
+  `cargo test -p orna-postgres --lib kernel::server_execution::tests
+  -- --nocapture` covered sealed presentation after threading client sink
+  offers through it. The earlier suite count is intentionally omitted because
+  current evidence records disagree.
+- `cargo test -p orna-compiler resolver::tests::rejects_client_resource_table_descriptor_with_deferred_row_diagnostic -- --exact --nocapture` and `rejects_client_stream_resource_record_descriptor_with_deferred_row_diagnostic` — 2 parser-accepted resolver regressions returned success; deferred inline TABLE/RECORD resource descriptors emit the exact `TypeMismatch` diagnostic and no checked bundle.
+- `cargo test -p orna-compiler resolver::tests::discovers_stream_resource_target_with_resolved_enum_element_type -- --exact --nocapture` and `rejects_opaque_stream_resource_elements_without_a_checked_bundle` — 2 stream element boundary proofs returned success; durable enum elements resolve through CLIENT `STREAM` resources and opaque elements fail closed.
+- `cargo test -p orna-client --lib tests::client_expression_call_depth_is_bounded_by_artifact_limit -- --nocapture` — 1 test returned success; the evaluator rejects expression call depth above the artifact limit.
+- `cargo test -p orna-protocol --lib resource_values_reject_truncated_value_length_without_mutating_connection -- --nocapture` — 1 test returned success; malformed value-length decoding preserves connection state and unrelated stream credit.
+- `cargo test -p orna-compiler --lib accepts_external_client_parameters_and_capabilities -- --nocapture` — 1 test returned success; external CLIENT capability declarations remain retained through resolution. Installed enforcement remains Compose-gated.
+- `cargo test -p orna-standard --lib v3_to_v4_upgrade_rejects_non_v3_parents_before_child_work -- --nocapture` — 1 test returned success; the wrong-parent upgrade fails before child work.
+- `cargo test -p orna-compiler --lib accepted_client_action_preparation_preserves_durable_operation_identity_and_arguments -- --nocapture` — 1 test returned success; prepared CLIENT action identity and normalized arguments remain durable.
+- `cargo test -p orna-artifact --lib procedural_plan_round_trips_scalar_resource_await_in_assignment -- --nocapture` — 1 test returned success; the accepted ADR 0077 artifact matrix preserves ordered locals, scalar resource construction, AWAIT assignment/return, exact target revision/call-site, and canonical parameter identities.
+- `cargo test -p orna-compiler accepts_a_checked_server_function_with_a_relational_plan` — 1 test returned success; the checked SERVER plan preserves DESC ordering, `NullOrder::Unspecified`, stable field identities, and exact checked query-reference order.
+- `cargo test -p orna-syntax --test accepted_subset` — 3 tests returned success; the accepted subset rejects a PL/SQL-style CLIENT `EXCEPTION` tail while preserving source text and the stable `ORNA0001` diagnostic.
+- With the test-hooks feature and the local PostgreSQL test service, `cargo test -p orna-postgres --test recovery authenticated_resource_denies_recovered_security_definer_before_execution -- --ignored --exact --nocapture` returned success; direct resource SECURITY DEFINER dispatch is denied before execution and finalizes its resource/invocation audit state. The read-only fixture does not independently observe a target write; follow-up proof remains tracked separately.
+
+- With the test-hooks feature and the local PostgreSQL test service, `cargo test -p orna-server --features test-hooks --test standard_database authenticated_direct_resource_post_reservation_failure_is_compensated_once -- --ignored --exact` returned success; the direct resource failure path compensates one reserved request. This does not replace the remaining hostile-search-path recovery proof.
+- `cargo test -p orna-protocol frame::tests::` — 84 protocol frame tests returned success after rejecting stale `InvokeEvents` during cancellation, preserving the accepted operational/audit failure exception, and rejecting late `CALL_ACCEPTED` after pre-accept cancellation. `cargo check -p orna-protocol` also passed with existing warnings.
+- `cargo test -p orna-client --lib client_user_state_` (8 passed), `cargo test -p orna-server --lib user_state` (12 passed), and `cargo check -p orna-client -p orna-server` (passed with existing warnings) — principal isolation checks passed.
+- `cargo test -p orna-server --test standard_database checks_accepted_client_state_fixture_plan_metadata_offline` and `cargo test -p orna-lsp --test lsp_e2e serves_canonical_accepted_dogfood_fixtures_without_diagnostics` — accepted CLIENT STATE fixture and LSP corpus checks passed.
+- `python3 -m py_compile scripts/check-editor-tooling.py` and `python3 scripts/check-editor-tooling.py` — static editor tooling and fail-closed Zed metadata validation passed. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke. Manual Zed/VSIX runtime parity and GUI/runtime launch remain unclaimed.
+- `cargo test -p orna-protocol resource_connection_rejects -- --nocapture` — 12 resource connection tests returned success; duplicate/skip sequence and terminal mismatch proofs preserve connection and credit state on rejection.
 
 The initial LSP expectation mismatch, CLIENT fixture compile mismatch, and
 workspace private-import compile failure were development corrections, not gate
-failures. Installed evaluator/Inspector-recursion, Compose/Docker, clean-host, Neovim/Vim runtime, live REF, same-major PostgreSQL, and contract results remain pending.
+failures. Installed evaluator/Inspector-recursion, Compose/Docker, clean-host, Neovim/Vim host sessions, manual Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and contract results remain pending or unclaimed.
 - **Implementation present, proof pending:** remaining nested source work includes
   cancellation identity/ownership, the companion raw-preflight ordering check,
   SecurityAdmin privilege filtering, raw sealed-invocation terminal/cancellation
-  handling, ordinary CLIENT compiler fixtures, and Compose/clean-host proof.
-  Installed evaluator/Inspector-recursion, Neovim/Vim, live REF, same-major
-  PostgreSQL, and accepted contract gates remain pending.
-  The focused, workspace, and editor-tooling results listed above are current.
+  handling, broader ordinary CLIENT compiler fixtures, and Compose/clean-host proof.
+  Installed evaluator/Inspector-recursion, Neovim/Vim host sessions, manual
+  Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and accepted
+  contract gates remain pending or unclaimed.
+  The focused results listed above are current; workspace reports remain historical and were not rerun, while the static editor-tooling gate passed on 2026-08-25. Neovim/Vim host-session and manual Zed/VSIX runtime proof remain pending or unclaimed.
 - **Historical evidence (not current validation):** the post-audit reports and
   nested commit IDs below are retained for provenance only. The outer checkout
   has only `master` ref `ff31b4e`; nested work commit IDs are not verifiable
@@ -184,10 +230,11 @@ contract:
   `crates/orna-client/src/lib.rs::runtime_conformance::destroying_a_surface_retires_all_owned_handles_and_suppresses_stale_work`
   (the focused runtime-conformance run passed 39 tests); this is not production
   runtime-ABI evidence.
-- commit `1aeef47` now proves the accepted SERVER dogfood fixture checks and
-  prepares offline, including its four functions and candidate revision pair.
-  Local evidence is
+- Historical nested report associated with `1aeef47` records accepted SERVER
+  dogfood fixture checks and offline preparation for four functions and a
+  candidate revision pair. The named evidence path is
   `crates/orna-server/tests/standard_database.rs::checks_and_prepares_server_function_dogfood_fixture_offline`;
+  no current rerun is claimed here;
   PostgreSQL installation and invocation remain Compose-gated.
 - commit `8af410c` adds a focused source-apply error mapping regression; the
   existing `CatalogueInvariant` marker maps to `RecoveryMismatch`. It does not
@@ -234,10 +281,17 @@ implementation should start without the contract gate below.
 
 ### Current implementation present, proof pending
 
-The current nested source contains the following proof work. Focused,
-headless workspace unit, and editor-tooling results recorded above are current;
-installed evaluator/Inspector-recursion, Compose/Docker, clean-host,
-Neovim/Vim, live REF, same-major PostgreSQL, and contract gates remain pending:
+The current nested source contains the following proof work. Focused results
+recorded above are current; workspace reports remain historical and were not
+rerun, while the static editor-tooling gate passed on 2026-08-25. `nvim` is
+absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so
+its filetype-only smoke is not host-session proof. Manual Zed/VSIX runtime
+proof remains pending or unclaimed.
+Installed evaluator/Inspector-recursion, Compose/Docker, clean-host, live REF,
+same-major PostgreSQL, and contract gates remain pending or unclaimed. `nvim` is
+absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so its
+filetype-only smoke is not host-session proof. Manual Zed/VSIX runtime parity
+remains unclaimed:
 
 - same-revision terminal replacement retention across staged CLIENT evaluator
   errors (same_revision_terminal_replacement_persists_when_new_evaluation_fails
@@ -258,10 +312,12 @@ Neovim/Vim, live REF, same-major PostgreSQL, and contract gates remain pending:
   `crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna`
   with the offline check
   `checks_and_evaluates_accepted_client_local_assignment_fixture_offline`;
-  its focused offline check and headless workspace unit validation are current; installed evaluator/Inspector-recursion and Compose proof remain pending;
+  its focused offline check is current; workspace validation and installed evaluator/Inspector-recursion and Compose proof remain pending;
 - LSP UTF-16 position and semantic-token coverage, including
   `orna-lsp/tests/lsp_e2e.rs::serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges`;
-  its focused check is current; the editor-tooling result is recorded above;
+  its focused check is current; the static editor-tooling gate passed on
+  2026-08-25, while Neovim/Vim host-session and manual Zed/VSIX runtime proof
+  remain pending or unclaimed;
 - focused positive V3-pinned and V5-pinned standard-library upgrade checks:
   `prepares_the_v3_to_v4_standard_upgrade_from_an_empty_v3_active_revision`
   and `prepares_the_v5_to_v6_standard_upgrade_from_an_empty_v5_active_revision`;
@@ -275,9 +331,40 @@ Neovim/Vim, live REF, same-major PostgreSQL, and contract gates remain pending:
   implementation is present, but the direct recovery proof remains
   Compose-gated and pending;
 - ordinary CLIENT call/REF-field compiler fixtures plus accepted resource,
-  action, and LSP/editor fixtures; resource and LSP/editor-tooling checks are current; ordinary-call and
-  final-field rename focused proofs are current, while installed evaluator/
-  Inspector-recursion and Neovim/Vim runtime proof remain pending.
+  action, and LSP/editor fixtures; resource and final-field rename focused proofs are current;
+  static editor-tooling validation passed on 2026-08-25, while ordinary-call and
+  installed evaluator/Inspector-recursion, Neovim/Vim host-session, and manual
+  Zed/VSIX runtime proof remain pending or unclaimed.
+
+- The CLIENT expression-depth, truncated `RESOURCE_VALUES`, external-capability,
+  V3-to-V4 parent, action-preparation, and REF-field checks listed above are
+  current focused evidence; their installed, Compose, or live boundaries remain
+  separately pending.
+
+- the Zed grammar pin at `editors/zed/extension.toml:[grammars.orna].rev`
+  (`f5c9007ee2ba8dcd00784e806a9d9b32be6efe08`) is implementation-present and
+  enforced by `scripts/check-editor-tooling.py`; the current pin passed the
+  static editor gate on 2026-08-25, and a temporary alternate 40-hex revision
+  was rejected. The check validates metadata identity, not remote grammar bytes
+  or Zed GUI runtime parity.
+- resource-request reservation recovery and hostile-search-path audit recovery
+  remain Compose-gated proof-pending tests in
+  `crates/orna-postgres/tests/recovery.rs`:
+  `recovery_rejects_resource_audit_without_its_durable_request_reservation`
+  and
+  `recovers_closed_security_audit_history_under_hostile_search_path_and_rejects_tamper`.
+
+- Resource cancellation provenance remains in progress under Bead `ornadb-el1.2.1.43`; direct/shared terminal precedence under Bead `ornadb-el1.2.1.44` is closed. The
+  current direct/shared adapter review found no concrete precedence mismatch, but the
+  authority decision and live-producer evidence remain pending. Do not change
+  the wire contract before the accepted provenance decision.
+- ADR 0080 closed the Inspector epoch-width authority blocker tracked by Bead
+  `ornadb-el1.2.1.33`: ORNA-INSPECT/1 treats its u64 `epoch_id` as complete v1
+  wire authority; full-width epoch identity is deferred to a future carrier
+  version and ADR.
+- Direct mutation `SECURITY DEFINER` remains a recorded contract/fixture blocker
+  under Bead `ornadb-el1.2.1.28.1`; the recovered read-only guard proof does not
+  establish mutation side effects.
 
 Run the remaining lifecycle, raw-preflight, compiler, Compose/Docker, clean-host,
 Neovim/Vim, live REF, same-major PostgreSQL, and accepted contract checks
@@ -552,12 +639,12 @@ then run the workspace and installed gates at the phase checkpoint.
 
 ADRs 0080 and 0081 accept the headless ordinary CLIENT Inspector v1 and
 generic standard render contract; the current source contains the implementation
-`std.inspect.render@1`. Focused local checks are present but unvalidated; the installed
-self-inspection/evaluator proofs remain Compose-gated and are not claimed as
-locally run.
+`std.inspect.render@1`. Focused local checks are implementation evidence; installed
+self-inspection/evaluator proofs remain Compose-gated, and production-runtime
+proof remains outside these ADRs and separately proposal-gated.
 
-The baseline work is complete. Further work in this phase is conditional on an
-accepted projection contract:
+The accepted headless baseline is implementation-present. Further work in this
+phase is conditional on an accepted projection contract:
 
 1. preserve the checked Inspector signature and stable projection identities;
 2. preserve snapshot reads without executing the observed target;
@@ -565,10 +652,10 @@ accepted projection contract:
    freeze/resume, and the Compose-gated installed self-inspection proof path;
 4. add populated resource/UI rows only after the Phase 0.2 contract is accepted.
 
-The current source contains the accepted headless scope, but this checkout has
-no validated local result. Installed proof paths remain Compose-gated and must
-not be described as locally run, or as proof of a graphical runtime, populated
-resource/UI projections, or reflective gateways.
+The current source contains the accepted headless scope. Installed proof paths
+remain Compose-gated, while production-runtime and native-host proof remain
+separately gated; neither is implied as locally run or as proof of a graphical
+runtime, populated resource/UI projections, or reflective gateways.
 
 ## Phase 3: Implement Studio and the first production UI runtime
 
@@ -662,9 +749,10 @@ effort:
 - Installed PostgreSQL checks remain Compose-gated `#[ignore]` evidence; no
   local Compose result is claimed for source apply, Inspector, resource,
   action, security-admin, or invocation proofs.
-- Offline editor tooling is accepted, but the Neovim/Vim editor-runtime checks
-  remain blocked when those binaries are unavailable; no editor-runtime proof
-  is claimed.
+- Offline/static editor tooling is accepted, but editor-runtime proof remains
+  blocked: `nvim` is absent, `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax`
+  or `-channel` and only provides filetype-only smoke. Manual Zed/VSIX runtime
+  parity is not claimed.
 - Studio remains pending behind the production runtime ABI and populated
   Inspector projection contracts; no Studio source/apply/revision path is
   accepted yet.

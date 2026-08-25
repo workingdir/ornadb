@@ -131,18 +131,22 @@ when its revision equals the current revision plus one. The fixture rejects a
 stale revision with a dedicated `STALE_REVISION` status and rejects a revision
 gap with `INVALID_ARGUMENT`.
 
-The fixture validates every operation, handle, parent, slot, ordinal, property,
-and value reference before it changes the surface. A failed batch changes
-neither the semantic tree nor its revision. A successful batch commits all
-operations together and updates the revision once. Empty batches are invalid so
-that a no-op cannot advance the revision.
+For supported operation kinds, the fixture validates every operation, handle,
+parent, slot, ordinal, property, and value reference before it changes the
+surface. `SET_FOCUS` and `SET_ACCESSIBILITY` are named by the header, but
+`OrnaUiOperationV1` has no payload arms for them; the fixture rejects those
+unsupported kinds with `ORNA_STATUS_UNSUPPORTED` and fails closed. A failed
+batch changes neither the semantic tree nor its revision. A successful batch
+commits all supported operations together and updates the revision once. Empty
+batches are invalid so that a no-op cannot advance the revision.
 
 Semantic state capture returns a deterministic canonical byte sequence through
 `OrnaOwnedBytes`. The captured state is unchanged after a rejected batch.
 
 ### Typed events and model requests
 
-The fixture accepts the event kinds already listed in the header:
+The fixture accepts the event kinds already listed in the header, including the
+`OrnaSurfaceClosedEventV1` and `OrnaDiagnosticEventV1` payloads defined there:
 
 - action;
 - focus changed;
@@ -187,13 +191,15 @@ The test-only module must prove at least:
 3. borrowed input is valid during a call but is not retained after return;
 4. captured bytes transfer to the caller and release exactly once;
 5. foreign and stale handles cannot mutate a surface;
-6. valid batches commit atomically, malformed batches leave no partial change,
-   stale revisions are rejected, and the captured state is deterministic;
+6. valid batches of supported operation kinds commit atomically, malformed
+   batches and unsupported `SET_FOCUS`/`SET_ACCESSIBILITY` kinds leave no
+   partial change, stale revisions are rejected, and the captured state is
+   deterministic;
 7. callback order is FIFO, callbacks do not overlap, and re-entry is rejected;
 8. typed events preserve handle provenance and model requests complete once;
 9. cancellation rejects late completion and shutdown cancels outstanding work;
 10. the end-to-end fixture proof reaches terminal shutdown with no post-terminal
-    callback.
+    callback;
 
 The C header syntax check remains a separate gate:
 

@@ -17,6 +17,9 @@ catalogue, the `std.invoke.echo` executable, and the two output value
 types unchanged, and appends the new schema, value type, binding, and
 source unit.
 
+`std.json.Value` is not a V4 identity; the V5 child snapshot introduces it
+(work ADR 0075).
+
 `std.ui.UI` is a transient immutable value, never a durable object. The
 core remains UI-ignorant; it sees only a standard `TypeId`, an opaque
 value type, and the value codec (spec ADR 0012, spec docs/10-ui-type.md).
@@ -46,26 +49,18 @@ guessed.
 | `std/ui.orna` `SourceUnitId` | `...05` |
 | `std.terminal` `SchemaId` | `...04` |
 | `std.io` `SchemaId` | `...05` |
-| `std.io` `SchemaId` | `...05` |
-| `std.json` `SchemaId` | `...06` |
-| `std.data` `SchemaId` | `...07` |
 | `std.ui` `SchemaId` | `...08` |
 | `std.terminal.Document` `TypeId` | `...15` |
 | `std.io.ByteStream` `TypeId` | `...16` |
-| `std.json.Value` `TypeId` | `...17` |
-| `std.data.Rows` `TypeId` | `...18` |
 | `std.ui.UI` `TypeId` | `...19` |
 | `std.ui.UI` kernel contract | `orna.std.value.ui@1` |
 
 The identity values above are the V1-V3 manifest facts plus one new
-`...05` source unit, one new `...08` schema, and the next free reserved
-type identity `...19`. The reserved sequence after
-`std.types.opaque_token` (`...14`) is `Document` `...15`, `ByteStream`
-`...16`; work ADR 0057 already claims `...17` (`std.json.Value`) and
-`...18` (`std.data.Rows`) in the compiler resolver model, so `...19` is
-the next unattributed byte. `...19` is not claimed by any other
-identity kind or crate; the resolver model verifies the invariant
-during the V4 reconcile tests.
+`...05` source unit, one new `...08` schema, and the fixed V4 UI type
+identity `...19`. The V4 manifest contains no `std.json` or `std.data`
+schema/type identities: `std.json.Value` is introduced by `orna.std/5`
+(work ADR 0075), while `std.data.Rows` remains reserved and unregistered.
+V4 remains immutable and valid while V5 retains it.
 
 The ordered source bundle is exact:
 
@@ -186,5 +181,5 @@ Work ADR 0055 remains authoritative for `orna.std/2` immutability and the
 upgrade authority rule. Work ADR 0058 remains authoritative for the V3
 output value types and codec registration. Work ADR 0059 installs V3 via
 the compiler-backed pipeline; this decision adds only the V4 vehicle that
-carries `std.ui.UI`. Spec ADR 0012 and spec docs/10-ui.md remain
+carries `std.ui.UI`. Spec ADR 0012 and spec docs/10-ui-type.md remain
 authoritative for the UI-is-a-standard-value-type model.

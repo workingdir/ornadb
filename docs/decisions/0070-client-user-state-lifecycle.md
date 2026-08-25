@@ -6,9 +6,11 @@
 
 The CLIENT runtime connects declared `STATE ... SCOPE USER` slots to the
 protected `sys.state.*` service through an explicit state-session boundary.
-The client owns state values and scheduling. The server owns principal
-selection, type validation against the active catalogue, durable storage, and
-revision conflict decisions.
+The authenticated adapter/session boundary establishes an opaque
+authenticated-session binding on the caller-owned store before USER-state load
+or flush. The client owns state values
+and scheduling. The server owns principal selection, type validation against
+the active catalogue, durable storage, and revision conflict decisions.
 
 A client state session has one root invocation identity:
 
@@ -45,7 +47,12 @@ state map.
 `ClientStateStore` remains caller-owned. Its `LOCAL` and `SESSION` maps retain
 in-memory values. Its `USER` map stores the loaded typed value, its persisted
 `TypeId`, and its server revision. USER entries also track whether the local
-value changed after load.
+value changed after load. The store also retains one opaque
+authenticated-session binding for its USER cache. The authenticated adapter
+establishes that binding before a USER load or flush. A load or flush using a
+store already bound to a different session is rejected before transport access
+and leaves the caller-owned values unchanged. This is intentional fail-closed
+session-affinity behaviour, not a principal-selection mechanism.
 
 The store exposes four lifecycle operations:
 
@@ -54,9 +61,12 @@ The store exposes four lifecycle operations:
 3. build the currently dirty values as `UserStateChange` records; and
 4. apply the aligned `UserStateWriteResult` records after a server flush.
 
-The client never supplies or stores a principal identity. The authenticated
-transport supplies the principal to the server session, as required by work
-ADR 0061.
+Session affinity is an invariant enforced at the authenticated adapter/session
+boundary for the load and flush operations, not a fifth public state
+operation. The store never exposes, stores, or chooses a `PrincipalId`. The
+authenticated transport supplies the principal to the server session, as
+required by work ADR 0061; the opaque binding only rejects a different
+authenticated session.
 
 Loaded values are keyed by the complete client state key. Duplicate keys,
 invalid key text, mismatched result batches, and impossible revision
@@ -138,9 +148,10 @@ lifecycle and must choose bounded flush points.
 3. Add explicit load, update, pending-change, and write-result operations.
 4. Permit USER values and defaults in the evaluator while retaining type and
    revision checks.
-5. Add an authenticated adapter that calls `PostgresKernel::load_user_state`
-   and `PostgresKernel::write_user_state` without accepting a principal from
-   client data.
+5. Add an authenticated adapter that establishes the opaque session binding
+   before calling `PostgresKernel::load_user_state` and
+   `PostgresKernel::write_user_state`, rejects a store bound to a different
+   session, and never accepts a principal from client data.
 6. Add a live proof for initial load, explicit update, flush, reload, and
    revision conflict.
 
@@ -161,4 +172,6 @@ authority for the protected server service, principal derivation, typed values,
 and optimistic revision outcomes. Work ADR 0069 remains the authority for
 CLIENT state declaration syntax and version-four plan metadata. Spec ADR 0007
 and `spec/docs/16-state-model.md` remain authoritative outside this
-implementation scope.
+implementation scope. Work ADRs 0020 and 0023 remain authoritative for
+authenticated session establishment; this decision adds only the opaque
+session-affinity invariant at the client state boundary.

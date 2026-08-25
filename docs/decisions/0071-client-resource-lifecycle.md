@@ -6,7 +6,8 @@
 lifecycle described here are implemented. The formerly open resource language,
 transport, and action portions are accepted successors in work ADRs 0077, 0078,
 and 0079; this ADR remains the authority for cache identity and lifecycle
-transitions.
+transitions. The security-cache correction is tracked under Beads `ornadb-r4o`;
+this note records the contract, not live proof.
 
 ## Decision
 
@@ -20,10 +21,15 @@ request. Its identity contains the complete cache boundary:
 
 ```text
 target FunctionId + pinned revision
-principal/security context
+principal/security context, including immutable authorization/security-snapshot
+epoch evidence
 canonical typed argument digest
 catalogue/data invalidation token
 ```
+
+The immutable security-snapshot digest is local cache-identity evidence. The
+trusted invocation boundary derives it; callers cannot select it, and it is
+never sent in resource transport or audit payloads.
 
 The runtime stores this identity with one expected resolved type and one
 explicit state machine:

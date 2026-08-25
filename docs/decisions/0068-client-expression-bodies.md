@@ -11,7 +11,7 @@ same-domain expression and external-contract forms.
 ## Decision
 
 CLIENT functions gain two closed surface extensions (spec roadmap milestone
-7, and the tracked next step named in work ADR 0062:177-182):
+7, and the tracked next step named in work ADR 0062's "Open decisions (not invented here)" section):
 
 1. **Expression bodies** - `CREATE CLIENT FUNCTION ... AS <expression> ;`
    replaces the Boolean-literal-only body with a closed expression language
@@ -21,10 +21,12 @@ CLIENT functions gain two closed surface extensions (spec roadmap milestone
    declares a runtime-provided function with no body.
 
 Both forms are already present in the spec EBNF
-(`spec/spec/orna.ebnf:110-124`), the DDL reference
-(`spec/docs/22-ddl-reference.md:88-125`), and the tree-sitter grammar
-(`editors/tree-sitter-orna/grammar.js:225-260`); the hand-written parser,
-compiler, and client evaluator implement none of them.
+(`spec/spec/orna.ebnf` CLIENT-body and external-contract productions), the DDL reference
+(`spec/docs/22-ddl-reference.md` CLIENT-function declarations), and the tree-sitter grammar
+(`editors/tree-sitter-orna/grammar.js` CLIENT-function grammar rules); the hand-written parser,
+compiler, and client evaluator implement these forms. Work ADRs 0077-0079
+cover the accepted resource, transport, AWAIT, and action extensions;
+graphical runtime and proposal-only surfaces remain outside this decision.
 
 ## Expression surface
 
@@ -45,9 +47,10 @@ concatenation  := expression "||" expression
 The closed rules:
 
 - A call resolves to a CLIENT function in the active application catalogue
-  (same-domain calls only). Cross-domain CLIENT-to-SERVER async calls, resources,
-  and `AWAIT` were deferred by this slice; their accepted language and
-  transport contracts are defined by work ADRs 0077 and 0078.
+  (same-domain calls only). Cross-domain CLIENT-to-SERVER async calls,
+  resources, and `AWAIT` are outside this ADR's same-domain expression slice;
+  their accepted language and transport contracts are defined by work ADRs
+  0077 and 0078.
 - Named arguments bind by parameter identity; positional arguments bind in
   declaration order; the compiler rejects unknown, duplicate, missing, or
   trailing arguments with the declaration span.
@@ -113,7 +116,7 @@ distinct `ExternalContract` node carrying the contract identity string.
 
 ## Compiler
 
-`check_client_functions` (orna-compiler/src/resolver.rs:4015) gains:
+`check_client_functions` in `crates/orna-compiler/src/resolver.rs` gains:
 
 - expression-body acceptance: every declared capability must be exercised
   by a call in the body (over-declaration fails closed exactly as the
@@ -128,8 +131,9 @@ references.
 
 ## Client evaluator
 
-`orna-client` (evaluate_client_function_with_grants, lib.rs:365) gains a
-version-3 evaluation path:
+`evaluate_client_function_with_grants` and
+`evaluate_client_function_with_grants_and_arguments` in
+`crates/orna-client/src/lib.rs` implement the version-3 evaluation path:
 
 - literal nodes produce the canonical scalar value;
 - parameter reads bind from the supplied typed arguments (the sealed and
@@ -189,7 +193,7 @@ ADR extends it.
 ## Precedence
 
 This decision extends work ADR 0060 (capability gate) and implements the
-expression path named as the next step in work ADR 0062:177-182. Work ADRs
+expression path named as the next step in work ADR 0062's "Open decisions (not invented here)" section. Work ADRs
 0077-0079 now govern the accepted resource, transport, and action successors
 to the deferred portions recorded above. Spec ADRs and docs remain
 authoritative outside this accepted implementation scope; the EBNF and DDL
