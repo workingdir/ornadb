@@ -5,11 +5,13 @@ IS
         std.data.resource(
 --      ^^^^^^^^^^^^^^^^^ function
             target => tasks.overdue,
---                           ^^^^^^^ property
+--                           ^^^^^^^ function
             arguments => std.call.args(p_id => p_id)
 --                       ^^^^^^^^^^^^^ function
         );
 BEGIN
+    LET source := client_result.payload;
+--                              ^^^^^^^ property
     RETURN AWAIT pending;
 --           ^^^^^ keyword
 END;
@@ -23,7 +25,7 @@ IS
         std.data.stream_resource(
 --      ^^^^^^^^^^^^^^^^^^^^^^^^ function
             target => studio.execute_sql,
---                              ^^^^^^^^^^ property
+--                              ^^^^^^^^^^ function
             arguments => std.call.args(p_limit => p_limit)
 --                       ^^^^^^^^^^^^^ function
         );
