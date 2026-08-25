@@ -925,6 +925,208 @@ impl ApplyDocument {
     }
 }
 
+/// The parsed public source-diff document. The report exposes source-revision
+/// halves and semantic changes; it does not expose catalogue-revision halves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceDiffDocument {
+    active_source_revision: String,
+    candidate_source_revision: String,
+    changes: Vec<SourceDiffChange>,
+}
+
+/// One exact semantic change rendered by the installed source-diff command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceDiffChange {
+    FieldRename {
+        field_id: String,
+    },
+    FunctionRevision {
+        name: String,
+        old_revision: String,
+        new_revision: String,
+        old_hash: String,
+        new_hash: String,
+        function_id: String,
+    },
+    NoSemanticChanges,
+}
+
+/// Parse the complete public source-diff document.
+///
+/// The parser deliberately rejects unknown lines, malformed identities, and
+/// extra trailing line feeds. The installed proof therefore checks the
+/// command's framing and exit-side streams rather than passing on a substring
+/// that merely resembles a diff.
+fn parse_source_diff_document(bytes: &[u8]) -> Result<SourceDiffDocument, Error> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Unexpected {
+        message: "source diff output is not UTF-8".to_string(),
+    })?;
+    if !text.ends_with('\n') {
+        return Err(Error::Unexpected {
+            message: "source diff output must end with one line feed".to_string(),
+        });
+    }
+    let body = &text[..text.len() - 1];
+    if body.ends_with('\n') {
+        return Err(Error::Unexpected {
+            message: "source diff output must end with exactly one line feed".to_string(),
+        });
+    }
+    if body.contains('\r') {
+        return Err(Error::Unexpected {
+            message: "source diff output must not contain carriage returns".to_string(),
+        });
+    }
+    let mut lines = body.lines();
+    let header = lines.next().ok_or_else(|| Error::Unexpected {
+        message: "source diff output must render a header".to_string(),
+    })?;
+    let revisions = header
+        .strip_prefix("semantic diff ")
+        .and_then(|rest| rest.split_once(" -> "))
+        .ok_or_else(|| Error::Unexpected {
+            message: "source diff output must start with its exact revision header".to_string(),
+        })?;
+    assert_source_diff_revision(revisions.0, "active")?;
+    assert_source_diff_revision(revisions.1, "candidate")?;
+
+    let mut changes = Vec::new();
+    for line in lines {
+        if line == "no semantic changes" {
+            changes.push(SourceDiffChange::NoSemanticChanges);
+            continue;
+        }
+
+        const FIELD_PREFIX: &str =
+            "~ field product_test.probe.stored -> product_test.probe.retained [";
+        if let Some(field_id) = line
+            .strip_prefix(FIELD_PREFIX)
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            assert_canonical_identity(field_id, "field:", "field rename")?;
+            changes.push(SourceDiffChange::FieldRename {
+                field_id: field_id.to_owned(),
+            });
+            continue;
+        }
+
+        const FUNCTION_PREFIX: &str = "! function ";
+        let Some(rest) = line.strip_prefix(FUNCTION_PREFIX) else {
+            return Err(Error::Unexpected {
+                message: format!("source diff rendered an unknown line: {line:?}"),
+            });
+        };
+        let (name, rest) =
+            rest.split_once(" executable revision ")
+                .ok_or_else(|| Error::Unexpected {
+                    message: format!("source diff rendered a malformed function line: {line:?}"),
+                })?;
+        if !matches!(
+            name,
+            "product_test.create_probe" | "product_test.read_probes"
+        ) {
+            return Err(Error::Unexpected {
+                message: format!("source diff rendered an unexpected function: {name:?}"),
+            });
+        }
+        let (old_revision, rest) = rest.split_once(" -> ").ok_or_else(|| Error::Unexpected {
+            message: format!("source diff function line lacks its revision transition: {line:?}"),
+        })?;
+        assert_canonical_identity(old_revision, "function-revision:", "old function revision")?;
+        let (new_revision, rest) =
+            rest.split_once(" semantic hash ")
+                .ok_or_else(|| Error::Unexpected {
+                    message: format!(
+                        "source diff function line lacks its semantic hashes: {line:?}"
+                    ),
+                })?;
+        assert_canonical_identity(new_revision, "function-revision:", "new function revision")?;
+        let (old_hash, rest) = rest.split_once(" -> ").ok_or_else(|| Error::Unexpected {
+            message: format!("source diff function line lacks its hash transition: {line:?}"),
+        })?;
+        assert_digest_hex(old_hash, "old semantic hash")?;
+        let (new_hash, function_id) = rest
+            .rsplit_once(" [")
+            .and_then(|(hash, id)| id.strip_suffix(']').map(|id| (hash, id)))
+            .ok_or_else(|| Error::Unexpected {
+                message: format!("source diff function line lacks its function identity: {line:?}"),
+            })?;
+        assert_digest_hex(new_hash, "new semantic hash")?;
+        assert_canonical_identity(function_id, "function:", "function revision")?;
+        changes.push(SourceDiffChange::FunctionRevision {
+            name: name.to_owned(),
+            old_revision: old_revision.to_owned(),
+            new_revision: new_revision.to_owned(),
+            old_hash: old_hash.to_owned(),
+            new_hash: new_hash.to_owned(),
+            function_id: function_id.to_owned(),
+        });
+    }
+
+    if changes.is_empty() {
+        return Err(Error::Unexpected {
+            message: "source diff output must render one semantic result line".to_string(),
+        });
+    }
+    Ok(SourceDiffDocument {
+        active_source_revision: revisions.0.to_owned(),
+        candidate_source_revision: revisions.1.to_owned(),
+        changes,
+    })
+}
+
+/// Require one canonical revision identity in the public source-diff report.
+fn assert_source_diff_revision(value: &str, side: &str) -> Result<(), Error> {
+    assert_canonical_identity(
+        value,
+        "source-revision:",
+        &format!("{side} source revision"),
+    )
+}
+
+/// Require one canonical 16-byte identity rendered with its exact prefix.
+fn assert_canonical_identity(value: &str, prefix: &str, label: &str) -> Result<(), Error> {
+    const ID_ALPHABET: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let encoded = value
+        .strip_prefix(prefix)
+        .ok_or_else(|| Error::Unexpected {
+            message: format!("{label} must use the {prefix} prefix: {value:?}"),
+        })?;
+    if encoded.len() != 26 || !encoded.bytes().all(|byte| ID_ALPHABET.contains(&byte)) {
+        return Err(Error::Unexpected {
+            message: format!("{label} must use one canonical 26-character identity: {value:?}"),
+        });
+    }
+    let Some(final_value) = ID_ALPHABET
+        .iter()
+        .position(|candidate| *candidate == encoded.as_bytes()[25])
+    else {
+        return Err(Error::Unexpected {
+            message: format!("{label} must use one canonical 26-character identity: {value:?}"),
+        });
+    };
+    if final_value & 0b11 != 0 {
+        return Err(Error::Unexpected {
+            message: format!("{label} final character is not canonical: {value:?}"),
+        });
+    }
+    Ok(())
+}
+
+/// Require one lowercase SHA-256 digest in a public function-revision line.
+fn assert_digest_hex(value: &str, label: &str) -> Result<(), Error> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(Error::Unexpected {
+            message: format!("{label} must use one lowercase SHA-256 digest: {value:?}"),
+        });
+    }
+    Ok(())
+}
+
 /// Parse the exact compact JSON success document of `orna source apply`.
 ///
 /// The document is one line ending in one line feed:
@@ -1364,6 +1566,70 @@ fn apply_document_parser_rejects_truncated_parameter_shapes() {
             matches!(result, Err(Error::Unexpected { .. })),
             "truncated parameter shape must be rejected: {case}"
         );
+    }
+}
+
+#[test]
+fn source_diff_parser_rejects_an_extra_final_line_feed() {
+    let document = concat!(
+        "semantic diff source-revision:00000000000000000000000000 -> ",
+        "source-revision:00000000000000000000000004\n",
+        "no semantic changes\n\n",
+    );
+    let result = parse_source_diff_document(document.as_bytes());
+    assert!(
+        matches!(result, Err(Error::Unexpected { .. })),
+        "an extra final line feed must be rejected"
+    );
+}
+
+#[test]
+fn source_diff_parser_rejects_a_noncanonical_final_base32_value() {
+    let document = concat!(
+        "semantic diff source-revision:00000000000000000000000000 -> ",
+        "source-revision:00000000000000000000000001\n",
+        "no semantic changes\n",
+    );
+    let result = parse_source_diff_document(document.as_bytes());
+    assert!(
+        matches!(result, Err(Error::Unexpected { .. })),
+        "a non-canonical final base32 value must be rejected"
+    );
+}
+
+#[test]
+fn source_diff_parser_retains_function_revision_and_hash_transitions() {
+    let old_hash = "0".repeat(64);
+    let new_hash = format!("{}1", "0".repeat(63));
+    let document = format!(
+        "semantic diff source-revision:00000000000000000000000000 -> \
+         source-revision:00000000000000000000000004\n\
+         ! function product_test.create_probe executable revision \
+         function-revision:00000000000000000000000000 -> \
+         function-revision:00000000000000000000000004 semantic hash {old_hash} -> \
+         {new_hash} [function:00000000000000000000000000]\n"
+    );
+    let parsed = parse_source_diff_document(document.as_bytes())
+        .expect("a canonical function revision transition must parse");
+    match parsed.changes.as_slice() {
+        [
+            SourceDiffChange::FunctionRevision {
+                name,
+                old_revision,
+                new_revision,
+                old_hash: parsed_old_hash,
+                new_hash: parsed_new_hash,
+                function_id,
+            },
+        ] => {
+            assert_eq!(name, "product_test.create_probe");
+            assert_eq!(old_revision, "function-revision:00000000000000000000000000");
+            assert_eq!(new_revision, "function-revision:00000000000000000000000004");
+            assert_eq!(parsed_old_hash, &old_hash);
+            assert_eq!(parsed_new_hash, &new_hash);
+            assert_eq!(function_id, "function:00000000000000000000000000");
+        }
+        changes => panic!("unexpected parsed source diff changes: {changes:?}"),
     }
 }
 
@@ -2197,16 +2463,16 @@ fn installed_field_rename_preserves_function_identities_and_values_across_restar
     );
 }
 
-/// Prove that the packaged `orna source diff` command renders a semantic
-/// field rename and leaves the active revision untouched.
+/// Prove the installed public `orna source diff` entrypoint without apply.
 ///
-/// The test applies the original fixture, diffs the evidence-bearing renamed
-/// fixture through `/usr/bin/orna`, and then diffs the original fixture again.
-/// The final no-change report is the public-command proof that the first diff
-/// prepared a candidate without applying it.
+/// The test applies the accepted original fixture, diffs the evidence-bearing
+/// renamed fixture through `/usr/bin/orna`, parses the complete public
+/// output and exit-0 boundary, and then diffs the original fixture again. The
+/// final exact no-change report keeps the active revision pair unchanged while
+/// the changed report retains the field identity and executable transition values.
 #[test]
-#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
-fn installed_source_diff_renders_semantic_changes_without_apply() {
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed public source-diff entrypoint"]
+fn installed_public_source_diff_preserves_identity_without_apply() {
     let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
         .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
     let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
@@ -2219,14 +2485,42 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
     let machine = InstalledMachine::start(&artifact, &original)
         .expect("start the installed Debian test machine");
 
+    // The initial apply is the only public source of the active revision pair
+    // exposed by this product journey. Keep both IDs and use the source side
+    // in each diff header to prove that diff never activated its candidate.
     let apply = machine
         .run_as_orna(&["source", "apply", FIXTURE_PATH])
         .expect("run installed source apply");
     let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert_eq!(
+        apply.status.code(),
+        Some(0),
+        "source apply must exit with the exact public success code"
+    );
     assert!(
         apply.stderr.is_empty(),
         "source apply must keep standard error empty"
     );
+    let apply_document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    assert_eq!(
+        apply_document.functions.len(),
+        2,
+        "source apply must report exactly the accepted fixture functions"
+    );
+    let initial_source_revision = apply_document.source_revision.clone();
+    let initial_catalogue_revision = apply_document.catalogue_revision.clone();
+    let create_probe_id = apply_document
+        .function_id(&["product_test", "create_probe"])
+        .expect("source apply must report create_probe")
+        .to_owned();
+    let read_probes_id = apply_document
+        .function_id(&["product_test", "read_probes"])
+        .expect("source apply must report read_probes")
+        .to_owned();
+    assert_canonical_identity(&create_probe_id, "function:", "create_probe")
+        .expect("create_probe identity must be canonical");
+    assert_canonical_identity(&read_probes_id, "function:", "read_probes")
+        .expect("read_probes identity must be canonical");
 
     machine
         .write_fixture(&renamed)
@@ -2236,22 +2530,84 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
         .expect("run installed source diff");
     let diff = require_success("orna source diff renamed", diff)
         .expect("source diff must succeed for the renamed source");
+    assert_eq!(
+        diff.status.code(),
+        Some(0),
+        "renamed source diff must exit with the exact public success code"
+    );
     assert!(
         diff.stderr.is_empty(),
         "source diff must keep standard error empty"
     );
-    let text = std::str::from_utf8(&diff.stdout).expect("source diff output must be UTF-8");
-    assert!(
-        text.starts_with("semantic diff "),
-        "source diff must render its semantic-diff header, got {text:?}"
+    let diff_document =
+        parse_source_diff_document(&diff.stdout).expect("renamed source diff must parse exactly");
+    assert_eq!(
+        diff_document.active_source_revision, initial_source_revision,
+        "source diff must pin its active revision to the applied pair"
     );
-    assert!(
-        text.contains("~ field product_test.probe.stored -> product_test.probe.retained [field:"),
-        "source diff must render the stable-ID field rename, got {text:?}"
+    assert_ne!(
+        diff_document.active_source_revision, diff_document.candidate_source_revision,
+        "source diff must render a distinct prepared candidate revision"
     );
-    assert!(
-        text.ends_with('\n'),
-        "source diff output must end with one line feed"
+    // The packaged source-diff header exposes only source-revision halves;
+    // catalogue-revision halves are a contract blocker for this public proof.
+
+    let mut field_ids = Vec::new();
+    let mut function_changes = Vec::new();
+    for change in diff_document.changes {
+        match change {
+            SourceDiffChange::FieldRename { field_id } => field_ids.push(field_id),
+            SourceDiffChange::FunctionRevision {
+                name,
+                old_revision,
+                new_revision,
+                old_hash,
+                new_hash,
+                function_id,
+            } => function_changes.push((
+                name,
+                old_revision,
+                new_revision,
+                old_hash,
+                new_hash,
+                function_id,
+            )),
+            SourceDiffChange::NoSemanticChanges => {
+                panic!("renamed source diff must not report no semantic changes")
+            }
+        }
+    }
+    assert_eq!(
+        field_ids.len(),
+        1,
+        "renamed source diff must render exactly one identity-keyed field rename"
+    );
+    // The packaged apply response does not expose a field identity, so this
+    // proof can require only the canonical field token rendered by source diff;
+    // baseline field-identity equality is an explicit output-contract blocker.
+
+    // The renamed fixture also changes create_probe from TRUE to FALSE. ADR
+    // 0015 requires a new executable revision and semantic hash for that
+    // resolved Boolean change, while ADR 0006 permits the rename-only
+    // read_probes dependent revision to remain unchanged and therefore absent
+    // from the rendered change list.
+    assert_eq!(
+        function_changes.len(),
+        1,
+        "the TRUE-to-FALSE create_probe change must be the only executable revision change"
+    );
+    let (name, old_revision, new_revision, old_hash, new_hash, function_id) = function_changes
+        .pop()
+        .expect("the source diff must retain create_probe's transition values");
+    assert_eq!(name, "product_test.create_probe");
+    assert_eq!(function_id, create_probe_id);
+    assert_ne!(
+        old_revision, new_revision,
+        "TRUE-to-FALSE must allocate a distinct executable revision identity"
+    );
+    assert_ne!(
+        old_hash, new_hash,
+        "TRUE-to-FALSE must change the executable semantic hash"
     );
 
     machine
@@ -2262,16 +2618,38 @@ fn installed_source_diff_renders_semantic_changes_without_apply() {
         .expect("run installed source diff against the original source");
     let unchanged = require_success("orna source diff unchanged", unchanged)
         .expect("source diff must succeed for the unchanged source");
+    assert_eq!(
+        unchanged.status.code(),
+        Some(0),
+        "unchanged source diff must exit with the exact public success code"
+    );
     assert!(
         unchanged.stderr.is_empty(),
         "unchanged source diff must keep standard error empty"
     );
-    let text =
-        std::str::from_utf8(&unchanged.stdout).expect("unchanged source diff output must be UTF-8");
-    assert!(
-        text.contains("no semantic changes"),
-        "the active revision must remain unchanged after source diff, got {text:?}"
+    let unchanged_document = parse_source_diff_document(&unchanged.stdout)
+        .expect("unchanged source diff must parse exactly");
+    assert_eq!(
+        unchanged_document.active_source_revision, initial_source_revision,
+        "unchanged source diff must retain the complete active revision pair"
     );
+    assert_ne!(
+        unchanged_document.active_source_revision, unchanged_document.candidate_source_revision,
+        "unchanged source diff must still be a prepared, unapplied candidate"
+    );
+    assert!(
+        matches!(
+            unchanged_document.changes.as_slice(),
+            [SourceDiffChange::NoSemanticChanges]
+        ),
+        "unchanged source diff must contain exactly the no-change result"
+    );
+    assert_canonical_identity(
+        &initial_catalogue_revision,
+        "catalogue-revision:",
+        "active catalogue revision",
+    )
+    .expect("source apply must expose a canonical catalogue half of the active pair");
 }
 
 /// Prove that an omitted nullable object field persists as a typed Boolean

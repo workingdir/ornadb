@@ -15,7 +15,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -233,7 +233,9 @@ impl RawProtocolVersion {
                 connection.apply_constructed(active, registry, frame)
             }
             Self::One | Self::Catalogue(_) | Self::Active(_) | Self::Registered(_, _) => {
-                connection.apply(frame)
+                Err(ResourceConnectionError::InvalidFrame {
+                    source: FrameCodecError::ResourceRequiresConstructed,
+                })
             }
         }
     }
@@ -1326,6 +1328,25 @@ fn without_started_event(events: InvocationEventBatch) -> InvocationEventBatch {
         .expect("sealed invocation completion contains a terminal event")
 }
 
+fn sealed_presentation_failure_actions(
+    stream: u64,
+    invocation: InvocationId,
+) -> VecDeque<ServerAction> {
+    VecDeque::from([
+        ServerAction::InvokeEvents {
+            stream,
+            events: redacted_invoke_failure(
+                invocation,
+                InvocationFailurePhase::Internal,
+                "INVOKE_INTERNAL_FAILURE",
+                "invocation could not complete",
+                InvocationRetryability::Unknown,
+            ),
+        },
+        ServerAction::Completed { stream },
+    ])
+}
+
 #[derive(Clone)]
 struct RawDispatchService {
     kernel: PostgresKernel,
@@ -1652,19 +1673,7 @@ impl DispatchService for RawDispatchService {
                 Ok(SealedInvocationExecution::Result(
                     SealedInvocationResult::PresentationFailed { .. },
                 )) => (
-                    VecDeque::from([
-                        ServerAction::InvokeEvents {
-                            stream,
-                            events: redacted_invoke_failure(
-                                invocation,
-                                InvocationFailurePhase::Internal,
-                                "INVOKE_PRESENTATION_FAILURE",
-                                "invocation output could not be presented",
-                                InvocationRetryability::No,
-                            ),
-                        },
-                        ServerAction::Completed { stream },
-                    ]),
+                    sealed_presentation_failure_actions(stream, invocation),
                     None,
                 ),
                 Ok(SealedInvocationExecution::Cancelled { .. }) => (
@@ -3065,7 +3074,10 @@ fn direct_resource_terminal_wins_after_cancel(
 ) -> bool {
     matches!(disposition, ResourceFrameDisposition::DroppedLate)
         && provenance.is_committed()
-        && matches!(action, ResourceServerFrame::Completed(_) | ResourceServerFrame::Failed(_))
+        && matches!(
+            action,
+            ResourceServerFrame::Completed(_) | ResourceServerFrame::Failed(_)
+        )
 }
 
 fn resource_completion_is_committed_for(
@@ -3266,6 +3278,7 @@ async fn handle_resource_frame<D: DispatchService>(
     }
     if let Some(request) = request {
         if !dispatcher.authorize_resource_request(&request) {
+            requests.insert(request.stream_id, request.clone());
             pending.insert(
                 request.stream_id,
                 ResourceDispatchCompletion {
@@ -3319,6 +3332,7 @@ async fn handle_resource_frame<D: DispatchService>(
                 },
             );
         } else {
+            requests.insert(request.stream_id, request.clone());
             pending.insert(
                 request.stream_id,
                 ResourceDispatchCompletion {
@@ -3389,9 +3403,8 @@ async fn flush_resource_pending(
                     continue;
                 }
             };
-            let publish_committed_late_terminal = pending
-                .get(&stream_id)
-                .is_some_and(|completion| {
+            let publish_committed_late_terminal =
+                pending.get(&stream_id).is_some_and(|completion| {
                     direct_resource_terminal_wins_after_cancel(
                         disposition,
                         &action,
@@ -3435,8 +3448,7 @@ async fn flush_resource_pending(
                     }
                     continue;
                 }
-                ResourceFrameDisposition::Applied
-                | ResourceFrameDisposition::DroppedLate => {}
+                ResourceFrameDisposition::Applied | ResourceFrameDisposition::DroppedLate => {}
             }
             let encoded = version
                 .encode_resource_server_frame(&action)
@@ -4562,6 +4574,13 @@ mod tests {
             byte_window: MAX_RESOURCE_WINDOW,
         }
     }
+    fn apply_resource_frame(
+        version: &RawProtocolVersion,
+        connection: &mut ResourceProtocolConnection,
+        frame: ResourceServerFrame,
+    ) -> Result<ResourceFrameDisposition, ResourceConnectionError> {
+        version.apply_resource(connection, frame)
+    }
 
     #[test]
     fn redacted_prepare_failure_contains_terminal_failure_event() {
@@ -4582,8 +4601,37 @@ mod tests {
     }
 
     #[test]
+    fn presentation_failure_uses_canonical_redacted_terminal_mapping() {
+        let invocation = InvocationId::from_bytes([0x42; 16]);
+        let mut actions = sealed_presentation_failure_actions(7, invocation);
+        let Some(ServerAction::InvokeEvents { stream, events }) = actions.pop_front() else {
+            panic!("presentation failure emits an invocation event");
+        };
+        assert_eq!(stream, 7);
+        assert_eq!(events.records().len(), 1);
+        let record = &events.records()[0];
+        assert_eq!(record.outer_sequence(), 2);
+        assert_eq!(record.event().sequence(), 1);
+        assert_eq!(record.event().kind(), InvocationEventKind::InvocationFailed);
+        assert_eq!(record.event().invocation_id(), invocation);
+        let InvocationEventBody::Failed(failure) = record.event().body() else {
+            panic!("presentation failure emits InvocationFailed");
+        };
+        assert_eq!(failure.phase(), InvocationFailurePhase::Internal);
+        assert_eq!(failure.code(), "INVOKE_INTERNAL_FAILURE");
+        assert_eq!(failure.message(), "invocation could not complete");
+        assert_eq!(failure.retryability(), InvocationRetryability::Unknown);
+        assert!(failure.details().is_none());
+        assert!(matches!(
+            actions.pop_front(),
+            Some(ServerAction::Completed { stream: 7 })
+        ));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
     fn exhausted_resource_credit_schedules_terminal_probes_without_value_credit() {
-        let (_version, revision) = constructed_test_version();
+        let (version, revision) = constructed_test_version();
         let request = resource_request(revision);
         let scalar = AuthenticatedServerResourceAccepted {
             stream_id: request.stream_id,
@@ -4596,28 +4644,33 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("scalar request opens");
-        connection
-            .apply(ResourceServerFrame::Accepted(
-                orna_protocol::ResourceAccepted {
-                    stream_id: scalar.stream_id,
-                    request_id: scalar.request_id,
-                    nested_invocation_id: scalar.nested_invocation_id,
-                    target_revision: scalar.target_revision,
-                    resource_kind: ResourceKind::Single,
-                },
-            ))
-            .expect("scalar request accepts");
-        connection
-            .apply(ResourceServerFrame::Values(orna_protocol::ResourceValues {
+        apply_resource_frame(
+            &version,
+            &mut connection,
+            ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: scalar.stream_id,
+                request_id: scalar.request_id,
+                nested_invocation_id: scalar.nested_invocation_id,
+                target_revision: scalar.target_revision,
+                resource_kind: ResourceKind::Single,
+            }),
+        )
+        .expect("scalar request accepts");
+        apply_resource_frame(
+            &version,
+            &mut connection,
+            ResourceServerFrame::Values(orna_protocol::ResourceValues {
                 stream_id: scalar.stream_id,
                 request_id: scalar.request_id,
                 target_revision: request.target_revision,
                 batch_sequence: 0,
                 item_count: 1,
-                byte_count: 1,
+                byte_count: resource_value_byte_count(&version, &RuntimeValue::Integer(7))
+                    .expect("scalar value encodes"),
                 values: vec![RuntimeValue::Integer(7)],
-            }))
-            .expect("scalar value consumes its item credit");
+            }),
+        )
+        .expect("scalar value consumes its item credit");
         let available = connection
             .resource_credit(scalar.stream_id, scalar.request_id)
             .expect("scalar credit remains identity-bound");
@@ -4707,17 +4760,18 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("resource request opens");
-        connection
-            .apply(ResourceServerFrame::Accepted(
-                orna_protocol::ResourceAccepted {
-                    stream_id: request.stream_id,
-                    request_id: request.request_id,
-                    nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
-                    target_revision: request.target_revision,
-                    resource_kind: ResourceKind::Single,
-                },
-            ))
-            .expect("resource request accepts");
+        apply_resource_frame(
+            &version,
+            &mut connection,
+            ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            }),
+        )
+        .expect("resource request accepts");
         let before = connection
             .resource_credit(request.stream_id, request.request_id)
             .expect("resource credit is available");
@@ -4737,6 +4791,60 @@ mod tests {
             result,
             Err(ResourceConnectionError::InvalidFrame { .. })
         ));
+        assert_eq!(
+            connection
+                .resource_credit(request.stream_id, request.request_id)
+                .expect("resource credit remains available"),
+            before
+        );
+    }
+
+    #[test]
+    fn non_constructed_resource_values_reject_before_credit_or_state_mutation() {
+        let (constructed, revision) = constructed_test_version();
+        let version = RawProtocolVersion::One;
+        let request = resource_request(revision);
+        let mut connection = ResourceProtocolConnection::new();
+        connection
+            .receive(ResourceClientFrame::Request(request.clone()))
+            .expect("resource request opens");
+        apply_resource_frame(
+            &constructed,
+            &mut connection,
+            ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                target_revision: request.target_revision,
+                resource_kind: ResourceKind::Single,
+            }),
+        )
+        .expect("resource request accepts");
+        let before_state = connection.clone();
+        let before = connection
+            .resource_credit(request.stream_id, request.request_id)
+            .expect("resource credit is available");
+
+        let result = version.apply_resource(
+            &mut connection,
+            ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                target_revision: request.target_revision,
+                batch_sequence: 0,
+                item_count: 1,
+                byte_count: 1,
+                values: vec![RuntimeValue::Integer(7)],
+            }),
+        );
+
+        assert_eq!(
+            result,
+            Err(ResourceConnectionError::InvalidFrame {
+                source: FrameCodecError::ResourceRequiresConstructed,
+            })
+        );
+        assert_eq!(connection, before_state);
         assert_eq!(
             connection
                 .resource_credit(request.stream_id, request.request_id)
@@ -4947,6 +5055,116 @@ mod tests {
                         terminal_provenance: ResourceTerminalProvenance::Authenticated,
                     }
                 }),
+                cancellation: ResourceCancellation::new(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct PreAcceptResourceDispatch {
+        authorized: bool,
+        resource_start_calls: Arc<AtomicUsize>,
+    }
+
+    impl DispatchService for PreAcceptResourceDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("pre-accept resource test does not issue a raw call")
+        }
+
+        fn authorize_resource_request(&self, _request: &ResourceRequest) -> bool {
+            self.authorized
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            _request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+            _version: RawProtocolVersion,
+        ) -> Option<StartedResourceDispatch> {
+            self.resource_start_calls.fetch_add(1, Ordering::SeqCst);
+            None
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DirectResourceFailureKind {
+        SecurityDenied,
+        TargetUnavailable,
+        ProducerFailure,
+    }
+
+    #[derive(Clone)]
+    struct DirectResourceFailureDispatch {
+        kind: DirectResourceFailureKind,
+        authenticated_terminal: Arc<AtomicUsize>,
+    }
+
+    impl DispatchService for DirectResourceFailureDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("resource transport test does not issue a raw call")
+        }
+
+        // Admission succeeds so each matrix case exercises the post-reservation path.
+        fn authorize_resource_request(&self, _request: &ResourceRequest) -> bool {
+            true
+        }
+
+        fn record_resource_terminal_provenance(
+            &self,
+            _stream_id: u64,
+            _request_id: InvocationId,
+            provenance: ResourceTerminalProvenance,
+        ) {
+            if provenance.is_committed() {
+                self.authenticated_terminal.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn start_resource(
+            &self,
+            _session: AuthenticatedSession,
+            request: ResourceRequest,
+            _resources: LocalRawSocketResources,
+            _version: RawProtocolVersion,
+        ) -> Option<StartedResourceDispatch> {
+            let failure = match self.kind {
+                DirectResourceFailureKind::SecurityDenied => CallFailure::ExecuteDenied,
+                DirectResourceFailureKind::TargetUnavailable => CallFailure::TargetUnavailable,
+                DirectResourceFailureKind::ProducerFailure => CallFailure::InternalFailure,
+            };
+            let terminal_provenance = match self.kind {
+                DirectResourceFailureKind::TargetUnavailable
+                | DirectResourceFailureKind::SecurityDenied
+                | DirectResourceFailureKind::ProducerFailure => {
+                    ResourceTerminalProvenance::Authenticated
+                }
+            };
+            let completion = ResourceDispatchCompletion {
+                actions: VecDeque::from([ResourceServerFrame::Failed(
+                    orna_protocol::ResourceFailed {
+                        stream_id: request.stream_id,
+                        request_id: request.request_id,
+                        target_revision: request.target_revision,
+                        failure,
+                    },
+                )]),
+                producer: None,
+                producer_waiting_bytes: None,
+                terminal_provenance,
+            };
+            Some(StartedResourceDispatch {
+                future: Box::pin(async move { completion }),
                 cancellation: ResourceCancellation::new(),
             })
         }
@@ -5668,7 +5886,7 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .unwrap();
-        let (server, _client) = UnixStream::pair().unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
             mpsc::channel::<(u64, ResourceDispatchCompletion)>(
@@ -5843,6 +6061,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_resource_failure_matrix_is_single_terminal_and_releases_state() {
+        let cases = [
+            (
+                DirectResourceFailureKind::SecurityDenied,
+                CallFailure::ExecuteDenied,
+            ),
+            (
+                DirectResourceFailureKind::TargetUnavailable,
+                CallFailure::TargetUnavailable,
+            ),
+            (
+                DirectResourceFailureKind::ProducerFailure,
+                CallFailure::InternalFailure,
+            ),
+        ];
+
+        for (index, (kind, expected_failure)) in cases.into_iter().enumerate() {
+            let (version, revision) = constructed_test_version();
+            let (active, registry) = match &version {
+                RawProtocolVersion::Constructed(active, registry) => {
+                    (active.clone(), registry.clone())
+                }
+                _ => unreachable!("constructed test version"),
+            };
+            let resources = LocalRawSocketResources::new();
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let (_shutdown_sender, shutdown) = watch::channel(false);
+            let authenticated_terminal = Arc::new(AtomicUsize::new(0));
+            let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+                DirectResourceFailureDispatch {
+                    kind,
+                    authenticated_terminal: Arc::clone(&authenticated_terminal),
+                },
+                test_session(),
+                version,
+                server,
+                resources.clone(),
+                shutdown,
+            ));
+
+            let stream_id = index as u64 + 1;
+            let mut request = resource_request(revision);
+            request.stream_id = stream_id;
+            request.request_id = InvocationId::from_bytes([0x50 + index as u8; 16]);
+            client
+                .write_all(
+                    &encode_resource_client_frame(
+                        &active,
+                        &registry,
+                        &ResourceClientFrame::Request(request.clone()),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                read_resource_server_frame(&mut client, &active, &registry).await,
+                ResourceServerFrame::Failed(frame)
+                    if frame.stream_id == stream_id
+                        && frame.request_id == request.request_id
+                        && frame.failure == expected_failure
+            ));
+
+            let cancel = encode_resource_client_frame(
+                &active,
+                &registry,
+                &ResourceClientFrame::Cancel(ResourceCancel {
+                    stream_id,
+                    request_id: request.request_id,
+                    reason: ResourceCancellationCode::ClientRequested,
+                }),
+            )
+            .unwrap();
+            client.write_all(&cancel).await.unwrap();
+            client.write_all(&cancel).await.unwrap();
+            assert!(
+                timeout(
+                    Duration::from_millis(50),
+                    read_resource_server_frame(&mut client, &active, &registry),
+                )
+                .await
+                .is_err(),
+                "direct resource failure must not be replaced by cancellation",
+            );
+
+            client.shutdown().await.unwrap();
+            server_task.await.unwrap().unwrap();
+            assert_eq!(
+                authenticated_terminal.load(Ordering::SeqCst),
+                1,
+                "resource failure must record one authenticated terminal provenance",
+            );
+            assert_eq!(
+                resources.kernel_operations.available_permits(),
+                KERNEL_OPERATION_LIMIT,
+                "resource failure leaked its kernel-operation permit",
+            );
+            assert!(
+                resources.reserve_payload(SHARED_PAYLOAD_BYTES).is_ok(),
+                "resource failure leaked its payload reservation",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn raw_socket_malformed_pending_resource_values_fails_only_that_stream() {
         let (version, revision) = constructed_test_version();
         let (active, registry) = match &version {
@@ -5986,7 +6310,7 @@ mod tests {
                 actions: resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]),
                 producer: None,
                 producer_waiting_bytes: None,
-            terminal_provenance: ResourceTerminalProvenance::Authenticated,
+                terminal_provenance: ResourceTerminalProvenance::Authenticated,
             },
         )]);
         let mut cancelled = BTreeMap::new();
@@ -6462,6 +6786,255 @@ mod tests {
         server_task.await.unwrap().unwrap();
     }
 
+    async fn pre_accept_cancel_emits_one_terminal(dispatcher: PreAcceptResourceDispatch) {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let request = resource_request(revision);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let (completion_sender, mut completion_receiver) =
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
+        let mut connection = ResourceProtocolConnection::new();
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeMap::new();
+        let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
+        let mut requests = BTreeMap::new();
+        let resources = LocalRawSocketResources::new();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        handle_resource_frame(
+            ResourceClientFrame::Request(request.clone()),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut producer_shutdown,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(requests.contains_key(&request.stream_id));
+        assert!(matches!(
+            pending
+                .get(&request.stream_id)
+                .and_then(|completion| completion.actions.front()),
+            Some(ResourceServerFrame::Failed(frame))
+                if frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.failure == CallFailure::InternalFailure
+        ));
+
+        let cancel = ResourceCancel {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        };
+        handle_resource_frame(
+            ResourceClientFrame::Cancel(cancel),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut producer_shutdown,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(cancelled.is_empty());
+        assert!(matches!(
+            pending
+                .get(&request.stream_id)
+                .and_then(|completion| completion.actions.front()),
+            Some(ResourceServerFrame::Cancelled(frame))
+                if frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.reason == ResourceCancellationCode::ClientRequested
+        ));
+
+        assert!(
+            flush_resource_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut requests,
+                &mut tasks,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(pending.is_empty());
+        assert!(requests.is_empty());
+        assert!(tasks.is_empty());
+        assert!(cancelled.is_empty());
+        assert_eq!(connection.live_resources(), 0);
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Cancelled(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.reason == ResourceCancellationCode::ClientRequested
+        ));
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "pre-accept cancellation must emit exactly one terminal frame",
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_denied_resource_cancel_before_accept_emits_one_terminal() {
+        pre_accept_cancel_emits_one_terminal(PreAcceptResourceDispatch {
+            authorized: false,
+            resource_start_calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn start_resource_none_cancel_before_accept_emits_one_terminal() {
+        pre_accept_cancel_emits_one_terminal(PreAcceptResourceDispatch {
+            authorized: true,
+            resource_start_calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn authorization_denied_resource_request_does_not_reserve_or_start() {
+        let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
+        let request = resource_request(revision);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (_reader, mut writer) = server.into_split();
+        let (completion_sender, mut completion_receiver) =
+            mpsc::channel::<(u64, ResourceDispatchCompletion)>(
+                RESOURCE_COMPLETION_CHANNEL_CAPACITY,
+            );
+        let mut connection = ResourceProtocolConnection::new();
+        let mut pending = BTreeMap::new();
+        let mut cancelled = BTreeMap::new();
+        let mut tasks: BTreeMap<u64, ResourceTask> = BTreeMap::new();
+        let mut producer_shutdown = JoinSet::new();
+        let mut requests = BTreeMap::new();
+        let resources = LocalRawSocketResources::new();
+        let kernel_operations_before = resources.kernel_operations.available_permits();
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let resource_start_calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = PreAcceptResourceDispatch {
+            authorized: false,
+            resource_start_calls: Arc::clone(&resource_start_calls),
+        };
+
+        handle_resource_frame(
+            ResourceClientFrame::Request(request.clone()),
+            PayloadReservation { _permit: None },
+            &dispatcher,
+            &test_session(),
+            &version,
+            &resources,
+            &mut connection,
+            &mut pending,
+            &mut cancelled,
+            &mut tasks,
+            &mut producer_shutdown,
+            &mut requests,
+            &completion_sender,
+            &mut completion_receiver,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resource_start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            kernel_operations_before,
+            "authorization denial must not reserve a kernel operation",
+        );
+        assert!(tasks.is_empty());
+        assert!(producer_shutdown.is_empty());
+        assert!(cancelled.is_empty());
+        assert_eq!(connection.live_resources(), 1);
+        assert!(matches!(
+            pending
+                .get(&request.stream_id)
+                .and_then(|completion| completion.actions.front()),
+            Some(ResourceServerFrame::Failed(frame))
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.failure == CallFailure::InternalFailure
+        ));
+
+        assert!(
+            flush_resource_pending(
+                &version,
+                &mut connection,
+                &mut pending,
+                &mut requests,
+                &mut tasks,
+                &mut producer_shutdown,
+                &mut writer,
+                &mut shutdown,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(pending.is_empty());
+        assert!(requests.is_empty());
+        assert!(tasks.is_empty());
+        assert!(cancelled.is_empty());
+        assert_eq!(connection.live_resources(), 0);
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            kernel_operations_before,
+        );
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Failed(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.failure == CallFailure::InternalFailure
+        ));
+    }
+
     #[tokio::test]
     async fn queued_resource_completion_wins_over_cancellation() {
         let (version, revision) = constructed_test_version();
@@ -6730,15 +7303,18 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("resource request opens");
-        connection
-            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+        apply_resource_frame(
+            &version,
+            &mut connection,
+            ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
                 nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
                 target_revision: request.target_revision,
                 resource_kind: request.resource_kind,
-            }))
-            .expect("resource request accepts");
+            }),
+        )
+        .expect("resource request accepts");
         connection
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
                 stream_id: request.stream_id,
@@ -6748,7 +7324,10 @@ mod tests {
             .expect("cancellation closes the protocol state");
 
         let mut actions = resource_actions(&version, &request, vec![RuntimeValue::Integer(7)]);
-        assert!(matches!(actions.pop_front(), Some(ResourceServerFrame::Accepted(_))));
+        assert!(matches!(
+            actions.pop_front(),
+            Some(ResourceServerFrame::Accepted(_))
+        ));
         let mut pending = BTreeMap::from([(
             request.stream_id,
             ResourceDispatchCompletion {
@@ -6801,15 +7380,18 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .expect("resource request opens");
-        connection
-            .apply(ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+        apply_resource_frame(
+            &version,
+            &mut connection,
+            ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
                 stream_id: request.stream_id,
                 request_id: request.request_id,
                 nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
                 target_revision: request.target_revision,
                 resource_kind: request.resource_kind,
-            }))
-            .expect("resource request accepts");
+            }),
+        )
+        .expect("resource request accepts");
         connection
             .receive(ResourceClientFrame::Cancel(ResourceCancel {
                 stream_id: request.stream_id,
@@ -6861,6 +7443,194 @@ mod tests {
                     && frame.request_id == request.request_id
                     && frame.failure == CallFailure::InternalFailure
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_committed_terminal_drains_late_values_without_mutating_protocol_state() {
+        for completed in [true, false] {
+            let (version, revision) = constructed_test_version();
+            let (active, registry) = match &version {
+                RawProtocolVersion::Constructed(active, registry) => {
+                    (active.clone(), registry.clone())
+                }
+                _ => unreachable!("constructed test version"),
+            };
+            let mut request = resource_request(revision);
+            request.resource_kind = ResourceKind::Stream;
+            request.item_window = 4;
+            let request_id = request.request_id;
+            let mut connection = ResourceProtocolConnection::new();
+            connection
+                .receive(ResourceClientFrame::Request(request.clone()))
+                .expect("resource request opens");
+            apply_resource_frame(
+                &version,
+                &mut connection,
+                ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                    stream_id: request.stream_id,
+                    request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x21; 16]),
+                    target_revision: request.target_revision,
+                    resource_kind: request.resource_kind,
+                }),
+            )
+            .expect("resource request accepts");
+            let first_value = RuntimeValue::Integer(7);
+            version
+                .apply_resource(
+                    &mut connection,
+                    ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                        stream_id: request.stream_id,
+                        request_id,
+                        target_revision: request.target_revision,
+                        batch_sequence: 0,
+                        item_count: 1,
+                        byte_count: resource_value_byte_count(&version, &first_value)
+                            .expect("first value encodes"),
+                        values: vec![first_value],
+                    }),
+                )
+                .expect("first value applies");
+            connection
+                .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                    stream_id: request.stream_id,
+                    request_id,
+                    reason: ResourceCancellationCode::ClientRequested,
+                }))
+                .expect("local cancellation closes the protocol state");
+
+            // Keep an unrelated live resource so the clone-based late-frame drain
+            // proves that sequence, credit, and total state remain untouched.
+            let mut live_request = request.clone();
+            live_request.stream_id = 2;
+            live_request.request_id = InvocationId::from_bytes([0x22; 16]);
+            let live_value = RuntimeValue::Integer(8);
+            connection
+                .receive(ResourceClientFrame::Request(live_request.clone()))
+                .expect("unrelated resource opens");
+            apply_resource_frame(
+                &version,
+                &mut connection,
+                ResourceServerFrame::Accepted(orna_protocol::ResourceAccepted {
+                    stream_id: live_request.stream_id,
+                    request_id: live_request.request_id,
+                    nested_invocation_id: InvocationId::from_bytes([0x23; 16]),
+                    target_revision: live_request.target_revision,
+                    resource_kind: live_request.resource_kind,
+                }),
+            )
+            .expect("unrelated resource accepts");
+            version
+                .apply_resource(
+                    &mut connection,
+                    ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                        stream_id: live_request.stream_id,
+                        request_id: live_request.request_id,
+                        target_revision: live_request.target_revision,
+                        batch_sequence: 0,
+                        item_count: 1,
+                        byte_count: resource_value_byte_count(&version, &live_value)
+                            .expect("live value encodes"),
+                        values: vec![live_value],
+                    }),
+                )
+                .expect("unrelated value applies");
+            let before_late_drain = connection.clone();
+
+            let late_value = RuntimeValue::Integer(9);
+            let terminal = if completed {
+                ResourceServerFrame::Completed(orna_protocol::ResourceCompleted {
+                    stream_id: request.stream_id,
+                    request_id,
+                    target_revision: request.target_revision,
+                    final_batch_sequence: 1,
+                    total_items: 2,
+                })
+            } else {
+                ResourceServerFrame::Failed(orna_protocol::ResourceFailed {
+                    stream_id: request.stream_id,
+                    request_id,
+                    target_revision: request.target_revision,
+                    failure: CallFailure::InternalFailure,
+                })
+            };
+            let mut pending = BTreeMap::from([(
+                request.stream_id,
+                ResourceDispatchCompletion {
+                    actions: VecDeque::from([
+                        ResourceServerFrame::Values(orna_protocol::ResourceValues {
+                            stream_id: request.stream_id,
+                            request_id,
+                            target_revision: request.target_revision,
+                            batch_sequence: 1,
+                            item_count: 1,
+                            byte_count: resource_value_byte_count(&version, &late_value)
+                                .expect("late value encodes"),
+                            values: vec![late_value],
+                        }),
+                        terminal,
+                    ]),
+                    producer: None,
+                    producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Authenticated,
+                },
+            )]);
+            let mut requests = BTreeMap::from([(request.stream_id, request.clone())]);
+            let mut tasks = BTreeMap::new();
+            let mut producer_shutdown = JoinSet::new();
+            let (_shutdown_sender, mut shutdown) = watch::channel(false);
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let (_reader, mut writer) = server.into_split();
+
+            assert!(
+                flush_resource_pending(
+                    &version,
+                    &mut connection,
+                    &mut pending,
+                    &mut requests,
+                    &mut tasks,
+                    &mut producer_shutdown,
+                    &mut writer,
+                    &mut shutdown,
+                )
+                .await
+                .expect("committed terminal flushes after late value drain")
+            );
+            assert!(pending.is_empty());
+            assert!(requests.is_empty());
+            assert_eq!(
+                connection, before_late_drain,
+                "late values are applied to a clone and cannot consume live state"
+            );
+            assert_eq!(connection.live_resources(), 1);
+            assert_eq!(
+                connection
+                    .resource_credit(live_request.stream_id, live_request.request_id)
+                    .expect("unrelated live resource remains inspectable"),
+                before_late_drain
+                    .resource_credit(live_request.stream_id, live_request.request_id)
+                    .expect("snapshot retains unrelated live resource"),
+            );
+            if completed {
+                assert!(matches!(
+                    read_resource_server_frame(&mut client, &active, &registry).await,
+                    ResourceServerFrame::Completed(frame)
+                        if frame.stream_id == request.stream_id
+                            && frame.request_id == request.request_id
+                            && frame.final_batch_sequence == 1
+                            && frame.total_items == 2
+                ));
+            } else {
+                assert!(matches!(
+                    read_resource_server_frame(&mut client, &active, &registry).await,
+                    ResourceServerFrame::Failed(frame)
+                        if frame.stream_id == request.stream_id
+                            && frame.request_id == request.request_id
+                            && frame.failure == CallFailure::InternalFailure
+                ));
+            }
+            drop(writer);
+        }
     }
 
     #[tokio::test]

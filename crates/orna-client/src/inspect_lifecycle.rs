@@ -120,6 +120,15 @@ impl ClientInspectLifecycle {
             }
             std::cmp::Ordering::Equal => Ok(()),
             std::cmp::Ordering::Greater => {
+                if binding.principal() != self.binding.principal() {
+                    return Err(InspectLifecycleError::PrincipalMismatch);
+                }
+                if binding.revision() != self.binding.revision() {
+                    return Err(InspectLifecycleError::RevisionMismatch {
+                        expected: self.binding.revision(),
+                        actual: binding.revision(),
+                    });
+                }
                 self.binding = binding;
                 self.freeze_token = None;
                 self.state = ClientInspectLifecycleState::Active;
@@ -324,6 +333,61 @@ mod tests {
             lifecycle.replace_epoch(same_generation_different_identity),
             Err(InspectLifecycleError::EpochMismatch)
         );
+    }
+
+    #[test]
+    fn newer_foreign_principal_is_rejected_without_mutating_frozen_lifecycle() {
+        let current = binding(1);
+        let foreign_principal = InspectEpochBinding::new(
+            invocation_id(1),
+            2,
+            invocation_id(3),
+            principal_id(8),
+            revision_pair(5),
+            invocation_id(6),
+            invocation_id(7),
+            InspectProjectionVersions::v1(),
+            2,
+        );
+        let mut lifecycle = ClientInspectLifecycle::new(current);
+        let token = lifecycle.freeze().expect("active lifecycle freezes");
+
+        assert_eq!(
+            lifecycle.replace_epoch(foreign_principal),
+            Err(InspectLifecycleError::PrincipalMismatch)
+        );
+        assert_eq!(lifecycle.binding(), current);
+        assert_eq!(lifecycle.state(), ClientInspectLifecycleState::Frozen);
+        assert_eq!(lifecycle.resume(token), Ok(()));
+    }
+
+    #[test]
+    fn newer_revision_mismatch_is_rejected_without_mutating_frozen_lifecycle() {
+        let current = binding(1);
+        let revision_mismatch = InspectEpochBinding::new(
+            invocation_id(1),
+            2,
+            invocation_id(3),
+            principal_id(4),
+            revision_pair(9),
+            invocation_id(6),
+            invocation_id(7),
+            InspectProjectionVersions::v1(),
+            2,
+        );
+        let mut lifecycle = ClientInspectLifecycle::new(current);
+        let token = lifecycle.freeze().expect("active lifecycle freezes");
+
+        assert_eq!(
+            lifecycle.replace_epoch(revision_mismatch),
+            Err(InspectLifecycleError::RevisionMismatch {
+                expected: revision_pair(5),
+                actual: revision_pair(9),
+            })
+        );
+        assert_eq!(lifecycle.binding(), current);
+        assert_eq!(lifecycle.state(), ClientInspectLifecycleState::Frozen);
+        assert_eq!(lifecycle.resume(token), Ok(()));
     }
 
     #[test]

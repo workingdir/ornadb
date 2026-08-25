@@ -8,6 +8,8 @@ use orna_compiler::{
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 
+use crate::source_diagnostics;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SourceCheckResult {
     Success,
@@ -57,22 +59,8 @@ pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
     if report.diagnostics().is_empty() {
         return SourceCheckResult::Success;
     }
-    for diagnostic in report.diagnostics() {
-        let location = diagnostic.location();
-        let span = location.span();
-        if writeln!(
-            output,
-            "{}:{}..{}: {}: {}",
-            location.logical_path(),
-            span.start(),
-            span.end(),
-            diagnostic.code().as_str(),
-            escape_message(diagnostic.message()),
-        )
-        .is_err()
-        {
-            return SourceCheckResult::Failure;
-        }
+    if source_diagnostics::write_diagnostics(output, report.diagnostics()).is_err() {
+        return SourceCheckResult::Failure;
     }
     SourceCheckResult::Failure
 }
@@ -101,39 +89,4 @@ fn write_standard_failure(output: &mut impl Write) -> SourceCheckResult {
 fn write_failure(output: &mut impl Write, message: &str) -> SourceCheckResult {
     let _ = writeln!(output, "{message}");
     SourceCheckResult::Failure
-}
-
-fn escape_message(message: &str) -> String {
-    let mut escaped = String::with_capacity(message.len());
-    for character in message.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{2028}' | '\u{2029}' => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(escaped, "\\u{{{:04X}}}", character as u32);
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escapes_each_message_scalar_once() {
-        assert_eq!(
-            escape_message("a\\b\n\r\t\u{001b}\u{2028}\u{2029}é"),
-            "a\\\\b\\n\\r\\t\\u{001B}\\u{2028}\\u{2029}é"
-        );
-    }
 }

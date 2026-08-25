@@ -10,6 +10,7 @@ use std::{
     error::Error,
     fmt,
     hash::{Hash, Hasher},
+    sync::Arc,
 };
 
 use orna_artifact::client_plan::{
@@ -22,8 +23,8 @@ use orna_artifact::client_plan::{
     ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
-    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ParameterId, PrincipalId,
-    StateSlotId, TypeId,
+    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ObjectId, ParameterId,
+    PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
@@ -38,7 +39,7 @@ use orna_core::{
         ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
         VerifiedStandardLibrarySnapshot,
     },
-    security::{AuthorisedInvocation, InvocationTarget, TargetClass},
+    security::{AuthenticatedSessionBinding, AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
         UserStateCell, UserStateChange, UserStateKeyWithoutPrincipal, UserStateWriteOutcome,
         UserStateWriteResult,
@@ -52,10 +53,7 @@ use orna_core::{
         SYS_INSPECT_UI_NODES_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
-    value::{
-        ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeType,
-        RuntimeValue,
-    },
+    value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
 /// The largest number of queued stream items retained by one CLIENT resource.
 /// This matches the largest single completion batch, keeping one broker-sized
@@ -636,8 +634,8 @@ pub enum ClientResourceError {
     InvalidFailureCode,
     /// The result does not match the declared resolved type.
     TypeMismatch,
-    /// The invocation context contains a NUL byte in its state profile or
-    /// function-instance key.
+    /// The invocation context contains a zero lineage identity or a NUL byte
+    /// in its state profile or function-instance key.
     InvalidInvocationContext,
 }
 
@@ -717,8 +715,9 @@ impl fmt::Display for ClientResourceError {
             Self::TypeMismatch => {
                 formatter.write_str("CLIENT resource result does not match its type")
             }
-            Self::InvalidInvocationContext => formatter
-                .write_str("CLIENT resource invocation context must be valid NUL-free text"),
+            Self::InvalidInvocationContext => formatter.write_str(
+                "CLIENT resource invocation context must use non-zero identities and valid NUL-free text",
+            ),
         }
     }
 }
@@ -795,7 +794,9 @@ impl ClientResourceRequest {
         invocation_context: Option<ClientResourceInvocationContext>,
     ) -> Result<Self, ClientResourceError> {
         if invocation_context.as_ref().is_some_and(|context| {
-            context.state_profile.as_bytes().contains(&0)
+            context.parent_invocation_id == InvocationId::from_bytes([0; 16])
+                || context.call_site_id == CallSiteId::from_bytes([0; 16])
+                || context.state_profile.as_bytes().contains(&0)
                 || context.function_instance_key.as_bytes().contains(&0)
         }) {
             return Err(ClientResourceError::InvalidInvocationContext);
@@ -1516,18 +1517,293 @@ where
     }
 }
 
+/// The small immutable validation witness retained for a request's lifetime.
+///
+/// `ActiveDatabaseRevision` owns the complete source/catalogue/revision graph.
+/// Keeping a clone of it for every loading resource would duplicate that graph.
+/// Requests only need the pinned identity, target/result admission, and the
+/// type facts required to validate a late completion, so capture those facts at
+/// the client boundary instead.
+#[derive(Clone)]
+struct ClientResourceValidationContext {
+    pair: RevisionPair,
+    target: InvocationTarget,
+    kind: ResourceKind,
+    expected_type: ResolvedType,
+    target_supported: bool,
+    result_type_supported: bool,
+    expected_type_known: bool,
+    value_kind: ClientResourceValueKind,
+}
+
+#[derive(Clone)]
+enum ClientResourceValueKind {
+    Scalar(StandardScalar),
+    Opaque(TypeId),
+    InspectCarrier(TypeId),
+    Record(TypeId),
+    Enum {
+        type_id: TypeId,
+        labels: Arc<[String]>,
+    },
+    Reference {
+        target: TypeId,
+        inspect_invocation: bool,
+    },
+    Reject,
+}
+
+impl ClientResourceValidationContext {
+    fn from_active(
+        active: &ActiveDatabaseRevision,
+        target: InvocationTarget,
+        kind: ResourceKind,
+        expected_type: ResolvedType,
+    ) -> Self {
+        Self {
+            pair: active.pair(),
+            target,
+            kind,
+            expected_type,
+            target_supported: active_supports_invocation_target(active, target),
+            result_type_supported: active_resource_result_type_matches(
+                active,
+                target,
+                kind,
+                expected_type,
+            ),
+            expected_type_known: active_type_is_known(active, expected_type),
+            value_kind: ClientResourceValueKind::from_active(active, expected_type),
+        }
+    }
+
+    fn inspect_carrier_matches(&self, value: &RuntimeValue, expected: TypeId) -> bool {
+        let RuntimeValue::Opaque(opaque) = value else {
+            return false;
+        };
+        if opaque.opaque_type() != expected {
+            return false;
+        }
+        let Some(kind) = InspectCarrierKind::from_type_id(expected) else {
+            return false;
+        };
+        let Ok(envelope) = InspectCarrierEnvelope::decode(opaque.canonical_payload()) else {
+            return false;
+        };
+        envelope.carrier_kind() == kind
+            && envelope.source_revision_id() == self.pair.source()
+            && envelope.catalogue_revision_id() == self.pair.catalogue()
+    }
+
+    fn value_matches(&self, value: &RuntimeValue, expected: ResolvedType) -> bool {
+        if let RuntimeValue::Null(null) = value {
+            return null.resolved_type() == expected && self.expected_type_known;
+        }
+        if expected != self.expected_type {
+            return false;
+        }
+        match &self.value_kind {
+            ClientResourceValueKind::Scalar(scalar) => runtime_scalar_matches(*scalar, value),
+            ClientResourceValueKind::Opaque(type_id) => {
+                matches!(value, RuntimeValue::Opaque(opaque) if opaque.opaque_type() == *type_id)
+            }
+            ClientResourceValueKind::InspectCarrier(type_id) => {
+                self.inspect_carrier_matches(value, *type_id)
+            }
+            ClientResourceValueKind::Record(type_id) => {
+                matches!(value, RuntimeValue::Record(record) if record.record_type() == *type_id)
+            }
+            ClientResourceValueKind::Enum { type_id, labels } => {
+                matches!(value, RuntimeValue::Enum(enum_value) if enum_value.enum_type() == *type_id && labels.iter().any(|label| label == enum_value.label()))
+            }
+            ClientResourceValueKind::Reference {
+                target,
+                inspect_invocation,
+            } => {
+                if *inspect_invocation {
+                    inspect_invocation_target(value).is_some()
+                } else {
+                    matches!(value, RuntimeValue::Reference { target: actual, .. } if *actual == *target)
+                }
+            }
+            ClientResourceValueKind::Reject => false,
+        }
+    }
+}
+
+impl ClientResourceValueKind {
+    fn from_active(active: &ActiveDatabaseRevision, expected: ResolvedType) -> Self {
+        match expected {
+            ResolvedType::Scalar(scalar) => match scalar {
+                StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::Float
+                | StandardScalar::CharacterLargeObject
+                | StandardScalar::BinaryLargeObject => Self::Scalar(scalar),
+                StandardScalar::Decimal
+                | StandardScalar::Uuid
+                | StandardScalar::Date
+                | StandardScalar::Time
+                | StandardScalar::Timestamp
+                | StandardScalar::Duration
+                | StandardScalar::Void => Self::Reject,
+            },
+            ResolvedType::Value(type_id) => {
+                if is_inspect_carrier_type(type_id) {
+                    return Self::InspectCarrier(type_id);
+                }
+                if type_id == SYS_INSPECT_INVOCATION_TYPE_ID {
+                    return Self::Reject;
+                }
+                if type_id == STD_UI_TYPE_ID {
+                    return Self::Opaque(type_id);
+                }
+                let Some(definition) = active
+                    .catalogue_hash_context()
+                    .standard()
+                    .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+                else {
+                    return Self::Reject;
+                };
+                if definition.kind() == ValueTypeKind::Opaque {
+                    return Self::Opaque(type_id);
+                }
+                match definition.representation_contract() {
+                    "orna.kernel.value.boolean@1" => Self::Scalar(StandardScalar::Boolean),
+                    "orna.kernel.value.integer@1" => Self::Scalar(StandardScalar::Integer),
+                    "orna.kernel.value.bigint@1" => Self::Scalar(StandardScalar::BigInt),
+                    "orna.kernel.value.float@1" => Self::Scalar(StandardScalar::Float),
+                    "orna.kernel.value.character-large-object@1" => {
+                        Self::Scalar(StandardScalar::CharacterLargeObject)
+                    }
+                    "orna.kernel.value.binary-large-object@1" => {
+                        Self::Scalar(StandardScalar::BinaryLargeObject)
+                    }
+                    _ => Self::Reject,
+                }
+            }
+            ResolvedType::Named(type_id) => {
+                if is_inspect_carrier_type(type_id) {
+                    return Self::InspectCarrier(type_id);
+                }
+                if active_has_record_type(active, type_id) {
+                    return Self::Record(type_id);
+                }
+                let application = active
+                    .catalogue()
+                    .enum_type_by_id(type_id)
+                    .map(|enum_type| enum_type.labels().to_vec());
+                let standard = active
+                    .catalogue_hash_context()
+                    .standard()
+                    .and_then(|snapshot| snapshot.catalogue().enum_type_by_id(type_id))
+                    .map(|enum_type| enum_type.labels().to_vec());
+                match (application, standard) {
+                    (Some(_), Some(_)) | (None, None) => Self::Reject,
+                    (Some(labels), None) | (None, Some(labels)) => Self::Enum {
+                        type_id,
+                        labels: labels.into(),
+                    },
+                }
+            }
+            ResolvedType::Reference { target } => {
+                if target == SYS_INSPECT_INVOCATION_TYPE_ID
+                    || active_has_object_type(active, target)
+                {
+                    Self::Reference {
+                        target,
+                        inspect_invocation: target == SYS_INSPECT_INVOCATION_TYPE_ID,
+                    }
+                } else {
+                    Self::Reject
+                }
+            }
+        }
+    }
+}
+
+trait ClientResourceRevisionValidation {
+    fn pair(&self) -> RevisionPair;
+    fn target_supported(&self, target: InvocationTarget) -> bool;
+    fn result_type_supported(
+        &self,
+        target: InvocationTarget,
+        kind: ResourceKind,
+        expected: ResolvedType,
+    ) -> bool;
+    fn value_matches(&self, value: &RuntimeValue, expected: ResolvedType) -> bool;
+}
+
+impl ClientResourceRevisionValidation for ActiveDatabaseRevision {
+    fn pair(&self) -> RevisionPair {
+        self.pair()
+    }
+
+    fn target_supported(&self, target: InvocationTarget) -> bool {
+        active_supports_invocation_target(self, target)
+    }
+
+    fn result_type_supported(
+        &self,
+        target: InvocationTarget,
+        kind: ResourceKind,
+        expected: ResolvedType,
+    ) -> bool {
+        active_resource_result_type_matches(self, target, kind, expected)
+    }
+
+    fn value_matches(&self, value: &RuntimeValue, expected: ResolvedType) -> bool {
+        runtime_value_matches(self, value, expected)
+    }
+}
+
+impl ClientResourceRevisionValidation for ClientResourceValidationContext {
+    fn pair(&self) -> RevisionPair {
+        self.pair
+    }
+
+    fn target_supported(&self, target: InvocationTarget) -> bool {
+        target == self.target && self.target_supported
+    }
+
+    fn result_type_supported(
+        &self,
+        target: InvocationTarget,
+        kind: ResourceKind,
+        expected: ResolvedType,
+    ) -> bool {
+        target == self.target
+            && kind == self.kind
+            && expected == self.expected_type
+            && self.result_type_supported
+    }
+
+    fn value_matches(&self, value: &RuntimeValue, expected: ResolvedType) -> bool {
+        ClientResourceValidationContext::value_matches(self, value, expected)
+    }
+}
+
 /// Request metadata retained by the runtime solely for executor cancellation.
 ///
 /// The request payload can contain sensitive argument values, so the wrapper
 /// deliberately redacts it from the parent resource's derived `Debug` output.
-#[derive(Clone, PartialEq)]
-struct ActiveClientResourceRequest(ClientResourceRequest);
+#[derive(Clone)]
+struct ActiveClientResourceRequest {
+    request: ClientResourceRequest,
+    validation: ClientResourceValidationContext,
+}
+impl PartialEq for ActiveClientResourceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request
+    }
+}
 
 impl fmt::Debug for ActiveClientResourceRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("ActiveClientResourceRequest")
-            .field(&self.0.request_id())
+            .field(&self.request.request_id())
             .finish()
     }
 }
@@ -1540,8 +1816,9 @@ pub struct ClientResource {
     expected_type: ResolvedType,
     request_id: Option<InvocationId>,
     /// A runtime-owned copy of the request metadata needed to ask the
-    /// executor to cancel its owned request. The executor still owns the
-    /// submitted request; this copy is only the cancellation descriptor.
+    /// executor to cancel its owned request, plus the active revision that
+    /// validated that request. The executor still owns the submitted request;
+    /// this copy is only runtime cancellation and validation context.
     active_request: Option<ActiveClientResourceRequest>,
     generation: ClientResourceGeneration,
     status: ClientResourceStatus,
@@ -1725,7 +2002,15 @@ impl ClientResource {
         )?;
         self.generation = generation;
         self.request_id = Some(request.request_id());
-        self.active_request = Some(ActiveClientResourceRequest(request.clone()));
+        self.active_request = Some(ActiveClientResourceRequest {
+            request: request.clone(),
+            validation: ClientResourceValidationContext::from_active(
+                active,
+                self.key.target(),
+                kind,
+                self.expected_type,
+            ),
+        });
         self.status = ClientResourceStatus::Loading;
         self.clear_result();
         Ok(request)
@@ -1737,6 +2022,14 @@ impl ClientResource {
         active: &ActiveDatabaseRevision,
         completion: ClientResourceCompletion,
     ) -> Result<(), ClientResourceError> {
+        self.apply_completion_with(active, completion)
+    }
+
+    fn apply_completion_with<V: ClientResourceRevisionValidation>(
+        &mut self,
+        validation: &V,
+        completion: ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
         self.validate_completion_identity(&completion)?;
         match completion {
             ClientResourceCompletion::Ready {
@@ -1745,26 +2038,26 @@ impl ClientResource {
                 if self.kind != ResourceKind::Scalar {
                     return Err(ClientResourceError::TypeMismatch);
                 }
-                self.publish_ready(active, generation, value)
+                self.publish_ready_with(validation, generation, value)
             }
             ClientResourceCompletion::StreamValues {
                 generation, values, ..
-            } => self.append_stream_values(active, generation, values),
+            } => self.append_stream_values_with(validation, generation, values),
             ClientResourceCompletion::StreamCompleted { generation, .. } => {
-                self.complete_stream(active, generation)
+                self.complete_stream_with(validation, generation)
             }
             ClientResourceCompletion::Cancelled { generation, .. } => {
-                self.validate_active_identity(active)?;
+                self.validate_active_identity_with(validation)?;
                 self.cancel(generation)
             }
             ClientResourceCompletion::Pending { generation, .. } => {
-                self.validate_active_identity(active)?;
+                self.validate_active_identity_with(validation)?;
                 self.require_loading(generation)
             }
             ClientResourceCompletion::Failed {
                 generation, code, ..
             } => {
-                self.validate_active_identity(active)?;
+                self.validate_active_identity_with(validation)?;
                 self.publish_failure(generation, code)
             }
         }
@@ -1777,30 +2070,21 @@ impl ClientResource {
         generation: ClientResourceGeneration,
         value: RuntimeValue,
     ) -> Result<(), ClientResourceError> {
+        self.publish_ready_with(active, generation, value)
+    }
+
+    fn publish_ready_with<V: ClientResourceRevisionValidation>(
+        &mut self,
+        validation: &V,
+        generation: ClientResourceGeneration,
+        value: RuntimeValue,
+    ) -> Result<(), ClientResourceError> {
         if self.kind != ResourceKind::Scalar {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.require_loading(generation)?;
-        if active.pair() != self.key.target().revision() {
-            return Err(ClientResourceError::RevisionMismatch {
-                expected: self.key.target().revision(),
-                actual: active.pair(),
-            });
-        }
-        if !active_supports_invocation_target(active, self.key.target()) {
-            return Err(ClientResourceError::TargetMismatch {
-                expected: self.key.target(),
-            });
-        }
-        if !active_resource_result_type_matches(
-            active,
-            self.key.target(),
-            self.kind,
-            self.expected_type,
-        ) {
-            return Err(ClientResourceError::TypeMismatch);
-        }
-        if !runtime_value_matches(active, &value, self.expected_type) {
+        self.validate_active_identity_with(validation)?;
+        if !validation.value_matches(&value, self.expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.status = ClientResourceStatus::Ready;
@@ -1816,8 +2100,17 @@ impl ClientResource {
         generation: ClientResourceGeneration,
         values: Vec<RuntimeValue>,
     ) -> Result<(), ClientResourceError> {
+        self.append_stream_values_with(active, generation, values)
+    }
+
+    fn append_stream_values_with<V: ClientResourceRevisionValidation>(
+        &mut self,
+        validation: &V,
+        generation: ClientResourceGeneration,
+        values: Vec<RuntimeValue>,
+    ) -> Result<(), ClientResourceError> {
         let (total_items, queued_items) =
-            self.validate_stream_values(active, generation, &values)?;
+            self.validate_stream_values_with(validation, generation, &values)?;
         self.stream_batches.push_back(values);
         self.stream_queued_items = queued_items;
         self.stream_total_items = total_items;
@@ -1827,6 +2120,15 @@ impl ClientResource {
     fn validate_stream_values(
         &self,
         active: &ActiveDatabaseRevision,
+        generation: ClientResourceGeneration,
+        values: &[RuntimeValue],
+    ) -> Result<(u64, u64), ClientResourceError> {
+        self.validate_stream_values_with(active, generation, values)
+    }
+
+    fn validate_stream_values_with<V: ClientResourceRevisionValidation>(
+        &self,
+        validation: &V,
         generation: ClientResourceGeneration,
         values: &[RuntimeValue],
     ) -> Result<(u64, u64), ClientResourceError> {
@@ -1847,10 +2149,10 @@ impl ClientResource {
             .checked_add(values.len() as u64)
             .filter(|total| *total <= MAX_RESOURCE_QUEUED_ITEMS)
             .ok_or(ClientResourceError::TypeMismatch)?;
-        self.validate_stream_item_type(active)?;
+        self.validate_stream_item_type_with(validation)?;
         if values
             .iter()
-            .any(|value| !runtime_value_matches(active, value, self.expected_type))
+            .any(|value| !validation.value_matches(value, self.expected_type))
         {
             return Err(ClientResourceError::TypeMismatch);
         }
@@ -1862,11 +2164,19 @@ impl ClientResource {
         active: &ActiveDatabaseRevision,
         generation: ClientResourceGeneration,
     ) -> Result<(), ClientResourceError> {
+        self.complete_stream_with(active, generation)
+    }
+
+    fn complete_stream_with<V: ClientResourceRevisionValidation>(
+        &mut self,
+        validation: &V,
+        generation: ClientResourceGeneration,
+    ) -> Result<(), ClientResourceError> {
         if self.kind != ResourceKind::Stream {
             return Err(ClientResourceError::TypeMismatch);
         }
         self.require_loading(generation)?;
-        self.validate_stream_item_type(active)?;
+        self.validate_stream_item_type_with(validation)?;
         self.stream_complete = true;
         self.status = ClientResourceStatus::Ready;
         self.active_request = None;
@@ -1879,19 +2189,21 @@ impl ClientResource {
         &self,
         active: &ActiveDatabaseRevision,
     ) -> Result<(), ClientResourceError> {
-        if active.pair() != self.key.target().revision() {
+        self.validate_stream_item_type_with(active)
+    }
+
+    fn validate_stream_item_type_with<V: ClientResourceRevisionValidation>(
+        &self,
+        validation: &V,
+    ) -> Result<(), ClientResourceError> {
+        if validation.pair() != self.key.target().revision() {
             return Err(ClientResourceError::RevisionMismatch {
                 expected: self.key.target().revision(),
-                actual: active.pair(),
+                actual: validation.pair(),
             });
         }
-        if !active_supports_invocation_target(active, self.key.target())
-            || !active_resource_result_type_matches(
-                active,
-                self.key.target(),
-                self.kind,
-                self.expected_type,
-            )
+        if !validation.target_supported(self.key.target())
+            || !validation.result_type_supported(self.key.target(), self.kind, self.expected_type)
         {
             return Err(ClientResourceError::TypeMismatch);
         }
@@ -2057,9 +2369,10 @@ impl ClientResource {
     /// the active revision that selected a replacement key.
     ///
     /// This is deliberately separate from [`Self::invalidate_with_executor`]:
-    /// the current active catalogue cannot validate a completion for the old
-    /// pinned target. Request identity and completion shape remain fail-closed;
-    /// only active-revision membership checks are omitted for this cleanup.
+    /// replacement selection runs under a newer active revision, so cleanup
+    /// validates the request against the revision captured when it started.
+    /// Request identity, completion shape, and the old active catalogue remain
+    /// fail-closed while terminal results from the old key are discarded.
     fn invalidate_stale_replacement_with_executor(
         &mut self,
         executor: &mut dyn ClientResourceExecutor,
@@ -2070,100 +2383,44 @@ impl ClientResource {
         let Some(request) = self.active_request() else {
             return self.invalidate();
         };
-        // The old key cannot be checked against the new active revision, but
-        // its request identity, target, kind, and expected type are still
-        // locally known. Reject those mismatches before consuming ownership.
+        // A replacement may be selected under a newer active revision, but
+        // the request must be validated against the revision that created it.
+        // This keeps cross-revision cleanup fail-closed without weakening the
+        // ordinary same-revision invalidation path.
+        let Some(validation) = self.active_request_validation() else {
+            return self.invalidate();
+        };
         self.validate_owned_request(&request)?;
+        self.validate_active_identity_with(&validation)?;
         let cancellation = executor.cancel(request.clone());
-        if let Err(error) = self.validate_stale_replacement_cancellation(&cancellation) {
-            if cancellation.matches_request(&request)
-                && matches!(
-                    cancellation,
-                    ClientResourceCompletion::Ready { .. }
-                        | ClientResourceCompletion::Failed { .. }
-                        | ClientResourceCompletion::StreamCompleted { .. }
-                        | ClientResourceCompletion::Cancelled { .. },
-                )
-            {
+        let cancellation_matches_request = cancellation.matches_request(&request);
+        let requires_abandon = matches!(
+            cancellation,
+            ClientResourceCompletion::Pending { .. }
+                | ClientResourceCompletion::StreamValues { .. },
+        );
+        if requires_abandon {
+            // Validate without publishing a non-terminal completion. If
+            // abandonment fails, the owned request and local resource remain
+            // unchanged so the caller can retry safely.
+            self.validate_cancellation_completion_with(&validation, &cancellation)?;
+            if let Err(message) = executor.abandon(request) {
+                return Err(ClientResourceError::Executor(message));
+            }
+        } else if let Err(error) = self.apply_completion_with(&validation, cancellation) {
+            // A matching terminal completion proves that the executor consumed
+            // its request even when the completion itself was malformed. Keep
+            // late results from being accepted while reporting the validation
+            // failure to the caller.
+            if cancellation_matches_request {
                 self.mark_executor_released_cancelled();
             }
             return Err(error);
         }
-        if matches!(
-            cancellation,
-            ClientResourceCompletion::Pending { .. }
-                | ClientResourceCompletion::StreamValues { .. }
-        ) {
-            if let Err(message) = executor.abandon(request) {
-                return Err(ClientResourceError::Executor(message));
-            }
-        }
-        // Every valid completion for a stale replacement is discarded. The
-        // old key must become idle with a fresh generation; terminal-wins is
-        // only meaningful while the key's pinned revision is still active.
-        self.invalidate()
-    }
 
-    fn validate_stale_replacement_cancellation(
-        &self,
-        completion: &ClientResourceCompletion,
-    ) -> Result<(), ClientResourceError> {
-        self.validate_completion_identity(completion)?;
-        match completion {
-            ClientResourceCompletion::Ready {
-                generation, value, ..
-            } => {
-                self.require_loading(*generation)?;
-                if self.kind != ResourceKind::Scalar
-                    || !stale_replacement_value_matches(value, self.expected_type)
-                {
-                    return Err(ClientResourceError::TypeMismatch);
-                }
-            }
-            ClientResourceCompletion::Failed {
-                generation, code, ..
-            } => {
-                self.require_loading(*generation)?;
-                if code.is_empty() || code.contains('\0') {
-                    return Err(ClientResourceError::InvalidFailureCode);
-                }
-            }
-            ClientResourceCompletion::StreamCompleted { generation, .. } => {
-                self.require_loading(*generation)?;
-                if self.kind != ResourceKind::Stream {
-                    return Err(ClientResourceError::TypeMismatch);
-                }
-            }
-            ClientResourceCompletion::Cancelled { generation, .. }
-            | ClientResourceCompletion::Pending { generation, .. } => {
-                self.require_loading(*generation)?;
-            }
-            ClientResourceCompletion::StreamValues {
-                generation, values, ..
-            } => {
-                self.require_loading(*generation)?;
-                if self.kind != ResourceKind::Stream
-                    || values.is_empty()
-                    || values.len() > MAX_RESOURCE_BATCH_ITEMS
-                    || self
-                        .stream_total_items
-                        .checked_add(values.len() as u64)
-                        .filter(|total| *total <= MAX_RESOURCE_TOTAL_ITEMS)
-                        .is_none()
-                    || self
-                        .stream_queued_items
-                        .checked_add(values.len() as u64)
-                        .filter(|total| *total <= MAX_RESOURCE_QUEUED_ITEMS)
-                        .is_none()
-                    || values
-                        .iter()
-                        .any(|value| !stale_replacement_value_matches(value, self.expected_type))
-                {
-                    return Err(ClientResourceError::TypeMismatch);
-                }
-            }
-        }
-        Ok(())
+        // The replacement key wins after the old request has been released;
+        // terminal results from the old revision are intentionally discarded.
+        self.invalidate()
     }
 
     fn clear_result(&mut self) {
@@ -2178,7 +2435,13 @@ impl ClientResource {
     fn active_request(&self) -> Option<ClientResourceRequest> {
         self.active_request
             .as_ref()
-            .map(|request| request.0.clone())
+            .map(|request| request.request.clone())
+    }
+
+    fn active_request_validation(&self) -> Option<ClientResourceValidationContext> {
+        self.active_request
+            .as_ref()
+            .map(|request| request.validation.clone())
     }
 
     fn mark_executor_released_cancelled(&mut self) {
@@ -2242,17 +2505,25 @@ impl ClientResource {
         active: &ActiveDatabaseRevision,
         completion: &ClientResourceCompletion,
     ) -> Result<(), ClientResourceError> {
+        self.validate_cancellation_completion_with(active, completion)
+    }
+
+    fn validate_cancellation_completion_with<V: ClientResourceRevisionValidation>(
+        &self,
+        validation: &V,
+        completion: &ClientResourceCompletion,
+    ) -> Result<(), ClientResourceError> {
         self.validate_completion_identity(completion)?;
         match completion {
             ClientResourceCompletion::Pending { generation, .. } => {
-                self.validate_active_identity(active)?;
+                self.validate_active_identity_with(validation)?;
                 self.require_loading(*generation)
             }
             ClientResourceCompletion::StreamValues {
                 generation, values, ..
             } => {
-                self.validate_active_identity(active)?;
-                self.validate_stream_values(active, *generation, values)
+                self.validate_active_identity_with(validation)?;
+                self.validate_stream_values_with(validation, *generation, values)
                     .map(|_| ())
             }
             _ => Err(ClientResourceError::InvalidTransition {
@@ -2265,23 +2536,25 @@ impl ClientResource {
         &self,
         active: &ActiveDatabaseRevision,
     ) -> Result<(), ClientResourceError> {
-        if active.pair() != self.key.target().revision() {
+        self.validate_active_identity_with(active)
+    }
+
+    fn validate_active_identity_with<V: ClientResourceRevisionValidation>(
+        &self,
+        validation: &V,
+    ) -> Result<(), ClientResourceError> {
+        if validation.pair() != self.key.target().revision() {
             return Err(ClientResourceError::RevisionMismatch {
                 expected: self.key.target().revision(),
-                actual: active.pair(),
+                actual: validation.pair(),
             });
         }
-        if !active_supports_invocation_target(active, self.key.target()) {
+        if !validation.target_supported(self.key.target()) {
             return Err(ClientResourceError::TargetMismatch {
                 expected: self.key.target(),
             });
         }
-        if !active_resource_result_type_matches(
-            active,
-            self.key.target(),
-            self.kind,
-            self.expected_type,
-        ) {
+        if !validation.result_type_supported(self.key.target(), self.kind, self.expected_type) {
             return Err(ClientResourceError::TypeMismatch);
         }
         Ok(())
@@ -2339,40 +2612,6 @@ impl ClientResource {
         Ok(())
     }
 }
-fn stale_replacement_value_matches(value: &RuntimeValue, expected: ResolvedType) -> bool {
-    // Typed NULL retains its declared type.  Do not normalize a primitive
-    // value type to its legacy scalar before checking NULL: a NULL carrying
-    // `Value(BOOLEAN)` is valid for that exact value type, while a NULL
-    // carrying `Scalar(Boolean)` is not the same declaration.
-    if let RuntimeValue::Null(null) = value {
-        return null.resolved_type() == expected;
-    }
-    let expected = match expected {
-        ResolvedType::Value(type_id) if type_id == orna_standard::BOOLEAN_TYPE_ID => {
-            ResolvedType::Scalar(StandardScalar::Boolean)
-        }
-        ResolvedType::Value(type_id) if type_id == orna_standard::INTEGER_TYPE_ID => {
-            ResolvedType::Scalar(StandardScalar::Integer)
-        }
-        ResolvedType::Value(type_id) if type_id == orna_standard::BIGINT_TYPE_ID => {
-            ResolvedType::Scalar(StandardScalar::BigInt)
-        }
-        ResolvedType::Value(type_id) if type_id == orna_standard::FLOAT_TYPE_ID => {
-            ResolvedType::Scalar(StandardScalar::Float)
-        }
-        ResolvedType::Value(type_id)
-            if type_id == orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID =>
-        {
-            ResolvedType::Scalar(StandardScalar::CharacterLargeObject)
-        }
-        ResolvedType::Value(type_id) if type_id == orna_standard::BINARY_LARGE_OBJECT_TYPE_ID => {
-            ResolvedType::Scalar(StandardScalar::BinaryLargeObject)
-        }
-        expected => expected,
-    };
-    value.runtime_type() == RuntimeType::Flat(expected)
-}
-
 fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
     match expected {
         ResolvedType::Scalar(scalar) => {
@@ -2659,13 +2898,14 @@ const DEFAULT_SECURITY_CONTEXT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
 /// The role list is sorted defensively even though AuthorisedInvocation
 /// already exposes roles in canonical order. This keeps the digest stable for
 /// every trusted invocation representation and makes the ordering contract
-/// explicit at this cache boundary.
+/// explicit at this cache boundary. The immutable authorization snapshot
+/// digest is appended after these retained invocation bindings.
 fn security_context_digest(authorisation: &AuthorisedInvocation) -> Sha256Digest {
     let mut roles = authorisation.active_roles().to_vec();
     roles.sort_unstable();
 
     let mut hasher = Sha256::new();
-    hasher.update(b"ornadb.client-resource-security-context/v1\0");
+    hasher.update(b"ornadb.client-resource-security-context/v2\0");
     hasher.update(authorisation.session_principal().to_bytes());
     hasher.update(authorisation.effective_principal().to_bytes());
     hasher.update(authorisation.authorising_principal().to_bytes());
@@ -2673,22 +2913,31 @@ fn security_context_digest(authorisation: &AuthorisedInvocation) -> Sha256Digest
     for role in roles {
         hasher.update(role.to_bytes());
     }
+    hasher.update(authorisation.security_context_digest().to_bytes());
     Sha256Digest::from_bytes(hasher.finalize().into())
 }
 
-/// Combines the active catalogue, host data epoch, and security context into
+/// Combines the active catalogue, host data epoch, security context, root state context, and USER mutation epoch into
 /// one local-only invalidation identity. None of these bytes are transport
 /// fields; only the resulting key selects a local resource cache entry.
 fn resource_invalidation_identity(
     catalogue_hash: Sha256Digest,
     data_invalidation_token: Sha256Digest,
     security_digest: Sha256Digest,
+    state_context: &ClientStateContext,
+    user_state_epoch: u64,
 ) -> Sha256Digest {
     let mut hasher = Sha256::new();
-    hasher.update(b"ornadb.client-resource-invalidation/v1\0");
+    hasher.update(b"ornadb.client-resource-invalidation/v2\0");
     hasher.update(catalogue_hash.to_bytes());
     hasher.update(data_invalidation_token.to_bytes());
     hasher.update(security_digest.to_bytes());
+    hasher.update(state_context.root_function().to_bytes());
+    hasher.update((state_context.state_profile().len() as u64).to_be_bytes());
+    hasher.update(state_context.state_profile().as_bytes());
+    hasher.update((state_context.instance_key().len() as u64).to_be_bytes());
+    hasher.update(state_context.instance_key().as_bytes());
+    hasher.update(user_state_epoch.to_be_bytes());
     Sha256Digest::from_bytes(hasher.finalize().into())
 }
 
@@ -2797,6 +3046,83 @@ impl ClientStateContext {
     pub fn instance_key(&self) -> &str {
         &self.instance_key
     }
+}
+
+/// A private, deterministic object-loader seam used by the CLIENT evaluator.
+///
+/// Durable object storage is owned by the authenticated host, not by this
+/// crate. Keeping this fixture private lets tests exercise reference-root
+/// paths without introducing a public storage contract. The evaluator binds
+/// the fixture to the active revision and the derived authenticated security
+/// context before every lookup; source expressions contribute only the
+/// reference identity itself.
+#[derive(Clone, Debug, PartialEq)]
+struct ClientReferenceLoaderFixture {
+    revision: RevisionPair,
+    principal: PrincipalId,
+    security_context_digest: Sha256Digest,
+    objects: HashMap<(TypeId, ObjectId), RuntimeValue>,
+}
+
+impl ClientReferenceLoaderFixture {
+    fn load(
+        &self,
+        active: &ActiveDatabaseRevision,
+        principal: PrincipalId,
+        security_context_digest: Sha256Digest,
+        reference: &RuntimeValue,
+    ) -> Option<RuntimeValue> {
+        if self.revision != active.pair()
+            || self.principal != principal
+            || self.security_context_digest != security_context_digest
+        {
+            return None;
+        }
+        let RuntimeValue::Reference { target, object } = reference else {
+            return None;
+        };
+        if active.catalogue().object_type_by_id(*target).is_none() {
+            return None;
+        }
+        let value = self.objects.get(&(*target, *object))?;
+        reference_record_is_active_and_matches_target(active, *target, value).then(|| value.clone())
+    }
+}
+
+fn reference_record_is_active_and_matches_target(
+    active: &ActiveDatabaseRevision,
+    target: TypeId,
+    value: &RuntimeValue,
+) -> bool {
+    let RuntimeValue::Record(record) = value else {
+        return false;
+    };
+    let Some(object) = active.catalogue().object_type_by_id(target) else {
+        return false;
+    };
+    let Some(record_definition) = active
+        .catalogue()
+        .record_value_type_by_id(record.record_type())
+    else {
+        return false;
+    };
+    if object.fields().len() != record_definition.fields().len()
+        || record.fields().len() != object.fields().len()
+    {
+        return false;
+    }
+    if object
+        .fields()
+        .iter()
+        .zip(record_definition.fields())
+        .any(|(object_field, record_field)| {
+            object_field.id() != record_field.id()
+                || object_field.ordinal() != record_field.ordinal()
+        })
+    {
+        return false;
+    }
+    encode_active_value(active, value).is_ok()
 }
 
 /// One state slot of one CLIENT function inside an in-memory state store.
@@ -2949,10 +3275,20 @@ impl ClientUserState {
 }
 /// The explicit in-memory CLIENT state for one invocation session
 /// (work ADRs 0069 and 0070).
+///
+/// The local USER cache is explicitly bound to one authenticated session.
+/// The binding is opaque and is cleared only with the store itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientStateStore {
     context: ClientStateContext,
+    /// The opaque authenticated-session binding for the local USER cache.
+    session_binding: Option<AuthenticatedSessionBinding>,
     security_context_digest: Sha256Digest,
+    /// Monotonic local epoch that changes whenever USER state is explicitly
+    /// mutated. Resource keys include this epoch so READY results cannot be
+    /// reused after a state update.
+    user_state_epoch: u64,
+    reference_loader: Option<ClientReferenceLoaderFixture>,
     local: HashMap<ClientStateKey, RuntimeValue>,
     session: HashMap<ClientStateKey, RuntimeValue>,
     user: HashMap<ClientStateKey, ClientUserState>,
@@ -2963,7 +3299,10 @@ impl Default for ClientStateStore {
     fn default() -> Self {
         Self {
             context: ClientStateContext::default_for(FunctionId::from_bytes([0; 16])),
+            session_binding: None,
             security_context_digest: DEFAULT_SECURITY_CONTEXT_DIGEST,
+            user_state_epoch: 0,
+            reference_loader: None,
             local: HashMap::new(),
             session: HashMap::new(),
             user: HashMap::new(),
@@ -2983,6 +3322,28 @@ impl ClientStateStore {
         self.context = context;
     }
 
+    /// Binds the local USER cache to one authenticated session.
+    ///
+    /// The first binding is retained. A different session is rejected without
+    /// clearing or changing any caller-owned USER values.
+    pub fn bind_authenticated_session(
+        &mut self,
+        binding: AuthenticatedSessionBinding,
+    ) -> Result<(), ClientUserStateError> {
+        if let Some(expected) = self.session_binding
+            && expected != binding
+        {
+            return Err(ClientUserStateError::SessionMismatch);
+        }
+        self.session_binding = Some(binding);
+        Ok(())
+    }
+
+    /// Installs a private fixture for trusted reference-root evaluation tests.
+    fn set_reference_loader_fixture(&mut self, fixture: ClientReferenceLoaderFixture) {
+        self.reference_loader = Some(fixture);
+    }
+
     /// Returns the selected root state context.
     pub const fn context(&self) -> &ClientStateContext {
         &self.context
@@ -2996,6 +3357,11 @@ impl ClientStateStore {
     /// Returns the invocation-derived security identity for local resources.
     fn security_context_digest(&self) -> Sha256Digest {
         self.security_context_digest
+    }
+
+    /// Returns the local USER-state mutation epoch used by resource keys.
+    fn user_state_epoch(&self) -> u64 {
+        self.user_state_epoch
     }
 
     /// Creates one state key in the selected root context.
@@ -3172,8 +3538,12 @@ impl ClientStateStore {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientUserStateError {
+    /// A caller-owned USER cache was presented to a different authenticated session.
+    SessionMismatch,
     /// A USER state batch contained the same logical cell more than once.
     DuplicateKey(ClientStateKey),
+    /// A USER state key is outside the selected root context.
+    ContextMismatch(ClientStateKey),
     /// A transport result did not align with the submitted change batch.
     WriteBatchLength { expected: usize, actual: usize },
     /// A transport result named a different cell from its change.
@@ -3207,9 +3577,16 @@ pub enum ClientUserStateError {
 impl fmt::Display for ClientUserStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SessionMismatch => {
+                formatter.write_str("USER state cache belongs to a different authenticated session")
+            }
             Self::DuplicateKey(key) => {
                 write!(formatter, "USER state batch contains duplicate key {key:?}")
             }
+            Self::ContextMismatch(key) => write!(
+                formatter,
+                "USER state key is outside the selected context {key:?}"
+            ),
             Self::WriteBatchLength { expected, actual } => write!(
                 formatter,
                 "USER state write result count {actual} does not match change count {expected}",
@@ -3262,13 +3639,22 @@ impl Error for ClientUserStateError {
 }
 
 impl ClientStateStore {
-    /// Loads one complete authenticated USER state batch for the selected root
-    /// context. Existing cells in that context are replaced; cells for other
-    /// contexts remain available to the caller-owned store.
+    /// Loads one complete USER state batch for the selected root function and
+    /// profile. The batch may contain multiple function-instance keys; the
+    /// authenticated adapter binds the store before transport access, and the
+    /// store itself carries no principal identity. Existing cells in that root
+    /// context are replaced; cells for other contexts remain available.
+    /// Single-instance updates remain enforced by [`Self::set_user_state`].
     pub fn load_user_state(&mut self, cells: &[UserStateCell]) -> Result<(), ClientUserStateError> {
+        let context = &self.context;
         let mut loaded = HashMap::with_capacity(cells.len());
         for cell in cells {
             let key = ClientStateKey::from_user_cell(cell);
+            if key.root_function() != context.root_function()
+                || key.state_profile() != context.state_profile()
+            {
+                return Err(ClientUserStateError::ContextMismatch(key));
+            }
             if loaded
                 .insert(key.clone(), ClientUserState::loaded(cell))
                 .is_some()
@@ -3276,11 +3662,57 @@ impl ClientStateStore {
                 return Err(ClientUserStateError::DuplicateKey(key));
             }
         }
-        let context = &self.context;
         self.user.retain(|key, _| {
             key.root_function() != context.root_function()
                 || key.state_profile() != context.state_profile()
-                || key.instance_key() != context.instance_key()
+        });
+        self.user.extend(loaded);
+        Ok(())
+    }
+
+    /// Loads USER cells for selected function-instance pairs in one root context.
+    ///
+    /// Unlike [`Self::load_user_state`], this filtered operation replaces only
+    /// the requested instances. Existing cells for other instances, including
+    /// dirty values, remain untouched; requested instances absent from `cells`
+    /// are removed after the complete batch passes validation.
+    pub fn load_user_state_for_instances(
+        &mut self,
+        cells: &[UserStateCell],
+        requested_instances: &[(FunctionId, String)],
+    ) -> Result<(), ClientUserStateError> {
+        if requested_instances.is_empty() {
+            return self.load_user_state(cells);
+        }
+        for (_, instance_key) in requested_instances {
+            validate_state_text(instance_key, "instance key")
+                .map_err(ClientUserStateError::InvalidIdentity)?;
+        }
+        let context = &self.context;
+        let requested: HashMap<(FunctionId, String), ()> = requested_instances
+            .iter()
+            .map(|(function, instance_key)| ((*function, instance_key.clone()), ()))
+            .collect();
+        let mut loaded = HashMap::with_capacity(cells.len());
+        for cell in cells {
+            let key = ClientStateKey::from_user_cell(cell);
+            if key.root_function() != context.root_function()
+                || key.state_profile() != context.state_profile()
+                || !requested.contains_key(&(key.function(), key.instance_key().to_owned()))
+            {
+                return Err(ClientUserStateError::ContextMismatch(key));
+            }
+            if loaded
+                .insert(key.clone(), ClientUserState::loaded(cell))
+                .is_some()
+            {
+                return Err(ClientUserStateError::DuplicateKey(key));
+            }
+        }
+        self.user.retain(|key, _| {
+            key.root_function() != context.root_function()
+                || key.state_profile() != context.state_profile()
+                || !requested.contains_key(&(key.function(), key.instance_key().to_owned()))
         });
         self.user.extend(loaded);
         Ok(())
@@ -3293,14 +3725,26 @@ impl ClientStateStore {
         value: RuntimeValue,
         value_type: TypeId,
     ) -> Result<(), ClientUserStateError> {
+        if key.root_function() != self.context.root_function()
+            || key.state_profile() != self.context.state_profile()
+            || key.instance_key() != self.context.instance_key()
+        {
+            return Err(ClientUserStateError::ContextMismatch(key));
+        }
         if let Some(existing) = self.user.get(&key)
             && existing.value_type != value_type
         {
             return Err(ClientUserStateError::ValueMismatch(key));
         }
+        let next_epoch = self.user_state_epoch.checked_add(1).ok_or_else(|| {
+            ClientUserStateError::InvalidChange(
+                "USER state invalidation epoch exhausted".to_owned(),
+            )
+        })?;
         let revision = self.user.get(&key).and_then(ClientUserState::revision);
         self.user
             .insert(key, ClientUserState::local(value, value_type, revision));
+        self.user_state_epoch = next_epoch;
         Ok(())
     }
 
@@ -5716,6 +6160,8 @@ fn evaluate_resource_expression(
             active.catalogue_hash(),
             state.context().data_invalidation_token(),
             state.security_context_digest(),
+            state.context(),
+            state.user_state_epoch(),
         ),
     );
     let state_profile = state.context().state_profile().to_owned();
@@ -6576,6 +7022,11 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
             // executor-owned request until a later terminal completion or
             // explicit abandonment arrives.
             self.pending_request = Some(request);
+        } else if self.pending_request.is_some() {
+            // A matching terminal completion proves that the child executor
+            // consumed its request. Do not report a released child as still
+            // owned when a prior stream batch was followed by completion.
+            self.pending_request = None;
         }
         completion
     }
@@ -6681,6 +7132,8 @@ fn trigger_client_action_with_lineage(
                     active.catalogue_hash(),
                     state.context().data_invalidation_token(),
                     security_context_digest(authorisation),
+                    state.context(),
+                    state.user_state_epoch(),
                 ),
             );
             if let Some(resource) = action_state.resource_mut() {
@@ -6724,6 +7177,8 @@ fn trigger_client_action_with_lineage(
                     active.catalogue_hash(),
                     state.context().data_invalidation_token(),
                     security_context_digest(authorisation),
+                    state.context(),
+                    state.user_state_epoch(),
                 ),
             );
             if let Some(resource) = action_state.resource_mut() {
@@ -6790,13 +7245,12 @@ fn trigger_client_action_with_lineage(
                                     && resource.status() == ClientResourceStatus::Idle
                                     && resource.generation().value() > previous.generation().value()
                             });
-                        let replacement_terminal =
-                            same_revision_terminal_replacement(
-                                active,
-                                state,
-                                candidate_key,
-                                resource,
-                            );
+                        let replacement_terminal = same_revision_terminal_replacement(
+                            active,
+                            state,
+                            candidate_key,
+                            resource,
+                        );
                         let pending_resource = nested_executor
                             .pending_request_identity()
                             .is_some_and(|(_, pending_key, pending_generation)| {
@@ -6844,12 +7298,11 @@ fn trigger_client_action_with_lineage(
             };
             if result_is_err {
                 for (key, resource) in &staged.resources {
-                    let replacement_cancelled =
-                        state.resources.get(key).is_some_and(|previous| {
-                            previous.status() == ClientResourceStatus::Loading
-                                && resource.status() == ClientResourceStatus::Idle
-                                && resource.generation().value() > previous.generation().value()
-                        });
+                    let replacement_cancelled = state.resources.get(key).is_some_and(|previous| {
+                        previous.status() == ClientResourceStatus::Loading
+                            && resource.status() == ClientResourceStatus::Idle
+                            && resource.generation().value() > previous.generation().value()
+                    });
                     let replacement_terminal =
                         same_revision_terminal_replacement(active, state, key, resource);
                     if replacement_cancelled || replacement_terminal {
@@ -7318,6 +7771,10 @@ fn inspect_snapshot_target_from_envelope(
     let [RuntimeValue::Bytes(payload)] = values else {
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
     };
+    // Encoded root_target bytes are checked against the authenticated
+    // AuthenticatedInspectSnapshot on the server. This client decoder only has
+    // the opaque envelope and no authenticated FunctionId root context, so the
+    // server remains authoritative for that binding.
     decode_inspect_snapshot_target_row(payload, envelope.epoch_id())
 }
 
@@ -7682,7 +8139,7 @@ fn evaluate_expression(
                 .ok_or_else(|| {
                     expression_error(context, ClientExpressionError::ParameterNotBound)
                 })?;
-            evaluate_field_path(active, value, fields, context)
+            evaluate_field_path(active, value, fields, context, principal, state)
         }
         ClientExpressionNode::Concat { left, right } => {
             let left = evaluate_expression(
@@ -7802,10 +8259,20 @@ fn evaluate_field_path(
     value: &RuntimeValue,
     fields: &[orna_core::FieldId],
     context: ClientExecutionContext,
+    principal: PrincipalId,
+    state: &ClientStateStore,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    let mut current = value;
+    let mut current = value.clone();
     for field_id in fields {
-        let RuntimeValue::Record(record) = current else {
+        if matches!(current, RuntimeValue::Reference { .. }) {
+            let Some(loader) = state.reference_loader.as_ref() else {
+                return Err(expression_error(context, ClientExpressionError::FieldPath));
+            };
+            current = loader
+                .load(active, principal, state.security_context_digest(), &current)
+                .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+        }
+        let RuntimeValue::Record(record) = &current else {
             return Err(expression_error(context, ClientExpressionError::FieldPath));
         };
         let definition = active
@@ -7829,7 +8296,8 @@ fn evaluate_field_path(
         current = record
             .fields()
             .get(index)
-            .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+            .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?
+            .clone();
     }
     Ok(current.clone())
 }
@@ -7920,6 +8388,18 @@ fn is_inspect_carrier_type(type_id: TypeId) -> bool {
             | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
             | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
             | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
+fn runtime_scalar_matches(scalar: StandardScalar, value: &RuntimeValue) -> bool {
+    matches!(
+        (scalar, value),
+        (StandardScalar::Boolean, RuntimeValue::Boolean(_))
+            | (StandardScalar::Integer, RuntimeValue::Integer(_))
+            | (StandardScalar::BigInt, RuntimeValue::BigInt(_))
+            | (StandardScalar::Float, RuntimeValue::Float(_))
+            | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
+            | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_))
     )
 }
 
@@ -8125,6 +8605,9 @@ fn initialize_client_state(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<(), ClientExecutionError> {
+    // Evaluate and type-check every missing default before committing any
+    // staged value to the caller-owned LOCAL, SESSION, or USER maps.
+    let mut staged = Vec::with_capacity(plan.slots().len());
     for slot in plan.slots() {
         let key = state.key_for(context.function(), slot.state_slot_id());
         let resolved = resolve_state_slot_type(active, slot.type_id()).ok_or_else(|| {
@@ -8194,7 +8677,11 @@ fn initialize_client_state(
                 value
             }
         };
-        match slot.scope() {
+        staged.push((slot.scope(), key, value, slot.type_id()));
+    }
+
+    for (scope, key, value, type_id) in staged {
+        match scope {
             StateScope::Local => {
                 if let Entry::Vacant(entry) = state.local.entry(key) {
                     entry.insert(value);
@@ -8207,7 +8694,7 @@ fn initialize_client_state(
             }
             StateScope::User => {
                 if let Entry::Vacant(entry) = state.user.entry(key) {
-                    entry.insert(ClientUserState::defaulted(value, slot.type_id()));
+                    entry.insert(ClientUserState::defaulted(value, type_id));
                 }
             }
         }
@@ -9083,19 +9570,19 @@ fn invalid_function(
 mod tests {
     use super::{
         ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
-        ClientActionState, ClientExecutionContext, ClientResource, ClientResourceCompletion,
-        ClientResourceExecutor, ClientResourceKey, ClientResourceRequest, ClientResourceStatus,
-        ClientStateStore, DeterministicClientResourceExecutor, ResourceKind,
+        ClientActionState, ClientExecutionContext, ClientReferenceLoaderFixture, ClientResource,
+        ClientResourceCompletion, ClientResourceExecutor, ClientResourceKey, ClientResourceRequest,
+        ClientResourceStatus, ClientStateStore, DeterministicClientResourceExecutor, ResourceKind,
         action_target_result_type, capability, complete_client_action, decode_action_payload,
         encode_action_payload, trigger_client_action,
     };
     use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
-    use std::{cell::Cell, rc::Rc, time::SystemTime};
+    use std::{cell::Cell, collections::HashMap, rc::Rc, time::SystemTime};
 
     use orna_core::{
-        CallSiteId, CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, LocalId,
-        ParameterId, PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
-        StateSlotId, TypeId,
+        CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, InvocationId,
+        LocalId, ObjectId, ParameterId, PrincipalId, SchemaId, SourceBundleId, SourceRevisionId,
+        SourceUnitId, StateSlotId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
             function_declaration_digest, function_semantic_digest,
@@ -9103,9 +9590,11 @@ mod tests {
             source_revision_record_digest, source_unit_content_digest,
         },
         catalogue::{
-            CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
+            CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ParameterDefinition, QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition,
+            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
+            ValueTypeDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -9121,8 +9610,11 @@ mod tests {
         },
         source::{SourceBundle, SourceUnit},
         state::{UserStateCell, UserStateKey, UserStateWriteOutcome, UserStateWriteResult},
-        types::{ResolvedType, StandardScalar},
-        value::{FunctionArgument, OpaqueValue, RuntimeFloat, RuntimeValue},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
+        value::{
+            ConstructedValueKind, FunctionArgument, OpaqueValue, RecordValue, RuntimeFloat,
+            RuntimeValue,
+        },
     };
 
     #[derive(Default)]
@@ -9382,6 +9874,26 @@ mod tests {
                 };
                 request.ready(value)
             })
+        }
+    }
+
+    struct StreamThenTerminalExecutor {
+        calls: usize,
+        stale: Option<ClientResourceRequest>,
+    }
+
+    impl ClientResourceExecutor for StreamThenTerminalExecutor {
+        fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
+            self.calls += 1;
+            match self.calls {
+                1 => request.stream_values(vec![RuntimeValue::Boolean(true)]),
+                2 => request.stream_completed(),
+                _ => self
+                    .stale
+                    .take()
+                    .unwrap_or_else(|| request.clone())
+                    .pending(),
+            }
         }
     }
 
@@ -9780,16 +10292,23 @@ mod tests {
     }
 
     #[test]
-    fn inspect_snapshot_row_binding_rejects_epoch_mismatch_and_trailing_bytes() {
+    fn inspect_snapshot_row_binding_preserves_server_root_authority() {
         let target = super::InvocationId::from_bytes([0x17; 16]);
+        let root_target = super::FunctionId::from_bytes([0x18; 16]);
         let mut row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
         row.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
         row.extend_from_slice(&target.to_bytes());
-        row.extend_from_slice(&[0x18; 16]);
+        row.extend_from_slice(&root_target.to_bytes());
         row.push(1);
         row.extend_from_slice(&0_u64.to_be_bytes());
         row.push(0);
         row.push(0);
+        assert_eq!(
+            super::decode_inspect_snapshot_target_row(&row, 7),
+            Ok(target)
+        );
+        let forged_root = super::FunctionId::from_bytes([0x19; 16]);
+        row[41..57].copy_from_slice(&forged_root.to_bytes());
         assert_eq!(
             super::decode_inspect_snapshot_target_row(&row, 7),
             Ok(target)
@@ -10335,6 +10854,203 @@ mod tests {
         );
     }
 
+    fn reference_field_path_fixture() -> (
+        ActiveDatabaseRevision,
+        ClientExecutionContext,
+        ParameterId,
+        TypeId,
+        TypeId,
+        RecordValue,
+        TypeId,
+        RecordValue,
+        FieldId,
+        FieldId,
+        AuthorisedInvocation,
+    ) {
+        let (base, function, pair, function_revision) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::Function(orna_standard::STD_INVOKE_ECHO_FUNCTION_ID),
+            DefinitionReferenceKind::FunctionCall,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            orna_artifact::client_plan::ExpressionClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            )
+            .encode()
+            .unwrap(),
+        );
+        let outer_object = TypeId::from_bytes([0x11; 16]);
+        let inner_object = TypeId::from_bytes([0x12; 16]);
+        let outer_record = TypeId::from_bytes([0x13; 16]);
+        let inner_record = TypeId::from_bytes([0x14; 16]);
+        let outer_field = FieldId::from_bytes([0x21; 16]);
+        let inner_field = FieldId::from_bytes([0x22; 16]);
+        let objects = vec![
+            ObjectTypeDefinition::new(
+                outer_object,
+                QualifiedSemanticName::new(["app", "item"]).unwrap(),
+                vec![FieldDefinition::new(
+                    outer_field,
+                    "child",
+                    0,
+                    ResolvedType::reference(inner_object),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            ),
+            ObjectTypeDefinition::new(
+                inner_object,
+                QualifiedSemanticName::new(["app", "person"]).unwrap(),
+                vec![FieldDefinition::new(
+                    inner_field,
+                    "name",
+                    0,
+                    ResolvedType::named(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            ),
+        ];
+        let records = vec![
+            RecordValueTypeDefinition::new(
+                outer_record,
+                QualifiedSemanticName::new(["app", "item_row"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        outer_field,
+                        "child",
+                        0,
+                        TypeDescriptor::named(inner_record),
+                    )
+                    .unwrap(),
+                ],
+            ),
+            RecordValueTypeDefinition::new(
+                inner_record,
+                QualifiedSemanticName::new(["app", "person_row"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        inner_field,
+                        "name",
+                        0,
+                        TypeDescriptor::named(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+                    )
+                    .unwrap(),
+                ],
+            ),
+        ];
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            objects,
+            base.catalogue().value_types().to_vec(),
+            base.catalogue().enum_types().to_vec(),
+            records,
+            base.catalogue().type_bindings().to_vec(),
+            base.catalogue().functions().to_vec(),
+        )
+        .unwrap();
+        let hash_context = base.catalogue_hash_context().clone();
+        let origin = base.function_revisions()[0].declaration_origin();
+        let mut origins = base.origins().to_vec();
+        origins.extend([
+            DefinitionOrigin::new(DefinitionIdentity::ObjectType(outer_object), origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: outer_object,
+                    field: outer_field,
+                },
+                origin,
+            ),
+            DefinitionOrigin::new(DefinitionIdentity::ObjectType(inner_object), origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: inner_object,
+                    field: inner_field,
+                },
+                origin,
+            ),
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(outer_record), origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: outer_record,
+                    field: outer_field,
+                },
+                origin,
+            ),
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(inner_record), origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: inner_record,
+                    field: inner_field,
+                },
+                origin,
+            ),
+        ]);
+        let catalogue_hash = catalogue_digest_with_context(
+            &hash_context,
+            &catalogue,
+            base.function_revisions(),
+            base.expressions(),
+            origins.as_slice(),
+            base.references(),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    base.function_revisions().to_vec(),
+                    origins,
+                    base.references().to_vec(),
+                ),
+            ),
+            hash_context,
+        )
+        .unwrap();
+        let inner = RecordValue::new(
+            &active,
+            inner_record,
+            [(String::from("name"), RuntimeValue::Text("Ada".to_owned()))],
+        )
+        .unwrap();
+        let outer = RecordValue::new(
+            &active,
+            outer_record,
+            [(String::from("child"), RuntimeValue::Record(inner.clone()))],
+        )
+        .unwrap();
+        let authorisation = authorise(pair, function);
+        let context = ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x40; 16]),
+            observer_lineage: None,
+        };
+        (
+            active,
+            context,
+            ParameterId::from_bytes([0x30; 16]),
+            outer_object,
+            outer_object,
+            outer,
+            inner_object,
+            inner,
+            outer_field,
+            inner_field,
+            authorisation,
+        )
+    }
+
     fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
         let principal = PrincipalId::from_bytes([0x7a; 16]);
         let snapshot = SecuritySnapshot::new(
@@ -10461,6 +11177,60 @@ mod tests {
             assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
             assert_eq!(resource.generation().value(), 0);
         }
+    }
+
+    #[test]
+    fn resource_request_rejects_zero_lineage_before_loading() {
+        let (active, function, pair, _) = version_one_active(true);
+        let principal = PrincipalId::from_bytes([0x7c; 16]);
+        let digest = super::ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0x24; 32]),
+        );
+        let mut resource =
+            super::ClientResource::new(key, ResolvedType::Scalar(StandardScalar::Boolean));
+
+        for (parent_invocation_id, call_site_id) in [
+            (
+                InvocationId::from_bytes([0; 16]),
+                CallSiteId::from_bytes([0x25; 16]),
+            ),
+            (
+                InvocationId::from_bytes([0x24; 16]),
+                CallSiteId::from_bytes([0; 16]),
+            ),
+        ] {
+            let context = super::ClientResourceInvocationContext::new(
+                parent_invocation_id,
+                call_site_id,
+                "profile".to_owned(),
+                "instance".to_owned(),
+            );
+            assert_eq!(
+                resource.begin_request_with_context(&active, context, Vec::new()),
+                Err(super::ClientResourceError::InvalidInvocationContext),
+            );
+            assert_eq!(resource.status(), super::ClientResourceStatus::Idle);
+            assert_eq!(resource.generation().value(), 0);
+            assert_eq!(resource.request_id(), None);
+        }
+
+        let context = super::ClientResourceInvocationContext::new(
+            InvocationId::from_bytes([0x24; 16]),
+            CallSiteId::from_bytes([0x25; 16]),
+            "profile".to_owned(),
+            "instance".to_owned(),
+        );
+        let request = resource
+            .begin_request_with_context(&active, context.clone(), Vec::new())
+            .unwrap();
+        assert_eq!(resource.status(), super::ClientResourceStatus::Loading);
+        assert_eq!(resource.generation().value(), 1);
+        assert_eq!(resource.request_id(), Some(request.request_id()));
+        assert_eq!(request.invocation_context(), Some(context));
     }
 
     #[test]
@@ -11063,6 +11833,67 @@ mod tests {
         assert_boolean_stream_batch(first, &[true, false]);
         let second = resource.take_stream_value(&active).unwrap().unwrap();
         assert_boolean_stream_batch(second, &[false, true]);
+        let terminal = resource.take_stream_value(&active).unwrap().unwrap();
+        assert_boolean_stream_terminal(terminal);
+    }
+
+    #[test]
+    fn client_record_stream_batches_append_and_take_nominal_type_ids() {
+        let (active, function, pair, _, record_type, other_record_type) =
+            version_two_server_record_stream_active();
+        let key = super::ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7a; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0x26; 32]),
+        );
+        let mut resource = ClientResource::new_stream(key, ResolvedType::Named(record_type));
+        let request = resource.begin_stream_request(&active, Vec::new()).unwrap();
+        let record = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record_type,
+                [(String::from("title"), RuntimeValue::Boolean(true))],
+            )
+            .unwrap(),
+        );
+        let mismatched = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                other_record_type,
+                [(String::from("title"), RuntimeValue::Boolean(false))],
+            )
+            .unwrap(),
+        );
+
+        resource
+            .apply_completion(&active, request.clone().stream_values(vec![record.clone()]))
+            .unwrap();
+        let before_mismatch = resource.clone();
+        assert_eq!(
+            resource.apply_completion(&active, request.clone().stream_values(vec![mismatched])),
+            Err(super::ClientResourceError::TypeMismatch),
+        );
+        assert_eq!(resource, before_mismatch);
+
+        resource
+            .apply_completion(&active, request.stream_completed())
+            .unwrap();
+        let batch = resource.take_stream_value(&active).unwrap().unwrap();
+        let RuntimeValue::Constructed(option) = batch else {
+            panic!("record stream batch must be a constructed OPTION");
+        };
+        let ConstructedValueKind::Option(Some(list)) = option.kind() else {
+            panic!("record stream batch must contain a present LIST");
+        };
+        let RuntimeValue::Constructed(list) = list else {
+            panic!("record stream OPTION must contain a constructed LIST");
+        };
+        let ConstructedValueKind::List(values) = list.kind() else {
+            panic!("record stream OPTION must contain a LIST");
+        };
+        assert_eq!(values, [record].as_slice());
+
         let terminal = resource.take_stream_value(&active).unwrap().unwrap();
         assert_boolean_stream_terminal(terminal);
     }
@@ -12457,6 +13288,57 @@ mod tests {
     }
 
     #[test]
+    fn stale_replacement_uses_pinned_validation_after_revision_changes() {
+        let (active, function, pair, _) = version_one_active(true);
+        let changed_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xa1; 16]),
+            CatalogueRevisionId::from_bytes([0xa2; 16]),
+        );
+        let changed_active = active_with_revision_pair(&active, changed_pair);
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
+        let old_key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xa3; 32]),
+        );
+        let new_key = ClientResourceKey::new(
+            InvocationTarget::new(function, changed_pair),
+            principal,
+            digest,
+            Sha256Digest::from_bytes([0xa4; 32]),
+        );
+        let mut state = ClientStateStore::new();
+        let request = state
+            .get_or_create_resource(old_key, ResolvedType::Scalar(StandardScalar::Boolean))
+            .begin_request(&active, Vec::new())
+            .unwrap();
+        let mut executor =
+            RecordingActionExecutor::new(None).with_cancel_value(RuntimeValue::Boolean(true));
+        executor.pending = Some(request.clone());
+
+        state
+            .get_or_create_resource_with_executor(
+                &changed_active,
+                new_key,
+                ResolvedType::Scalar(StandardScalar::Boolean),
+                &mut executor,
+            )
+            .unwrap();
+
+        assert_eq!(executor.cancelled, vec![request]);
+        assert_eq!(
+            state.resource(old_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
+        );
+        assert_eq!(
+            state.resource(new_key).map(ClientResource::status),
+            Some(ClientResourceStatus::Idle),
+        );
+    }
+
+    #[test]
     fn stale_replacement_accepts_typed_null_for_primitive_value_type() {
         let (active, _function, pair, _, _parameter) = version_six_client_resource_action_active();
         let changed_pair = RevisionPair::new(
@@ -13182,8 +14064,9 @@ mod tests {
             plan.encode().expect("the state plan encodes"),
         );
         let mut state = super::ClientStateStore::new();
+        state.set_context(super::ClientStateContext::default_for(function));
         let durable_key = UserStateKey::new(
-            PrincipalId::from_bytes([0x20; 16]),
+            PrincipalId::from_bytes([0x7a; 16]),
             function,
             String::new(),
             function,
@@ -13238,8 +14121,9 @@ mod tests {
             plan.encode().expect("the state plan encodes"),
         );
         let mut state = super::ClientStateStore::new();
+        state.set_context(super::ClientStateContext::default_for(function));
         let durable_key = UserStateKey::new(
-            PrincipalId::from_bytes([0x22; 16]),
+            PrincipalId::from_bytes([0x7a; 16]),
             function,
             String::new(),
             function,
@@ -13378,6 +14262,483 @@ mod tests {
     }
 
     #[test]
+    fn client_user_state_set_rejects_context_mismatch_before_lookup_or_mutation() {
+        let root_function = FunctionId::from_bytes([0xc1; 16]);
+        let function = FunctionId::from_bytes([0xc2; 16]);
+        let slot = StateSlotId::from_bytes([0xc3; 16]);
+        let principal = PrincipalId::from_bytes([0xc4; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let other_context = super::ClientStateContext::new(
+            FunctionId::from_bytes([0xc5; 16]),
+            "other-profile".to_owned(),
+            "other-instance".to_owned(),
+        )
+        .unwrap();
+        let matching_key = super::ClientStateKey::from_context(&context, function, slot);
+        let mismatched_key = super::ClientStateKey::from_context(&other_context, function, slot);
+        let durable_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        state
+            .load_user_state(&[UserStateCell::new(
+                durable_key,
+                RuntimeValue::Text("loaded".to_owned()),
+                value_type,
+                7,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+        let before = state.user().clone();
+        let pending_before = state.pending_user_state_changes().unwrap();
+
+        let error = state
+            .set_user_state(
+                mismatched_key.clone(),
+                RuntimeValue::Boolean(true),
+                orna_standard::BOOLEAN_TYPE_ID,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientUserStateError::ContextMismatch(key) if key == mismatched_key
+        ));
+        assert_eq!(state.user(), &before);
+        assert_eq!(state.pending_user_state_changes().unwrap(), pending_before);
+
+        state
+            .set_user_state(
+                matching_key.clone(),
+                RuntimeValue::Text("changed".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        let stored = state.user().get(&matching_key).unwrap();
+        assert_eq!(stored.value(), &RuntimeValue::Text("changed".to_owned()));
+        assert_eq!(stored.revision(), Some(7));
+        assert!(stored.is_dirty());
+        let changes = state.pending_user_state_changes().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].expected_revision(), Some(7));
+    }
+
+    #[test]
+    fn client_user_state_load_rejects_mixed_context_batch_atomically() {
+        let root_function = FunctionId::from_bytes([0x71; 16]);
+        let function = FunctionId::from_bytes([0x72; 16]);
+        let slot = StateSlotId::from_bytes([0x73; 16]);
+        let principal = PrincipalId::from_bytes([0x74; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let matching_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let mismatched_key = UserStateKey::new(
+            principal,
+            FunctionId::from_bytes([0x75; 16]),
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        state
+            .load_user_state(&[UserStateCell::new(
+                matching_key.clone(),
+                RuntimeValue::Text("before".to_owned()),
+                value_type,
+                1,
+                SystemTime::UNIX_EPOCH,
+            )])
+            .unwrap();
+        let before = state.user().clone();
+
+        let error = state
+            .load_user_state(&[
+                UserStateCell::new(
+                    matching_key,
+                    RuntimeValue::Text("replacement".to_owned()),
+                    value_type,
+                    2,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    mismatched_key,
+                    RuntimeValue::Text("outside-context".to_owned()),
+                    value_type,
+                    3,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientUserStateError::ContextMismatch(key)
+                if key.root_function() == FunctionId::from_bytes([0x75; 16])
+        ));
+        assert_eq!(state.user(), &before);
+    }
+
+    #[test]
+    fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context_atomically() {
+        let root_function = FunctionId::from_bytes([0x81; 16]);
+        let function = FunctionId::from_bytes([0x82; 16]);
+        let slot = StateSlotId::from_bytes([0x83; 16]);
+        let principal = PrincipalId::from_bytes([0x84; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "active-instance".to_owned(),
+        )
+        .unwrap();
+        let active_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "active-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let dynamic_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "row:42".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let selected_absent_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "row:empty".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let unselected_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "row:99".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let foreign_key = UserStateKey::new(
+            principal,
+            FunctionId::from_bytes([0x85; 16]),
+            "foreign-profile".to_owned(),
+            function,
+            "foreign-instance".to_owned(),
+            slot,
+        )
+        .unwrap();
+        let requested_instances = vec![
+            (function, "active-instance".to_owned()),
+            (function, "row:42".to_owned()),
+            (function, "row:empty".to_owned()),
+        ];
+        let unselected_client_key = super::ClientStateKey::from_user_cell(&UserStateCell::new(
+            unselected_key.clone(),
+            RuntimeValue::Text("unselected-before".to_owned()),
+            value_type,
+            1,
+            SystemTime::UNIX_EPOCH,
+        ));
+        let dynamic_client_key = super::ClientStateKey::from_user_cell(&UserStateCell::new(
+            dynamic_key.clone(),
+            RuntimeValue::Text("dynamic-loaded".to_owned()),
+            value_type,
+            3,
+            SystemTime::UNIX_EPOCH,
+        ));
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context.clone());
+
+        state
+            .load_user_state(&[
+                UserStateCell::new(
+                    active_key.clone(),
+                    RuntimeValue::Text("active-before".to_owned()),
+                    value_type,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    unselected_key.clone(),
+                    RuntimeValue::Text("unselected-before".to_owned()),
+                    value_type,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    selected_absent_key.clone(),
+                    RuntimeValue::Text("selected-before".to_owned()),
+                    value_type,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap();
+        state.set_context(
+            super::ClientStateContext::new(
+                root_function,
+                "profile".to_owned(),
+                "row:99".to_owned(),
+            )
+            .unwrap(),
+        );
+        state
+            .set_user_state(
+                unselected_client_key.clone(),
+                RuntimeValue::Text("unselected-dirty".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        state.set_context(context.clone());
+
+        state
+            .load_user_state_for_instances(
+                &[
+                    UserStateCell::new(
+                        active_key.clone(),
+                        RuntimeValue::Text("active-loaded".to_owned()),
+                        value_type,
+                        2,
+                        SystemTime::UNIX_EPOCH,
+                    ),
+                    UserStateCell::new(
+                        dynamic_key.clone(),
+                        RuntimeValue::Text("dynamic-loaded".to_owned()),
+                        value_type,
+                        3,
+                        SystemTime::UNIX_EPOCH,
+                    ),
+                ],
+                &requested_instances,
+            )
+            .unwrap();
+        assert_eq!(state.user().len(), 3);
+        assert!(
+            !state
+                .user()
+                .contains_key(&super::ClientStateKey::from_user_cell(&UserStateCell::new(
+                    selected_absent_key.clone(),
+                    RuntimeValue::Text("selected-before".to_owned()),
+                    value_type,
+                    1,
+                    SystemTime::UNIX_EPOCH,
+                ),))
+        );
+        assert_eq!(
+            state
+                .user()
+                .get(&super::ClientStateKey::from_user_cell(&UserStateCell::new(
+                    active_key.clone(),
+                    RuntimeValue::Text("active-loaded".to_owned()),
+                    value_type,
+                    2,
+                    SystemTime::UNIX_EPOCH,
+                ),))
+                .map(super::ClientUserState::value),
+            Some(&RuntimeValue::Text("active-loaded".to_owned())),
+        );
+        assert_eq!(
+            state
+                .user()
+                .get(&super::ClientStateKey::from_user_cell(&UserStateCell::new(
+                    dynamic_key.clone(),
+                    RuntimeValue::Text("dynamic-loaded".to_owned()),
+                    value_type,
+                    3,
+                    SystemTime::UNIX_EPOCH,
+                ),))
+                .map(super::ClientUserState::value),
+            Some(&RuntimeValue::Text("dynamic-loaded".to_owned())),
+        );
+
+        let unselected = state.user().get(&unselected_client_key).unwrap();
+        assert_eq!(
+            unselected.value(),
+            &RuntimeValue::Text("unselected-dirty".to_owned()),
+        );
+        assert!(unselected.is_dirty());
+        let pending = state.pending_user_state_changes().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].instance_key(), "row:99");
+
+        let set_error = state
+            .set_user_state(
+                dynamic_client_key.clone(),
+                RuntimeValue::Text("must-not-set-dynamic".to_owned()),
+                value_type,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            set_error,
+            super::ClientUserStateError::ContextMismatch(key) if key == dynamic_client_key
+        ));
+
+        let before_unexpected = state.user().clone();
+        let unexpected_error = state
+            .load_user_state_for_instances(
+                &[UserStateCell::new(
+                    unselected_key.clone(),
+                    RuntimeValue::Text("unexpected-instance".to_owned()),
+                    value_type,
+                    4,
+                    SystemTime::UNIX_EPOCH,
+                )],
+                &requested_instances,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            unexpected_error,
+            super::ClientUserStateError::ContextMismatch(key)
+                if key.instance_key() == "row:99"
+        ));
+        assert_eq!(state.user(), &before_unexpected);
+
+        let before_duplicate = state.user().clone();
+        let duplicate_error = state
+            .load_user_state(&[
+                UserStateCell::new(
+                    dynamic_key.clone(),
+                    RuntimeValue::Text("duplicate-first".to_owned()),
+                    value_type,
+                    4,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    dynamic_key.clone(),
+                    RuntimeValue::Text("duplicate-second".to_owned()),
+                    value_type,
+                    5,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            duplicate_error,
+            super::ClientUserStateError::DuplicateKey(key)
+                if key.instance_key() == "row:42"
+        ));
+        assert_eq!(state.user(), &before_duplicate);
+
+        let before_foreign = state.user().clone();
+        let error = state
+            .load_user_state(&[
+                UserStateCell::new(
+                    active_key,
+                    RuntimeValue::Text("must-not-replace".to_owned()),
+                    value_type,
+                    4,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    foreign_key,
+                    RuntimeValue::Text("must-not-load".to_owned()),
+                    value_type,
+                    5,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientUserStateError::ContextMismatch(key)
+                if key.root_function() == FunctionId::from_bytes([0x85; 16])
+                    && key.state_profile() == "foreign-profile"
+        ));
+        assert_eq!(state.user(), &before_foreign);
+    }
+
+    #[test]
+    fn client_user_state_empty_filter_accepts_the_default_instance_cell() {
+        let root_function = FunctionId::from_bytes([0xa6; 16]);
+        let function = FunctionId::from_bytes([0xa7; 16]);
+        let slot = StateSlotId::from_bytes([0xa8; 16]);
+        let principal = PrincipalId::from_bytes([0xa9; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "mounted-instance".to_owned(),
+        )
+        .unwrap();
+        let default_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            String::new(),
+            slot,
+        )
+        .unwrap();
+        let default_cell = UserStateCell::new(
+            default_key,
+            RuntimeValue::Text("default".to_owned()),
+            value_type,
+            1,
+            SystemTime::UNIX_EPOCH,
+        );
+        let client_key = super::ClientStateKey::from_user_cell(&default_cell);
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+
+        state
+            .load_user_state_for_instances(&[default_cell], &[])
+            .unwrap();
+
+        assert_eq!(
+            state
+                .user()
+                .get(&client_key)
+                .map(super::ClientUserState::value),
+            Some(&RuntimeValue::Text("default".to_owned())),
+        );
+        assert_eq!(
+            state
+                .user()
+                .get(&client_key)
+                .map(super::ClientUserState::revision),
+            Some(Some(1)),
+        );
+    }
+
+    #[test]
     fn client_user_state_load_replaces_prior_context_cells() {
         let root_function = FunctionId::from_bytes([0x61; 16]);
         let function = FunctionId::from_bytes([0x62; 16]);
@@ -13448,6 +14809,122 @@ mod tests {
 
         assert!(!state.user().contains_key(&current_client_key));
         assert!(state.user().contains_key(&other_client_key));
+    }
+
+    #[test]
+    fn client_user_state_binding_rejects_other_session_without_mutating_cells_or_pending_changes() {
+        let root_function = FunctionId::from_bytes([0x91; 16]);
+        let function = FunctionId::from_bytes([0x92; 16]);
+        let first_slot = StateSlotId::from_bytes([0x93; 16]);
+        let second_slot = StateSlotId::from_bytes([0x94; 16]);
+        let principal = PrincipalId::from_bytes([0x95; 16]);
+        let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x96; 16]),
+            CatalogueRevisionId::from_bytes([0x97; 16]),
+        );
+        let snapshot = SecuritySnapshot::new(
+            pair,
+            vec![],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("session binding fixture should be valid");
+        let first_session = snapshot
+            .bind_authenticated_session(principal, vec![])
+            .expect("first session should bind");
+        let second_session = snapshot
+            .bind_authenticated_session(principal, vec![])
+            .expect("second session should bind");
+        assert_eq!(first_session.binding(), first_session.clone().binding());
+        assert_ne!(first_session.binding(), second_session.binding());
+
+        let context = super::ClientStateContext::new(
+            root_function,
+            "profile".to_owned(),
+            "root-instance".to_owned(),
+        )
+        .unwrap();
+        let first_client_key = super::ClientStateKey::from_context(&context, function, first_slot);
+        let second_client_key =
+            super::ClientStateKey::from_context(&context, function, second_slot);
+        let first_durable_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            first_slot,
+        )
+        .unwrap();
+        let second_durable_key = UserStateKey::new(
+            principal,
+            root_function,
+            "profile".to_owned(),
+            function,
+            "root-instance".to_owned(),
+            second_slot,
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+        state.set_context(context);
+        assert!(
+            state
+                .bind_authenticated_session(first_session.binding())
+                .is_ok()
+        );
+        assert!(
+            state
+                .bind_authenticated_session(first_session.clone().binding())
+                .is_ok()
+        );
+        state
+            .load_user_state(&[
+                UserStateCell::new(
+                    first_durable_key,
+                    RuntimeValue::Text("first".to_owned()),
+                    value_type,
+                    4,
+                    SystemTime::UNIX_EPOCH,
+                ),
+                UserStateCell::new(
+                    second_durable_key,
+                    RuntimeValue::Text("second".to_owned()),
+                    value_type,
+                    8,
+                    SystemTime::UNIX_EPOCH,
+                ),
+            ])
+            .unwrap();
+        state
+            .set_user_state(
+                first_client_key,
+                RuntimeValue::Text("first-dirty".to_owned()),
+                value_type,
+            )
+            .unwrap();
+        let durable_before = state.user().clone();
+        let pending_before = state.pending_user_state_changes().unwrap();
+        assert_eq!(pending_before.len(), 1);
+
+        assert_eq!(
+            state.bind_authenticated_session(second_session.binding()),
+            Err(super::ClientUserStateError::SessionMismatch)
+        );
+        assert_eq!(state.user(), &durable_before);
+        assert_eq!(state.pending_user_state_changes().unwrap(), pending_before);
+        assert!(
+            state
+                .bind_authenticated_session(first_session.binding())
+                .is_ok()
+        );
+        assert_eq!(state.user().len(), 2);
+        assert!(state.user().contains_key(&second_client_key));
     }
 
     #[test]
@@ -13684,6 +15161,101 @@ mod tests {
                 && *slot == StateSlotId::from_bytes([0x31; 16])
         ));
     }
+
+    #[test]
+    fn version_four_state_initializer_stages_all_scopes_before_commit() {
+        let local_slot = StateSlotId::from_bytes([0x30; 16]);
+        let session_slot = StateSlotId::from_bytes([0x31; 16]);
+        let user_slot = StateSlotId::from_bytes([0x32; 16]);
+        let invalid_slot = StateSlotId::from_bytes([0x33; 16]);
+        let plan = orna_artifact::client_plan::StateClientPlan::new(
+            orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            vec![
+                orna_artifact::client_plan::StateSlot::new(
+                    local_slot,
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::String {
+                            value: "must-not-commit-local".to_owned(),
+                        },
+                    ),
+                ),
+                orna_artifact::client_plan::StateSlot::new(
+                    session_slot,
+                    orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Session,
+                    orna_artifact::client_plan::StateDefault::Null,
+                ),
+                orna_artifact::client_plan::StateSlot::new(
+                    user_slot,
+                    orna_standard::BOOLEAN_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::User,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+                    ),
+                ),
+                orna_artifact::client_plan::StateSlot::new(
+                    invalid_slot,
+                    orna_standard::BOOLEAN_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::String {
+                            value: "not-a-boolean".to_owned(),
+                        },
+                    ),
+                ),
+            ],
+        );
+        let (active, function, pair, function_revision) = version_four_state_active(
+            orna_standard::BOOLEAN_TYPE_ID,
+            plan.encode().expect("the state plan encodes"),
+        );
+        let execution_context = super::ClientExecutionContext {
+            pair,
+            function,
+            function_revision,
+            parent_invocation_id: InvocationId::from_bytes([0x34; 16]),
+            observer_lineage: None,
+        };
+        let state_context = super::ClientStateContext::new(
+            function,
+            "atomic-profile".to_owned(),
+            "atomic-instance".to_owned(),
+        )
+        .unwrap();
+        let mut state = super::ClientStateStore::new();
+        state.set_context(state_context);
+        let before = state.clone();
+        let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+        let mut local_environment = super::ClientLocalEnvironment::new();
+
+        let error = super::initialize_client_state(
+            &active,
+            &plan,
+            execution_context,
+            super::ObserverLineage::top_level(execution_context.parent_invocation_id()),
+            &[],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x35; 16]),
+            &mut executor,
+            &mut local_environment,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::StateEvaluation {
+                context,
+                source: super::ClientStateError::DefaultTypeMismatch { slot },
+            } if context == execution_context && slot == invalid_slot
+        ));
+        assert_eq!(state, before);
+    }
+
     #[test]
     fn version_four_supported_scalar_slot_types_initialise() {
         for type_id in [
@@ -14235,6 +15807,176 @@ mod tests {
     }
 
     #[test]
+    fn evaluator_resource_key_includes_state_context_identity() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/state-context".to_owned()),
+        )
+        .unwrap();
+        let context_a = super::ClientStateContext::new(
+            function,
+            "profile-a".to_owned(),
+            "instance-a".to_owned(),
+        )
+        .unwrap();
+        let context_b = super::ClientStateContext::new(
+            FunctionId::from_bytes([0xa1; 16]),
+            "profile-b".to_owned(),
+            "instance-b".to_owned(),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor_a =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("context-a".to_owned())));
+        let result_a = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context_a,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xa2; 16]),
+            &mut executor_a,
+        )
+        .unwrap();
+        let key_a = executor_a.executed[0].key();
+        assert_eq!(
+            result_a.value(),
+            &RuntimeValue::Text("context-a".to_owned())
+        );
+        assert_eq!(
+            state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
+
+        let mut executor_b =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("context-b".to_owned())));
+        let result_b = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context_b,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xa3; 16]),
+            &mut executor_b,
+        )
+        .unwrap();
+        let key_b = executor_b.executed[0].key();
+
+        assert_ne!(
+            key_a, key_b,
+            "state context switch must select a new local key"
+        );
+        assert_eq!(
+            executor_b.executed.len(),
+            1,
+            "the READY result must not be reused"
+        );
+        assert_eq!(
+            result_b.value(),
+            &RuntimeValue::Text("context-b".to_owned())
+        );
+        assert_eq!(key_a.target(), key_b.target());
+        assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+        assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
+    }
+
+    #[test]
+    fn evaluator_resource_key_changes_after_user_state_mutation() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let grants = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument =
+            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/user-state".to_owned()))
+                .unwrap();
+        let context =
+            super::ClientStateContext::new(function, "profile".to_owned(), "instance".to_owned())
+                .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor_a =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("before".to_owned())));
+        let result_a = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb1; 16]),
+            &mut executor_a,
+        )
+        .unwrap();
+        let key_a = executor_a.executed[0].key();
+        assert_eq!(result_a.value(), &RuntimeValue::Text("before".to_owned()));
+        assert_eq!(
+            state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
+
+        let user_key = super::ClientStateKey::from_context(
+            &context,
+            function,
+            StateSlotId::from_bytes([0xb2; 16]),
+        );
+        state
+            .set_user_state(
+                user_key,
+                RuntimeValue::Text("changed".to_owned()),
+                orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            )
+            .unwrap();
+
+        let mut executor_b =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("after".to_owned())));
+        let result_b = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorise(pair, function),
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &grants,
+            &mut state,
+            InvocationId::from_bytes([0xb3; 16]),
+            &mut executor_b,
+        )
+        .unwrap();
+        let key_b = executor_b.executed[0].key();
+
+        assert_ne!(
+            key_a, key_b,
+            "USER state mutation must select a new local key"
+        );
+        assert_eq!(
+            executor_b.executed.len(),
+            1,
+            "the READY result must not be reused"
+        );
+        assert_eq!(result_b.value(), &RuntimeValue::Text("after".to_owned()));
+        assert_eq!(key_a.target(), key_b.target());
+        assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+        assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
+    }
+
+    #[test]
     fn evaluator_resource_key_includes_authorised_security_context() {
         let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
         let (direct_authorisation, role_authorisation) =
@@ -14370,6 +16112,151 @@ mod tests {
                 .resource(loading_key_b)
                 .map(ClientResource::status),
             Some(ClientResourceStatus::Loading)
+        );
+    }
+
+    #[test]
+    fn evaluator_resource_key_includes_security_snapshot_grants_without_reusing_ready() {
+        let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+        let session_principal = PrincipalId::from_bytes([0x7a; 16]);
+        let role = PrincipalId::from_bytes([0x7b; 16]);
+        let principals = vec![
+            Principal::new(
+                session_principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            ),
+            Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+        ];
+        let memberships = vec![RoleMembership::new(role, session_principal)];
+        let authorise_with_grants = |execute_grants| {
+            let snapshot = SecuritySnapshot::new(
+                pair,
+                vec![function],
+                principals.clone(),
+                memberships.clone(),
+                execute_grants,
+            )
+            .expect("security snapshot should validate");
+            let session = snapshot
+                .bind_authenticated_session(session_principal, vec![role])
+                .expect("security session should bind");
+            let ExecuteDecision::Allowed(authorisation) =
+                snapshot.authorise_execute(&session, InvocationTarget::new(function, pair))
+            else {
+                panic!("direct grant should allow the function");
+            };
+            authorisation
+        };
+        let authorisation_a =
+            authorise_with_grants(vec![ExecuteGrant::new(session_principal, function)]);
+        let authorisation_b = authorise_with_grants(vec![
+            ExecuteGrant::new(session_principal, function),
+            ExecuteGrant::new(role, function),
+        ]);
+
+        assert_eq!(
+            authorisation_a.session_principal(),
+            authorisation_b.session_principal()
+        );
+        assert_eq!(
+            authorisation_a.effective_principal(),
+            authorisation_b.effective_principal()
+        );
+        assert_eq!(
+            authorisation_a.authorising_principal(),
+            authorisation_b.authorising_principal()
+        );
+        assert_eq!(
+            authorisation_a.active_roles(),
+            authorisation_b.active_roles()
+        );
+        assert_eq!(authorisation_a.target(), authorisation_b.target());
+
+        let capabilities = capability::LocalCapabilityGrantSet::from_grants([
+            capability::LocalCapabilityGrant::new(
+                capability::LocalCapabilityName::StdFsRead,
+                capability::LocalCapabilityScope::path("/tmp").unwrap(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/security-snapshot-grants".to_owned()),
+        )
+        .unwrap();
+        let context = super::ClientStateContext::new_with_data_invalidation_token(
+            function,
+            "profile".to_owned(),
+            "instance".to_owned(),
+            Sha256Digest::from_bytes([0x21; 32]),
+        )
+        .unwrap();
+        let mut state = ClientStateStore::new();
+        let mut executor_a =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("snapshot-a".to_owned())));
+        let result_a = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorisation_a,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &capabilities,
+            &mut state,
+            InvocationId::from_bytes([0x61; 16]),
+            &mut executor_a,
+        )
+        .unwrap();
+        let key_a = executor_a.executed[0].key();
+        assert_eq!(
+            result_a.value(),
+            &RuntimeValue::Text("snapshot-a".to_owned())
+        );
+        assert_eq!(
+            state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
+
+        let mut executor_b =
+            RecordingActionExecutor::new(Some(RuntimeValue::Text("snapshot-b".to_owned())));
+        let result_b = super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+            &active,
+            &authorisation_b,
+            &context,
+            std::slice::from_ref(&argument),
+            &[],
+            &capabilities,
+            &mut state,
+            InvocationId::from_bytes([0x62; 16]),
+            &mut executor_b,
+        )
+        .unwrap();
+        let key_b = executor_b.executed[0].key();
+
+        assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
+        assert_ne!(
+            key_a, key_b,
+            "snapshot grant changes must select a new local key"
+        );
+        assert_eq!(
+            executor_b.executed.len(),
+            1,
+            "the READY result must not be reused"
+        );
+        assert_eq!(
+            result_b.value(),
+            &RuntimeValue::Text("snapshot-b".to_owned())
+        );
+        assert_eq!(key_a.target(), key_b.target());
+        assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+        assert_eq!(
+            state.resource(key_a).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
+        );
+        assert_eq!(
+            state.resource(key_b).map(ClientResource::status),
+            Some(ClientResourceStatus::Ready)
         );
     }
 
@@ -14881,7 +16768,9 @@ mod tests {
                     local,
                     orna_artifact::client_plan::ClientExpressionNode::Await {
                         expression: Box::new(
-                            orna_artifact::client_plan::ClientExpressionNode::Resource { operation },
+                            orna_artifact::client_plan::ClientExpressionNode::Resource {
+                                operation,
+                            },
                         ),
                     },
                 )],
@@ -14889,7 +16778,9 @@ mod tests {
                     left: Box::new(
                         orna_artifact::client_plan::ClientExpressionNode::LocalRead { local },
                     ),
-                    right: Box::new(orna_artifact::client_plan::ClientExpressionNode::Integer { value: 7 }),
+                    right: Box::new(orna_artifact::client_plan::ClientExpressionNode::Integer {
+                        value: 7,
+                    }),
                 },
             );
             orna_artifact::client_plan::CapabilityClientPlan::new(
@@ -14917,9 +16808,11 @@ mod tests {
             .unwrap(),
         ])
         .unwrap();
-        let argument =
-            FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/stale-replacement".to_owned()))
-                .unwrap();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Text("/tmp/stale-replacement".to_owned()),
+        )
+        .unwrap();
         let context = |token| {
             super::ClientStateContext::new_with_data_invalidation_token(
                 function,
@@ -14951,7 +16844,11 @@ mod tests {
             } => (key, generation),
             other => panic!("expected first resource request to remain pending, got {other:?}"),
         };
-        let old_request = executor.executed.first().expect("old request was submitted").clone();
+        let old_request = executor
+            .executed
+            .first()
+            .expect("old request was submitted")
+            .clone();
         assert_eq!(old_request.key(), old_key);
         assert_eq!(old_request.generation(), old_generation);
 
@@ -15972,6 +17869,349 @@ mod tests {
                 source: super::ClientExpressionError::RecursionLimit,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn client_expression_call_depth_accepts_boundary_and_rejects_next_edge() {
+        std::thread::Builder::new()
+            .name("client-expression-depth-boundary".to_owned())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let boundary_edges = orna_artifact::client_plan::MAX_EXPRESSION_DEPTH + 1;
+                let (boundary_prepared, boundary_function) =
+                    prepared_client_call_chain_with_state_root(boundary_edges);
+                let boundary_active = active_from_prepared_candidate(&boundary_prepared);
+                let mut boundary_state = ClientStateStore::new();
+
+                let boundary_result = super::evaluate_client_function_with_state(
+                    &boundary_active,
+                    &authorise(boundary_active.pair(), boundary_function),
+                    &mut boundary_state,
+                )
+                .expect("the call at MAX_EXPRESSION_DEPTH must be accepted");
+                assert_eq!(boundary_result.value(), &RuntimeValue::Boolean(true));
+                assert_eq!(boundary_state.local().len(), 1);
+
+                let (overflow_prepared, overflow_function) =
+                    prepared_client_call_chain_with_state_root(boundary_edges + 1);
+                let overflow_active = active_from_prepared_candidate(&overflow_prepared);
+                let mut overflow_state = ClientStateStore::new();
+                let state_before_overflow = overflow_state.clone();
+
+                let error = super::evaluate_client_function_with_state(
+                    &overflow_active,
+                    &authorise(overflow_active.pair(), overflow_function),
+                    &mut overflow_state,
+                )
+                .expect_err("the call after MAX_EXPRESSION_DEPTH must fail closed");
+
+                assert!(matches!(
+                    error,
+                    super::ClientExecutionError::ExpressionEvaluation {
+                        source: super::ClientExpressionError::RecursionLimit,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    overflow_state, state_before_overflow,
+                    "a recursion-limit error must not commit staged state or resources"
+                );
+            })
+            .expect("the depth-boundary test thread must start")
+            .join()
+            .expect("the depth-boundary test thread must complete");
+    }
+
+    #[test]
+    fn reference_root_field_path_loads_nested_records_under_authenticated_context() {
+        let (
+            active,
+            context,
+            parameter,
+            outer_type,
+            outer_object,
+            outer_record,
+            inner_object,
+            inner_record,
+            outer_field,
+            inner_field,
+            authorisation,
+        ) = reference_field_path_fixture();
+        let mut objects = HashMap::new();
+        objects.insert(
+            (outer_object, ObjectId::from_bytes([0x31; 16])),
+            RuntimeValue::Record(outer_record),
+        );
+        objects.insert(
+            (inner_object, ObjectId::from_bytes([0x32; 16])),
+            RuntimeValue::Record(inner_record),
+        );
+        let mut state = ClientStateStore::new();
+        state.set_security_context_digest(super::security_context_digest(&authorisation));
+        state.set_reference_loader_fixture(ClientReferenceLoaderFixture {
+            revision: active.pair(),
+            principal: authorisation.session_principal(),
+            security_context_digest: super::security_context_digest(&authorisation),
+            objects,
+        });
+        let expression = orna_artifact::client_plan::ClientExpressionNode::FieldPath {
+            root: parameter,
+            fields: vec![outer_field, inner_field],
+        };
+        let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+        let mut locals = super::ClientLocalEnvironment::new();
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Reference {
+                target: outer_type,
+                object: ObjectId::from_bytes([0x31; 16]),
+            },
+        )
+        .unwrap();
+
+        let value = super::evaluate_expression(
+            &active,
+            &expression,
+            context,
+            super::ObserverLineage::top_level(context.parent_invocation_id()),
+            &[(argument.parameter(), argument.value().clone())],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut state,
+            0,
+            authorisation.session_principal(),
+            &mut executor,
+            &mut locals,
+        )
+        .expect("trusted reference loader resolves nested field paths");
+
+        assert_eq!(value, RuntimeValue::Text("Ada".to_owned()));
+        let direct = super::evaluate_field_path(
+            &active,
+            &RuntimeValue::Record(
+                state
+                    .reference_loader
+                    .as_ref()
+                    .unwrap()
+                    .objects
+                    .get(&(inner_object, ObjectId::from_bytes([0x32; 16])))
+                    .and_then(|value| match value {
+                        RuntimeValue::Record(record) => Some(record.clone()),
+                        _ => None,
+                    })
+                    .unwrap(),
+            ),
+            &[inner_field],
+            context,
+            authorisation.session_principal(),
+            &state,
+        )
+        .expect("direct record field paths retain their existing behaviour");
+        assert_eq!(direct, RuntimeValue::Text("Ada".to_owned()));
+    }
+
+    #[test]
+    fn reference_root_field_path_fails_closed_without_loader_or_object() {
+        let (
+            active,
+            context,
+            parameter,
+            outer_type,
+            _outer_object,
+            _outer_record,
+            _inner_object,
+            _inner_record,
+            outer_field,
+            _inner_field,
+            authorisation,
+        ) = reference_field_path_fixture();
+        let expression = orna_artifact::client_plan::ClientExpressionNode::FieldPath {
+            root: parameter,
+            fields: vec![outer_field],
+        };
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Reference {
+                target: outer_type,
+                object: ObjectId::from_bytes([0x31; 16]),
+            },
+        )
+        .unwrap();
+        let evaluate = |state: &mut ClientStateStore, principal| {
+            let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+            let mut locals = super::ClientLocalEnvironment::new();
+            super::evaluate_expression(
+                &active,
+                &expression,
+                context,
+                super::ObserverLineage::top_level(context.parent_invocation_id()),
+                &[(argument.parameter(), argument.value().clone())],
+                &[],
+                &super::capability::LocalCapabilityGrantSet::new(),
+                state,
+                0,
+                principal,
+                &mut executor,
+                &mut locals,
+            )
+        };
+
+        let mut absent = ClientStateStore::new();
+        assert!(matches!(
+            evaluate(&mut absent, authorisation.session_principal()),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
+        ));
+
+        let mut objects = HashMap::new();
+        objects.insert(
+            (outer_type, ObjectId::from_bytes([0x31; 16])),
+            RuntimeValue::Text("not a record".to_owned()),
+        );
+        let digest = super::security_context_digest(&authorisation);
+        let mut wrong_type = ClientStateStore::new();
+        wrong_type.set_security_context_digest(digest);
+        wrong_type.set_reference_loader_fixture(ClientReferenceLoaderFixture {
+            revision: active.pair(),
+            principal: authorisation.session_principal(),
+            security_context_digest: digest,
+            objects,
+        });
+        assert!(matches!(
+            evaluate(&mut wrong_type, authorisation.session_principal()),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
+        ));
+
+        let mut missing = ClientStateStore::new();
+        missing.set_security_context_digest(digest);
+        missing.set_reference_loader_fixture(ClientReferenceLoaderFixture {
+            revision: active.pair(),
+            principal: authorisation.session_principal(),
+            security_context_digest: digest,
+            objects: HashMap::new(),
+        });
+        assert!(matches!(
+            evaluate(&mut missing, authorisation.session_principal()),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reference_root_loader_isolated_by_principal_revision_and_unknown_field() {
+        let (
+            active,
+            context,
+            parameter,
+            outer_type,
+            outer_object,
+            outer_record,
+            _inner_object,
+            _inner_record,
+            outer_field,
+            _inner_field,
+            authorisation,
+        ) = reference_field_path_fixture();
+        let digest = super::security_context_digest(&authorisation);
+        let mut objects = HashMap::new();
+        objects.insert(
+            (outer_object, ObjectId::from_bytes([0x31; 16])),
+            RuntimeValue::Record(outer_record),
+        );
+        let fixture = ClientReferenceLoaderFixture {
+            revision: active.pair(),
+            principal: authorisation.session_principal(),
+            security_context_digest: digest,
+            objects,
+        };
+        let expression = |field| orna_artifact::client_plan::ClientExpressionNode::FieldPath {
+            root: parameter,
+            fields: vec![field],
+        };
+        let argument = FunctionArgument::new(
+            parameter,
+            RuntimeValue::Reference {
+                target: outer_type,
+                object: ObjectId::from_bytes([0x31; 16]),
+            },
+        )
+        .unwrap();
+        let evaluate = |state: &mut ClientStateStore, principal, field| {
+            let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+            let mut locals = super::ClientLocalEnvironment::new();
+            super::evaluate_expression(
+                &active,
+                &expression(field),
+                context,
+                super::ObserverLineage::top_level(context.parent_invocation_id()),
+                &[(argument.parameter(), argument.value().clone())],
+                &[],
+                &super::capability::LocalCapabilityGrantSet::new(),
+                state,
+                0,
+                principal,
+                &mut executor,
+                &mut locals,
+            )
+        };
+
+        let mut principal_mismatch = ClientStateStore::new();
+        principal_mismatch.set_security_context_digest(digest);
+        principal_mismatch.set_reference_loader_fixture(fixture.clone());
+        assert!(matches!(
+            evaluate(
+                &mut principal_mismatch,
+                PrincipalId::from_bytes([0x7b; 16]),
+                outer_field
+            ),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
+        ));
+
+        let mut revision_mismatch = ClientStateStore::new();
+        revision_mismatch.set_security_context_digest(digest);
+        revision_mismatch.set_reference_loader_fixture(ClientReferenceLoaderFixture {
+            revision: RevisionPair::new(
+                SourceRevisionId::from_bytes([0xf1; 16]),
+                active.pair().catalogue(),
+            ),
+            ..fixture.clone()
+        });
+        assert!(matches!(
+            evaluate(
+                &mut revision_mismatch,
+                authorisation.session_principal(),
+                outer_field
+            ),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
+        ));
+
+        let mut unknown_field = ClientStateStore::new();
+        unknown_field.set_security_context_digest(digest);
+        unknown_field.set_reference_loader_fixture(fixture);
+        assert!(matches!(
+            evaluate(
+                &mut unknown_field,
+                authorisation.session_principal(),
+                FieldId::from_bytes([0xff; 16])
+            ),
+            Err(super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            })
         ));
     }
 
@@ -18132,6 +20372,36 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         orna_compiler::prepare_standard_application(&report, active.pair(), &active).unwrap()
     }
 
+    fn prepared_client_call_chain_with_state_root(
+        call_edges: usize,
+    ) -> (DeployableRevision, FunctionId) {
+        assert!(call_edges > 0);
+
+        let mut source = String::from("CREATE SCHEMA app; ");
+        source.push_str(
+            "CREATE CLIENT FUNCTION app.f0() RETURNS BOOLEAN IS STATE value BOOLEAN DEFAULT TRUE; BEGIN RETURN app.f1(); END; ",
+        );
+        for index in 1..call_edges {
+            source.push_str(&format!(
+                "CREATE CLIENT FUNCTION app.f{index}() RETURNS BOOLEAN RETURN app.f{}(); ",
+                index + 1
+            ));
+        }
+        source.push_str(&format!(
+            "CREATE CLIENT FUNCTION app.f{call_edges}() RETURNS BOOLEAN RETURN TRUE;"
+        ));
+
+        let prepared = prepared_client_source_v6(&source);
+        let function = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .find(|candidate| candidate.name().to_string() == "app.f0")
+            .expect("the root CLIENT function is present")
+            .id();
+        (prepared, function)
+    }
+
     fn prepared_client_functions() -> DeployableRevision {
         let snapshot = orna_standard::retained_standard_library_snapshot().unwrap();
         let verified = orna_standard::verify_standard_library_snapshot(snapshot).unwrap();
@@ -19002,6 +21272,177 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         )
         .unwrap();
         (active, function_id, pair, function_revision_id)
+    }
+
+    fn version_two_server_record_stream_active() -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+        TypeId,
+        TypeId,
+    ) {
+        const RECORD_TYPE: TypeId = TypeId::from_bytes([0x91; 16]);
+        const OTHER_RECORD_TYPE: TypeId = TypeId::from_bytes([0x92; 16]);
+        const FIELD_ID: FieldId = FieldId::from_bytes([0x93; 16]);
+        const OTHER_FIELD_ID: FieldId = FieldId::from_bytes([0x94; 16]);
+
+        let (initial, function_id, pair, function_revision_id) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            1,
+            b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
+        );
+        let prior_function = initial.catalogue().function_by_id(function_id).unwrap();
+        let function = FunctionDefinition::new(
+            function_id,
+            prior_function.name().clone(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Stream(ResolvedType::Named(RECORD_TYPE)),
+            function_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+        let record = RecordValueTypeDefinition::new(
+            RECORD_TYPE,
+            QualifiedSemanticName::new(["app", "event"]).unwrap(),
+            vec![
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FIELD_ID,
+                    "title",
+                    0,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap(),
+            ],
+        );
+        let other_record = RecordValueTypeDefinition::new(
+            OTHER_RECORD_TYPE,
+            QualifiedSemanticName::new(["app", "other_event"]).unwrap(),
+            vec![
+                RecordValueFieldDefinition::try_new_descriptor(
+                    OTHER_FIELD_ID,
+                    "title",
+                    0,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap(),
+            ],
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+            initial.catalogue().revision(),
+            initial.catalogue().schemas().to_vec(),
+            initial.catalogue().object_types().to_vec(),
+            initial.catalogue().value_types().to_vec(),
+            initial.catalogue().enum_types().to_vec(),
+            vec![record, other_record],
+            initial.catalogue().type_bindings().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+
+        let prior_revision = &initial.function_revisions()[0];
+        let target_origin = prior_revision.declaration_origin();
+        let reference = DefinitionReference::new(
+            function_id,
+            function_revision_id,
+            0,
+            DefinitionReferenceTarget::ValueType(RECORD_TYPE),
+            DefinitionReferenceKind::NamedType,
+            target_origin,
+        );
+        let payload = vec![0x53];
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            1,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            initial.expressions(),
+            std::slice::from_ref(&reference),
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function_id,
+            function_revision_id,
+            prior_revision.revision_number(),
+            target_origin,
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let mut origins = initial.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(RECORD_TYPE),
+            target_origin,
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Field {
+                owner: RECORD_TYPE,
+                field: FIELD_ID,
+            },
+            target_origin,
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(OTHER_RECORD_TYPE),
+            target_origin,
+        ));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Field {
+                owner: OTHER_RECORD_TYPE,
+                field: OTHER_FIELD_ID,
+            },
+            target_origin,
+        ));
+        let context = initial.catalogue_hash_context().clone();
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            initial.expressions(),
+            &origins,
+            std::slice::from_ref(&reference),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                initial.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    initial.expressions().to_vec(),
+                    vec![revision],
+                    origins,
+                    vec![reference],
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+
+        (
+            active,
+            function_id,
+            pair,
+            function_revision_id,
+            RECORD_TYPE,
+            OTHER_RECORD_TYPE,
+        )
     }
 
     fn version_four_state_active(
@@ -21199,6 +23640,55 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     }
 
     #[test]
+    fn nested_action_stream_values_then_terminal_releases_child() {
+        let (active, function, pair, _) = version_two_server_stream_active();
+        let key = ClientResourceKey::new(
+            InvocationTarget::new(function, pair),
+            PrincipalId::from_bytes([0x7e; 16]),
+            ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap(),
+            Sha256Digest::from_bytes([0xca; 32]),
+        );
+        let mut resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let request = resource.begin_stream_request(&active, vec![]).unwrap();
+        let mut wrong_resource =
+            ClientResource::new_stream(key, ResolvedType::Value(orna_standard::BOOLEAN_TYPE_ID));
+        let wrong_request = wrong_resource
+            .begin_stream_request(&active, vec![])
+            .unwrap();
+        assert_ne!(request.request_id(), wrong_request.request_id());
+
+        let mut executor = StreamThenTerminalExecutor {
+            calls: 0,
+            stale: Some(wrong_request),
+        };
+        let mut nested = super::ClientActionNestedExecutor {
+            inner: &mut executor,
+            pending_request: None,
+        };
+
+        assert_eq!(
+            nested.execute(request.clone()),
+            request
+                .clone()
+                .stream_values(vec![RuntimeValue::Boolean(true)]),
+        );
+        assert!(nested.release_failed());
+
+        assert_eq!(
+            nested.execute(request.clone()),
+            request.clone().stream_completed(),
+        );
+        assert!(!nested.release_failed());
+
+        assert_eq!(nested.execute(request.clone()), request.clone().pending());
+        assert_eq!(
+            nested.pending_request_identity(),
+            Some((request.request_id(), request.key(), request.generation())),
+        );
+    }
+
+    #[test]
     fn nested_executor_rejects_mismatched_completion_identity() {
         let (active, function, pair, _) = version_one_active(true);
         let digest = ClientResourceKey::canonical_arguments_digest(&active, &[]).unwrap();
@@ -21748,6 +24238,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 active.catalogue_hash(),
                 state.context().data_invalidation_token(),
                 super::security_context_digest(&auth),
+                state.context(),
+                state.user_state_epoch(),
             ),
         );
         state
@@ -22775,8 +25267,9 @@ mod runtime_conformance {
     use orna_core::value::MAX_RUNTIME_VALUE_NODES;
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
+        error::Error,
         ffi::{c_char, c_void},
-        ptr, slice,
+        fmt, ptr, slice,
         sync::{
             Arc, Condvar, LazyLock, Mutex, MutexGuard, TryLockError,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -25228,6 +27721,15 @@ mod runtime_conformance {
             if kind.is_empty() {
                 return status(StatusCode::InvalidArgument, b"empty surface kind");
             }
+            if options.opaque_runtime_restore_state.len > 0 {
+                return status(
+                    StatusCode::Unsupported,
+                    b"opaque runtime restore state is unsupported",
+                );
+            }
+            if !Self::valid_bytes_view(options.opaque_runtime_restore_state) {
+                return status(StatusCode::InvalidArgument, b"invalid restore state");
+            }
             let handle = self.next_handle();
             self.known_surfaces.insert(handle);
             self.surfaces.insert(
@@ -25884,6 +28386,9 @@ mod runtime_conformance {
             if let Err(error) = self.operational() {
                 return error;
             }
+            if visible > 1 {
+                return status(StatusCode::InvalidArgument, b"invalid visibility");
+            }
             if let Err(error) = self.check_surface(handle) {
                 return error;
             }
@@ -26500,6 +29005,14 @@ mod runtime_conformance {
         }
 
         fn start_model_request(&self, surface: SurfaceHandle) -> (ModelHandle, RequestHandle) {
+            self.start_model_request_result(surface)
+                .expect("fixture callback should accept model request")
+        }
+
+        fn start_model_request_result(
+            &self,
+            surface: SurfaceHandle,
+        ) -> Result<(ModelHandle, RequestHandle), StatusCode> {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
             let mut guard = guard;
             let state = guard
@@ -26508,7 +29021,7 @@ mod runtime_conformance {
                 .expect("fixture runtime should exist");
             state
                 .start_model_request(surface)
-                .expect("fixture callback should accept model request")
+                .map_err(|error| error.code)
         }
         fn queue_event(&self, event: RuntimeEvent) -> StatusCode {
             let mut guard = global().lock().unwrap_or_else(|error| error.into_inner());
@@ -26627,30 +29140,129 @@ mod runtime_conformance {
         }
     }
 
+    /// Stable status-level classification exposed by the test-only headless
+    /// fixture. The ABI status remains the machine-readable value; this kind
+    /// keeps callers from having to infer the outcome from diagnostic text.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HeadlessFixtureErrorKind {
+        Validation,
+        Unsupported,
+        Lifecycle,
+        Cancellation,
+        Internal,
+        StaleRevision,
+    }
+
+    /// Compatibility alias for callers that use class terminology.
+    pub type HeadlessFixtureErrorClass = HeadlessFixtureErrorKind;
+
+    /// A structured error returned by the test-only headless fixture helpers.
+    ///
+    /// Display retains the existing stable diagnostic text so existing
+    /// diagnostics remain useful, while callers can inspect status_code,
+    /// kind, and classification without parsing that text.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct HeadlessFixtureError {
+        status: StatusCode,
+        kind: HeadlessFixtureErrorKind,
+        message: String,
+    }
+
+    impl HeadlessFixtureError {
+        fn new(status: StatusCode) -> Self {
+            let kind = match status {
+                StatusCode::InvalidArgument => HeadlessFixtureErrorKind::Validation,
+                StatusCode::Unsupported => HeadlessFixtureErrorKind::Unsupported,
+                StatusCode::NotFound | StatusCode::Busy | StatusCode::Failed => {
+                    HeadlessFixtureErrorKind::Lifecycle
+                }
+                StatusCode::Cancelled => HeadlessFixtureErrorKind::Cancellation,
+                StatusCode::Internal => HeadlessFixtureErrorKind::Internal,
+                StatusCode::StaleRevision => HeadlessFixtureErrorKind::StaleRevision,
+                _ => HeadlessFixtureErrorKind::Internal,
+            };
+            Self {
+                status,
+                kind,
+                message: String::from_utf8_lossy(status_message(status)).into_owned(),
+            }
+        }
+
+        /// Returns the stable ABI status code.
+        pub const fn status_code(&self) -> StatusCode {
+            self.status
+        }
+
+        /// Alias for status_code used by status-oriented fixture callers.
+        pub const fn code(&self) -> StatusCode {
+            self.status
+        }
+
+        /// Alias for status_code used by callers that name the field status.
+        pub const fn status(&self) -> StatusCode {
+            self.status
+        }
+
+        /// Returns the stable fixture error classification.
+        pub const fn kind(&self) -> HeadlessFixtureErrorKind {
+            self.kind
+        }
+
+        /// Returns the accepted conformance-level error classification.
+        pub const fn classification(&self) -> HeadlessFixtureErrorKind {
+            self.kind
+        }
+
+        /// Alias for classification for callers that use class terminology.
+        pub const fn class(&self) -> HeadlessFixtureErrorKind {
+            self.kind
+        }
+
+        /// Alias for classification using explicit error terminology.
+        pub const fn error_class(&self) -> HeadlessFixtureErrorKind {
+            self.kind
+        }
+
+        /// Returns the stable diagnostic text retained for human diagnostics.
+        pub fn message(&self) -> &str {
+            &self.message
+        }
+    }
+
+    impl fmt::Display for HeadlessFixtureError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.message)
+        }
+    }
+
+    impl Error for HeadlessFixtureError {}
+
     struct HeadlessFixtureState {
         surface: Option<SurfaceHandle>,
         node: Option<NodeHandle>,
         revision: u64,
+        terminal: bool,
     }
 
-    struct HeadlessFixtureSession {
+    pub struct HeadlessFixtureSession {
         fixture: FixtureSession,
         state: Mutex<HeadlessFixtureState>,
     }
 
     impl HeadlessFixtureSession {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 fixture: FixtureSession::new(),
                 state: Mutex::new(HeadlessFixtureState {
                     surface: None,
                     node: None,
                     revision: 0,
+                    terminal: false,
                 }),
             }
         }
 
-        fn create_surface(&self) -> Result<u64, String> {
+        pub fn create_surface(&self) -> Result<u64, HeadlessFixtureError> {
             let surface = self
                 .fixture
                 .create_surface_result(b"Headless fixture")
@@ -26662,7 +29274,7 @@ mod runtime_conformance {
             Ok(surface)
         }
 
-        fn apply_ui_payload(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        pub fn apply_ui_payload(&self, payload: &[u8]) -> Result<Vec<u8>, HeadlessFixtureError> {
             if !valid_canonical_frame(payload) {
                 return Err(status_error(StatusCode::InvalidArgument));
             }
@@ -26700,10 +29312,13 @@ mod runtime_conformance {
             }
             state.node = Some(node);
             state.revision = revision;
+            self.capture(surface)
+        }
+        pub fn capture(&self, surface: u64) -> Result<Vec<u8>, HeadlessFixtureError> {
             self.fixture.capture_result(surface).map_err(status_error)
         }
 
-        fn destroy_surface(&self, surface: u64) -> Result<(), String> {
+        pub fn destroy_surface(&self, surface: u64) -> Result<(), HeadlessFixtureError> {
             let result = self.fixture.destroy_surface(surface);
             if result != StatusCode::Ok {
                 return Err(status_error(result));
@@ -26717,8 +29332,32 @@ mod runtime_conformance {
             Ok(())
         }
 
-        fn shutdown(&self) -> Result<(), String> {
+        pub fn shutdown(&self) -> Result<(), HeadlessFixtureError> {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.terminal {
+                return Err(status_error(StatusCode::Failed));
+            }
             let result = self.fixture.shutdown();
+            if result == StatusCode::Ok {
+                state.terminal = true;
+                Ok(())
+            } else {
+                Err(status_error(result))
+            }
+        }
+
+        fn start_model_request(&self) -> Result<(u64, u64), HeadlessFixtureError> {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(surface) = state.surface else {
+                return Err(status_error(StatusCode::NotFound));
+            };
+            self.fixture
+                .start_model_request_result(surface)
+                .map_err(status_error)
+        }
+
+        fn complete_model_request(&self, request: u64) -> Result<(), HeadlessFixtureError> {
+            let result = self.fixture.apply_model_rows(request);
             if result == StatusCode::Ok {
                 Ok(())
             } else {
@@ -26726,7 +29365,16 @@ mod runtime_conformance {
             }
         }
 
-        fn is_terminal(&self) -> bool {
+        fn cancel_model_request(&self, request: u64) -> Result<(), HeadlessFixtureError> {
+            let result = self.fixture.cancel_request(request);
+            if result == StatusCode::Ok {
+                Ok(())
+            } else {
+                Err(status_error(result))
+            }
+        }
+
+        pub fn is_terminal(&self) -> bool {
             let guard = global().lock().unwrap_or_else(|error| error.into_inner());
             guard
                 .runtime
@@ -26734,7 +29382,7 @@ mod runtime_conformance {
                 .is_some_and(|runtime| runtime.terminal)
         }
 
-        fn last_callback_is_terminal(&self) -> bool {
+        pub fn last_callback_is_terminal(&self) -> bool {
             self.fixture
                 .callback_log()
                 .sequence
@@ -26743,8 +29391,8 @@ mod runtime_conformance {
         }
     }
 
-    fn status_error(code: StatusCode) -> String {
-        String::from_utf8_lossy(status_message(code)).into_owned()
+    fn status_error(code: StatusCode) -> HeadlessFixtureError {
+        HeadlessFixtureError::new(code)
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26853,6 +29501,109 @@ mod runtime_conformance {
         }
     }
 
+    fn unsupported_operation(kind: UiOperationKind) -> UiOperation {
+        UiOperation {
+            kind,
+            as_: UiOperationArgs { unmount_node: 0 },
+        }
+    }
+
+    fn assert_unsupported_operation_preserves_surface_state(
+        kind: UiOperationKind,
+        title: &'static [u8],
+    ) {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(title);
+        let node_alias = next_unreserved_alias_handle();
+        let action_alias = next_unreserved_alias_handle();
+        assert_eq!(
+            session.apply(surface, &batch(1, &[mount(node_alias, 0, view(b"root"))])),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            session.apply(
+                surface,
+                &batch(
+                    2,
+                    &[bind_action(
+                        node_alias,
+                        view(b"activate"),
+                        action_alias,
+                        view(b"bool"),
+                    )],
+                ),
+            ),
+            StatusCode::Ok
+        );
+        let before_capture = session.capture(surface);
+        let before_state = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let runtime = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            let surface_state = runtime
+                .surfaces
+                .get(&surface)
+                .expect("surface should be live");
+            (
+                surface_state.revision,
+                surface_state.node_aliases.clone(),
+                surface_state.action_aliases.clone(),
+                surface_state.owned_handles.clone(),
+                runtime.node_tokens.clone(),
+                runtime.action_tokens.clone(),
+                runtime.known_handles.clone(),
+                runtime.retired_handles.clone(),
+                runtime.allocated_nodes.clone(),
+                runtime.allocated_actions.clone(),
+            )
+        };
+        let before_reservations = HANDLE_RESERVATIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let mixed_operations = [
+            set_property(node_alias, view(b"status")),
+            unsupported_operation(kind),
+        ];
+        assert_eq!(
+            session.apply(surface, &batch(3, &mixed_operations)),
+            StatusCode::Unsupported
+        );
+        assert_eq!(session.capture(surface), before_capture);
+        let after_state = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let runtime = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            let surface_state = runtime
+                .surfaces
+                .get(&surface)
+                .expect("surface should be live");
+            (
+                surface_state.revision,
+                surface_state.node_aliases.clone(),
+                surface_state.action_aliases.clone(),
+                surface_state.owned_handles.clone(),
+                runtime.node_tokens.clone(),
+                runtime.action_tokens.clone(),
+                runtime.known_handles.clone(),
+                runtime.retired_handles.clone(),
+                runtime.allocated_nodes.clone(),
+                runtime.allocated_actions.clone(),
+            )
+        };
+        assert_eq!(after_state, before_state);
+        assert_eq!(
+            *HANDLE_RESERVATIONS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            before_reservations
+        );
+    }
+
     fn batch(revision: u64, operations: &[UiOperation]) -> UiBatch {
         UiBatch {
             semantic_revision: revision,
@@ -26893,6 +29644,128 @@ mod runtime_conformance {
             StatusCode::Ok
         );
     }
+
+    #[test]
+    fn unsupported_restore_state_is_rejected_before_surface_or_handle_mutation() {
+        let session = FixtureSession::new();
+        let existing = session.create_surface(b"Existing surface");
+        let before_capture = session.capture(existing);
+        let before_handles = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let state = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            (
+                state.surfaces.len(),
+                state.known_handles.clone(),
+                state.retired_handles.clone(),
+            )
+        };
+        let restore = b"opaque restore bytes";
+        let options = SurfaceCreateOptions {
+            surface_kind: view(b"window"),
+            title: view(b"Unsupported restore"),
+            state_profile: view(b"local"),
+            opaque_runtime_restore_state: BytesView {
+                data: restore.as_ptr(),
+                len: restore.len(),
+            },
+        };
+        let sentinel = 0xdead_beef_u64;
+        let mut output = sentinel;
+        assert_eq!(
+            unsafe { (FIXTURE_API.create_surface)(session.runtime, &options, &mut output) }.code,
+            StatusCode::Unsupported
+        );
+        assert_eq!(output, sentinel);
+        let after_handles = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let state = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            (
+                state.surfaces.len(),
+                state.known_handles.clone(),
+                state.retired_handles.clone(),
+            )
+        };
+        assert_eq!(after_handles, before_handles);
+        assert_eq!(session.capture(existing), before_capture);
+    }
+
+    #[test]
+    fn invalid_surface_visibility_is_rejected_without_mutation() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Visibility");
+        let before_capture = session.capture(surface);
+        let before_state = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let state = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            let surface_state = state
+                .surfaces
+                .get(&surface)
+                .expect("surface should be live");
+            (
+                surface_state.visible,
+                state.known_handles.clone(),
+                state.retired_handles.clone(),
+            )
+        };
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 2) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(session.capture(surface), before_capture);
+        let after_state = {
+            let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+            let state = guard
+                .runtime
+                .as_ref()
+                .expect("fixture runtime should exist");
+            let surface_state = state
+                .surfaces
+                .get(&surface)
+                .expect("surface should be live");
+            (
+                surface_state.visible,
+                state.known_handles.clone(),
+                state.retired_handles.clone(),
+            )
+        };
+        assert_eq!(after_state, before_state);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 1) }.code,
+            StatusCode::Ok
+        );
+    }
+
+    #[test]
+    fn stale_visibility_preserves_not_found_and_terminal_status() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Stale visibility");
+        assert_eq!(session.destroy_surface(surface), StatusCode::Ok);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 2) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 1) }.code,
+            StatusCode::NotFound
+        );
+
+        let terminal_surface = session.create_surface(b"Terminal visibility");
+        assert_eq!(session.shutdown(), StatusCode::Ok);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, terminal_surface, 1) }.code,
+            StatusCode::Failed
+        );
+    }
+
     #[test]
     fn direct_destroy_before_shutdown_keeps_fixture_runtime_registered() {
         let session = FixtureSession::new();
@@ -27723,6 +30596,23 @@ mod runtime_conformance {
         assert_eq!(session.capture(surface), after_second);
     }
     #[test]
+    fn unsupported_set_focus_in_mixed_batch_preserves_revision_capture_aliases_and_reservations() {
+        assert_unsupported_operation_preserves_surface_state(
+            UiOperationKind::SetFocus,
+            b"Unsupported focus",
+        );
+    }
+
+    #[test]
+    fn unsupported_set_accessibility_in_mixed_batch_preserves_revision_capture_aliases_and_reservations()
+     {
+        assert_unsupported_operation_preserves_surface_state(
+            UiOperationKind::SetAccessibility,
+            b"Unsupported accessibility",
+        );
+    }
+
+    #[test]
     fn canonical_capture_escapes_json_control_characters() {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"JSON escaping");
@@ -27830,9 +30720,26 @@ mod runtime_conformance {
         let surface = session
             .create_surface()
             .expect("headless fixture surface should be created");
-        assert!(
-            session.apply_ui_payload(b"not an ORNA-UI frame").is_err(),
-            "headless fixture must reject invalid UI frames"
+        let before_invalid_ui = session
+            .capture(surface)
+            .expect("empty surface capture should succeed");
+        let invalid_ui = session
+            .apply_ui_payload(b"not an ORNA-UI frame")
+            .expect_err("headless fixture must reject invalid UI frames");
+        assert_eq!(invalid_ui.status_code(), StatusCode::InvalidArgument);
+        assert_eq!(invalid_ui.code(), StatusCode::InvalidArgument);
+        assert_eq!(invalid_ui.kind(), HeadlessFixtureErrorKind::Validation);
+        assert_eq!(
+            invalid_ui.classification(),
+            HeadlessFixtureErrorKind::Validation
+        );
+        assert_eq!(invalid_ui.to_string(), invalid_ui.message());
+        assert!(invalid_ui.to_string().contains("ORNA-E100"));
+        assert_eq!(
+            session
+                .capture(surface)
+                .expect("invalid UI must not mutate the surface"),
+            before_invalid_ui
         );
 
         let frame_for = |body: &[u8]| {
@@ -27881,6 +30788,104 @@ mod runtime_conformance {
             .expect("headless fixture should shut down");
         assert!(session.is_terminal());
         assert!(session.last_callback_is_terminal());
+    }
+
+    #[test]
+    fn headless_fixture_stale_handles_are_structured_and_non_mutating() {
+        let session = HeadlessFixtureSession::new();
+        let surface = session
+            .create_surface()
+            .expect("headless fixture surface should be created");
+        let before = session
+            .capture(surface)
+            .expect("live surface capture should succeed");
+        let foreign = next_unreserved_alias_handle();
+        let foreign_error = session
+            .capture(foreign)
+            .expect_err("foreign handles must be rejected");
+        assert_eq!(foreign_error.status_code(), StatusCode::InvalidArgument);
+        assert_eq!(
+            foreign_error.classification(),
+            HeadlessFixtureErrorKind::Validation
+        );
+        assert_eq!(
+            session.capture(surface).expect("surface remains live"),
+            before
+        );
+
+        session
+            .destroy_surface(surface)
+            .expect("headless fixture surface should be destroyed");
+        let stale_capture = session
+            .capture(surface)
+            .expect_err("destroyed handles must be rejected");
+        assert_eq!(stale_capture.status_code(), StatusCode::NotFound);
+        assert_eq!(stale_capture.kind(), HeadlessFixtureErrorKind::Lifecycle);
+        assert_eq!(
+            stale_capture.classification(),
+            HeadlessFixtureErrorKind::Lifecycle
+        );
+        let stale_destroy = session
+            .destroy_surface(surface)
+            .expect_err("destroyed surface cannot be destroyed twice");
+        assert_eq!(stale_destroy.status_code(), StatusCode::NotFound);
+        assert_eq!(
+            stale_destroy.classification(),
+            HeadlessFixtureErrorKind::Lifecycle
+        );
+        session
+            .shutdown()
+            .expect("headless fixture should shut down");
+    }
+
+    #[test]
+    fn headless_fixture_model_cancellation_rejects_late_completion_structurally() {
+        let session = HeadlessFixtureSession::new();
+        session
+            .create_surface()
+            .expect("headless fixture surface should be created");
+        let (_, request) = session
+            .start_model_request()
+            .expect("model request should be accepted");
+        let surface = session
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .surface
+            .expect("surface remains live before cancellation");
+        let before_late_completion = session
+            .capture(surface)
+            .expect("capture before late completion should succeed");
+        session
+            .cancel_model_request(request)
+            .expect("model request cancellation should succeed");
+        let after_cancel = session.fixture.callback_log();
+        let late_completion = session
+            .complete_model_request(request)
+            .expect_err("late completion must report cancellation");
+        assert_eq!(late_completion.status_code(), StatusCode::Cancelled);
+        assert_eq!(
+            late_completion.kind(),
+            HeadlessFixtureErrorKind::Cancellation
+        );
+        assert_eq!(
+            late_completion.classification(),
+            HeadlessFixtureErrorKind::Cancellation
+        );
+        assert_eq!(late_completion.to_string(), late_completion.message());
+        assert_eq!(
+            session
+                .capture(surface)
+                .expect("late completion is non-mutating"),
+            before_late_completion
+        );
+        assert_eq!(session.fixture.callback_log(), after_cancel);
+        session
+            .destroy_surface(surface)
+            .expect("surface should be destroyable after cancellation");
+        session
+            .shutdown()
+            .expect("headless fixture should shut down");
     }
 
     #[test]
@@ -28480,6 +31485,232 @@ mod runtime_conformance {
     }
 
     #[test]
+    fn prior_runtime_handles_are_rejected_by_a_replacement_runtime_without_side_effects() {
+        let first = FixtureSession::new();
+        let old_runtime = first.runtime;
+        let old_surface = first.create_surface(b"Prior runtime");
+        let node_alias = next_unreserved_alias_handle();
+        let action_alias = next_unreserved_alias_handle();
+        let operations = [
+            mount(node_alias, 0, view(b"root")),
+            bind_action(
+                node_alias,
+                view(b"submit"),
+                action_alias,
+                view(b"std.json.Value"),
+            ),
+        ];
+        assert_eq!(
+            first.apply(old_surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
+        let (old_node, old_action) = first.node_and_action(old_surface);
+        let (old_model, old_request) = first.start_model_request(old_surface);
+        assert_eq!(first.poll(), StatusCode::Ok);
+        assert_eq!(first.shutdown(), StatusCode::Ok);
+        unsafe { (FIXTURE_API.destroy)(old_runtime) };
+        drop(first);
+
+        let second = FixtureSession::new();
+        assert_ne!(old_runtime, second.runtime);
+        let replacement_surface = second.create_surface(b"Replacement runtime");
+        let before_state = second.capture(replacement_surface);
+        let before_log = second.callback_log();
+        let context = (&*second.client as *const ClientContext).cast_mut().cast();
+
+        let foreign_action_event = RuntimeEvent {
+            kind: EventKind::Action,
+            as_: RuntimeEventArgs {
+                action: ActionEvent {
+                    surface: old_surface,
+                    node: old_node,
+                    action: old_action,
+                    payload: empty_value(),
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, old_runtime, &foreign_action_event) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, second.runtime, &foreign_action_event) }
+                .code,
+            StatusCode::InvalidArgument
+        );
+
+        let foreign_focus_event = RuntimeEvent {
+            kind: EventKind::FocusChanged,
+            as_: RuntimeEventArgs {
+                action: ActionEvent {
+                    surface: old_surface,
+                    node: old_node,
+                    action: 0,
+                    payload: empty_value(),
+                },
+            },
+        };
+        let foreign_layout_event = RuntimeEvent {
+            kind: EventKind::LayoutStateChanged,
+            as_: RuntimeEventArgs {
+                layout_state: LayoutStateEvent {
+                    surface: old_surface,
+                    node: old_node,
+                    semantic_state_name: view(b"fixture"),
+                    semantic_state: empty_value(),
+                    opaque_runtime_state: BytesView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                },
+            },
+        };
+        let foreign_surface_closed_event = RuntimeEvent {
+            kind: EventKind::SurfaceClosed,
+            as_: RuntimeEventArgs {
+                surface_closed: SurfaceClosedEvent {
+                    surface: old_surface,
+                },
+            },
+        };
+        let foreign_range_event = RuntimeEvent {
+            kind: EventKind::ModelRangeRequest,
+            as_: RuntimeEventArgs {
+                range_request: ModelRangeRequest {
+                    request: old_request,
+                    model: old_model,
+                    start: 0,
+                    count: 1,
+                    sort_filter_token: view(b"fixture"),
+                },
+            },
+        };
+        let foreign_children_event = RuntimeEvent {
+            kind: EventKind::ModelChildrenRequest,
+            as_: RuntimeEventArgs {
+                children_request: ModelChildrenRequest {
+                    request: old_request,
+                    model: old_model,
+                    parent_key: empty_value(),
+                },
+            },
+        };
+        for event in [
+            &foreign_focus_event,
+            &foreign_layout_event,
+            &foreign_surface_closed_event,
+            &foreign_range_event,
+            &foreign_children_event,
+        ] {
+            assert_eq!(
+                unsafe { client_emit_runtime_event(context, second.runtime, event) }.code,
+                StatusCode::InvalidArgument
+            );
+        }
+
+        let mut metadata = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe { client_read_action_metadata(context, old_action, &mut metadata) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert!(metadata.data.is_null());
+        assert_eq!(metadata.len, 0);
+
+        let mut opaque_state = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe {
+                (FIXTURE_API.capture_opaque_state)(second.runtime, old_surface, &mut opaque_state)
+            }
+            .code,
+            StatusCode::InvalidArgument
+        );
+        assert!(opaque_state.data.is_null());
+        assert_eq!(opaque_state.len, 0);
+
+        assert_eq!(
+            unsafe { (FIXTURE_API.destroy_surface)(second.runtime, old_surface) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                (FIXTURE_API.apply_ui_batch)(second.runtime, old_surface, &batch(1, &operations))
+            }
+            .code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(second.runtime, old_surface, 1) }.code,
+            StatusCode::InvalidArgument
+        );
+        let mut semantic_state = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe {
+                (FIXTURE_API.capture_semantic_state)(
+                    second.runtime,
+                    old_surface,
+                    &mut semantic_state,
+                )
+            }
+            .code,
+            StatusCode::InvalidArgument
+        );
+        assert!(semantic_state.data.is_null());
+        assert_eq!(semantic_state.len, 0);
+
+        assert_eq!(
+            unsafe { client_complete_model_request(context, old_request, empty_value()) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe {
+                client_fail_model_request(
+                    context,
+                    old_request,
+                    status(StatusCode::Failed, b"foreign request"),
+                )
+            }
+            .code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.apply_model_rows)(second.runtime, old_request, empty_value()) }
+                .code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.cancel_request)(second.runtime, old_request) }.code,
+            StatusCode::InvalidArgument
+        );
+        assert_eq!(second.callback_log(), before_log);
+        assert_eq!(
+            second.capture_result(replacement_surface),
+            Ok(before_state.clone())
+        );
+        assert_eq!(second.poll(), StatusCode::Ok);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(second.runtime, replacement_surface, 1) }
+                .code,
+            StatusCode::Ok
+        );
+        assert_eq!(second.capture_result(replacement_surface), Ok(before_state));
+    }
+
+    #[test]
     fn cancellation_wins_late_completion_and_shutdown_is_terminal() {
         let session = FixtureSession::new();
         let surface = session.create_surface(b"Shutdown");
@@ -28538,6 +31769,209 @@ mod runtime_conformance {
         assert_eq!(session.callback_log().sequence, sequence);
         assert_eq!(session.emit_diagnostic(), StatusCode::Failed);
         assert_eq!(session.callback_log().events, log.events);
+    }
+
+    #[test]
+    fn headless_terminal_shutdown_rejects_new_work_without_callbacks() {
+        let session = HeadlessFixtureSession::new();
+        session
+            .create_surface()
+            .expect("headless fixture surface should be created");
+        session
+            .shutdown()
+            .expect("headless fixture shutdown should reach terminal state");
+        assert!(session.is_terminal());
+        assert!(session.last_callback_is_terminal());
+
+        let after_shutdown = session.fixture.callback_log();
+        let shutdown_error = session
+            .shutdown()
+            .expect_err("terminal fixture must reject repeated shutdown");
+        assert_eq!(shutdown_error.status_code(), StatusCode::Failed);
+        assert_eq!(shutdown_error.kind(), HeadlessFixtureErrorKind::Lifecycle);
+        assert_eq!(session.fixture.callback_log(), after_shutdown);
+        let create_error = session
+            .create_surface()
+            .expect_err("terminal fixture must reject new surfaces");
+        assert_eq!(create_error.status_code(), StatusCode::Failed);
+        assert_eq!(create_error.kind(), HeadlessFixtureErrorKind::Lifecycle);
+        assert_eq!(
+            create_error.classification(),
+            HeadlessFixtureErrorKind::Lifecycle
+        );
+        let request_error = session
+            .start_model_request()
+            .expect_err("terminal fixture must reject new model requests");
+        assert_eq!(request_error.status_code(), StatusCode::Failed);
+        assert_eq!(
+            request_error.classification(),
+            HeadlessFixtureErrorKind::Lifecycle
+        );
+        assert_eq!(session.fixture.callback_log(), after_shutdown);
+    }
+
+    #[test]
+    fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_callbacks() {
+        let session = FixtureSession::new();
+        let surface = session.create_surface(b"Live handle shutdown");
+        let node_alias = next_unreserved_alias_handle();
+        let action_alias = next_unreserved_alias_handle();
+        let operations = [
+            mount(node_alias, 0, view(b"root")),
+            bind_action(
+                node_alias,
+                view(b"submit"),
+                action_alias,
+                view(b"std.json.Value"),
+            ),
+        ];
+        assert_eq!(
+            session.apply(surface, &batch(1, &operations)),
+            StatusCode::Ok
+        );
+        let (node, action) = session.node_and_action(surface);
+        let (model, request) = session.start_model_request(surface);
+
+        assert_eq!(session.shutdown(), StatusCode::Ok);
+        let terminal = session.callback_log();
+        assert_eq!(
+            terminal
+                .failures
+                .iter()
+                .filter(|(id, code)| *id == request && *code == StatusCode::Cancelled)
+                .count(),
+            1,
+            "shutdown must cancel the pending request exactly once"
+        );
+        assert_eq!(
+            terminal
+                .events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::SurfaceClosed && event.surface == surface
+                })
+                .count(),
+            1,
+            "shutdown must emit one terminal close event"
+        );
+        assert!(terminal.terminal);
+        assert_eq!(terminal.sequence.len(), 4);
+        assert!(matches!(
+            terminal.sequence[0].kind.clone(),
+            CallbackKind::Event(EventRecord {
+                kind: EventKind::ModelRangeRequest,
+                surface: event_surface,
+                request: event_request,
+            }) if event_surface == surface && event_request == request
+        ));
+        assert_eq!(
+            terminal.sequence[1].kind,
+            CallbackKind::Failure(request, StatusCode::Cancelled)
+        );
+        assert!(matches!(
+            terminal.sequence[2].kind.clone(),
+            CallbackKind::Event(EventRecord {
+                kind: EventKind::SurfaceClosed,
+                surface: event_surface,
+                request: 0,
+            }) if event_surface == surface
+        ));
+        assert_eq!(
+            terminal.sequence.last().map(|record| &record.kind),
+            Some(&CallbackKind::Terminal)
+        );
+        assert!(
+            terminal
+                .sequence
+                .last()
+                .is_some_and(|record| record.terminal)
+        );
+        assert!(
+            terminal
+                .sequence
+                .iter()
+                .take(terminal.sequence.len().saturating_sub(1))
+                .all(|record| !record.terminal)
+        );
+
+        let context = (&*session.client as *const ClientContext).cast_mut().cast();
+        let before_stale_handles = terminal.clone();
+
+        // Surface operations are terminal once shutdown has drained the live surface.
+        assert_eq!(session.capture_result(surface), Err(StatusCode::Failed));
+        assert_eq!(session.destroy_surface(surface), StatusCode::Failed);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 1) }.code,
+            StatusCode::Failed
+        );
+
+        // Node and action handles are retired with their containing surface.
+        let stale_action_event = RuntimeEvent {
+            kind: EventKind::Action,
+            as_: RuntimeEventArgs {
+                action: ActionEvent {
+                    surface,
+                    node,
+                    action,
+                    payload: empty_value(),
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, session.runtime, &stale_action_event) }
+                .code,
+            StatusCode::NotFound
+        );
+        let mut metadata = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe { client_read_action_metadata(context, action, &mut metadata) }.code,
+            StatusCode::NotFound
+        );
+        assert!(metadata.data.is_null());
+        assert_eq!(metadata.len, 0);
+
+        // Model and request handles are retired after their one cancellation outcome.
+        let stale_model_event = RuntimeEvent {
+            kind: EventKind::ModelRangeRequest,
+            as_: RuntimeEventArgs {
+                range_request: ModelRangeRequest {
+                    request,
+                    model,
+                    start: 0,
+                    count: 1,
+                    sort_filter_token: view(b"fixture"),
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { client_emit_runtime_event(context, session.runtime, &stale_model_event) }.code,
+            StatusCode::NotFound
+        );
+        assert_eq!(session.apply_model_rows(request), StatusCode::Failed);
+        assert_eq!(session.cancel_request(request), StatusCode::Failed);
+        assert_eq!(
+            unsafe { client_complete_model_request(context, request, empty_value()) }.code,
+            StatusCode::Failed
+        );
+        assert_eq!(
+            unsafe {
+                client_fail_model_request(
+                    context,
+                    request,
+                    status(StatusCode::Cancelled, b"request cancelled"),
+                )
+            }
+            .code,
+            StatusCode::Failed
+        );
+
+        // No stale operation may append a callback after the terminal marker.
+        assert_eq!(session.callback_log(), before_stale_handles);
     }
 
     #[test]

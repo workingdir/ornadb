@@ -339,8 +339,14 @@ fn authenticated_state_load_preserves_context_until_response_is_valid() {
     .expect("a complete multi-instance response must stage");
     assert_eq!(staged.context(), &requested_context);
     assert_eq!(staged.user().len(), 3);
-    assert_eq!(staged.user().get(&existing_key), before.user().get(&existing_key));
-    assert_eq!(store, before, "staging must not mutate the caller-owned store");
+    assert_eq!(
+        staged.user().get(&existing_key),
+        before.user().get(&existing_key)
+    );
+    assert_eq!(
+        store, before,
+        "staging must not mutate the caller-owned store"
+    );
 
     let foreign_cell = UserStateCell::new(
         UserStateKey::new(
@@ -359,31 +365,37 @@ fn authenticated_state_load_preserves_context_until_response_is_valid() {
     );
     let foreign_error =
         AuthenticatedClientStateAdapter::<'static>::stage_authenticated_user_state_load(
-        &store,
-        &requested_context,
-        &[valid_cells[0].clone(), foreign_cell],
-        &requested,
-    )
-    .expect_err("a foreign root/profile must be rejected");
+            &store,
+            &requested_context,
+            &[valid_cells[0].clone(), foreign_cell],
+            &requested,
+        )
+        .expect_err("a foreign root/profile must be rejected");
     assert!(matches!(
         foreign_error,
         ClientUserStateError::ContextMismatch(_)
     ));
-    assert_eq!(store, before, "foreign response must be rejected atomically");
+    assert_eq!(
+        store, before,
+        "foreign response must be rejected atomically"
+    );
 
     let duplicate_error =
         AuthenticatedClientStateAdapter::<'static>::stage_authenticated_user_state_load(
-        &store,
-        &requested_context,
-        &[valid_cells[0].clone(), valid_cells[0].clone()],
-        &requested,
-    )
-    .expect_err("duplicate identities must be rejected");
+            &store,
+            &requested_context,
+            &[valid_cells[0].clone(), valid_cells[0].clone()],
+            &requested,
+        )
+        .expect_err("duplicate identities must be rejected");
     assert!(matches!(
         duplicate_error,
         ClientUserStateError::DuplicateKey(_)
     ));
-    assert_eq!(store, before, "duplicate response must be rejected atomically");
+    assert_eq!(
+        store, before,
+        "duplicate response must be rejected atomically"
+    );
 
     let loaded_key = ClientStateKey::from_user_cell(&valid_cells[0]);
     assert_eq!(

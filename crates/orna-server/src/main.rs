@@ -16,6 +16,7 @@ use orna_protocol::CallFailure;
 
 mod package_maintenance;
 mod source_check;
+mod source_diagnostics;
 
 const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
@@ -308,9 +309,9 @@ where
     // The optional global `--runtime <family>` override (ADR 0063) is
     // consumed before the command word so `orna --runtime tty invoke ...`
     // works. A missing value or an unknown family is a usage error (`None`).
-    // The override is threaded into the invoke command below. Source
-    // source and server commands reject it per their accepted command contracts. Unknown leading
-    // flags still fall to `_ => None`.
+    // The override is threaded into the invoke command below. Source and
+    // server commands reject it per their accepted command contracts. Unknown
+    // leading flags still fall to `_ => None`.
     let runtime = if args
         .peek()
         .is_some_and(|value| value == OsStr::new("--runtime"))
@@ -325,6 +326,17 @@ where
         None
     };
 
+    // The global override belongs only to the `invoke` command form. Reject it
+    // before dispatching any other command so those parsers cannot accept it
+    // as an unrelated command prefix (ADR 0063).
+    if runtime.is_some()
+        && !args
+            .peek()
+            .is_some_and(|value| value == OsStr::new("invoke"))
+    {
+        return None;
+    }
+
     match args.next().as_deref() {
         Some(value) if value == OsStr::new("--version") => {
             args.next().is_none().then_some(Command::Version)
@@ -336,21 +348,10 @@ where
                 Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
                 _ => return None,
             };
-            if runtime.is_some() {
-                return None;
-            }
             args.next().is_none().then_some(command)
         }
         Some(value) if value == OsStr::new("source") => {
             let command = match args.next().as_deref() {
-                Some(value)
-                    if runtime.is_some()
-                        && (value == OsStr::new("check")
-                            || value == OsStr::new("apply")
-                            || value == OsStr::new("diff")) =>
-                {
-                    return None;
-                }
                 Some(value) if value == OsStr::new("check") => Command::SourceCheck,
                 Some(value) if value == OsStr::new("apply") => Command::SourceApply,
                 Some(value) if value == OsStr::new("diff") => Command::SourceDiff,
@@ -1082,6 +1083,14 @@ mod tests {
     }
 
     #[test]
+    fn accepts_one_exact_source_diff_path() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "source", "diff", "nested/app.orna"])),
+            Some(Command::SourceDiff("nested/app.orna".to_owned()))
+        );
+    }
+
+    #[test]
     fn rejects_global_runtime_override_on_server_run() {
         assert_eq!(
             parse_command(arguments(&["orna", "--runtime", "tty", "server", "run"])),
@@ -1135,6 +1144,30 @@ mod tests {
                 None,
                 "runtime override must be rejected for source {subcommand}"
             );
+        }
+    }
+
+    #[test]
+    fn rejects_global_runtime_override_on_non_invoke_commands() {
+        let function = FunctionId::from_bytes([0x11; 16]).canonical();
+        let root = FunctionId::from_bytes([0x22; 16]).canonical();
+        let invocation = InvocationId::from_bytes([0x33; 16]).canonical();
+        for values in [
+            vec!["orna", "--runtime", "tty", "--version"],
+            vec!["orna", "--runtime", "tty", "raw-call", function.as_str()],
+            vec!["orna", "--runtime", "tty", "state", "get", root.as_str()],
+            vec!["orna", "--runtime", "tty", "inspect", invocation.as_str()],
+            vec!["orna", "--runtime", "tty", "security", "whoami"],
+            vec![
+                "orna",
+                "--runtime",
+                "tty",
+                "security",
+                "grant-execute",
+                function.as_str(),
+            ],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
     }
 
@@ -1516,6 +1549,22 @@ mod tests {
             parse_command(arguments(&["orna", "source", "apply", "./-x"])),
             Some(Command::SourceApply("./-x".to_owned()))
         );
+    }
+
+    #[test]
+    fn rejects_invalid_source_diff_shapes_and_paths() {
+        for values in [
+            vec!["orna", "source"],
+            vec!["orna", "source", "diff"],
+            vec!["orna", "source", "diff", ""],
+            vec!["orna", "source", "diff", "-x"],
+            vec!["orna", "source", "diff", "app.orna", "extra"],
+            vec!["orna", "source", "DIFF", "app.orna"],
+            vec!["orna", "source", "--diff", "app.orna"],
+            vec!["orna", "source", "diff", "line\nbreak"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
     }
 
     #[test]
