@@ -403,12 +403,14 @@ impl PostgresKernel {
             let transaction = database_session
                 .client
                 .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
+                .isolation_level(IsolationLevel::ReadCommitted)
                 .read_only(false)
                 .start()
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
+            let lock_pair = configure_and_recover(&transaction).await?.pair();
+            lock_active_revision(&transaction, lock_pair).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let bound_session = revalidate_authenticated_session(
