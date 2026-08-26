@@ -28,6 +28,21 @@ set_target_properties(orna-runtime-qt PROPERTIES
     VISIBILITY_INLINES_HIDDEN YES
 )
 
+add_executable(orna-runtime-qt-demo
+    examples/runtime_demo.cpp
+)
+target_compile_features(orna-runtime-qt-demo PRIVATE cxx_std_17)
+target_include_directories(orna-runtime-qt-demo PRIVATE "${ORNA_RUNTIME_ABI_INCLUDE_DIR}")
+target_link_libraries(orna-runtime-qt-demo PRIVATE
+    orna-runtime-qt
+    Qt6::Core
+    Qt6::Widgets
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(orna-runtime-qt-demo PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(orna-runtime-qt-test
