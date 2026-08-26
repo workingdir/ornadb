@@ -142,15 +142,114 @@ fn retained_verified_standard_snapshot(
             orna_standard::retained_standard_library_v6_snapshot()
                 .and_then(orna_standard::verify_standard_library_v6_snapshot)
         }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V7_REVISION_ID => {
+            orna_standard::retained_standard_library_v7_snapshot()
+                .and_then(orna_standard::verify_standard_library_v7_snapshot)
+        }
         _ => Err(StandardLibraryError::Unavailable),
     }
 }
 
+/// Applies the complete accepted standard chain to the latest retained
+/// standard. The V1-to-V2 operation intentionally starts from the bare active
+/// revision and atomically retains V1 with V2; each later child is prepared
+/// from a recovered active parent.
+async fn bootstrap_latest_standard(
+    kernel: &PostgresKernel,
+    active: orna_core::revision::ActiveDatabaseRevision,
+) -> Result<orna_core::revision::VerifiedStandardLibrarySnapshot, OpenStandardDatabaseError> {
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v1_to_v2,
+    )
+    .await?;
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v2_to_v3,
+    )
+    .await?;
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v3_to_v4,
+    )
+    .await?;
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v4_to_v5,
+    )
+    .await?;
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v5_to_v6,
+    )
+    .await?;
+    let (_, expected) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v6_to_v7,
+    )
+    .await?;
+    Ok(expected)
+}
+
+async fn continue_standard_to_v7(
+    kernel: &PostgresKernel,
+    mut active: orna_core::revision::ActiveDatabaseRevision,
+    prepares: &[fn(
+        &orna_core::revision::ActiveDatabaseRevision,
+    ) -> Result<orna_standard::StandardUpgrade, StandardUpgradeError>],
+) -> Result<orna_core::revision::VerifiedStandardLibrarySnapshot, OpenStandardDatabaseError> {
+    let mut expected = None;
+    for prepare in prepares {
+        let (next_active, next_expected) =
+            apply_standard_upgrade_step(kernel, &active, *prepare).await?;
+        active = next_active;
+        expected = Some(next_expected);
+    }
+    expected.ok_or_else(|| OpenStandardDatabaseError::StandardLibrary {
+        source: StandardLibraryError::Unavailable,
+    })
+}
+
+async fn apply_standard_upgrade_step(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    prepare: fn(
+        &orna_core::revision::ActiveDatabaseRevision,
+    ) -> Result<orna_standard::StandardUpgrade, StandardUpgradeError>,
+) -> Result<
+    (
+        orna_core::revision::ActiveDatabaseRevision,
+        orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ),
+    OpenStandardDatabaseError,
+> {
+    let upgrade =
+        prepare(active).map_err(|source| OpenStandardDatabaseError::StandardUpgrade { source })?;
+    let expected = upgrade.verified_standard_snapshot().clone();
+    kernel
+        .apply_standard_upgrade(&upgrade)
+        .await
+        .map_err(|source| OpenStandardDatabaseError::Kernel { source })?;
+    let active = kernel
+        .recover()
+        .await
+        .map_err(|source| OpenStandardDatabaseError::Kernel { source })?;
+    Ok((active, expected))
+}
+
 /// Bootstraps and opens one database with the accepted standard library active.
 ///
-/// The returned kernel has completed bare bootstrap and verified recovery. When
-/// the database was bare, this function prepares and atomically applies the
-/// accepted standard upgrade before it returns.
+/// The returned kernel has completed bare bootstrap and verified recovery. A
+/// bare database, or an intermediate V2-V6 commit from an interrupted fresh
+/// chain, is advanced through the complete accepted upgrade chain to V7 before
+/// it returns; intentionally installed V1 and V7 snapshots are verified in
+/// place.
 pub async fn open_standard_database(
     kernel: PostgresKernel,
 ) -> Result<PostgresKernel, OpenStandardDatabaseError> {
@@ -162,18 +261,77 @@ pub async fn open_standard_database(
         .recover()
         .await
         .map_err(|source| OpenStandardDatabaseError::Kernel { source })?;
-    let expected = if let Some(selected) = active.catalogue_hash_context().standard() {
-        retained_verified_standard_snapshot(selected.revision())
-            .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?
-    } else {
-        let upgrade = orna_standard::prepare_standard_upgrade(&active)
-            .map_err(|source| OpenStandardDatabaseError::StandardUpgrade { source })?;
-        let expected = upgrade.verified_standard_snapshot().clone();
-        kernel
-            .apply_standard_upgrade(&upgrade)
-            .await
-            .map_err(|source| OpenStandardDatabaseError::Kernel { source })?;
-        expected
+    let installed_revision = active
+        .catalogue_hash_context()
+        .standard()
+        .map(|standard| standard.revision());
+    let expected = match installed_revision {
+        None => bootstrap_latest_standard(&kernel, active).await?,
+        Some(
+            revision @ (orna_standard::STANDARD_LIBRARY_REVISION_ID
+            | orna_standard::STANDARD_LIBRARY_V7_REVISION_ID),
+        ) => retained_verified_standard_snapshot(revision)
+            .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?,
+        Some(orna_standard::STANDARD_LIBRARY_V2_REVISION_ID) => {
+            continue_standard_to_v7(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v2_to_v3,
+                    orna_standard::prepare_standard_upgrade_v3_to_v4,
+                    orna_standard::prepare_standard_upgrade_v4_to_v5,
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V3_REVISION_ID) => {
+            continue_standard_to_v7(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v3_to_v4,
+                    orna_standard::prepare_standard_upgrade_v4_to_v5,
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V4_REVISION_ID) => {
+            continue_standard_to_v7(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v4_to_v5,
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V5_REVISION_ID) => {
+            continue_standard_to_v7(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V6_REVISION_ID) => {
+            continue_standard_to_v7(
+                &kernel,
+                active,
+                &[orna_standard::prepare_standard_upgrade_v6_to_v7],
+            )
+            .await?
+        }
+        Some(revision) => retained_verified_standard_snapshot(revision)
+            .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?,
     };
     let active = kernel
         .recover()
@@ -264,6 +422,7 @@ mod tests {
             orna_standard::STANDARD_LIBRARY_V4_REVISION_ID,
             orna_standard::STANDARD_LIBRARY_V5_REVISION_ID,
             orna_standard::STANDARD_LIBRARY_V6_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V7_REVISION_ID,
         ];
 
         for revision in revisions {

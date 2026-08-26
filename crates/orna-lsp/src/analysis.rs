@@ -12,7 +12,7 @@ use lsp_types::{
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v6_snapshot, verify_standard_library_v6_snapshot};
+use orna_standard::{retained_standard_library_v7_snapshot, verify_standard_library_v7_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
@@ -29,15 +29,15 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained standard library snapshot.
+    /// Loads and verifies the retained V7 standard library snapshot.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
         let snapshot =
-            retained_standard_library_v6_snapshot().map_err(|error| error.to_string())?;
+            retained_standard_library_v7_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_v6_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v7_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
