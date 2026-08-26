@@ -68,6 +68,18 @@ use orna_standard::{
 pub mod capability;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
+pub mod runtime_loader;
+
+pub use runtime_loader::{
+    AbiActionEvent, AbiBindAction, AbiBytesView, AbiChildOperation, AbiClientApi,
+    AbiContractVersion, AbiDescriptor, AbiDiagnosticEvent, AbiEventKind, AbiLayoutStateEvent,
+    AbiModelChildrenRequest, AbiModelRangeRequest, AbiMountNode, AbiOwnedBytes, AbiRuntimeApi,
+    AbiRuntimeCreateOptions, AbiRuntimeEvent, AbiRuntimeEventArgs, AbiRuntimeFeature,
+    AbiSetProperty, AbiSinkOffer, AbiStatus, AbiStatusCode, AbiStringView, AbiSurfaceClosedEvent,
+    AbiSurfaceCreateOptions, AbiThreadModel, AbiUiBatch, AbiUiOperation, AbiUiOperationArgs,
+    AbiUiOperationKind, AbiValueRef, RuntimeApi, RuntimeContract, RuntimeDescriptor,
+    RuntimeLibrary, RuntimeLoadError, RuntimeSink,
+};
 
 pub use inspect_lifecycle::{
     ClientInspectLifecycle, ClientInspectLifecycleState, InspectEpochBinding, InspectFreezeToken,
