@@ -741,12 +741,25 @@ async fn validate_source_ancestry(
     transaction: &Transaction<'_>,
     ancestry: &BTreeSet<(CatalogueRevisionId, SourceRevisionId)>,
 ) -> Result<(), PostgresKernelError> {
-    let source_revisions = ancestry
-        .iter()
-        .map(|(_, source)| *source)
-        .collect::<BTreeSet<_>>();
-    for source in source_revisions {
-        validate_source_revision(transaction, source).await?;
+    let mut validated = HashSet::new();
+    for (_, source) in ancestry {
+        let mut path = HashSet::new();
+        let mut current = *source;
+        loop {
+            let source_record = DurableRecord::new(SOURCE_REVISION_RELATION, current.canonical());
+            if !path.insert(current) {
+                return Err(source_record.invariant(
+                    "source revision ancestry must terminate without repeated identities",
+                ));
+            }
+            if !validated.insert(current) {
+                break;
+            }
+            let Some(parent) = validate_source_revision(transaction, current).await? else {
+                break;
+            };
+            current = parent;
+        }
     }
     Ok(())
 }
@@ -895,7 +908,7 @@ async fn validate_catalogue_ancestry(
 async fn validate_source_revision(
     transaction: &Transaction<'_>,
     source: SourceRevisionId,
-) -> Result<(), PostgresKernelError> {
+) -> Result<Option<SourceRevisionId>, PostgresKernelError> {
     let source_record = DurableRecord::new(SOURCE_REVISION_RELATION, source.canonical());
     let rows = transaction
         .query(
@@ -998,7 +1011,7 @@ async fn validate_source_revision(
         return Err(source_record
             .invariant("source revision digest must match its bundle, parent, and bundle digest"));
     }
-    Ok(())
+    Ok(parent)
 }
 
 async fn load_active_header(
