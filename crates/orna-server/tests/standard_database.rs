@@ -3403,6 +3403,164 @@ async fn proves_expression_client_functions_through_installed_invoke() -> TestRe
     })
     .await
 }
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn proves_installed_ref_expression_client_loads_object_field_and_redacts_missing_reference()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let uid = nix::unistd::geteuid().as_raw();
+        let kernel = kernel(&database)?;
+        let (active, _literal, _composed, _external) =
+            install_expression_client_fixture(&kernel).await?;
+        let item = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["expr", "item"])
+            .ok_or_else(|| failure("expression CLIENT fixture is missing expr.item"))?;
+        let title = item
+            .fields()
+            .iter()
+            .find(|field| field.name() == "title")
+            .ok_or_else(|| failure("expression CLIENT fixture is missing expr.item.title"))?;
+        let ref_composed = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["expr", "ref_composed"])
+            .map(FunctionDefinition::id)
+            .ok_or_else(|| failure("expression CLIENT fixture is missing expr.ref_composed"))?;
+        let parameter = active
+            .catalogue()
+            .function_by_id(ref_composed)
+            .and_then(|function| function.parameters().first())
+            .ok_or_else(|| failure("expr.ref_composed is missing p_item"))?;
+        require(
+            parameter.resolved_type() == ResolvedType::reference(item.id()),
+            "expr.ref_composed lost its typed REF expr.item parameter",
+        )?;
+
+        let object = ObjectId::from_bytes([0x4a; 16]);
+        insert_expression_item_row(&database, &active, item.id(), title.id(), object, "hello")
+            .await?;
+
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(FunctionDefinition::id)
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, ref_composed)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let reference = RuntimeValue::Reference {
+            target: item.id(),
+            object,
+        };
+        let audit_before = security_audit_count(&database).await?;
+        let success = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            1,
+            RawCall {
+                function: ref_composed,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: parameter.id(),
+                    value: reference.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        if !(success.source().is_none()
+            && success.actions()
+                == [
+                    ServerAction::Events {
+                        stream: 1,
+                        events: vec![Event::Value(RuntimeValue::Text("hello!?".into()))],
+                    },
+                    ServerAction::Completed { stream: 1 },
+                ])
+        {
+            return Err(failure(format!(
+                "installed raw REF expression did not load the object field and concatenate its suffixes: actions={:?}, source={:?}",
+                success.actions(),
+                success.source(),
+            )));
+        }
+        let audit_after_success = security_audit_count(&database).await?;
+        require(
+            audit_after_success == audit_before + 1,
+            "successful installed REF expression changed audit cardinality unexpectedly",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.last().is_some_and(|event| {
+                event.decision().kind() == SecurityAuditKind::Execute
+                    && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                    && event.decision().target()
+                        == Some(InvocationTarget::new(ref_composed, active.pair()))
+                    && event.decision().session_principal() == Some(RAW_CLIENT_USER)
+            }),
+            "successful installed REF expression did not retain a redacted allowed audit decision",
+        )?;
+
+        let missing_reference = RuntimeValue::Reference {
+            target: item.id(),
+            object: ObjectId::from_bytes([0x4b; 16]),
+        };
+        let missing = RawClientDispatch::new(
+            kernel.clone(),
+            session,
+            2,
+            RawCall {
+                function: ref_composed,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: parameter.id(),
+                    value: missing_reference,
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &missing,
+            2,
+            CallFailure::ClientEvaluationFailed,
+            matches!(missing.source(), Some(PostgresKernelError::ClientExecution(_))),
+            "missing installed REF object did not fail through the redacted CLIENT evaluation boundary",
+        )?;
+        let audit_after_missing = security_audit_count(&database).await?;
+        require(
+            audit_after_missing == audit_after_success + 1,
+            "missing installed REF object changed audit cardinality unexpectedly",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            i64::try_from(events.len())? == audit_after_missing
+                && events.iter().rev().take(2).all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                        && event.decision().target()
+                            == Some(InvocationTarget::new(ref_composed, active.pair()))
+                }),
+            "missing installed REF object leaked detail or changed the execute audit boundary",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -14195,6 +14353,46 @@ async fn insert_raw_server_flag(
         ),
     )
     .await
+}
+
+async fn insert_expression_item_row(
+    database: &TestDatabase,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    object_type: TypeId,
+    title_field: orna_core::FieldId,
+    object_id: ObjectId,
+    title: &str,
+) -> TestResult<()> {
+    let object = active
+        .catalogue()
+        .object_types()
+        .iter()
+        .find(|object| object.id() == object_type)
+        .ok_or_else(|| failure("expression CLIENT fixture object identity is not active"))?;
+    let field = object
+        .fields()
+        .iter()
+        .find(|field| field.id() == title_field)
+        .ok_or_else(|| failure("expression CLIENT fixture field identity is not active"))?;
+    let table = format!("t_{:032x}", u128::from_be_bytes(object.id().to_bytes()));
+    let column = format!("f_{:032x}", u128::from_be_bytes(field.id().to_bytes()));
+    let statement =
+        format!("INSERT INTO _orna_data.{table} (_orna_object_id, {column}) VALUES ($1, $2)");
+    let session = database.open().await?;
+    let object_bytes = object_id.to_bytes().to_vec();
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(&statement, &[&object_bytes, &title])
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "expression CLIENT object insert",
+    )
 }
 
 async fn run_database_statement(database: &TestDatabase, statement: &str) -> TestResult<()> {

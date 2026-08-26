@@ -151,10 +151,10 @@ use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan
 use orna_client::{
     ClientExecutionError, ClientExecutionResult, ClientResourceCompletion,
     ClientResourceExecutionError, ClientResourceExecutor, ClientStateContext, ClientStateStore,
+    client_function_arguments_match, client_security_context_digest,
     evaluate_client_function_in_state_context_with_grants_and_arguments as evaluate_authorised_client_function_with_state_context_and_arguments,
     evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_state_context_and_arguments_and_executor,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
-    evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
@@ -214,8 +214,8 @@ use crate::{
         SealedPresentationError, ServerSelectError, ServerSelectResult,
         execute_authorised_raw_server_select, execute_authorised_server_select,
         execute_standard_json_encode, execute_standard_parameter_echo,
-        present_sealed_standard_output, raw_identity_selected_server_select_target_is_selected,
-        raw_server_target_is_unavailable,
+        load_client_reference_loader, present_sealed_standard_output,
+        raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
         raw_unique_text_selected_server_select_target_is_selected,
         run_authenticated_server_resource_stream, run_authenticated_standard_resource_stream,
     },
@@ -1441,21 +1441,42 @@ impl PostgresKernel {
                             ),
                         ),
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
-                            if arguments.len() != definition.parameters().len() {
+                            if !client_function_arguments_match(&active, definition, arguments) {
                                 Err(raw_call_target_unavailable(
                                     function,
                                     "raw CLIENT arguments do not match the declared parameter set",
                                 ))
                             } else {
-                                evaluate_authorised_client_function_with_arguments(
+                                match load_client_reference_loader(
+                                    &transaction,
                                     &active,
-                                    &authorisation,
+                                    authorisation.session_principal(),
+                                    client_security_context_digest(&authorisation),
                                     arguments,
-                                    &[],
-                                    &self.capability_grants,
                                 )
-                                .map(|result| AuthenticatedRawCallResult::Client(result.into_value()))
-                                .map_err(PostgresKernelError::ClientExecution)
+                                .await
+                                {
+                                    Ok(loader) => {
+                                        let mut state = ClientStateStore::new();
+                                        state.install_reference_loader(loader);
+                                        let state_context =
+                                            ClientStateContext::default_for(definition.id());
+                                        evaluate_authorised_client_function_with_state_context_and_arguments(
+                                            &active,
+                                            &authorisation,
+                                            &state_context,
+                                            arguments,
+                                            &[],
+                                            &self.capability_grants,
+                                            &mut state,
+                                        )
+                                        .map(|result| {
+                                            AuthenticatedRawCallResult::Client(result.into_value())
+                                        })
+                                        .map_err(PostgresKernelError::ClientExecution)
+                                    }
+                                    Err(error) => Err(error),
+                                }
                             }
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
@@ -2588,6 +2609,17 @@ impl PostgresKernel {
                                     }
                                     let arguments =
                                         bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                                    let loader = load_client_reference_loader(
+                                        &transaction,
+                                        &active,
+                                        authorisation.session_principal(),
+                                        client_security_context_digest(&authorisation),
+                                        &arguments,
+                                    )
+                                    .await;
+                                    let execution = match loader {
+                                        Ok(loader) => {
+                                            state.install_reference_loader(loader);
                                     let state_context = ClientStateContext::new(
                                         definition.id(),
                                         decoded
@@ -2676,6 +2708,10 @@ impl PostgresKernel {
                                         )
                                     }
                                     .map_err(PostgresKernelError::ClientExecution);
+                                    execution
+                                        }
+                                        Err(error) => Err(error),
+                                    };
                                     let capability_denied = matches!(
                                         &execution,
                                         Err(PostgresKernelError::ClientExecution(
