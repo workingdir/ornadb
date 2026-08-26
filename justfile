@@ -22,6 +22,10 @@ runtime-qt-test:
 runtime-qt-rust-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
 
+# Run the Studio shell demo once against an explicit Qt runtime path.
+studio-qt-smoke runtime_path:
+    QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example studio_demo -- {{runtime_path}} --smoke
+
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
 # ../spec cannot run this local gate until the packaging/checkout contract is resolved.
@@ -48,6 +52,10 @@ test:
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
 editor-tooling-check:
     python3 scripts/check-editor-tooling.py
+
+# Run every accepted offline source-check demo in manifest order.
+demo-check:
+    python3 scripts/run-demos.py
 
 # Start the private PostgreSQL development kernel.
 postgres-up:

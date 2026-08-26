@@ -1,0 +1,55 @@
+# Accepted API demos. Sources remain in the canonical test fixture directory.
+#
+# `mode = "source-check"` invokes the public offline source checker.
+# `mode = "offline-test"` invokes the named focused offline proof.
+# `mode = "compose-only"` is listed for discoverability but not run locally.
+
+[[demos]]
+name = "server-functions"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/server_function_dogfood.orna"
+description = "SERVER query, stream, and mutation functions."
+
+[[demos]]
+name = "client-function"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/client_function_dogfood.orna"
+description = "A minimal Boolean CLIENT function."
+
+[[demos]]
+name = "client-local-assignment"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna"
+description = "CLIENT local assignment and RETURN."
+
+[[demos]]
+name = "client-state"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/client_state_dogfood.orna"
+description = "CLIENT LOCAL, SESSION, and USER state declarations."
+
+[[demos]]
+name = "scalar-resource"
+mode = "offline-test"
+test = "checks_accepted_scalar_resource_fixture_offline"
+source = "crates/orna-server/tests/fixtures/scalar_resource_dogfood.orna"
+description = "CLIENT scalar resource backed by standard invocation."
+
+[[demos]]
+name = "stream-resource"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/stream_resource_dogfood.orna"
+description = "SERVER stream and CLIENT stream resource."
+
+[[demos]]
+name = "action"
+mode = "offline-test"
+test = "checks_accepted_action_fixture_offline"
+source = "crates/orna-server/tests/fixtures/action_dogfood.orna"
+description = "Opaque std.Action values and action calls."
+
+[[demos]]
+name = "client-inspector"
+mode = "compose-only"
+source = "crates/orna-server/tests/fixtures/client_inspector_dogfood.orna"
+description = "Headless Inspector snapshot projection and renderer."
