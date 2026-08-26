@@ -18,6 +18,10 @@ runtime-qt-test:
     cmake --build target/runtime-qt --parallel
     ctest --test-dir target/runtime-qt --output-on-failure
 
+# Run the Rust Qt runtime loader/session smoke test against an explicit shared library path.
+runtime-qt-rust-smoke runtime_path:
+    QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
+
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
 # ../spec cannot run this local gate until the packaging/checkout contract is resolved.
