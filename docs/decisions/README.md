@@ -30,9 +30,10 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0071, 0074 | Resource identity/lifecycle and the runtime executor seam | Resource language, transport, scheduling, and executable actions are implemented by 0077-0079; virtual models, retry/cache policy, and production runtime integration remain deferred. |
 | 0072, 0073 | Scalar identity calls, ORV6 SET values, and sealed `active_roles` | Other sealed security calls, generic STREAM values, arbitrary SET elements, presentation-specific renderers, remote transport, and new source syntax remain deferred. |
 | 0075 | V5 `std.json.Value` snapshot and recovery | GUI runtimes, resource inspection, and reflective gateways remain outside the decision. |
-| 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading, toolkit, platform selection, and native event-loop integration remain deferred. |
+| 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading remains deferred except for the bounded Qt v1 provider accepted by 0082; browser, second-toolkit, and native platform expansion remain deferred. |
 | 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
+| 0082 | First production Qt non-TTY runtime boundary for v1 development | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio, and gateways remain separately gated. |
 
 ## Current work ADRs
 
@@ -181,3 +182,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Headless Ordinary CLIENT Inspector v1](0080-client-inspector.md)
 * **work ADR 0081:**
   [Generic Standard Inspector Render Contract](0081-standard-inspector-render-contract.md)
+* **work ADR 0082:**
+  [First Production Qt Non-TTY Runtime Boundary](0082-production-qt-runtime.md)
