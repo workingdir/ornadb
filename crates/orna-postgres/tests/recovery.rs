@@ -163,7 +163,7 @@ async fn security_admin_grant_rejects_object_scope_and_accepts_class_wide_sentin
 
         let session = database.open().await?;
         let grantee = GRANTEE.to_bytes().to_vec();
-        let object_id = vec![0xa1; 16];
+        let object_id = vec![0xa1_u8; 16];
         let empty_object = Vec::<u8>::new();
         let operation: TestResult<()> = async {
             session
