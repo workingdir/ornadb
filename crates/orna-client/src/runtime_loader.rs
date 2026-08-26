@@ -900,6 +900,8 @@ impl RuntimeLibrary {
         if api_pointer.is_null() || !api_pointer.is_aligned() {
             return Err(RuntimeLoadError::NullApi);
         }
+        validate_native_range(api_pointer, std::mem::size_of::<RuntimeApi>())
+            .map_err(|_| RuntimeLoadError::NullApi)?;
 
         // SAFETY: the pointer is non-null and aligned, and the query contract
         // says it points to an initialized `RuntimeApi` for the library's
@@ -969,6 +971,8 @@ fn copy_descriptor(pointer: *const AbiDescriptor) -> Result<RuntimeDescriptor, R
     if pointer.is_null() || !pointer.is_aligned() {
         return Err(RuntimeLoadError::NullDescriptor);
     }
+    validate_native_range(pointer, std::mem::size_of::<AbiDescriptor>())
+        .map_err(|_| RuntimeLoadError::NullDescriptor)?;
 
     // SAFETY: the caller supplied a non-null, aligned pointer returned by the
     // validated runtime's `describe` function.  Every nested pointer is
@@ -1114,6 +1118,16 @@ fn copy_string_array(
     raw_values.iter().copied().map(copy_string).collect()
 }
 
+fn validate_native_range<T>(pointer: *const T, byte_length: usize) -> Result<(), RuntimeLoadError> {
+    if byte_length > isize::MAX as usize {
+        return Err(RuntimeLoadError::DescriptorLimitExceeded);
+    }
+    (pointer as usize)
+        .checked_add(byte_length)
+        .ok_or(RuntimeLoadError::MalformedDescriptor)?;
+    Ok(())
+}
+
 fn copy_string(view: AbiStringView) -> Result<String, RuntimeLoadError> {
     if view.len > CLIENT_MAX_DESCRIPTOR_STRING_BYTES {
         return Err(RuntimeLoadError::DescriptorLimitExceeded);
@@ -1124,9 +1138,7 @@ fn copy_string(view: AbiStringView) -> Result<String, RuntimeLoadError> {
     if view.data.is_null() || !view.data.is_aligned() {
         return Err(RuntimeLoadError::MalformedDescriptor);
     }
-    (view.data as usize)
-        .checked_add(view.len)
-        .ok_or(RuntimeLoadError::MalformedDescriptor)?;
+    validate_native_range(view.data, view.len)?;
 
     // SAFETY: the pointer is non-null/aligned and the length was bounded above
     // before constructing this byte slice.  UTF-8 validation happens before
@@ -1157,9 +1169,7 @@ fn validate_array_pointer<T>(
         .checked_mul(std::mem::size_of::<T>())
         .filter(|length| *length <= isize::MAX as usize)
         .ok_or(RuntimeLoadError::DescriptorLimitExceeded)?;
-    (pointer as usize)
-        .checked_add(byte_length)
-        .ok_or(RuntimeLoadError::MalformedDescriptor)?;
+    validate_native_range(pointer, byte_length)?;
     Ok(())
 }
 
