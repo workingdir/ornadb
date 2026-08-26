@@ -91,7 +91,7 @@ use orna_core::{
         SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    system::SYS_INVOKE_FUNCTION_ID,
+    system::{SYS_INVOKE_FUNCTION_ID, SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID},
     types::{ResolvedType, TypeDescriptor},
     value::{EnumValue, FunctionArgument, OpaqueValue, RecordValue, RuntimeValue},
 };
@@ -1209,7 +1209,7 @@ async fn proves_the_capability_gate_end_to_end() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> TestResult<()> {
+async fn raw_sys_invoke_is_denied_before_sealed_entry() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, _standard_upgrade, _client_function, _server_function) =
@@ -1245,14 +1245,15 @@ async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> 
         require_dispatch_failure(
             &system_entry,
             1,
-            CallFailure::TargetUnavailable,
+            CallFailure::ExecuteDenied,
             matches!(
                 system_entry.source(),
-                Some(PostgresKernelError::RawCallTargetUnavailable { function, rule })
-                    if *function == SYS_INVOKE_FUNCTION_ID
-                        && *rule == "sys.invoke requires its sealed request carrier"
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::UnknownFunction,
+                    ..
+                })
             ),
-            "the sealed sys.invoke entry did not close as an unavailable raw target",
+            "the raw sys.invoke entry did not retain its closed denial",
         )?;
 
         let ordinary_unknown = FunctionId::from_bytes([0x74; 16]);
@@ -1278,16 +1279,18 @@ async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> 
         require(
             audits.len() == 2
                 && audits[0].decision().kind() == SecurityAuditKind::Execute
-                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Denied
                 && audits[0].decision().target()
                     == Some(InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()))
+                && audits[0].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction))
                 && audits[1].decision().kind() == SecurityAuditKind::Execute
                 && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
                 && audits[1].decision().target()
                     == Some(InvocationTarget::new(ordinary_unknown, active.pair()))
                 && audits[1].decision().denial()
                     == Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction)),
-            "sealed system entry changed the exact durable audit sequence",
+            "raw system and unknown targets changed the exact denial audit sequence",
         )?;
         require_no_database_sessions(&database).await
     })
@@ -4773,8 +4776,8 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         )?;
 
         // An unmatchable requirement (`application/xml` has no registered
-        // presenter) fails closed with the presentation error class (spec
-        // exit 5, `ORNA0702`): no presenter artifact executes, no value
+        // presenter) fails closed as the accepted redacted internal Event
+        // over the ORF5 transport. No presenter artifact executes, no value
         // reaches stdout, and no diagnostic reaches stderr.
         let (xml_outcome, xml_stdout, xml_stderr) = installed_invoke_run(
             &database,
@@ -4784,9 +4787,11 @@ async fn proves_output_through_orna_invoke_against_postgres() -> TestResult<()> 
         require(
             matches!(
                 xml_outcome,
-                Err(error) if error.kind() == InstalledInvokeErrorKind::Presentation
+                Err(error)
+                    if error.kind() == InstalledInvokeErrorKind::Internal
+                        && error.message() == "sealed dispatch failed"
             ),
-            "the unmatchable output requirement did not return the exit-5 presentation class",
+            "the unmatchable output requirement did not return the closed internal class",
         )?;
         require(
             xml_stdout.is_empty() && xml_stderr.is_empty(),
@@ -6904,7 +6909,7 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             PrincipalKind::User,
             PrincipalStatus::Active,
         );
-        let request = ResourceRequest {
+        let mut request = ResourceRequest {
             stream_id: 73,
             request_id: InvocationId::from_bytes([0x31; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x32; 16]),
@@ -6942,11 +6947,16 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
             )
             .expect("the stream resource security snapshot is valid")
         };
-
         let allowed = kernel
             .replace_security_snapshot(&snapshot(vec![ExecuteGrant::new(RAW_CLIENT_USER, target)]))
             .await?;
         let session = allowed.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let parent_request =
+            sealed_scalar_resource_request(SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID)?;
+        let parent =
+            create_authenticated_parent_invocation(&kernel, &active, &session, parent_request)
+                .await?;
+        request.parent_invocation_id = parent;
         let completed = kernel
             .dispatch_authenticated_server_resource(&session, &request)
             .await?;
@@ -7029,24 +7039,34 @@ async fn authenticated_stream_resource_dispatches_allowed_and_denied_with_redact
         )?;
 
         let audits = kernel.recover_security_audit_events().await?;
+        let target_audits = audits
+            .iter()
+            .filter(|event| {
+                event.decision().kind() == SecurityAuditKind::Execute
+                    && event.decision().target()
+                        == Some(InvocationTarget::new(target, active.pair()))
+            })
+            .collect::<Vec<_>>();
+        let inspect_audits = audits
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Inspect)
+            .collect::<Vec<_>>();
         require(
-            audits.len() == 2
-                && audits[0].decision().kind() == SecurityAuditKind::Execute
-                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
-                && audits[0].decision().target()
-                    == Some(InvocationTarget::new(target, active.pair()))
-                && audits[0].decision().effective_principal() == Some(RAW_CLIENT_USER)
-                && audits[0].decision().authorising_principal() == Some(RAW_CLIENT_USER)
-                && audits[1].decision().kind() == SecurityAuditKind::Execute
-                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
-                && audits[1].decision().target()
-                    == Some(InvocationTarget::new(target, active.pair()))
-                && audits[1].decision().denial()
+            target_audits.len() == 2
+                && target_audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && target_audits[0].decision().effective_principal() == Some(RAW_CLIENT_USER)
+                && target_audits[0].decision().authorising_principal() == Some(RAW_CLIENT_USER)
+                && target_audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && target_audits[1].decision().denial()
                     == Some(SecurityAuditDenial::Execute(
                         ExecuteDenial::MissingExecuteGrant,
                     ))
-                && audits[1].decision().effective_principal().is_none()
-                && audits[1].decision().authorising_principal().is_none(),
+                && target_audits[1].decision().effective_principal().is_none()
+                && target_audits[1]
+                    .decision()
+                    .authorising_principal()
+                    .is_none()
+                && inspect_audits.len() == 1,
             "stream resource audit evidence exposed an unredacted decision",
         )?;
         let audit_text = format!("{audits:?}");
@@ -7084,26 +7104,22 @@ async fn authenticated_direct_resource_post_reservation_failure_is_compensated_o
             PrincipalKind::User,
             PrincipalStatus::Active,
         );
-        let functions = active
+        let function_targets = active
             .catalogue()
             .functions()
             .iter()
-            .map(|function| function.id())
+            .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
         let security = SecuritySnapshot::new_with_function_targets(
             active.pair(),
-            functions
-                .iter()
-                .copied()
-                .map(SecurityFunctionTarget::application)
-                .collect(),
+            function_targets,
             vec![principal],
             vec![],
             vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
         )?;
         let allowed = kernel.replace_security_snapshot(&security).await?;
         let session = allowed.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
-        let request = ResourceRequest {
+        let mut request = ResourceRequest {
             stream_id: 203,
             request_id: InvocationId::from_bytes([0xd1; 16]),
             parent_invocation_id: InvocationId::from_bytes([0xd2; 16]),
@@ -7121,6 +7137,12 @@ async fn authenticated_direct_resource_post_reservation_failure_is_compensated_o
             item_window: 1,
             byte_window: 1024,
         };
+        let parent_request =
+            sealed_scalar_resource_request(SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID)?;
+        let parent =
+            create_authenticated_parent_invocation(&kernel, &active, &session, parent_request)
+                .await?;
+        request.parent_invocation_id = parent;
 
         let dispatch = kernel
             .dispatch_authenticated_server_resource_with_forced_post_reservation_failure(
@@ -7210,7 +7232,7 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             )
             .await
             .map_err(|error| failure(format!("install stream resource fixture failed: {error:?}")))?;
-        let request = ResourceRequest {
+        let mut request = ResourceRequest {
             stream_id: 201,
             request_id: InvocationId::from_bytes([0xa1; 16]),
             parent_invocation_id: InvocationId::from_bytes([0xa2; 16]),
@@ -7233,25 +7255,28 @@ async fn authenticated_resource_worker_failure_is_compensated_once() -> TestResu
             PrincipalKind::User,
             PrincipalStatus::Active,
         );
-        let functions = active
+        let function_targets = active
             .catalogue()
             .functions()
             .iter()
-            .map(|function| function.id())
+            .map(|function| SecurityFunctionTarget::application(function.id()))
             .collect::<Vec<_>>();
         let security = SecuritySnapshot::new_with_function_targets(
             active.pair(),
-            functions
-                .iter()
-                .copied()
-                .map(SecurityFunctionTarget::application)
-                .collect(),
+            function_targets,
             vec![principal],
             vec![],
             vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
         )?;
-        let active = kernel.replace_security_snapshot(&security).await?;
-        let session = active.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let active_security = kernel.replace_security_snapshot(&security).await?;
+        let session = active_security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let parent_request = sealed_scalar_resource_request(
+            SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        )?;
+        let parent =
+            create_authenticated_parent_invocation(&kernel, &active, &session, parent_request)
+                .await?;
+        request.parent_invocation_id = parent;
         let cancellation = ResourceCancellation::new();
         let worker_failure = kernel
             .start_authenticated_server_resource_producer_with_forced_pre_acceptance_failure(
@@ -7820,7 +7845,7 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
         )?;
         kernel.replace_security_snapshot(&security).await?;
         let session = kernel.authenticate_local_peer(uid).await?;
-        let request = ResourceRequest {
+        let mut request = ResourceRequest {
             stream_id: 91,
             request_id: InvocationId::from_bytes([0x91; 16]),
             parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
@@ -7838,6 +7863,14 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
             item_window: 1,
             byte_window: MAX_RESOURCE_WINDOW,
         };
+        let parent_request = sealed_echo_request(
+            InvocationRequestTarget::function_id(target),
+            InvocationParameterSelector::parameter_id(STD_INVOKE_ECHO_PARAMETER_ID),
+            41,
+        )?;
+        request.parent_invocation_id =
+            create_authenticated_parent_invocation(&kernel, &active, &session, parent_request)
+                .await?;
 
         let last_ordinal = active
             .source()
@@ -14827,11 +14860,32 @@ async fn require_no_database_sessions(database: &TestDatabase) -> TestResult<()>
 }
 
 /// Builds one complete checked `sys.invoke` Request for a no-argument scalar CLIENT fixture.
-#[cfg(feature = "test-hooks")]
 fn sealed_scalar_resource_request(client: FunctionId) -> TestResult<InvokeRequest> {
+    sealed_request(InvocationRequestTarget::function_id(client), Vec::new())
+}
+
+/// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
+fn sealed_echo_request(
+    target: InvocationRequestTarget,
+    selector: InvocationParameterSelector,
+    value: i32,
+) -> TestResult<InvokeRequest> {
+    sealed_request(
+        target,
+        vec![InvocationArgument::new(
+            selector,
+            InvokeValue::new(RuntimeValue::Integer(value))?,
+        )],
+    )
+}
+
+fn sealed_request(
+    target: InvocationRequestTarget,
+    arguments: Vec<InvocationArgument>,
+) -> TestResult<InvokeRequest> {
     Ok(InvokeRequest::new(InvokeRequestInput {
-        target: InvocationRequestTarget::function_id(client),
-        arguments: Vec::new(),
+        target,
+        arguments,
         caller_context: InvocationCallerContext::new(
             InvocationCallerKind::TestRunner,
             false,
@@ -14862,46 +14916,42 @@ fn sealed_scalar_resource_request(client: FunctionId) -> TestResult<InvokeReques
     })?)
 }
 
-/// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
-fn sealed_echo_request(
-    target: InvocationRequestTarget,
-    selector: InvocationParameterSelector,
-    value: i32,
-) -> TestResult<InvokeRequest> {
-    Ok(InvokeRequest::new(InvokeRequestInput {
-        target,
-        arguments: vec![InvocationArgument::new(
-            selector,
-            InvokeValue::new(RuntimeValue::Integer(value))?,
-        )],
-        caller_context: InvocationCallerContext::new(
-            InvocationCallerKind::TestRunner,
-            false,
-            false,
-            None,
-            None,
-            "en-GB",
-            "UTC",
-            None,
-        )?,
-        client_offer: InvocationClientOffer::new(
-            5,
-            "en-GB",
-            "UTC",
-            Vec::new(),
-            Vec::new(),
-            1_024,
-            0,
-            None,
-            None,
-        )?,
-        output_requirement: None,
-        state_profile: None,
-        trace_policy: InvocationTracePolicy::Off,
-        idempotency_key: None,
-        parent_invocation_id: None,
-        observer_context: None,
-    })?)
+/// Creates an authenticated parent invocation for resource provenance tests.
+async fn create_authenticated_parent_invocation(
+    kernel: &PostgresKernel,
+    active: &ActiveDatabaseRevision,
+    session: &AuthenticatedSession,
+    request: InvokeRequest,
+) -> TestResult<InvocationId> {
+    let registry = active
+        .catalogue_hash_context()
+        .standard()
+        .map(registered_opaque_codecs)
+        .transpose()?
+        .ok_or_else(|| failure("the parent invocation requires the verified standard snapshot"))?;
+    let retained = encode_invoke_request(active, &registry, &request)?;
+    let kernel = kernel.clone();
+    let session = session.clone();
+    let worker = std::thread::Builder::new()
+        .name("orna-test-parent-invocation".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || -> TestResult<SealedInvocationResult> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("parent invocation runtime failed: {error}")))?;
+            Ok(runtime.block_on(kernel.dispatch_sealed_sys_invoke(&session, 5, &retained))?)
+        })
+        .map_err(|error| failure(format!("parent invocation thread failed: {error}")))?;
+    let result = worker
+        .join()
+        .map_err(|_| failure("parent invocation thread panicked"))??;
+    match result {
+        SealedInvocationResult::Completed { invocation, .. } => Ok(invocation),
+        result => Err(failure(format!(
+            "the authenticated parent invocation did not complete: {result:?}",
+        ))),
+    }
 }
 
 /// Builds one complete checked `sys.invoke` Request for `std.json.encode`.
