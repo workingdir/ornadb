@@ -22,6 +22,44 @@ jobs:
         with:
           node-version: "22"
       - run: npm install --global tree-sitter-cli@0.26.5 --no-audit --no-fund
-      - run: just check
-      - run: just editor-tooling-check
-      - run: just kernel-test
+      - name: Prepare CI evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ci-evidence
+          {
+            printf 'git_commit=%s\n' "$GITHUB_SHA"
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+            rustc --version
+            cargo --version
+            just --version
+            node --version
+            npm --version
+            python3 --version
+            tree-sitter --version
+            docker --version
+            docker compose version
+          } | tee ci-evidence/tool-versions.txt
+      - name: Run quality gate
+        run: |
+          set -euo pipefail
+          just check 2>&1 | tee ci-evidence/check.log
+      - name: Run editor tooling gate
+        run: |
+          set -euo pipefail
+          just editor-tooling-check 2>&1 | tee ci-evidence/editor-tooling.log
+      - name: Run Compose kernel gate
+        run: |
+          set -euo pipefail
+          just kernel-test 2>&1 | tee ci-evidence/kernel-test.log
+      - name: Capture PostgreSQL logs
+        if: ${{ always() }}
+        run: docker compose logs --no-color postgres > ci-evidence/postgres.log || true
+      - name: Upload CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ github.run_id }}
+          path: ci-evidence
+          if-no-files-found: error
+          retention-days: 14
