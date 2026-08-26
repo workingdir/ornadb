@@ -69,10 +69,10 @@ const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const INSPECT_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x5a; 16]);
 const FOREIGN_INSPECT_PRINCIPAL: PrincipalId = PrincipalId::from_bytes([0x5b; 16]);
 const RAW_INSPECT_STATE_SOURCE: &str = "CREATE SCHEMA inspect_fixture;\n\
-    CREATE CLIENT FUNCTION inspect_fixture.state() RETURNS BOOLEAN IS\n\
+    CREATE CLIENT FUNCTION inspect_fixture.state() RETURNS INTEGER IS\n\
       STATE value INTEGER SCOPE USER DEFAULT 0;\n\
     BEGIN\n\
-      RETURN TRUE;\n\
+      RETURN 41;\n\
     END;\n";
 
 /// Asserts one live condition, failing the whole test with a typed error.
@@ -185,7 +185,7 @@ async fn write_cell(
     let registry = registered_opaque_codecs(standard)?;
     let value_bytes = encode_constructed_value(&active, &registry, &RuntimeValue::Integer(value))?;
     let request = InstalledUserStateRequest::new(InstalledUserStateOperation::Write {
-        root_function: STD_INVOKE_ECHO_FUNCTION_ID,
+        root_function: state_function,
         state_profile: String::new(),
         change: InstalledUserStateChange {
             function: state_function,
@@ -226,12 +226,27 @@ fn record_lines(text: &str) -> Result<Vec<serde_json::Value>, String> {
 
 /// Builds one complete checked `sys.invoke` Request for `std.invoke.echo`.
 fn sealed_echo_request(value: i32) -> TestResult<InvokeRequest> {
-    Ok(InvokeRequest::new(InvokeRequestInput {
-        target: InvocationRequestTarget::function_id(STD_INVOKE_ECHO_FUNCTION_ID),
-        arguments: vec![InvocationArgument::new(
+    sealed_request(
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        vec![InvocationArgument::new(
             InvocationParameterSelector::parameter_id(STD_INVOKE_ECHO_PARAMETER_ID),
             InvokeValue::new(RuntimeValue::Integer(value))?,
         )],
+    )
+}
+
+/// Builds one complete checked request for a parameter-free CLIENT function.
+fn sealed_state_request(function: FunctionId) -> TestResult<InvokeRequest> {
+    sealed_request(function, Vec::new())
+}
+
+fn sealed_request(
+    target: FunctionId,
+    arguments: Vec<InvocationArgument>,
+) -> TestResult<InvokeRequest> {
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target: InvocationRequestTarget::function_id(target),
+        arguments,
         caller_context: InvocationCallerContext::new(
             InvocationCallerKind::TestRunner,
             false,
@@ -361,10 +376,10 @@ async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
                     PrincipalStatus::Active,
                 )],
                 vec![],
-                vec![ExecuteGrant::new(
-                    INSPECT_PRINCIPAL,
-                    STD_INVOKE_ECHO_FUNCTION_ID,
-                )],
+                vec![
+                    ExecuteGrant::new(INSPECT_PRINCIPAL, STD_INVOKE_ECHO_FUNCTION_ID),
+                    ExecuteGrant::new(INSPECT_PRINCIPAL, state_function),
+                ],
                 vec![LocalPeerCredential::new(uid, INSPECT_PRINCIPAL)],
                 vec![
                     PrivilegeGrant::new(
@@ -386,12 +401,13 @@ async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
             )?;
         db_kernel.replace_security_snapshot(&security).await?;
 
-        // One cell under the echo root for the state_cells redaction proof.
+        // One cell under the state function root for the state_cells redaction proof.
         let write = write_cell(&database, state_function, state_slot, ECHO_VALUE).await?;
-        require(
-            write == Ok(InstalledUserStateOutcome::Completed),
-            "the state-cell write must complete",
-        )?;
+        if write != Ok(InstalledUserStateOutcome::Completed) {
+            return Err(failure(format!(
+                "the state-cell write must complete: {write:?}",
+            )));
+        }
 
         // One protected sealed echo invocation: the dispatch appends the
         // linked EXECUTE + invocation audit evidence and auto-captures the
@@ -403,6 +419,14 @@ async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
             .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained)
             .await?;
         let invocation = require_echo_completion(&result, ECHO_VALUE)?;
+        // A second sealed invocation uses the state-bearing function as its
+        // root, so its captured epoch can project the USER state cell.
+        let state_request = sealed_state_request(state_function)?;
+        let retained_state = encode_invoke_request(&active, &registry, &state_request)?;
+        let state_result = db_kernel
+            .dispatch_sealed_sys_invoke(&session, CONNECTION_PROTOCOL_MAJOR, &retained_state)
+            .await?;
+        let state_invocation = require_echo_completion(&state_result, ECHO_VALUE)?;
 
         // A bare command resolves the epoch by invocation and renders the
         // closed summary record.
@@ -588,7 +612,7 @@ async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
         let (outcome, stdout) = inspect_run(
             &database,
             InstalledInspectRequest::new(
-                invocation,
+                state_invocation,
                 None,
                 Some(InstalledInspectProjection::StateCells),
                 false,
@@ -615,7 +639,7 @@ async fn proves_installed_inspect_end_to_end_inner() -> TestResult<()> {
         let (outcome, stdout) = inspect_run(
             &database,
             InstalledInspectRequest::new(
-                invocation,
+                state_invocation,
                 None,
                 Some(InstalledInspectProjection::StateCells),
                 false,

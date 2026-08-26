@@ -797,7 +797,7 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     root_target: FunctionId,
     outcome: InspectOutcomeKind,
     events: &InvocationEventBatch,
-    client_offer: &InvocationClientOffer,
+    client_offer: Option<&InvocationClientOffer>,
     observer_invocation: Option<InvocationId>,
     loaded_user_state_cells: Option<&[UserStateCell]>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
@@ -1128,7 +1128,7 @@ fn build_inspect_epoch(
     root_target: FunctionId,
     outcome: InspectOutcomeKind,
     events: &InvocationEventBatch,
-    client_offer: &InvocationClientOffer,
+    client_offer: Option<&InvocationClientOffer>,
     state_cells: Vec<StateCellRow>,
     security_decisions: Vec<SecurityDecisionRow>,
 ) -> Result<InspectSnapshotEpoch, PostgresKernelError> {
@@ -1176,7 +1176,10 @@ fn build_inspect_epoch(
         duration_nanoseconds.unwrap_or(0),
     )
     .map_err(PostgresKernelError::Inspect)?;
-    let runtime_bindings = runtime_bindings_from_offer(client_offer)?;
+    let runtime_bindings = client_offer
+        .map(runtime_bindings_from_offer)
+        .transpose()?
+        .unwrap_or_default();
     InspectSnapshotEpoch::new(
         InspectEpochId::new(),
         invocation,

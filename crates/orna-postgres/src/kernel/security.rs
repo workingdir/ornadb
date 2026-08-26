@@ -4676,18 +4676,31 @@ async fn run_authenticated_server_resource_producer_task_body(
                 lifecycle.cancelled = true;
             }
             let operation = if commit_started {
-                commit_resource_audit(
-                    transaction,
+                match capture_completed_resource_inspect_snapshot(
+                    &transaction,
+                    &active,
                     &authenticated_session,
-                    &request,
-                    Some(invocation),
-                    SecurityAuditOutcome::Allowed,
-                    ResourceAuditTerminalOutcome::Completed,
+                    invocation,
                     completed_target,
-                    Some(total_items),
-                    Some(total_bytes),
                 )
                 .await
+                {
+                    Ok(_) => {
+                        commit_resource_audit(
+                            transaction,
+                            &authenticated_session,
+                            &request,
+                            Some(invocation),
+                            SecurityAuditOutcome::Allowed,
+                            ResourceAuditTerminalOutcome::Completed,
+                            completed_target,
+                            Some(total_items),
+                            Some(total_bytes),
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
                 commit_accepted_resource_cancelled_audit(
                     transaction,
@@ -6917,6 +6930,57 @@ async fn finish_sealed_failure(
     Ok(SealedInvocationResult::Failed { invocation, events })
 }
 
+/// Captures the structural epoch for one completed authenticated resource.
+///
+/// Resource requests do not carry an independent client offer. The nested
+/// invocation therefore records no runtime-binding rows, while the immutable
+/// invocation and trace carriers remain available to the Inspector.
+async fn capture_completed_resource_inspect_snapshot(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authenticated_session: &AuthenticatedSession,
+    invocation: InvocationId,
+    root_target: Option<InvocationTarget>,
+) -> Result<InspectEpochId, PostgresKernelError> {
+    let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+        PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.active_revision",
+            record: active.pair().catalogue().canonical(),
+            rule: "completed resource capture requires the verified standard snapshot",
+        }
+    })?;
+    let registry =
+        registered_opaque_codecs(standard).map_err(|_| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.standard_library_revisions",
+            record: standard.revision().canonical(),
+            rule: "completed resource capture requires the verified codec registry",
+        })?;
+    let root_target = root_target.ok_or_else(|| {
+        sealed_target_invariant(active, "completed resource producer must retain its target")
+    })?;
+    let events = sealed_completed_events_from_values(
+        authenticated_session.principal(),
+        invocation,
+        Vec::new(),
+    )?;
+    crate::inspect::capture_inspect_snapshot_in_transaction(
+        transaction,
+        active,
+        &registry,
+        authenticated_session,
+        invocation,
+        InspectSnapshotOptions::structural(),
+        authenticated_session.principal(),
+        root_target.function(),
+        InspectOutcomeKind::Allowed,
+        &events,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
 /// Captures one inspection epoch and its trace rows for a completed sealed
 /// invocation in the caller's protected transaction.
 ///
@@ -6953,7 +7017,7 @@ async fn capture_sealed_invocation_snapshot(
         root_target,
         InspectOutcomeKind::Allowed,
         events,
-        client_offer,
+        Some(client_offer),
         None,
         loaded_user_state_cells,
     )
