@@ -6350,14 +6350,23 @@ async fn insert_inactive_application_function(
             &[&unit, &bundle, &content_hash],
         )
         .await?;
-    client
-        .execute(
-            "INSERT INTO _orna_kernel.source_bundle_units
-                (bundle_id, source_unit_id, ordinal)
-             VALUES ($1, $2, 0)",
-            &[&bundle, &unit],
+    let has_source_bundle_units: bool = client
+        .query_one(
+            "SELECT to_regclass('_orna_kernel.source_bundle_units') IS NOT NULL",
+            &[],
         )
-        .await?;
+        .await?
+        .get(0);
+    if has_source_bundle_units {
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, 0)",
+                &[&bundle, &unit],
+            )
+            .await?;
+    }
     client
         .execute(
             "INSERT INTO _orna_kernel.source_revisions
@@ -8797,8 +8806,8 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
         // already-valid V2 pair while the V3 invocation evidence remains
         // historical audit data.
         let collision_function = SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID.to_bytes().to_vec();
-        let collision_revision = vec![0xfa; 16];
-        let collision_hash = vec![0xfb; 32];
+        let collision_revision = vec![0xfa_u8; 16];
+        let collision_hash = vec![0xfb_u8; 32];
         let collision_catalogue = pair.catalogue().to_bytes().to_vec();
         let schema_session = database.open().await?;
         let schema_row = schema_session
@@ -8884,8 +8893,8 @@ async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()
             matches!(
                 error,
                 PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel.invocation_audit_events",
-                    rule: "target function and pinned revision must exist together",
+                    relation: "_orna_kernel.function_revisions",
+                    rule: "each function revision must have exactly one versioned executable artifact",
                     ..
                 }
             ),
