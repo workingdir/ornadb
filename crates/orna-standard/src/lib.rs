@@ -41,10 +41,10 @@ use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeEx
 
 pub use orna_compiler::StandardUpgradeIdentity;
 pub use orna_compiler::{
-    CheckedStandardUiWindow, STD_INTEGER_TYPE_ID,
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
-    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
-    STD_INVOKE_SOURCE_UNIT_ID, STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+    CheckedStandardUiWindow, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+    STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
     STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
     STD_TYPES_SOURCE_UNIT_ID, STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
@@ -3718,7 +3718,7 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v6_standard(standard) {
+    let registrations = if is_accepted_v7_standard(standard) || is_accepted_v6_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -3908,6 +3908,16 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
         && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+}
+
+fn is_accepted_v7_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V7_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V7_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V7_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V7_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V6_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V7_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V7_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v6_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
