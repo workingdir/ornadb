@@ -60,11 +60,11 @@ use std::{
     fmt,
 };
 
-use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
-use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::client_plan::{
     ClientExpressionNode, ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
+use orna_artifact::server_json_encode::{self, JsonEncodePlan};
+use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
     CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceUnitId,
     StateSlotId, TypeId,
@@ -3624,7 +3624,9 @@ fn unquoted_semantic_name(
         .map_err(|_| StandardLibraryCheckError::SourceMismatch)
 }
 fn matches_qualified_name(name: &QualifiedName, expected: &QualifiedSemanticName) -> bool {
-    unquoted_semantic_name(name).ok().is_some_and(|actual| actual == *expected)
+    unquoted_semantic_name(name)
+        .ok()
+        .is_some_and(|actual| actual == *expected)
 }
 
 fn unquoted_prelude_name(
