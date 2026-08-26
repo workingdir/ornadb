@@ -9044,6 +9044,13 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             .parameter_by_name("p_sequence")
             .ok_or_else(|| failure("resource cancellation fixture create sequence parameter disappeared"))?
             .id();
+        let root = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "root"])
+            .ok_or_else(|| failure("resource cancellation fixture is missing resource_fixture.root"))?
+            .id();
         kernel
             .execute_server_insert(
                 create,
@@ -9057,7 +9064,6 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             )
             .await
             .map_err(|error| failure(format!("insert cancellation fixture row failed: {error:?}")))?;
-
         let probe_type = active
             .catalogue()
             .object_types()
@@ -9069,6 +9075,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             "_orna_data.t_{:032x}",
             u128::from_be_bytes(probe_type.to_bytes())
         );
+
         let functions = active
             .catalogue()
             .functions()
@@ -9086,16 +9093,33 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             functions,
             vec![principal],
             vec![],
-            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, root),
+            ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&security).await?;
         let registry = registered_opaque_codecs(&standard_source)?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let root_request = sealed_scalar_resource_request(root)?;
+        let retained_root = encode_invoke_request(&active, &registry, &root_request)?;
+        let root_result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained_root)
+            .await?;
+        let parent_invocation_id = match root_result {
+            SealedInvocationResult::Completed { invocation, .. } => invocation,
+            result => {
+                return Err(failure(format!(
+                    "resource cancellation fixture root did not complete through sealed invoke: {result:?}"
+                )));
+            }
+        };
 
         let first_request = ResourceRequest {
             stream_id: 1,
-            request_id: InvocationId::from_bytes([0x91; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
+            request_id: InvocationId::new(),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -9108,15 +9132,13 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 value: RuntimeValue::Text("cancel-replacement-value".to_owned()),
             }],
             item_window: 1,
-            byte_window: MAX_RESOURCE_WINDOW,
+            byte_window: 1,
         };
-        let replacement_request = ResourceRequest {
-            stream_id: 2,
-            request_id: InvocationId::from_bytes([0xa1; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0xa2; 16]),
-            generation: 2,
-            ..first_request.clone()
-        };
+        let mut replacement_request = first_request.clone();
+        replacement_request.stream_id = 2;
+        replacement_request.request_id = InvocationId::new();
+        replacement_request.generation = 2;
+        replacement_request.byte_window = MAX_RESOURCE_WINDOW;
         let authorizer = RawResourceRequestAuthorizer::new();
         require(
             authorizer.expect(&first_request),
@@ -9133,7 +9155,6 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             authorizer.clone(),
         ));
         let waiter_session = database.open().await?;
-        let mut locker = Some(database.open().await?);
         let stream_operation = async {
             client
                 .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
@@ -9144,14 +9165,6 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
                 "resource cancellation proof did not complete the constructed handshake",
             )?;
-            locker
-                .as_ref()
-                .expect("resource lock session remains before cancellation")
-                .client()
-                .batch_execute(&format!(
-                    "BEGIN; LOCK TABLE {probe_relation} IN ACCESS EXCLUSIVE MODE;"
-                ))
-                .await?;
 
             send_resource_client_frame_to_socket(
                 &mut client,
@@ -9160,28 +9173,51 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 &ResourceClientFrame::Request(first_request.clone()),
             )
             .await?;
-
-            let lock_waiting = timeout(Duration::from_secs(5), async {
+            let accepted = timeout(
+                Duration::from_secs(5),
+                read_resource_server_frame_from_socket(&mut client, &active, &registry),
+            )
+            .await
+            .map_err(|_| failure("resource cancellation proof did not reach acceptance"))??;
+            require(
+                matches!(
+                    accepted,
+                    ResourceServerFrame::Accepted(frame)
+                        if frame.stream_id == first_request.stream_id
+                            && frame.request_id == first_request.request_id
+                            && frame.target_revision == first_request.target_revision
+                            && frame.resource_kind == first_request.resource_kind
+                ),
+                "resource cancellation proof did not observe RESOURCE_ACCEPTED",
+            )?;
+            let resource_query = format!("%{probe_relation}%");
+            let producer_active = timeout(Duration::from_secs(5), async {
                 loop {
-                    let waiting = waiter_session
+                    let active = waiter_session
                         .client()
                         .query_one(
-                            &format!(
-                                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = '{probe_relation}'::regclass AND NOT granted)"
-                            ),
-                            &[],
+                            "SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_stat_activity
+                                WHERE pid <> pg_backend_pid()
+                                  AND datname = current_database()
+                                  AND state = 'idle in transaction'
+                                  AND query LIKE $1
+                            )",
+                            &[&resource_query],
                         )
                         .await?
                         .get::<_, bool>(0);
-                    if waiting {
+                    if active {
                         return Ok::<(), tokio_postgres::Error>(());
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .map_err(|_| failure("resource cancellation proof did not reach its deterministic lock wait"))?;
-            lock_waiting?;
+            .map_err(|_| failure("resource cancellation producer did not reach its active query"))?;
+            producer_active?;
+
 
             send_resource_client_frame_to_socket(
                 &mut client,
@@ -9194,9 +9230,6 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 }),
             )
             .await?;
-            if let Some(locker) = locker.take() {
-                locker.shutdown().await?;
-            }
             let cancelled = timeout(
                 Duration::from_secs(5),
                 read_resource_server_frame_from_socket(&mut client, &active, &registry),
@@ -9209,6 +9242,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                     ResourceServerFrame::Cancelled(frame)
                         if frame.stream_id == first_request.stream_id
                             && frame.request_id == first_request.request_id
+                            && frame.target_revision == first_request.target_revision
                             && frame.reason == ResourceCancellationCode::ClientRequested
                 ),
                 "resource cancellation proof did not return the redacted terminal cancellation",
@@ -9253,6 +9287,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                     ResourceServerFrame::Values(frame)
                         if frame.stream_id == replacement_request.stream_id
                             && frame.request_id == replacement_request.request_id
+                            && frame.target_revision == replacement_request.target_revision
                             && frame.batch_sequence == 0
                             && frame.values
                                 == [RuntimeValue::Text("cancel-replacement-value".to_owned())]
@@ -9271,6 +9306,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                     ResourceServerFrame::Completed(frame)
                         if frame.stream_id == replacement_request.stream_id
                             && frame.request_id == replacement_request.request_id
+                            && frame.target_revision == replacement_request.target_revision
                             && frame.final_batch_sequence == 0
                             && frame.total_items == 1
                 ),
@@ -9278,25 +9314,16 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             )
         }
         .await;
-        let lock_cleanup = match locker {
-            Some(locker) => locker.shutdown().await,
-            None => Ok(()),
-        };
         let shutdown = client.shutdown().await.map_err(Into::into);
         let connection = connection.await.map_err(Into::into).and_then(|result| {
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
         });
-        let waiter_shutdown = waiter_session.shutdown().await;
         finish_session(
             stream_operation,
-            finish_session(
-                lock_cleanup,
-                finish_session(shutdown, connection, "resource cancellation socket cleanup"),
-                "resource cancellation lock cleanup",
-            ),
+            finish_session(shutdown, connection, "resource cancellation socket cleanup"),
             "resource cancellation replacement operation",
         )?;
-        waiter_shutdown?;
+        waiter_session.shutdown().await?;
 
         let audit_session = database.open().await?;
         let audit_operation = async {
@@ -9309,7 +9336,12 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                             resource.catalogue_revision_id, resource.session_principal_id,
                             resource.decision_outcome, resource.terminal_outcome,
                             resource.item_count, resource.byte_count,
-                            invocation.outcome AS invocation_outcome
+                            invocation.invocation_id AS invocation_id,
+                            invocation.outcome AS invocation_outcome,
+                            invocation.session_principal_id AS invocation_principal_id,
+                            invocation.function_id AS invocation_function_id,
+                            invocation.source_revision_id AS invocation_source_revision_id,
+                            invocation.catalogue_revision_id AS invocation_catalogue_revision_id
                      FROM _orna_kernel.resource_audit_events AS resource
                      LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
                        ON invocation.invocation_id = resource.nested_invocation_id
@@ -9324,6 +9356,7 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             let target_bytes = target.to_bytes().to_vec();
             let source_revision_bytes = active.pair().source().to_bytes().to_vec();
             let catalogue_revision_bytes = active.pair().catalogue().to_bytes().to_vec();
+            let principal_bytes = RAW_CLIENT_USER.to_bytes().to_vec();
             for (index, row) in rows.iter().enumerate() {
                 let request_id: Vec<u8> = row.try_get("request_id")?;
                 let parent_invocation_id: Vec<u8> = row.try_get("parent_invocation_id")?;
@@ -9331,22 +9364,32 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                 let call_site_id: Vec<u8> = row.try_get("call_site_id")?;
                 let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
                 let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
-                let catalogue_revision_id: Option<Vec<u8>> = row.try_get("catalogue_revision_id")?;
+                let catalogue_revision_id: Option<Vec<u8>> =
+                    row.try_get("catalogue_revision_id")?;
                 let session_principal_id: Vec<u8> = row.try_get("session_principal_id")?;
                 let decision_outcome: String = row.try_get("decision_outcome")?;
                 let terminal_outcome: String = row.try_get("terminal_outcome")?;
                 let item_count: Option<i64> = row.try_get("item_count")?;
                 let byte_count: Option<i64> = row.try_get("byte_count")?;
                 let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
+                let invocation_id: Option<Vec<u8>> = row.try_get("invocation_id")?;
+                let invocation_principal_id: Option<Vec<u8>> =
+                    row.try_get("invocation_principal_id")?;
+                let invocation_function_id: Option<Vec<u8>> =
+                    row.try_get("invocation_function_id")?;
+                let invocation_source_revision_id: Option<Vec<u8>> =
+                    row.try_get("invocation_source_revision_id")?;
+                let invocation_catalogue_revision_id: Option<Vec<u8>> =
+                    row.try_get("invocation_catalogue_revision_id")?;
                 let (request, parent, decision, terminal, expected_items, target_present) =
                     if index == 0 {
                         (
                             &first_request,
                             &first_request.parent_invocation_id,
-                            "denied",
+                            "allowed",
                             "cancelled",
                             None,
-                            false,
+                            true,
                         )
                     } else {
                         (
@@ -9368,11 +9411,16 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
                         && source_revision_id.is_none()
                         && catalogue_revision_id.is_none()
                 };
-                let nested_identity_matches = match (&nested_invocation_id, target_present) {
-                    (Some(nested), true) => nested.len() == 16,
-                    (None, false) => true,
-                    _ => false,
-                };
+                let nested_identity_matches = target_present
+                    && nested_invocation_id.as_ref().is_some_and(|id| id.len() == 16)
+                    && nested_invocation_id == invocation_id
+                    && invocation_outcome.as_deref() == Some(decision)
+                    && invocation_principal_id.as_deref() == Some(principal_bytes.as_slice())
+                    && invocation_function_id.as_deref() == Some(target_bytes.as_slice())
+                    && invocation_source_revision_id.as_deref()
+                        == Some(source_revision_bytes.as_slice())
+                    && invocation_catalogue_revision_id.as_deref()
+                        == Some(catalogue_revision_bytes.as_slice());
                 require(
                     request_id == request.request_id.to_bytes()
                         && parent_invocation_id == parent.to_bytes()
@@ -9438,6 +9486,13 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
         })?;
         let (active, _client_function, target, parameter, call_site) =
             install_stream_resource_client_fixture(&kernel, &active, &checked_standard).await?;
+        let root = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "root"])
+            .ok_or_else(|| failure("resource disconnect fixture is missing resource_fixture.root"))?
+            .id();
         let create = active
             .catalogue()
             .functions()
@@ -9470,7 +9525,6 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             )
             .await
             .map_err(|error| failure(format!("insert resource disconnect fixture row failed: {error:?}")))?;
-
         let probe_type = active
             .catalogue()
             .object_types()
@@ -9499,15 +9553,32 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             functions,
             vec![principal],
             vec![],
-            vec![ExecuteGrant::new(RAW_CLIENT_USER, target)],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, target),
+                ExecuteGrant::new(RAW_CLIENT_USER, root),
+            ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&security).await?;
         let registry = registered_opaque_codecs(&standard_source)?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let root_request = sealed_scalar_resource_request(root)?;
+        let retained_root = encode_invoke_request(&active, &registry, &root_request)?;
+        let root_result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained_root)
+            .await?;
+        let parent_invocation_id = match root_result {
+            SealedInvocationResult::Completed { invocation, .. } => invocation,
+            result => {
+                return Err(failure(format!(
+                    "resource disconnect fixture root did not complete through sealed invoke: {result:?}"
+                )));
+            }
+        };
         let request = ResourceRequest {
             stream_id: 1,
-            request_id: InvocationId::from_bytes([0xc1; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0xc2; 16]),
+            request_id: InvocationId::new(),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -9520,7 +9591,7 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
                 value: RuntimeValue::Text("disconnect-active-value".to_owned()),
             }],
             item_window: 1,
-            byte_window: MAX_RESOURCE_WINDOW,
+            byte_window: 1,
         };
         let authorizer = RawResourceRequestAuthorizer::new();
         require(
@@ -9537,10 +9608,9 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             LocalRawSocketResources::new(),
             authorizer,
         ));
-        let waiter_session = database.open().await?;
-        let mut locker = Some(database.open().await?);
         let mut accepted_nested_bytes: Option<Vec<u8>> = None;
         let mut write_closed = false;
+        let waiter_session = database.open().await?;
         let stream_operation = async {
             client
                 .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
@@ -9551,14 +9621,6 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
                 acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
                 "resource disconnect proof did not complete the constructed handshake",
             )?;
-            locker
-                .as_ref()
-                .expect("resource disconnect lock session remains before disconnect")
-                .client()
-                .batch_execute(&format!(
-                    "BEGIN; LOCK TABLE {probe_relation} IN ACCESS EXCLUSIVE MODE;"
-                ))
-                .await?;
 
             send_resource_client_frame_to_socket(
                 &mut client,
@@ -9581,21 +9643,25 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
                         && frame.resource_kind == request.resource_kind => frame.nested_invocation_id,
                 _ => return Err(failure("resource disconnect proof did not observe RESOURCE_ACCEPTED")),
             };
-            accepted_nested_bytes = Some(accepted_nested_invocation_id.to_bytes().to_vec());
-
-            let lock_waiting = timeout(Duration::from_secs(5), async {
+            let resource_query = format!("%{probe_relation}%");
+            let producer_active = timeout(Duration::from_secs(5), async {
                 loop {
-                    let waiting = waiter_session
+                    let active = waiter_session
                         .client()
                         .query_one(
-                            &format!(
-                                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = '{probe_relation}'::regclass AND NOT granted)"
-                            ),
-                            &[],
+                            "SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_stat_activity
+                                WHERE pid <> pg_backend_pid()
+                                  AND datname = current_database()
+                                  AND state = 'idle in transaction'
+                                  AND query LIKE $1
+                            )",
+                            &[&resource_query],
                         )
                         .await?
                         .get::<_, bool>(0);
-                    if waiting {
+                    if active {
                         return Ok::<(), tokio_postgres::Error>(());
                     }
                     tokio::task::yield_now().await;
@@ -9603,17 +9669,12 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             })
             .await
             .map_err(|_| failure("resource disconnect producer did not reach its active query"))?;
-            lock_waiting?;
+            producer_active?;
+            accepted_nested_bytes = Some(accepted_nested_invocation_id.to_bytes().to_vec());
 
-            // Keep the relation lock until the server has observed EOF and
-            // entered its producer-cancellation cleanup path. This makes the
-            // active state deterministic and prevents a raced completed result.
+
             client.shutdown().await?;
             write_closed = true;
-            sleep(Duration::from_millis(100)).await;
-            if let Some(locker) = locker.take() {
-                locker.shutdown().await?;
-            }
             let mut trailing = Vec::new();
             timeout(Duration::from_secs(5), client.read_to_end(&mut trailing))
                 .await
@@ -9624,10 +9685,7 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             )
         }
         .await;
-        let lock_cleanup = match locker {
-            Some(locker) => locker.shutdown().await,
-            None => Ok(()),
-        };
+
         let shutdown = if write_closed {
             Ok(())
         } else {
@@ -9636,18 +9694,12 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
         let connection = connection.await.map_err(Into::into).and_then(|result| {
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
         });
-        let waiter_shutdown = waiter_session.shutdown().await;
         finish_session(
             stream_operation,
-            finish_session(
-                lock_cleanup,
-                finish_session(shutdown, connection, "resource disconnect socket cleanup"),
-                "resource disconnect lock cleanup",
-            ),
+            finish_session(shutdown, connection, "resource disconnect socket cleanup"),
             "resource disconnect active producer operation",
         )?;
-        waiter_shutdown?;
-
+        waiter_session.shutdown().await?;
         let audit_session = database.open().await?;
         let audit_operation = async {
             let rows = audit_session
@@ -13890,16 +13942,11 @@ async fn install_stream_resource_client_fixture(
         "stream CLIENT resource plan did not retain canonical target metadata",
     )?;
 
-    let client_parameter = client_definition
-        .parameters()
-        .first()
-        .ok_or_else(|| failure("stream CLIENT resource fixture is missing p_marker"))?
-        .id();
     Ok((
         active,
         client,
         target,
-        client_parameter,
+        target_parameter,
         operation.call_site_id(),
     ))
 }
