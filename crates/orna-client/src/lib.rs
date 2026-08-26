@@ -77,8 +77,15 @@ pub use runtime_loader::{
     AbiRuntimeCreateOptions, AbiRuntimeEvent, AbiRuntimeEventArgs, AbiRuntimeFeature,
     AbiSetProperty, AbiSinkOffer, AbiStatus, AbiStatusCode, AbiStringView, AbiSurfaceClosedEvent,
     AbiSurfaceCreateOptions, AbiThreadModel, AbiUiBatch, AbiUiOperation, AbiUiOperationArgs,
-    AbiUiOperationKind, AbiValueRef, RuntimeApi, RuntimeContract, RuntimeDescriptor,
-    RuntimeLibrary, RuntimeLoadError, RuntimeSink,
+    AbiUiOperationKind, AbiValueRef, CLIENT_MAX_QUEUED_RUNTIME_EVENT_BYTES,
+    CLIENT_MAX_QUEUED_RUNTIME_EVENTS, CLIENT_MAX_RUNTIME_BATCH_OPERATIONS,
+    CLIENT_MAX_RUNTIME_CONFIGURATION_BYTES, CLIENT_MAX_RUNTIME_TEXT_BYTES,
+    CLIENT_MAX_RUNTIME_VALUE_BYTES, RuntimeActionEvent, RuntimeActionEventSnapshot, RuntimeApi,
+    RuntimeContract, RuntimeDescriptor, RuntimeDiagnosticEvent, RuntimeDiagnosticEventSnapshot,
+    RuntimeEvent, RuntimeEventSnapshot, RuntimeLibrary, RuntimeLoadError, RuntimeSession,
+    RuntimeSessionError, RuntimeSink, RuntimeSurfaceClosedEvent, RuntimeSurfaceClosedEventSnapshot,
+    RuntimeSurfaceOptions, RuntimeUiBatch, RuntimeUiOperation, RuntimeValueInput,
+    RuntimeValueSnapshot,
 };
 
 pub use inspect_lifecycle::{
