@@ -1,0 +1,6 @@
+CREATE EXTERNAL CLIENT FUNCTION std.ui.window (
+    title TEXT,
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.window@1';

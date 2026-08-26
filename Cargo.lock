@@ -560,6 +560,7 @@ dependencies = [
 name = "orna-standard"
 version = "0.1.0"
 dependencies = [
+ "orna-artifact",
  "orna-compiler",
  "orna-core",
  "orna-syntax",

@@ -2036,7 +2036,7 @@ pub struct CheckedStandardLibrary {
     pub(super) schemas: Vec<CheckedStandardSchema>,
     pub(super) value_types: Vec<CheckedStandardValueType>,
     pub(super) type_bindings: Vec<CheckedStandardTypeBinding>,
-    pub(super) checked_executable: Option<CheckedStandardExecutable>,
+    pub(super) checked_executables: Vec<CheckedStandardExecutable>,
 }
 
 impl CheckedStandardLibrary {
@@ -2060,11 +2060,28 @@ impl CheckedStandardLibrary {
         &self.type_bindings
     }
 
-    /// Returns the checked V2 executable facts for the one standard function.
+    /// Returns the checked standard executable facts in catalogue order.
+    pub fn checked_executables(&self) -> &[CheckedStandardExecutable] {
+        &self.checked_executables
+    }
+
+    /// Returns the checked V2 `std.invoke.echo` executable for compatibility.
     ///
-    /// Version 1 snapshots carry no executable and return `None`.
+    /// V1 snapshots carry no executable. V2 and later snapshots retain this
+    /// historical accessor even when the standard snapshot contains additional
+    /// executable functions.
     pub fn checked_executable(&self) -> Option<&CheckedStandardExecutable> {
-        self.checked_executable.as_ref()
+        self.standard_executable(STD_INVOKE_ECHO_FUNCTION_ID)
+    }
+
+    /// Finds checked evidence for one standard executable function.
+    pub fn standard_executable(
+        &self,
+        function_id: FunctionId,
+    ) -> Option<&CheckedStandardExecutable> {
+        self.checked_executables
+            .iter()
+            .find(|executable| executable.function_id() == function_id)
     }
 }
 
@@ -2080,6 +2097,31 @@ pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0079 `orna.std/6` standard-library revision identity: `...06`.
 pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
+/// The fixed ADR 0019 `orna.std/7` standard-library revision identity.
+pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
+/// The fixed ADR 0019 `std/window.orna` source-unit identity: `...08`.
+pub const STD_WINDOW_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
+/// The fixed ADR 0019 `std.ui.window` function identity: `...14`.
+pub const STD_UI_WINDOW_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
+/// The fixed ADR 0019 `std.ui.window.title` parameter identity: `...14`.
+pub const STD_UI_WINDOW_TITLE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
+/// The fixed ADR 0019 `std.ui.window.content` parameter identity: `...15`.
+pub const STD_UI_WINDOW_CONTENT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+/// The fixed ADR 0019 `std.ui.window` function-revision identity: `...14`.
+pub const STD_UI_WINDOW_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14]);
+/// The `std.ui.window` function revision number.
+pub const STD_UI_WINDOW_REVISION_NUMBER: u64 = 1;
+/// The fixed ADR 0019 runtime contract identity.
+pub const STD_UI_WINDOW_RUNTIME_CONTRACT: &str = "std.ui.window@1";
+/// The fixed initial TEXT value-type identity used by `std.ui.window`.
+pub const STD_CHARACTER_LARGE_OBJECT_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
 /// The fixed ADR 0062 `std/ui.orna` source-unit identity: `...05`.
 pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
@@ -2270,6 +2312,37 @@ impl CheckedStandardJsonEncode {
         self.revision_id
     }
 }
+/// The checked declaration facts for the accepted ADR 0019 external
+/// `std.ui.window` CLIENT function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardUiWindow {
+    pub(super) function_id: FunctionId,
+    pub(super) title_parameter_id: ParameterId,
+    pub(super) content_parameter_id: ParameterId,
+    pub(super) revision_id: FunctionRevisionId,
+}
+
+impl CheckedStandardUiWindow {
+    /// Returns the fixed `std.ui.window` function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns the fixed `std.ui.window.title` parameter identity.
+    pub const fn title_parameter_id(&self) -> ParameterId {
+        self.title_parameter_id
+    }
+
+    /// Returns the fixed `std.ui.window.content` parameter identity.
+    pub const fn content_parameter_id(&self) -> ParameterId {
+        self.content_parameter_id
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
+    }
+}
 
 /// The checked declaration facts for the one accepted ADR 0057 terminal
 /// table presenter function (`std.terminal.present_table`).
@@ -2325,6 +2398,7 @@ impl CheckedStandardTerminalPresentTable {
 pub struct CheckedStandardExecutable {
     pub(super) function_id: FunctionId,
     pub(super) parameter_id: ParameterId,
+    pub(super) parameter_ids: Vec<ParameterId>,
     pub(super) revision_id: FunctionRevisionId,
     pub(super) revision_number: u64,
     pub(super) declaration_origin: SourceOrigin,
@@ -2348,6 +2422,10 @@ impl CheckedStandardExecutable {
     /// Returns the fixed `std.invoke.echo.p_value` parameter identity.
     pub const fn parameter_id(&self) -> ParameterId {
         self.parameter_id
+    }
+    /// Returns all parameter identities in declaration order.
+    pub fn parameter_ids(&self) -> &[ParameterId] {
+        &self.parameter_ids
     }
 
     /// Returns the fixed version-1 function-revision identity.

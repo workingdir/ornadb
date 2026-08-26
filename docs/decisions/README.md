@@ -33,7 +33,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading remains deferred except for the bounded Qt v1 provider accepted by 0082; browser, second-toolkit, and native platform expansion remain deferred. |
 | 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
-| 0082 | First production Qt non-TTY runtime boundary for v1 development | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio, and gateways remain separately gated. |
+| 0082 | First production Qt non-TTY runtime boundary, provider, loader, and session bridge | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio database operations, and gateways remain separately gated. |
 
 ## Current work ADRs
 
@@ -184,3 +184,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Generic Standard Inspector Render Contract](0081-standard-inspector-render-contract.md)
 * **work ADR 0082:**
   [First Production Qt Non-TTY Runtime Boundary](0082-production-qt-runtime.md)
+* **work ADR 0083:**
+  [Registered `std.ui.window` Client Function](0083-standard-ui-window.md)
