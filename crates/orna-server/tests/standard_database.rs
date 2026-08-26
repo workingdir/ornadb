@@ -8239,9 +8239,31 @@ async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> 
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants()
+fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("installed-resource-live".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!("build installed resource runtime failed: {error}"))
+                })?;
+            runtime.block_on(
+                installed_resource_socket_delivers_values_and_enforces_windows_and_grants_inner(),
+            )
+        })
+        .map_err(|error| failure(format!("spawn installed resource thread failed: {error}")))?;
+    handle
+        .join()
+        .map_err(|_| failure("installed resource thread panicked"))?
+}
+
+#[cfg(feature = "test-hooks")]
+async fn installed_resource_socket_delivers_values_and_enforces_windows_and_grants_inner()
 -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?)
@@ -8268,6 +8290,13 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             .iter()
             .find(|function| function.name().parts() == ["resource_fixture", "all"])
             .ok_or_else(|| failure("installed resource fixture is missing resource_fixture.all"))?
+            .id();
+        let root = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["resource_fixture", "root"])
+            .ok_or_else(|| failure("installed resource fixture is missing resource_fixture.root"))?
             .id();
         let probe_type = active
             .catalogue()
@@ -8341,10 +8370,25 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             vec![
                 ExecuteGrant::new(RAW_CLIENT_USER, target),
                 ExecuteGrant::new(RAW_CLIENT_USER, all_target),
+                ExecuteGrant::new(RAW_CLIENT_USER, root),
             ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&granted_security).await?;
+        let session = kernel.authenticate_local_peer(uid).await?;
+        let root_request = sealed_scalar_resource_request(root)?;
+        let retained_root = encode_invoke_request(&active, &registry, &root_request)?;
+        let root_result = kernel
+            .dispatch_sealed_sys_invoke(&session, 5, &retained_root)
+            .await?;
+        let parent_invocation_id = match root_result {
+            SealedInvocationResult::Completed { invocation, .. } => invocation,
+            result => {
+                return Err(failure(format!(
+                    "installed resource fixture root did not complete through sealed invoke: {result:?}"
+                )));
+            }
+        };
 
 
         let first_value_bytes = exact_resource_value_bytes(
@@ -8363,7 +8407,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         let stream_request = ResourceRequest {
             stream_id: 2,
             request_id: InvocationId::from_bytes([0x51; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x52; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8378,7 +8422,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         let item_barrier_request = ResourceRequest {
             stream_id: 3,
             request_id: InvocationId::from_bytes([0x53; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x54; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8396,7 +8440,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         let byte_request = ResourceRequest {
             stream_id: 4,
             request_id: InvocationId::from_bytes([0x55; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x56; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8411,7 +8455,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         let byte_barrier_request = ResourceRequest {
             stream_id: 5,
             request_id: InvocationId::from_bytes([0x57; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x58; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8709,13 +8753,11 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             "stream resource socket operation",
         )?;
 
-        // Authenticate and recover the socket before taking the fixture lock.
-        // Catalogue recovery reads the fixture relation metadata.
         let waiter_session = database.open().await?;
         let cancellation_request = ResourceRequest {
             stream_id: 6,
             request_id: InvocationId::from_bytes([0x61; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x62; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8725,7 +8767,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             resource_kind: ResourceKind::Stream,
             arguments: vec![],
             item_window: 1,
-            byte_window: MAX_RESOURCE_WINDOW,
+            byte_window: 1,
         };
         let authorizer = RawResourceRequestAuthorizer::new();
         require(
@@ -8751,11 +8793,6 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
                 "cancellation socket did not complete the constructed handshake",
             )?;
-            let locker = database.open().await?;
-            locker
-                .client()
-                .batch_execute(&format!("BEGIN; LOCK TABLE {probe_relation} IN ACCESS EXCLUSIVE MODE;"))
-                .await?;
             send_resource_client_frame_to_socket(
                 &mut client,
                 &active,
@@ -8763,27 +8800,49 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 &ResourceClientFrame::Request(cancellation_request.clone()),
             )
             .await?;
-            let lock_waiting = timeout(Duration::from_secs(5), async {
+            let accepted = timeout(
+                Duration::from_secs(5),
+                read_resource_server_frame_from_socket(&mut client, &active, &registry),
+            )
+            .await
+            .map_err(|_| failure("cancellation resource did not reach acceptance"))??;
+            require(
+                matches!(
+                    accepted,
+                    ResourceServerFrame::Accepted(frame)
+                        if frame.stream_id == cancellation_request.stream_id
+                            && frame.request_id == cancellation_request.request_id
+                            && frame.target_revision == cancellation_request.target_revision
+                ),
+                "cancellation resource did not observe RESOURCE_ACCEPTED",
+            )?;
+            let resource_query = format!("%{probe_relation}%");
+            let producer_active = timeout(Duration::from_secs(5), async {
                 loop {
-                    let waiting = waiter_session
+                    let active = waiter_session
                         .client()
                         .query_one(
-                            &format!(
-                                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = '{probe_relation}'::regclass AND NOT granted)",
-                            ),
-                            &[],
+                            "SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_stat_activity
+                                WHERE pid <> pg_backend_pid()
+                                  AND datname = current_database()
+                                  AND state = 'idle in transaction'
+                                  AND query LIKE $1
+                            )",
+                            &[&resource_query],
                         )
                         .await?
                         .get::<_, bool>(0);
-                    if waiting {
+                    if active {
                         return Ok::<(), tokio_postgres::Error>(());
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .map_err(|_| failure("resource dispatch did not reach its lock wait state"))?;
-            lock_waiting?;
+            .map_err(|_| failure("cancellation resource did not reach its active query"))?;
+            producer_active?;
             send_resource_client_frame_to_socket(
                 &mut client,
                 &active,
@@ -8795,7 +8854,6 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 }),
             )
             .await?;
-            locker.shutdown().await?;
             let cancelled = read_resource_server_frame_from_socket(&mut client, &active, &registry).await?;
             require(
                 matches!(
@@ -8803,6 +8861,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                     ResourceServerFrame::Cancelled(frame)
                         if frame.stream_id == cancellation_request.stream_id
                             && frame.request_id == cancellation_request.request_id
+                            && frame.target_revision == cancellation_request.target_revision
                             && frame.reason == ResourceCancellationCode::ClientRequested
                 ),
                 "active authenticated resource dispatch did not terminate as cancelled",
@@ -8811,7 +8870,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             let replacement_request = ResourceRequest {
                 stream_id: 8,
                 request_id: InvocationId::from_bytes([0x81; 16]),
-                parent_invocation_id: InvocationId::from_bytes([0x82; 16]),
+                parent_invocation_id,
                 call_site_id: call_site,
                 state_profile: String::new(),
                 function_instance_key: String::new(),
@@ -8864,7 +8923,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
         let denied_request = ResourceRequest {
             stream_id: 7,
             request_id: InvocationId::from_bytes([0x71; 16]),
-            parent_invocation_id: InvocationId::from_bytes([0x72; 16]),
+            parent_invocation_id,
             call_site_id: call_site,
             state_profile: String::new(),
             function_instance_key: String::new(),
@@ -8965,7 +9024,15 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             "resource audit evidence retained raw argument or result detail",
         )?;
 
-        assert_resource_audit_rows(&database, &active, call_site, target, all_target).await?;
+        assert_resource_audit_rows(
+            &database,
+            &active,
+            call_site,
+            target,
+            all_target,
+            parent_invocation_id,
+        )
+        .await?;
 
         // The terminal rows must remain queryable after the current kernel and
         // audit session are gone and the installed standard is recovered by a
@@ -8988,6 +9055,7 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
             call_site,
             target,
             all_target,
+            parent_invocation_id,
         )
         .await?;
         drop(recovered_kernel);
@@ -14632,6 +14700,7 @@ async fn assert_resource_audit_rows(
     call_site: CallSiteId,
     target: FunctionId,
     all_target: FunctionId,
+    expected_parent: InvocationId,
 ) -> TestResult<()> {
     let audit_session = database.open().await?;
     let audit_operation = async {
@@ -14657,13 +14726,13 @@ async fn assert_resource_audit_rows(
             "resource audit did not retain one terminal row for each request",
         )?;
         let expected = [
-            ([0x51; 16], [0x52; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
-            ([0x53; 16], [0x54; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
-            ([0x55; 16], [0x56; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
-            ([0x57; 16], [0x58; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
-            ([0x61; 16], [0x62; 16], None, "denied", "cancelled", None, None),
-            ([0x71; 16], [0x72; 16], Some(target), "denied", "failed", None, None),
-            ([0x81; 16], [0x82; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
+            ([0x51; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
+            ([0x53; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
+            ([0x55; 16], Some(all_target), "allowed", "completed", Some(2_i64), Some(80_i64)),
+            ([0x57; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
+            ([0x61; 16], Some(all_target), "allowed", "cancelled", None, None),
+            ([0x71; 16], Some(target), "denied", "failed", None, None),
+            ([0x81; 16], Some(target), "allowed", "completed", Some(1_i64), Some(39_i64)),
         ];
         for (index, row) in rows.iter().enumerate() {
             let request_id: Vec<u8> = row.try_get("request_id")?;
@@ -14680,16 +14749,17 @@ async fn assert_resource_audit_rows(
             let item_count: Option<i64> = row.try_get("item_count")?;
             let byte_count: Option<i64> = row.try_get("byte_count")?;
             let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
-            let (request, parent, target, decision, terminal, count, bytes) = expected[index];
+            let (request, target, decision, terminal, count, bytes) = expected[index];
             let target = target.map(|function| function.to_bytes().to_vec());
-            let nested_identity_matches = match (&nested_invocation_id, target.is_some()) {
+            let accepted = decision == "allowed";
+            let nested_identity_matches = match (&nested_invocation_id, accepted) {
                 (Some(nested), true) => nested.len() == 16,
                 (None, false) => true,
                 _ => false,
             };
             require(
                 request_id == request
-                    && parent_invocation_id == parent
+                    && parent_invocation_id == expected_parent.to_bytes().to_vec()
                     && call_site_id == call_site.to_bytes().to_vec()
                     && nested_identity_matches
                     && target_function_id == target
@@ -14704,7 +14774,7 @@ async fn assert_resource_audit_rows(
                     && terminal_outcome == terminal
                     && item_count == count
                     && byte_count == bytes
-                    && invocation_outcome.as_deref() == target.as_ref().map(|_| decision),
+                    && invocation_outcome.as_deref() == accepted.then_some(decision),
                 "resource audit row did not preserve exact request correlation and terminal outcome",
             )?;
         }
