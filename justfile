@@ -7,6 +7,17 @@ check: fmt build lint test
 fmt:
     cargo fmt --all -- --check
 
+# Build the first production Qt runtime against the canonical ABI header.
+runtime-qt-build:
+    cmake -S runtimes/qt -B target/runtime-qt
+    cmake --build target/runtime-qt --parallel
+
+# Run the Qt runtime contract smoke test with an offscreen platform.
+runtime-qt-test:
+    cmake -S runtimes/qt -B target/runtime-qt
+    cmake --build target/runtime-qt --parallel
+    ctest --test-dir target/runtime-qt --output-on-failure
+
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
 # ../spec cannot run this local gate until the packaging/checkout contract is resolved.
