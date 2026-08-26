@@ -377,24 +377,38 @@ impl AuthenticatedServerResourceProducer {
         credit: ResourceCredit,
     ) -> Result<AuthenticatedServerResourceEvent, PostgresKernelError> {
         let (response, receiver) = tokio::sync::oneshot::channel();
-        self.commands
+        // Cancellation may close the worker response channel after a pull is
+        // queued. Preserve the cancellation outcome; unrelated task exits stay
+        // durable invariant failures.
+        if self
+            .commands
             .send(ResourceProducerCommand::Pull(ResourceProducerPull {
                 credit,
                 response,
             }))
             .await
-            .map_err(|_| PostgresKernelError::DurableInvariant {
+            .is_err()
+        {
+            if self.cancellation.is_requested() {
+                return Ok(AuthenticatedServerResourceEvent::Cancelled);
+            }
+            return Err(PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
                 record: self.accepted.request_id.canonical(),
                 rule: "producer task terminated before pull response",
-            })?;
-        receiver
-            .await
-            .map_err(|_| PostgresKernelError::DurableInvariant {
+            });
+        }
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) if self.cancellation.is_requested() => {
+                Ok(AuthenticatedServerResourceEvent::Cancelled)
+            }
+            Err(_) => Err(PostgresKernelError::DurableInvariant {
                 relation: "resource producer",
                 record: self.accepted.request_id.canonical(),
                 rule: "producer task dropped pull response",
-            })?
+            }),
+        }
     }
 
     /// Requests cancellation and reports whether this call won the race.
