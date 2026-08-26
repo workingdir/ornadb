@@ -3915,6 +3915,61 @@ async fn recovery_rejects_a_missing_application_authority_target_without_changin
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_an_application_authority_target_with_a_standard_pin() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let active_before = active_revision_pair(&database).await?;
+        require(
+            kernel.recover_security_snapshot().await.is_ok(),
+            "the intact two-class fixture must recover its security snapshot",
+        )?;
+
+        // Remove the database shape and pin constraints so a foreign
+        // standard revision can be attached to an application authority row.
+        run_batch(
+            &database,
+            &format!(
+                "ALTER TABLE _orna_kernel.invocation_target_authorities
+                     DROP CONSTRAINT invocation_target_authorities_class_shape_check,
+                     DROP CONSTRAINT invocation_target_authorities_standard_pin_fk;
+                 UPDATE _orna_kernel.invocation_target_authorities
+                 SET standard_library_revision_id = decode(repeat('66', 16), 'hex')
+                 WHERE catalogue_revision_id = decode('{}', 'hex')
+                   AND function_id = decode('{}', 'hex');",
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(fixture.app_function.to_bytes()),
+            ),
+        )
+        .await?;
+
+        let error = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("an application authority target with a standard pin must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    rule: "application invocation targets must not pin a standard library revision",
+                    ..
+                }
+            ),
+            "application authority standard-pin tamper returned the wrong durable invariant",
+        )?;
+        require(
+            active_revision_pair(&database).await? == active_before,
+            "rejected application authority standard-pin tamper changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn recovery_rejects_a_standard_authority_target_absent_from_the_pinned_snapshot()
 -> TestResult<()> {
     with_test_database(|database| async move {
