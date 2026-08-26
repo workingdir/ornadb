@@ -1,6 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
+    path::PathBuf,
     process::ExitCode,
 };
 
@@ -18,7 +19,7 @@ mod package_maintenance;
 mod source_check;
 mod source_diagnostics;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -57,6 +58,7 @@ enum Command {
     Run,
     BackendShell,
     Upgrade,
+    RuntimeDescribe(PathBuf),
     SourceCheck(String),
     SourceApply(String),
     SourceDiff(String),
@@ -283,6 +285,24 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::RuntimeDescribe(path) => {
+            let library = match orna_client::RuntimeLibrary::load_qt(&path) {
+                Ok(library) => library,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    return ExitCode::from(1);
+                }
+            };
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match write_runtime_descriptor_json(&mut stdout, library.descriptor()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Inspect(request) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
@@ -297,6 +317,70 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeDescriptorJson<'a> {
+    runtime_name: &'a str,
+    runtime_version: &'a str,
+    build_id: &'a str,
+    platform: &'a str,
+    thread_model: i32,
+    features: u64,
+    sinks: Vec<RuntimeSinkJson<'a>>,
+    contracts: Vec<RuntimeContractJson<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeSinkJson<'a> {
+    type_name: &'a str,
+    media_types: &'a [String],
+    supports_streaming: bool,
+    preference_rank: i32,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeContractJson<'a> {
+    name: &'a str,
+    major: u32,
+    minor: u32,
+    features: &'a [String],
+}
+
+fn write_runtime_descriptor_json(
+    output: &mut impl Write,
+    descriptor: &orna_client::RuntimeDescriptor,
+) -> io::Result<()> {
+    let json = RuntimeDescriptorJson {
+        runtime_name: &descriptor.runtime_name,
+        runtime_version: &descriptor.runtime_version,
+        build_id: &descriptor.build_id,
+        platform: &descriptor.platform,
+        thread_model: descriptor.thread_model.0,
+        features: descriptor.features,
+        sinks: descriptor
+            .sinks
+            .iter()
+            .map(|sink| RuntimeSinkJson {
+                type_name: &sink.type_name,
+                media_types: &sink.media_types,
+                supports_streaming: sink.supports_streaming,
+                preference_rank: sink.preference_rank,
+            })
+            .collect(),
+        contracts: descriptor
+            .contracts
+            .iter()
+            .map(|contract| RuntimeContractJson {
+                name: &contract.name,
+                major: contract.major,
+                minor: contract.minor,
+                features: &contract.features,
+            })
+            .collect(),
+    };
+    serde_json::to_writer(&mut *output, &json).map_err(io::Error::other)?;
+    output.write_all(b"\n")
 }
 
 fn parse_command<I>(args: I) -> Option<Command>
@@ -350,6 +434,15 @@ where
             };
             args.next().is_none().then_some(command)
         }
+        Some(value) if value == OsStr::new("runtime") => match args.next().as_deref() {
+            Some(value) if value == OsStr::new("describe") => {
+                let path = PathBuf::from(args.next()?);
+                args.next()
+                    .is_none()
+                    .then_some(Command::RuntimeDescribe(path))
+            }
+            _ => None,
+        },
         Some(value) if value == OsStr::new("source") => {
             let command = match args.next().as_deref() {
                 Some(value) if value == OsStr::new("check") => Command::SourceCheck,
@@ -1087,6 +1180,75 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "source", "diff", "nested/app.orna"])),
             Some(Command::SourceDiff("nested/app.orna".to_owned()))
+        );
+    }
+
+    #[test]
+    fn accepts_one_exact_runtime_describe_path() {
+        let path = "/opt/orna/lib/liborna-runtime-qt.so";
+        assert_eq!(
+            parse_command(arguments(&["orna", "runtime", "describe", path])),
+            Some(Command::RuntimeDescribe(PathBuf::from(path)))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_extra_runtime_describe_shapes() {
+        for values in [
+            vec!["orna", "runtime"],
+            vec!["orna", "runtime", "describe"],
+            vec![
+                "orna",
+                "runtime",
+                "inspect",
+                "/opt/orna/lib/liborna-runtime-qt.so",
+            ],
+            vec![
+                "orna",
+                "runtime",
+                "describe",
+                "/opt/orna/lib/liborna-runtime-qt.so",
+                "extra",
+            ],
+            vec!["orna", "runtime", "describe", "/first", "/second"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn serializes_runtime_descriptor_metadata_in_source_order() {
+        let descriptor = orna_client::RuntimeDescriptor {
+            abi_major: 1,
+            abi_minor: 0,
+            runtime_name: "orna-runtime-qt".to_owned(),
+            runtime_version: "1.0.0".to_owned(),
+            build_id: "test-build".to_owned(),
+            platform: "linux-x86_64".to_owned(),
+            thread_model: orna_client::AbiThreadModel::CALLER_PUMPS,
+            features: 1,
+            sinks: vec![orna_client::RuntimeSink {
+                type_name: "std.ui.UI".to_owned(),
+                media_types: vec!["application/test".to_owned()],
+                supports_streaming: false,
+                preference_rank: 0,
+            }],
+            contracts: vec![orna_client::RuntimeContract {
+                name: "std.ui.window".to_owned(),
+                major: 1,
+                minor: 0,
+                features: vec!["title".to_owned()],
+            }],
+        };
+        let mut output = Vec::new();
+        write_runtime_descriptor_json(&mut output, &descriptor).expect("metadata writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("JSON is UTF-8"),
+            concat!(
+                r#"{"runtime_name":"orna-runtime-qt","runtime_version":"1.0.0","build_id":"test-build","platform":"linux-x86_64","thread_model":3,"features":1,"sinks":[{"type_name":"std.ui.UI","media_types":["application/test"],"supports_streaming":false,"preference_rank":0}],"contracts":[{"name":"std.ui.window","major":1,"minor":0,"features":["title"]}]}"#,
+                "\n"
+            )
         );
     }
 
@@ -2418,7 +2580,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
         );
     }
 }
