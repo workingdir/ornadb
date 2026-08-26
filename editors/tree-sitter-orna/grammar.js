@@ -106,7 +106,12 @@ module.exports = grammar({
             // Schema and type DDL
             // ------------------------------------------------------------------
             create_schema_statement: ($) =>
-                seq($.kw_create, $.kw_schema, field('name', $.qualified_name), $.semicolon),
+                seq(
+                    $.kw_create,
+                    $.kw_schema,
+                    field('name', alias($._declaration_qualified_name, $.qualified_name)),
+                    $.semicolon,
+                ),
 
             create_type_statement: ($) =>
                 choice(
@@ -119,7 +124,7 @@ module.exports = grammar({
                 seq(
                     $.kw_create,
                     $.kw_type,
-                    field('name', $.qualified_name),
+                    field('name', alias($._declaration_qualified_name, $.qualified_name)),
                     $.kw_as,
                     $.kw_enum,
                     $.lparen,
@@ -132,7 +137,7 @@ module.exports = grammar({
                 seq(
                     $.kw_create,
                     $.kw_type,
-                    field('name', $.qualified_name),
+                    field('name', alias($._declaration_qualified_name, $.qualified_name)),
                     $.kw_as,
                     $.kw_object,
                     $.lparen,
@@ -146,7 +151,7 @@ module.exports = grammar({
                 seq(
                     $.kw_create,
                     $.kw_type,
-                    field('name', $.qualified_name),
+                    field('name', alias($._declaration_qualified_name, $.qualified_name)),
                     $.kw_as,
                     $.kw_value,
                     choice(
@@ -965,12 +970,21 @@ module.exports = grammar({
                     ),
                 ),
 
-            // The first component of a name is normally an identifier. Real Orna
-            // code additionally uses `security` (schema) and `rows` (variable) as
-            // names, and REF(alias) appears as a call; all other keywords are
-            // reserved in name-initial position so statement terminators such as
-            // END cannot be mistaken for expressions. Later components accept any
-            // keyword (std.types.DATE, filter.SET, sys.time.now).
+            _declaration_qualified_name: ($) =>
+                prec.left(
+                    1,
+                    choice(
+                        seq($._declaration_qualified_name, $.dot, $._name),
+                        $._declaration_name_first,
+                    ),
+                ),
+
+            _declaration_name_first: ($) => choice($.identifier, $._keyword),
+
+            // The first component of a general name remains restricted so
+            // keyword-only expression and procedural positions keep their
+            // existing recovery behaviour. Declaration names use the
+            // explicit declaration_qualified_name rule above.
             _name_first: ($) => choice($.identifier, $.kw_ref, $.kw_security, $.kw_rows),
 
             // Any keyword token, usable as a name component (see _name).

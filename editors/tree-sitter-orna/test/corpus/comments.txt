@@ -27,8 +27,7 @@ CREATE TYPE demo.item AS OBJECT (
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (identifier))
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
@@ -44,4 +43,3 @@ CREATE TYPE demo.item AS OBJECT (
       (comment)
       (rparen)
       (semicolon))))
-

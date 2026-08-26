@@ -21,8 +21,7 @@ CREATE TYPE canonical.scalar_types AS OBJECT (
       (kw_create)
       (kw_type)
       (qualified_name
-        (qualified_name
-          (identifier))
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
