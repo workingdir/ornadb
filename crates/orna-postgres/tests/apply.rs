@@ -8608,9 +8608,27 @@ async fn proves_sealed_echo_invocation_and_rejects_tampered_v3_rows() -> TestRes
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()> {
+fn proves_sealed_security_identity_invocation_and_audit() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("sealed-security-identity-live".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("sealed identity runtime failed: {error}")))?;
+            runtime.block_on(proves_sealed_security_identity_invocation_and_audit_inner())
+        })
+        .map_err(|error| failure(format!("sealed identity thread failed: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("sealed identity thread panicked")),
+    }
+}
+
+async fn proves_sealed_security_identity_invocation_and_audit_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let chain = install_v3_standard_chain(&database).await?;
         let kernel = kernel(&database)?;
