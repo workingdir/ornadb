@@ -214,11 +214,11 @@ const RESOURCE_KIND_STREAM: u8 = 2;
 const NODE_AWAIT: u8 = 9;
 const NODE_RESOURCE: u8 = 10;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
+const OPAQUE_FIXED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>();
 #[cfg(test)]
 const OPAQUE_PAYLOAD_LENGTH: usize = 16;
 #[cfg(test)]
-const OPAQUE_ENCODED_LENGTH: usize =
-    MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>() + OPAQUE_PAYLOAD_LENGTH;
+const OPAQUE_ENCODED_LENGTH: usize = OPAQUE_FIXED_LENGTH + OPAQUE_PAYLOAD_LENGTH;
 
 const NODE_CALL: u8 = 1;
 const NODE_STRING: u8 = 2;
@@ -286,20 +286,32 @@ impl OpaqueClientPlan {
     }
 
     /// Encodes this plan into its exact version-2 bytes.
-    pub fn encode(&self) -> Vec<u8> {
-        let fixed_length = MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>();
-        let mut bytes = Vec::with_capacity(fixed_length + self.canonical_payload.len());
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        let encoded_length = OPAQUE_FIXED_LENGTH.saturating_add(self.canonical_payload.len());
+        if encoded_length > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: encoded_length,
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let mut bytes = Vec::with_capacity(encoded_length);
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
         bytes.push(RETURN_OPAQUE_OPERATION);
         bytes.extend_from_slice(&self.opaque_type.to_bytes());
         bytes.extend_from_slice(&(self.canonical_payload.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&self.canonical_payload);
-        bytes
+        Ok(bytes)
     }
 
     /// Decodes exactly one canonical version-2 opaque client-plan artefact.
     pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return Err(ClientPlanError::ArtifactSizeLimit {
+                size: bytes.len(),
+                maximum: MAX_ARTIFACT_BYTES,
+            });
+        }
         let mut reader = Reader::new(bytes);
         if reader.array::<8>()? != MAGIC {
             return Err(ClientPlanError::InvalidMagic);
@@ -1624,7 +1636,7 @@ impl InnerClientPlan {
     pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
         match self {
             Self::Boolean(plan) => Ok(plan.encode()),
-            Self::Opaque(plan) => Ok(plan.encode()),
+            Self::Opaque(plan) => plan.encode(),
             Self::Expression(plan) => plan.encode(),
             Self::State(plan) => plan.encode(),
             Self::Resource(plan) => plan.encode(),
@@ -3712,7 +3724,7 @@ mod tests {
         expected.extend_from_slice(&OPAQUE_PAYLOAD);
 
         assert_eq!(expected.len(), 49);
-        assert_eq!(plan.encode(), expected);
+        assert_eq!(plan.encode().expect("opaque plan encodes"), expected);
         assert_eq!(OpaqueClientPlan::decode(&expected), Ok(plan.clone()));
         assert_eq!(plan.format_version(), OPAQUE_FORMAT_VERSION);
         assert_eq!(plan.opaque_type(), OPAQUE_TYPE);
@@ -3723,15 +3735,73 @@ mod tests {
     fn opaque_plan_round_trips_variable_length_payload() {
         let payload = (0..32).collect::<Vec<u8>>();
         let plan = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, payload.clone());
-        let encoded = plan.encode();
+        let encoded = plan.encode().expect("opaque plan encodes");
 
         assert_eq!(&encoded[29..33], &(payload.len() as u32).to_be_bytes());
         assert_eq!(OpaqueClientPlan::decode(&encoded), Ok(plan));
     }
 
     #[test]
+    fn opaque_plan_rejects_oversized_total_artifact_on_encode() {
+        let payload = vec![0; MAX_ARTIFACT_BYTES - OPAQUE_FIXED_LENGTH + 1];
+        let plan = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, payload);
+
+        assert_eq!(
+            plan.encode(),
+            Err(ClientPlanError::ArtifactSizeLimit {
+                size: MAX_ARTIFACT_BYTES + 1,
+                maximum: MAX_ARTIFACT_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn opaque_plan_rejects_oversized_total_artifact_on_decode() {
+        let mut bytes = vec![0; MAX_ARTIFACT_BYTES + 1];
+        let version_start = MAGIC.len();
+        let operation_start = version_start + size_of::<u32>();
+        let type_start = operation_start + 1;
+        let payload_length_start = type_start + 16;
+        bytes[..MAGIC.len()].copy_from_slice(&MAGIC);
+        bytes[version_start..operation_start].copy_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
+        bytes[operation_start] = RETURN_OPAQUE_OPERATION;
+        bytes[type_start..payload_length_start].copy_from_slice(&OPAQUE_TYPE.to_bytes());
+        bytes[payload_length_start..OPAQUE_FIXED_LENGTH].copy_from_slice(
+            &((MAX_ARTIFACT_BYTES - OPAQUE_FIXED_LENGTH + 1) as u32).to_be_bytes(),
+        );
+
+        assert_eq!(
+            OpaqueClientPlan::decode(&bytes),
+            Err(ClientPlanError::ArtifactSizeLimit {
+                size: MAX_ARTIFACT_BYTES + 1,
+                maximum: MAX_ARTIFACT_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn opaque_plan_preserves_declared_payload_length_error_within_size_bound() {
+        let mut bytes = vec![0; OPAQUE_FIXED_LENGTH];
+        bytes[..MAGIC.len()].copy_from_slice(&MAGIC);
+        bytes[MAGIC.len()..MAGIC.len() + size_of::<u32>()]
+            .copy_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
+        bytes[MAGIC.len() + size_of::<u32>()] = RETURN_OPAQUE_OPERATION;
+        bytes[OPAQUE_FIXED_LENGTH - size_of::<u32>()..]
+            .copy_from_slice(&((MAX_ARTIFACT_BYTES as u32) + 1).to_be_bytes());
+
+        assert_eq!(
+            OpaqueClientPlan::decode(&bytes),
+            Err(ClientPlanError::InvalidOpaquePayloadLength {
+                actual: (MAX_ARTIFACT_BYTES as u32) + 1,
+            })
+        );
+    }
+
+    #[test]
     fn client_plan_versions_remain_mutually_closed() {
-        let opaque = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode();
+        let opaque = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD)
+            .encode()
+            .expect("opaque plan encodes");
         assert_eq!(
             ClientPlan::decode(&opaque),
             Err(ClientPlanError::UnsupportedVersion(OPAQUE_FORMAT_VERSION))
@@ -3751,7 +3821,9 @@ mod tests {
 
     #[test]
     fn opaque_plan_rejects_operation_length_and_trailing_corruption() {
-        let encoded = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode();
+        let encoded = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD)
+            .encode()
+            .expect("opaque plan encodes");
 
         let mut wrong_operation = encoded.clone();
         wrong_operation[12] = RETURN_BOOLEAN_OPERATION;
@@ -5173,7 +5245,9 @@ mod tests {
             (FORMAT_VERSION, ClientPlan::return_boolean(true).encode()),
             (
                 OPAQUE_FORMAT_VERSION,
-                OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode(),
+                OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD)
+                    .encode()
+                    .expect("opaque plan encodes"),
             ),
             (
                 EXPRESSION_FORMAT_VERSION,
