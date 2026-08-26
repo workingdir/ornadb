@@ -637,7 +637,7 @@ def check_alter_rename_highlights(
             tree_sitter_directory,
             repository,
             "accepted_actions_inspector.orna",
-            15,
+            18,
         )
         and check_highlight_fixture(
             tree_sitter,
