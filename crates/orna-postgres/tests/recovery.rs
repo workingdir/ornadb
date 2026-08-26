@@ -5702,7 +5702,11 @@ async fn authenticated_resource_denies_recovered_security_definer_before_executi
             let row = audit_session
                 .client()
                 .query_one(
-                    "SELECT resource.decision_outcome,
+                    "SELECT resource.nested_invocation_id,
+                            resource.target_function_id,
+                            resource.source_revision_id,
+                            resource.catalogue_revision_id,
+                            resource.decision_outcome,
                             resource.terminal_outcome,
                             invocation.outcome AS invocation_outcome,
                             row_to_json(resource)::text AS resource_json,
@@ -5717,30 +5721,40 @@ async fn authenticated_resource_denies_recovered_security_definer_before_executi
                                FROM _orna_kernel.resource_request_history
                               WHERE request_id = $1) AS history_count
                      FROM _orna_kernel.resource_audit_events AS resource
-                     JOIN _orna_kernel.invocation_audit_events AS invocation
+                     LEFT JOIN _orna_kernel.invocation_audit_events AS invocation
                        ON invocation.invocation_id = resource.nested_invocation_id
                     WHERE resource.request_id = $1",
                     &[&request.request_id.to_bytes().to_vec()],
                 )
                 .await?;
+            let nested_invocation_id: Option<Vec<u8>> = row.try_get("nested_invocation_id")?;
+            let target_function_id: Option<Vec<u8>> = row.try_get("target_function_id")?;
+            let source_revision_id: Option<Vec<u8>> = row.try_get("source_revision_id")?;
+            let catalogue_revision_id: Option<Vec<u8>> =
+                row.try_get("catalogue_revision_id")?;
             let decision_outcome: String = row.try_get("decision_outcome")?;
             let terminal_outcome: String = row.try_get("terminal_outcome")?;
-            let invocation_outcome: String = row.try_get("invocation_outcome")?;
+            let invocation_outcome: Option<String> = row.try_get("invocation_outcome")?;
             let resource_json: String = row.try_get("resource_json")?;
-            let invocation_json: String = row.try_get("invocation_json")?;
+            let invocation_json: Option<String> = row.try_get("invocation_json")?;
             let resource_count: i64 = row.try_get("resource_count")?;
             let invocation_count: i64 = row.try_get("invocation_count")?;
             let history_count: i64 = row.try_get("history_count")?;
             require(
-                decision_outcome == "denied"
+                nested_invocation_id.is_none()
+                    && target_function_id == Some(target.id().to_bytes().to_vec())
+                    && source_revision_id == Some(active.pair().source().to_bytes().to_vec())
+                    && catalogue_revision_id
+                        == Some(active.pair().catalogue().to_bytes().to_vec())
+                    && decision_outcome == "denied"
                     && terminal_outcome == "failed"
-                    && invocation_outcome == "denied"
+                    && invocation_outcome.is_none()
                     && resource_count == 1
-                    && invocation_count == 1
+                    && invocation_count == 0
                     && history_count == 1
                     && !resource_json.contains(RAW_MARKER)
-                    && !invocation_json.contains(RAW_MARKER),
-                "resource denial did not retain exactly one redacted terminal audit and reservation",
+                    && invocation_json.is_none(),
+                "resource denial did not retain nullable nested identity and redacted target audit",
             )
         }
         .await;
