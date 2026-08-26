@@ -19985,7 +19985,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             orna_standard::STD_UI_TYPE_ID,
             payload.clone(),
         )
-        .encode();
+        .encode()
+        .expect("opaque UI plan encodes");
         let (active, function, _, _) = version_two_active_with_artifact(
             standard_v6(),
             orna_standard::STD_UI_TYPE_ID,
@@ -20043,7 +20044,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             orna_standard::OPAQUE_TOKEN_TYPE_ID,
             payload,
         )
-        .encode();
+        .encode()
+        .expect("opaque plan encodes");
         malformed[29..33].copy_from_slice(&15_u32.to_be_bytes());
         malformed.truncate(malformed.len() - 1);
         let (active, function, _, _) = version_two_value_active_with_artifact(
@@ -21275,7 +21277,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             DefinitionReferenceKind::NamedType,
             orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
             orna_artifact::client_plan::OpaqueClientPlan::return_opaque(plan_type, payload)
-                .encode(),
+                .encode()
+                .expect("opaque plan encodes"),
         )
     }
 

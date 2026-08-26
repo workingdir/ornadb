@@ -14525,7 +14525,7 @@ async fn install_opaque_client_fixture(
         DefinitionReferenceKind::NamedType,
         function_origin,
     );
-    let plan = OpaqueClientPlan::return_opaque(OPAQUE_TOKEN_TYPE_ID, payload).encode();
+    let plan = OpaqueClientPlan::return_opaque(OPAQUE_TOKEN_TYPE_ID, payload).encode()?;
     let artifact = ExecutableArtifact::new(
         ExecutableArtifactKind::Client,
         "orna.client-plan",
