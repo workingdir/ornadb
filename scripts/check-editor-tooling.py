@@ -659,6 +659,13 @@ def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> 
         log(f"invalid tree-sitter package metadata: {exc}", error=True)
         return False
 
+    if not isinstance(package, dict):
+        log(
+            f"{display_path(package_path, repository)} must contain a package object",
+            error=True,
+        )
+        return False
+
     if package.get("private") is not True:
         log(
             f"{display_path(package_path, repository)} must be marked private "
