@@ -1526,59 +1526,66 @@ async fn persist_source(
         .await
         .map_err(PostgresKernelError::Database)?;
     for unit in source.units() {
-        if reuse_existing_units {
+        let existing = if reuse_existing_units {
             // The append-only standard parent edge (work ADR 0059): an
             // already-installed unit with the same reserved identity is the
-            // retained parent unit. It must be byte-identical and is
-            // re-parented into the child bundle so the child snapshot owns
-            // its complete unit set; any other pre-existing row fails closed.
-            let existing = transaction
+            // retained parent unit. It must be byte-identical; the immutable
+            // source-unit row is never re-parented. Membership in the bundle
+            // relation below is authoritative.
+            transaction
                 .query_opt(
                     "SELECT ordinal, logical_path, content, content_hash
                      FROM _orna_kernel.source_units WHERE id = $1",
                     &[&bytes(unit.id())],
                 )
                 .await
-                .map_err(PostgresKernelError::Database)?;
-            if let Some(row) = existing {
-                let ordinal: i64 = row.try_get(0).map_err(PostgresKernelError::Database)?;
-                let logical_path: String = row.try_get(1).map_err(PostgresKernelError::Database)?;
-                let content: String = row.try_get(2).map_err(PostgresKernelError::Database)?;
-                let content_hash: Vec<u8> =
-                    row.try_get(3).map_err(PostgresKernelError::Database)?;
-                if ordinal != i64::from(unit.ordinal())
-                    || logical_path != unit.logical_path()
-                    || content != unit.content()
-                    || content_hash != digest(unit.content_hash())
-                {
-                    return Err(invariant(
-                        "reused standard source unit must be byte-identical to the retained parent",
-                    ));
-                }
-                transaction
-                    .execute(
-                        "UPDATE _orna_kernel.source_units SET bundle_id = $1 WHERE id = $2",
-                        &[&bytes(source.bundle()), &bytes(unit.id())],
-                    )
-                    .await
-                    .map_err(PostgresKernelError::Database)?;
-                continue;
+                .map_err(PostgresKernelError::Database)?
+        } else {
+            None
+        };
+        if let Some(row) = existing {
+            let ordinal: i64 = row.try_get(0).map_err(PostgresKernelError::Database)?;
+            let logical_path: String = row.try_get(1).map_err(PostgresKernelError::Database)?;
+            let content: String = row.try_get(2).map_err(PostgresKernelError::Database)?;
+            let content_hash: Vec<u8> = row.try_get(3).map_err(PostgresKernelError::Database)?;
+            if ordinal != i64::from(unit.ordinal())
+                || logical_path != unit.logical_path()
+                || content != unit.content()
+                || content_hash != digest(unit.content_hash())
+            {
+                return Err(invariant(
+                    "reused standard source unit must be byte-identical to the retained parent",
+                ));
             }
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO _orna_kernel.source_units
+                        (id, bundle_id, ordinal, logical_path, content, content_hash,
+                         hash_algorithm, encoding, hash_contract_version)
+                     VALUES ($1, $2, $3, $4, $5, $6, 'sha256', 'utf-8', $7)",
+                    &[
+                        &bytes(unit.id()),
+                        &bytes(source.bundle()),
+                        &i64::from(unit.ordinal()),
+                        &unit.logical_path(),
+                        &unit.content(),
+                        &digest(unit.content_hash()),
+                        &CONTRACT_VERSION,
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
         }
         transaction
             .execute(
-                "INSERT INTO _orna_kernel.source_units
-                    (id, bundle_id, ordinal, logical_path, content, content_hash,
-                     hash_algorithm, encoding, hash_contract_version)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'sha256', 'utf-8', $7)",
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, $3)",
                 &[
-                    &bytes(unit.id()),
                     &bytes(source.bundle()),
+                    &bytes(unit.id()),
                     &i64::from(unit.ordinal()),
-                    &unit.logical_path(),
-                    &unit.content(),
-                    &digest(unit.content_hash()),
-                    &CONTRACT_VERSION,
                 ],
             )
             .await

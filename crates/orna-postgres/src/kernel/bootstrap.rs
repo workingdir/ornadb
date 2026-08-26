@@ -277,6 +277,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0042_security_principal_non_empty.sql"),
         data_step: None,
     },
+    Migration {
+        version: 43,
+        name: "source bundle unit memberships",
+        sql: include_str!("../../migrations/0043_source_bundle_units.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -671,6 +677,26 @@ async fn strict_empty_revision_state(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
+    // Migration 4 runs before migration 43 creates the membership table, so
+    // account for the relation only when it exists.
+    let source_bundle_units: i64 = if transaction
+        .query_one(
+            "SELECT to_regclass('_orna_kernel.source_bundle_units') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?
+        .get(0)
+    {
+        transaction
+            .query_one("SELECT count(*) FROM _orna_kernel.source_bundle_units", &[])
+            .await
+            .map_err(PostgresKernelError::Database)?
+            .get(0)
+    } else {
+        0
+    };
+
     let count = |column| counts.get::<_, i64>(column);
     let fresh = [
         "bundles",
@@ -691,7 +717,8 @@ async fn strict_empty_revision_state(
         "data_relations",
     ]
     .iter()
-    .all(|column| count(*column) == 0);
+    .all(|column| count(*column) == 0)
+        && source_bundle_units == 0;
     if fresh {
         return Ok(None);
     }
@@ -711,7 +738,8 @@ async fn strict_empty_revision_state(
         && count("function_revisions") == 0
         && count("function_artifacts") == 0
         && count("references") == 0
-        && count("data_relations") == 0;
+        && count("data_relations") == 0
+        && source_bundle_units == 0;
     if !supported_legacy_empty {
         return Err(PostgresKernelError::CatalogueInvariant(
             "canonical hash migration only supports a fresh or empty legacy catalogue",
@@ -981,7 +1009,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            42
+            43
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -1025,6 +1053,7 @@ mod tests {
         assert_eq!(MIGRATIONS[39].version, 40);
         assert_eq!(MIGRATIONS[40].version, 41);
         assert_eq!(MIGRATIONS[41].version, 42);
+        assert_eq!(MIGRATIONS[42].version, 43);
         assert_eq!(MIGRATIONS[33].name, "resource request identity history");
         assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
         assert_eq!(MIGRATIONS[35].name, "sealed Inspector value types");
@@ -1046,6 +1075,7 @@ mod tests {
             MIGRATIONS[41].name,
             "non-empty security principal identities"
         );
+        assert_eq!(MIGRATIONS[42].name, "source bundle unit memberships");
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -1110,6 +1140,56 @@ mod tests {
         assert!(MIGRATIONS[39].data_step.is_none());
         assert!(MIGRATIONS[40].data_step.is_none());
         assert!(MIGRATIONS[41].data_step.is_none());
+        assert!(MIGRATIONS[42].data_step.is_none());
+    }
+
+    #[test]
+    fn source_bundle_unit_memberships_is_the_registered_version_forty_three() {
+        let migration = &MIGRATIONS[42];
+
+        assert_eq!(migration.version, 43);
+        assert_eq!(migration.name, "source bundle unit memberships");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.source_bundle_units")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("bundle_id bytea NOT NULL REFERENCES _orna_kernel.source_bundles(id)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("source_unit_id bytea NOT NULL REFERENCES _orna_kernel.source_units(id)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("ordinal bigint NOT NULL CHECK (ordinal >= 0)")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("PRIMARY KEY (bundle_id, source_unit_id)")
+        );
+        assert!(migration.sql.contains("UNIQUE (bundle_id, ordinal)"));
+        assert!(migration.sql.contains(
+            "INSERT INTO _orna_kernel.source_bundle_units (bundle_id, source_unit_id, ordinal)"
+        ));
+        assert!(migration.sql.contains("SELECT bundle_id, id, ordinal"));
+        assert!(
+            migration
+                .sql
+                .contains("REVOKE ALL ON TABLE _orna_kernel.source_bundle_units FROM PUBLIC")
+        );
+        assert!(
+            migration.sql.contains(
+                "source bundle membership migration found a non-empty bundle without units"
+            )
+        );
     }
 
     #[test]

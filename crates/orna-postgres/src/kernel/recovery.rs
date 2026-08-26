@@ -4661,19 +4661,61 @@ async fn load_source_units(
 ) -> Result<Vec<StoredSourceUnit>, PostgresKernelError> {
     let rows = transaction
         .query(
-            "SELECT
-                id,
-                bundle_id,
-                ordinal,
-                logical_path,
-                content,
-                content_hash,
-                hash_algorithm,
-                hash_contract_version,
-                encoding
-             FROM _orna_kernel.source_units
-             WHERE bundle_id = $1
-             ORDER BY ordinal",
+            "WITH RECURSIVE source_ancestry(
+                 source_revision_id,
+                 bundle_id,
+                 parent_source_revision_id,
+                 path,
+                 has_cycle
+             ) AS (
+                 SELECT
+                     source.id,
+                     source.bundle_id,
+                     source.parent_source_revision_id,
+                     ARRAY[source.id],
+                     false
+                 FROM _orna_kernel.source_revisions AS source
+                 WHERE source.bundle_id = $1
+                 UNION ALL
+                 SELECT
+                     parent.id,
+                     parent.bundle_id,
+                     parent.parent_source_revision_id,
+                     array_append(child.path, parent.id),
+                     parent.id = ANY(child.path)
+                 FROM _orna_kernel.source_revisions AS parent
+                 JOIN source_ancestry AS child
+                   ON parent.id = child.parent_source_revision_id
+                 WHERE NOT child.has_cycle
+             )
+             SELECT
+                membership.bundle_id AS bundle_id,
+                membership.source_unit_id AS id,
+                membership.ordinal AS ordinal,
+                unit.logical_path,
+                unit.content,
+                unit.content_hash,
+                unit.hash_algorithm,
+                unit.hash_contract_version,
+                unit.encoding,
+                unit.bundle_id AS legacy_bundle_id,
+                EXISTS (
+                    SELECT 1
+                    FROM source_ancestry
+                    WHERE source_ancestry.bundle_id = unit.bundle_id
+                ) AS legacy_bundle_is_ancestor,
+                COALESCE(
+                    (
+                        SELECT bool_or(source_ancestry.has_cycle)
+                        FROM source_ancestry
+                    ),
+                    false
+                ) AS source_ancestry_has_cycle
+             FROM _orna_kernel.source_bundle_units AS membership
+             JOIN _orna_kernel.source_units AS unit
+               ON unit.id = membership.source_unit_id
+             WHERE membership.bundle_id = $1
+             ORDER BY membership.ordinal",
             &[&bundle.to_bytes().to_vec()],
         )
         .await
@@ -4708,6 +4750,35 @@ fn decode_source_unit(
     )?);
     if bundle != expected_bundle {
         return Err(record.invariant("source unit must belong to the selected source bundle"));
+    }
+    let source_ancestry_has_cycle: bool = record.column(
+        row,
+        "source_ancestry_has_cycle",
+        "source revision ancestry cycle flag must be boolean",
+    )?;
+    if source_ancestry_has_cycle {
+        return Err(
+            record.invariant("source revision ancestry must terminate without repeated identities")
+        );
+    }
+    let _legacy_bundle = SourceBundleId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "legacy_bundle_id",
+            "source unit legacy bundle identity must be 16 bytes",
+        )?,
+        &record,
+        "source unit legacy bundle identity must be 16 bytes",
+    )?);
+    let legacy_bundle_is_ancestor: bool = record.column(
+        row,
+        "legacy_bundle_is_ancestor",
+        "source unit legacy bundle ancestry flag must be boolean",
+    )?;
+    if !legacy_bundle_is_ancestor {
+        return Err(record.invariant(
+            "source unit legacy bundle identity must remain in the source revision ancestry",
+        ));
     }
 
     let ordinal = u32_from_i64(
