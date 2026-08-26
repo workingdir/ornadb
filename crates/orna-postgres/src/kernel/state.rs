@@ -295,6 +295,7 @@ impl PostgresKernel {
                 active.pair(),
                 SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
             )?;
+            let loaded_pair = active.pair();
             let registry = state_value_registry(&active)?;
             let cells = load_user_state_in_transaction(
                 &transaction,
@@ -314,7 +315,9 @@ impl PostgresKernel {
 
             // PostgreSQL forbids INSERT in the read-only snapshot. Keep the
             // load snapshot read-only, then append only the redacted audit
-            // decision in its own protected transaction.
+            // decision in its own protected transaction. Revalidate the
+            // retained session and revision again because security state can
+            // change between these two transactions.
             let audit_transaction = database_session
                 .client
                 .build_transaction()
@@ -324,10 +327,27 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&audit_transaction).await?;
+            let audit_active = configure_and_recover(&audit_transaction).await?;
+            if audit_active.pair() != loaded_pair {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: STATE_RELATION,
+                    record: format!("{root_function:?}"),
+                    rule: "USER state load revision changed before audit",
+                });
+            }
+            validate_active_user_state_root(&audit_active, root_function)?;
+            let audit_security =
+                recover_security_snapshot_for_active(&audit_transaction, &audit_active).await?;
+            let audit_bound_session = revalidate_authenticated_session(
+                &audit_security,
+                authenticated_session,
+                audit_active.pair(),
+                SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
+            )?;
             append_security_audit_event(
                 &audit_transaction,
                 SecurityAuditDecision::user_state_allowed(
-                    &bound_session,
+                    &audit_bound_session,
                     UserStateAuditOperation::Load,
                     root_function,
                     cells.len() as u64,
