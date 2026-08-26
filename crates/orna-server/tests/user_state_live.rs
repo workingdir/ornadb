@@ -784,6 +784,46 @@ async fn rejects_authenticated_client_state_session_mismatch() -> TestResult<()>
             state == before_mismatch,
             "a rejected flush must preserve the original session's dirty state",
         )?;
+        // Rebind the local peer for each durable read so both principals are
+        // checked through a currently authenticated session.
+        map_peer(&database, PRINCIPAL_A).await?;
+        let durable_session_a = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let principal_a_cells = kernel
+            .load_user_state(
+                &durable_session_a,
+                context.root_function(),
+                context.state_profile(),
+                &[],
+                &expected_types,
+            )
+            .await?;
+        require(
+            principal_a_cells.len() == 1
+                && principal_a_cells[0].value() == &RuntimeValue::Integer(7)
+                && principal_a_cells[0].revision() == 1,
+            "a rejected flush must preserve principal A's existing cell",
+        )?;
+        map_peer(&database, PRINCIPAL_B).await?;
+        let durable_session_b = kernel
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .await?;
+        let principal_b_cells = kernel
+            .load_user_state(
+                &durable_session_b,
+                context.root_function(),
+                context.state_profile(),
+                &[],
+                &expected_types,
+            )
+            .await?;
+        require(
+            principal_b_cells.len() == 1
+                && principal_b_cells[0].value() == &RuntimeValue::Integer(70)
+                && principal_b_cells[0].revision() == 1,
+            "a rejected flush must not alter principal B's existing cell",
+        )?;
 
         let load = adapter_b
             .load(&context, &[], &expected_types, &mut state)
@@ -801,22 +841,7 @@ async fn rejects_authenticated_client_state_session_mismatch() -> TestResult<()>
             state == before_mismatch,
             "a rejected load must preserve the original session's dirty state",
         )?;
-
-        let principal_b_cells = kernel
-            .load_user_state(
-                &session_b,
-                context.root_function(),
-                context.state_profile(),
-                &[],
-                &expected_types,
-            )
-            .await?;
-        require(
-            principal_b_cells.len() == 1
-                && principal_b_cells[0].value() == &RuntimeValue::Integer(70)
-                && principal_b_cells[0].revision() == 1,
-            "a rejected flush must not alter the other session's existing cell",
-        )
+        Ok(())
     })
     .await
 }
