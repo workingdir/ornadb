@@ -7164,6 +7164,13 @@ async fn load_invocation_target_authorities(
         };
         match class.as_str() {
             "application" => {
+                if standard.is_some() {
+                    return Err(PostgresKernelError::DurableInvariant {
+                        relation: RELATION,
+                        record: function.canonical(),
+                        rule: "application invocation targets must not pin a standard library revision",
+                    });
+                }
                 if catalogue_revision.as_deref() != Some(executable.to_bytes().as_slice()) {
                     return Err(missing());
                 }
