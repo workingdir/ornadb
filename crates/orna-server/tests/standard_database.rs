@@ -3641,6 +3641,52 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
+        let (root_outcome, _, _) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::function_id(local_target),
+                vec![CliArgumentInput::Canonical {
+                    parameter: local_target_parameter.canonical(),
+                    value: "43".to_owned(),
+                }],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            root_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "action evaluator could not create an owned root invocation",
+        )?;
+        let audit_session = database.open().await?;
+        let root_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT invocation_id
+                     FROM _orna_kernel.invocation_audit_events
+                     WHERE function_id = $1
+                       AND session_principal_id = $2
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    &[
+                        &local_target.to_bytes().to_vec(),
+                        &RAW_CLIENT_USER.to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            let bytes: Vec<u8> = row.try_get(0)?;
+            let bytes: [u8; 16] = bytes
+                .try_into()
+                .map_err(|_| failure("action root invocation audit identity was not 16 bytes"))?;
+            Ok(InvocationId::from_bytes(bytes))
+        }
+        .await;
+        let parent_invocation = finish_session(
+            root_operation,
+            audit_session.shutdown().await,
+            "action root invocation audit lookup",
+        )?;
         let session = kernel.authenticate_local_peer(uid).await?;
         let authorisation = match security
             .authorise_execute(&session, InvocationTarget::new(client, active.pair()))
@@ -3653,10 +3699,23 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             }
         };
         let argument = FunctionArgument::new(client_parameter, RuntimeValue::Integer(43))?;
-        let result = evaluate_client_function_with_arguments(
-            &active,
-            &authorisation,
-            std::slice::from_ref(&argument),
+        let evaluation_grants = LocalCapabilityGrantSet::new();
+        let mut evaluation_state = ClientStateStore::default();
+        let mut evaluation_executor = DeterministicStreamResourceExecutor;
+        let result =
+            evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                std::slice::from_ref(&argument),
+                &[],
+                &evaluation_grants,
+                &mut evaluation_state,
+                parent_invocation,
+                &mut evaluation_executor,
+            )?;
+        require(
+            result.context().parent_invocation_id() == parent_invocation,
+            "action evaluator did not retain its authenticated parent invocation",
         )?;
         let local_authorisation = match security
             .authorise_execute(&session, InvocationTarget::new(local_client, active.pair()))
@@ -3735,14 +3794,55 @@ async fn proves_server_action_resource_trigger_through_authenticated_executor() 
             &mut state,
             &mut executor,
         );
-        let action_result =
-            finish_pending_client_action(&active, &mut action_state, &mut executor, action_result)
+        let action_result: TestResult<ClientActionOutcome> = match action_result {
+            Err(ClientActionError::Pending) => {
+                let completion = match timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(completion) = executor.poll() {
+                            return Ok::<ClientResourceCompletion, Box<dyn Error + Send + Sync>>(
+                                completion,
+                            );
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
                 .await
-                .map_err(|error| {
-                    failure(format!(
-                        "installed action resource completion failed: {error:?}"
-                    ))
-                });
+                {
+                    Ok(Ok(completion)) => Ok(completion),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(failure("installed action resource completion timed out")),
+                };
+                match completion {
+                    Ok(completion) => {
+                        if !matches!(
+                            &completion,
+                            ClientResourceCompletion::Ready { value, .. }
+                                if value == &RuntimeValue::Integer(43)
+                        ) {
+                            Err(failure(
+                                "installed SERVER action did not return typed INTEGER(43)",
+                            ))
+                        } else {
+                            complete_client_action(
+                                &active,
+                                &mut action_state,
+                                completion,
+                                &mut executor,
+                            )
+                            .map_err(|error| {
+                                failure(format!(
+                                    "installed action resource completion failed: {error:?}"
+                                ))
+                            })
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            result => Err(failure(format!(
+                "installed SERVER action did not enter its pending executor path: {result:?}"
+            ))),
+        };
         drop(executor);
         let connection = connection.await.map_err(Into::into).and_then(|result| {
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
@@ -3861,8 +3961,17 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
                 "action denial standard source check failed: {error:?}"
             ))
         })?;
-        let (active, client, target, client_parameter, target_parameter, _, _, _, _) =
-            install_action_client_fixture(&kernel, &active, &standard).await?;
+        let (
+            active,
+            client,
+            target,
+            client_parameter,
+            target_parameter,
+            _local_client,
+            local_target,
+            _local_client_parameter,
+            local_target_parameter,
+        ) = install_action_client_fixture(&kernel, &active, &standard).await?;
         let mut function_targets = active
             .catalogue()
             .functions()
@@ -3887,10 +3996,61 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
                 PrincipalStatus::Active,
             )],
             vec![],
-            vec![ExecuteGrant::new(RAW_CLIENT_USER, client)],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client),
+                ExecuteGrant::new(RAW_CLIENT_USER, local_target),
+            ],
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         let security = kernel.replace_security_snapshot(&security).await?;
+        let (root_outcome, _, _) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::function_id(local_target),
+                vec![CliArgumentInput::Canonical {
+                    parameter: local_target_parameter.canonical(),
+                    value: "43".to_owned(),
+                }],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            root_outcome == Ok(InstalledInvokeOutcome::Completed),
+            "action denial evaluator could not create an owned root invocation",
+        )?;
+        let audit_session = database.open().await?;
+        let root_operation = async {
+            let row = audit_session
+                .client()
+                .query_one(
+                    "SELECT invocation_id
+                     FROM _orna_kernel.invocation_audit_events
+                     WHERE function_id = $1
+                       AND session_principal_id = $2
+                     ORDER BY sequence DESC
+                     LIMIT 1",
+                    &[
+                        &local_target.to_bytes().to_vec(),
+                        &RAW_CLIENT_USER.to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            let bytes: Vec<u8> = row.try_get(0)?;
+            let bytes: [u8; 16] = bytes
+                .try_into()
+                .map_err(|_| {
+                    failure("action denial root invocation audit identity was not 16 bytes")
+                })?;
+            Ok(InvocationId::from_bytes(bytes))
+        }
+        .await;
+        let parent_invocation = finish_session(
+            root_operation,
+            audit_session.shutdown().await,
+            "action denial root invocation audit lookup",
+        )?;
         let session = kernel.authenticate_local_peer(uid).await?;
         let authorisation = match security
             .authorise_execute(&session, InvocationTarget::new(client, active.pair()))
@@ -3903,10 +4063,23 @@ async fn proves_server_action_denial_stays_inside_authenticated_resource_trigger
             }
         };
         let argument = FunctionArgument::new(client_parameter, RuntimeValue::Integer(43))?;
-        let result = evaluate_client_function_with_arguments(
-            &active,
-            &authorisation,
-            std::slice::from_ref(&argument),
+        let evaluation_grants = LocalCapabilityGrantSet::new();
+        let mut evaluation_state = ClientStateStore::default();
+        let mut evaluation_executor = DeterministicStreamResourceExecutor;
+        let result =
+            evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &active,
+                &authorisation,
+                std::slice::from_ref(&argument),
+                &[],
+                &evaluation_grants,
+                &mut evaluation_state,
+                parent_invocation,
+                &mut evaluation_executor,
+            )?;
+        require(
+            result.context().parent_invocation_id() == parent_invocation,
+            "action denial evaluator did not retain its authenticated parent invocation",
         )?;
         let RuntimeValue::Opaque(action) = result.value() else {
             return Err(failure(
@@ -4155,9 +4328,27 @@ async fn proves_kernel_capability_gate_for_external_client_contract() -> TestRes
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> TestResult<()> {
+fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("orna-v5-json-proof".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("build JSON proof runtime failed: {error}")))?;
+            runtime
+                .block_on(proves_v5_json_value_and_encode_through_installed_sealed_invoke_inner())
+        })
+        .map_err(|error| failure(format!("spawn JSON proof thread failed: {error}")))?;
+    handle
+        .join()
+        .map_err(|_| failure("JSON proof thread panicked"))?
+}
+
+async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = kernel(&database)?;
@@ -4264,38 +4455,24 @@ async fn proves_v5_json_value_and_encode_through_installed_sealed_invoke() -> Te
         // NULL. Exercise the presenter boundary instead: install one nullable
         // SERVER result, then request the pinned JSON presenter for that result.
         let checked_standard = check_standard_library_source(standard)?;
-        let last_ordinal = active
-            .source()
-            .units()
-            .len()
-            .checked_sub(1)
-            .ok_or_else(|| failure("the V5 source has no unit for the nullable fixture"))?;
-        let source = SourceBundle::new(active.source().units().iter().enumerate().map(
-            |(ordinal, unit)| {
-                let content = if ordinal == last_ordinal {
-                    format!(
-                        "{}\n\
-CREATE SCHEMA json_null_fixture;\n\
-CREATE TYPE json_null_fixture.probe AS OBJECT (\n\
-  marker TEXT UNIQUE NOT NULL, linked REF json_null_fixture.probe\n\
-);\n\
-CREATE SERVER FUNCTION json_null_fixture.create(p_marker TEXT)\n\
-RETURNS ROWS (created REF json_null_fixture.probe)\n\
-SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
-AS INSERT INTO json_null_fixture.probe AS made (marker)\n\
-VALUES (p_marker) RETURNING REF(made);\n\
-CREATE SERVER FUNCTION json_null_fixture.read_links()\n\
-RETURNS ROWS (linked REF json_null_fixture.probe)\n\
-SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-AS SELECT probe.linked FROM json_null_fixture.probe probe;\n",
-                        unit.content()
-                    )
-                } else {
-                    unit.content().to_owned()
-                };
-                SourceUnit::new(unit.logical_path(), content)
-            },
-        ))?;
+        let source = SourceBundle::new([SourceUnit::new(
+            "json_null_fixture.orna",
+            r#"CREATE SCHEMA json_null_fixture;
+CREATE TYPE json_null_fixture.probe AS OBJECT (
+  marker TEXT UNIQUE NOT NULL, linked REF json_null_fixture.probe
+);
+CREATE SERVER FUNCTION json_null_fixture.create(p_marker TEXT)
+RETURNS ROWS (created REF json_null_fixture.probe)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO json_null_fixture.probe AS made (marker)
+VALUES (p_marker) RETURNING REF(made);
+CREATE SERVER FUNCTION json_null_fixture.read_links()
+RETURNS ROWS (linked REF json_null_fixture.probe)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT probe.linked FROM json_null_fixture.probe probe;
+"#
+            .to_owned(),
+        )])?;
         let report = check_standard_application(
             &source,
             &StandardApplicationCheckContext::try_new(active.catalogue(), &checked_standard)?,
@@ -4362,48 +4539,24 @@ AS SELECT probe.linked FROM json_null_fixture.probe probe;\n",
         )?;
         kernel.replace_security_snapshot(&security).await?;
         let session = kernel.authenticate_local_peer(uid).await?;
-        let create_request = InvokeRequest::new(InvokeRequestInput {
-            target: InvocationRequestTarget::function_id(create_function),
-            arguments: vec![InvocationArgument::new(
-                InvocationParameterSelector::parameter_id(create_parameter),
-                InvokeValue::new(RuntimeValue::Text("null-row".to_owned()))?,
-            )],
-            caller_context: InvocationCallerContext::new(
-                InvocationCallerKind::TestRunner,
-                false,
-                false,
-                None,
-                None,
-                "en-GB",
-                "UTC",
-                None,
-            )?,
-            client_offer: InvocationClientOffer::new(
-                5,
-                "en-GB",
-                "UTC",
-                Vec::new(),
-                Vec::new(),
-                1_024,
-                0,
-                None,
-                None,
-            )?,
-            output_requirement: None,
-            state_profile: None,
-            trace_policy: InvocationTracePolicy::Off,
-            idempotency_key: None,
-            parent_invocation_id: None,
-            observer_context: None,
-        })?;
-        let retained = encode_invoke_request(&installed, &registry, &create_request)?;
         let create_result = kernel
-            .dispatch_sealed_sys_invoke(&session, 5, &retained)
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_function,
+                &[FunctionArgument::new(
+                    create_parameter,
+                    RuntimeValue::Text("null-row".to_owned()),
+                )?],
+            )
             .await?;
-        require(
-            matches!(create_result, SealedInvocationResult::Completed { .. }),
-            "the nullable JSON fixture creator did not complete",
-        )?;
+        if !matches!(
+            &create_result,
+            AuthenticatedRawCallResult::Server(values) if values.len() == 1
+        ) {
+            return Err(failure(format!(
+                "the nullable JSON fixture creator did not return one row: {create_result:?}"
+            )));
+        }
         let json_output = InvocationOutputRequirement::new(
             Some("json".to_owned()),
             None,
