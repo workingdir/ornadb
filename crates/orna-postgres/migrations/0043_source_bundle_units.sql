@@ -19,25 +19,22 @@ ORDER BY bundle_id, ordinal;
 
 -- Do not silently bless databases that already lost a historical bundle. The
 -- canonical empty bundle is the only valid non-member bundle.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM _orna_kernel.source_bundles AS bundle
-        WHERE bundle.content_hash <> decode(
-            '965513f9c104e3c3fca13b46dcd382a64041a063d35ff0a316149bf5a4bfd641',
-            'hex'
-        )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM _orna_kernel.source_bundle_units AS membership
-              WHERE membership.bundle_id = bundle.id
-          )
-    ) THEN
-        RAISE EXCEPTION
-            'source bundle membership migration found a non-empty bundle without units';
-    END IF;
-END
-$$;
+CREATE TEMP TABLE _orna_migration_0043_membership_guard (
+    valid boolean NOT NULL CHECK (valid)
+) ON COMMIT DROP;
+
+INSERT INTO _orna_migration_0043_membership_guard (valid)
+SELECT false
+FROM _orna_kernel.source_bundles AS bundle
+WHERE bundle.content_hash <> decode(
+    '965513f9c104e3c3fca13b46dcd382a64041a063d35ff0a316149bf5a4bfd641',
+    'hex'
+)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM _orna_kernel.source_bundle_units AS membership
+      WHERE membership.bundle_id = bundle.id
+  )
+LIMIT 1;
 
 REVOKE ALL ON TABLE _orna_kernel.source_bundle_units FROM PUBLIC;

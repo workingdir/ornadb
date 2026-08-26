@@ -522,39 +522,36 @@ FROM _orna_kernel.catalogue_functions;
 -- Validate the complete backfill, including every existing invocation-audit
 -- target pair, before the replacement foreign key is created. A missing,
 -- duplicate, or revision-mismatched application function aborts the migration.
-DO $$
-DECLARE
-    mismatched bigint;
-    missing_audit_targets bigint;
-BEGIN
-    SELECT count(*) INTO mismatched
-    FROM _orna_kernel.catalogue_functions AS function
-    FULL JOIN _orna_kernel.invocation_target_authorities AS authority
-      ON authority.catalogue_revision_id = function.catalogue_revision_id
-     AND authority.function_id = function.function_id
-    WHERE authority.catalogue_revision_id IS NULL
-       OR function.catalogue_revision_id IS NULL
-       OR authority.target_class <> 'application'
-       OR authority.function_revision_id <> function.current_function_revision_id
-       OR authority.standard_library_revision_id IS NOT NULL;
-    IF mismatched <> 0 THEN
-        RAISE EXCEPTION
-            'invocation target authority backfill is missing, duplicated, or revision-mismatched';
-    END IF;
+CREATE TEMP TABLE migration_0023_authority_validation (
+    is_valid boolean NOT NULL,
+    CONSTRAINT migration_0023_authority_validation_check CHECK (is_valid)
+) ON COMMIT DROP;
 
-    SELECT count(*) INTO missing_audit_targets
-    FROM _orna_kernel.invocation_audit_events AS audit
-    WHERE audit.function_id IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM _orna_kernel.invocation_target_authorities AS authority
-          WHERE authority.catalogue_revision_id = audit.catalogue_revision_id
-            AND authority.function_id = audit.function_id
-      );
-    IF missing_audit_targets <> 0 THEN
-        RAISE EXCEPTION 'an invocation audit target lacks an application authority row';
-    END IF;
-END $$;
+INSERT INTO migration_0023_authority_validation (is_valid)
+SELECT
+    NOT EXISTS (
+        SELECT 1
+        FROM _orna_kernel.catalogue_functions AS function
+        FULL JOIN _orna_kernel.invocation_target_authorities AS authority
+          ON authority.catalogue_revision_id = function.catalogue_revision_id
+         AND authority.function_id = function.function_id
+        WHERE authority.catalogue_revision_id IS NULL
+           OR function.catalogue_revision_id IS NULL
+           OR authority.target_class <> 'application'
+           OR authority.function_revision_id <> function.current_function_revision_id
+           OR authority.standard_library_revision_id IS NOT NULL
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM _orna_kernel.invocation_audit_events AS audit
+        WHERE audit.function_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM _orna_kernel.invocation_target_authorities AS authority
+              WHERE authority.catalogue_revision_id = audit.catalogue_revision_id
+                AND authority.function_id = audit.function_id
+          )
+    );
 
 -- Replace the application-only invocation-audit target foreign key with one
 -- that references the common target-authority relation. The validated

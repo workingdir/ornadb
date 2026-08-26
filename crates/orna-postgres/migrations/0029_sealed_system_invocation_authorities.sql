@@ -51,11 +51,14 @@ CROSS JOIN (
         (decode('00000000000000000000000000000041', 'hex'))
 ) AS identity(function_id);
 
-DO $$
-DECLARE
-    missing bigint;
-BEGIN
-    SELECT count(*) INTO missing
+CREATE TEMP TABLE migration_0029_sealed_system_authority_guard (
+    is_valid boolean NOT NULL,
+    CONSTRAINT migration_0029_sealed_system_authority_guard_check CHECK (is_valid)
+) ON COMMIT DROP;
+
+INSERT INTO migration_0029_sealed_system_authority_guard (is_valid)
+SELECT NOT EXISTS (
+    SELECT 1
     FROM _orna_kernel.catalogue_revisions AS revision
     CROSS JOIN (
         VALUES
@@ -70,10 +73,5 @@ BEGIN
           AND authority.target_class = 'system'
           AND authority.function_revision_id = identity.function_id
           AND authority.standard_library_revision_id IS NULL
-    );
-    IF missing <> 0 THEN
-        RAISE EXCEPTION
-            'sealed system invocation authority backfill is incomplete';
-    END IF;
-END
-$$;
+    )
+);

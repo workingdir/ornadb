@@ -24,11 +24,14 @@ WHERE NOT EXISTS (
       AND authority.function_id = decode('00000000000000000000000000000042', 'hex')
 );
 
-DO $$
-DECLARE
-    missing bigint;
-BEGIN
-    SELECT count(*) INTO missing
+CREATE TEMP TABLE migration_0030_active_roles_authority_guard (
+    is_valid boolean NOT NULL,
+    CONSTRAINT migration_0030_active_roles_authority_guard_check CHECK (is_valid)
+) ON COMMIT DROP;
+
+INSERT INTO migration_0030_active_roles_authority_guard (is_valid)
+SELECT NOT EXISTS (
+    SELECT 1
     FROM _orna_kernel.catalogue_revisions AS revision
     WHERE NOT EXISTS (
         SELECT 1
@@ -38,10 +41,5 @@ BEGIN
           AND authority.target_class = 'system'
           AND authority.function_revision_id = decode('00000000000000000000000000000042', 'hex')
           AND authority.standard_library_revision_id IS NULL
-    );
-    IF missing <> 0 THEN
-        RAISE EXCEPTION
-            'active-roles system invocation authority backfill is incomplete';
-    END IF;
-END
-$$;
+    )
+);

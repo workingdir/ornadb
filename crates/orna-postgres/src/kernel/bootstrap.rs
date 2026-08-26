@@ -300,6 +300,47 @@ const MIGRATION_REGISTRY_SQL: &str = "
 const MIGRATION_LOCK_NAMESPACE: i32 = 0x4f52_4e41;
 const MIGRATION_LOCK_KEY: i32 = 1;
 
+const LEGACY_MIGRATION_CHECKSUMS: &[(i64, [u8; 32])] = &[
+    (
+        23,
+        [
+            0x3c, 0xa6, 0x3b, 0x0c, 0xc4, 0xf2, 0x6d, 0x91, 0x30, 0x5d, 0xcc, 0xd7, 0xda, 0xdc,
+            0x50, 0x64, 0xfe, 0xfc, 0xfc, 0xf0, 0x7c, 0x5b, 0x2b, 0x22, 0x6e, 0x92, 0x0b, 0xbf,
+            0x88, 0xd0, 0xed, 0x89,
+        ],
+    ),
+    (
+        29,
+        [
+            0xc4, 0x08, 0xd9, 0xfa, 0xeb, 0x56, 0x22, 0x76, 0xb9, 0x19, 0x1d, 0xbd, 0x9d, 0xc1,
+            0xe4, 0xce, 0xea, 0x02, 0xd7, 0x94, 0xb9, 0x4e, 0x48, 0x14, 0xf4, 0xfa, 0xb4, 0x0e,
+            0x62, 0x96, 0x76, 0xef,
+        ],
+    ),
+    (
+        30,
+        [
+            0x90, 0x36, 0x2d, 0x04, 0x93, 0xf2, 0xbd, 0xd7, 0x9b, 0xcb, 0xf8, 0x6c, 0x23, 0x66,
+            0x1d, 0xdc, 0xe5, 0xc0, 0xa4, 0x06, 0x6a, 0x79, 0xe8, 0xed, 0xcc, 0xd7, 0x1b, 0x19,
+            0x3e, 0xfe, 0x81, 0x01,
+        ],
+    ),
+];
+
+fn legacy_migration_checksum(version: i64) -> Option<&'static [u8; 32]> {
+    LEGACY_MIGRATION_CHECKSUMS
+        .iter()
+        .find(|(legacy_version, _)| *legacy_version == version)
+        .map(|(_, checksum)| checksum)
+}
+
+fn migration_checksum_matches(migration: &Migration, applied_checksum: &[u8]) -> bool {
+    let expected_checksum = migration_checksum(migration);
+    applied_checksum == expected_checksum
+        || legacy_migration_checksum(migration.version)
+            .is_some_and(|legacy_checksum| applied_checksum == legacy_checksum)
+}
+
 /// The consistent empty or active durable revision pair.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActiveRevision {
@@ -428,8 +469,8 @@ async fn validated_applied_migration_count(
         let applied_checksum: Vec<u8> = row
             .try_get("checksum")
             .map_err(PostgresKernelError::Database)?;
-        let expected_checksum = migration_checksum(expected);
-        if applied_name != expected.name || applied_checksum != expected_checksum {
+        if applied_name != expected.name || !migration_checksum_matches(expected, &applied_checksum)
+        {
             return Err(PostgresKernelError::MigrationMismatch { version });
         }
     }
@@ -1001,7 +1042,10 @@ fn exact_id_bytes(bytes: Vec<u8>, message: &'static str) -> Result<[u8; 16], Pos
 mod tests {
     use std::{str::FromStr, sync::Arc};
 
-    use super::{MIGRATIONS, PostgresKernel, validated_migration_registry};
+    use super::{
+        MIGRATIONS, PostgresKernel, legacy_migration_checksum, migration_checksum,
+        migration_checksum_matches, validated_migration_registry,
+    };
 
     #[test]
     fn migration_registry_is_a_strict_contiguous_sequence() {
@@ -1144,6 +1188,77 @@ mod tests {
     }
 
     #[test]
+    fn legacy_migration_checksums_are_scoped_to_versions_23_29_and_30() {
+        let expected_legacy_checksums = [
+            (
+                23_i64,
+                [
+                    0x3c, 0xa6, 0x3b, 0x0c, 0xc4, 0xf2, 0x6d, 0x91, 0x30, 0x5d, 0xcc, 0xd7, 0xda,
+                    0xdc, 0x50, 0x64, 0xfe, 0xfc, 0xfc, 0xf0, 0x7c, 0x5b, 0x2b, 0x22, 0x6e, 0x92,
+                    0x0b, 0xbf, 0x88, 0xd0, 0xed, 0x89,
+                ],
+            ),
+            (
+                29_i64,
+                [
+                    0xc4, 0x08, 0xd9, 0xfa, 0xeb, 0x56, 0x22, 0x76, 0xb9, 0x19, 0x1d, 0xbd, 0x9d,
+                    0xc1, 0xe4, 0xce, 0xea, 0x02, 0xd7, 0x94, 0xb9, 0x4e, 0x48, 0x14, 0xf4, 0xfa,
+                    0xb4, 0x0e, 0x62, 0x96, 0x76, 0xef,
+                ],
+            ),
+            (
+                30_i64,
+                [
+                    0x90, 0x36, 0x2d, 0x04, 0x93, 0xf2, 0xbd, 0xd7, 0x9b, 0xcb, 0xf8, 0x6c, 0x23,
+                    0x66, 0x1d, 0xdc, 0xe5, 0xc0, 0xa4, 0x06, 0x6a, 0x79, 0xe8, 0xed, 0xcc, 0xd7,
+                    0x1b, 0x19, 0x3e, 0xfe, 0x81, 0x01,
+                ],
+            ),
+        ];
+
+        for (version, expected_checksum) in expected_legacy_checksums {
+            let migration = &MIGRATIONS[usize::try_from(version - 1).expect("valid version")];
+            assert_eq!(legacy_migration_checksum(version), Some(&expected_checksum));
+            assert!(migration_checksum_matches(migration, &expected_checksum));
+            assert!(migration_checksum_matches(
+                migration,
+                &migration_checksum(migration)
+            ));
+
+            let mut drifted_legacy_checksum = expected_checksum;
+            drifted_legacy_checksum[0] ^= 0xff;
+            assert!(!migration_checksum_matches(
+                migration,
+                &drifted_legacy_checksum
+            ));
+        }
+
+        assert!(legacy_migration_checksum(22).is_none());
+        assert!(legacy_migration_checksum(24).is_none());
+        assert!(legacy_migration_checksum(28).is_none());
+        assert!(legacy_migration_checksum(31).is_none());
+    }
+
+    #[test]
+    fn unrelated_migration_checksum_drift_is_rejected() {
+        for migration in MIGRATIONS {
+            if matches!(migration.version, 23 | 29 | 30) {
+                continue;
+            }
+
+            let mut drifted_checksum = migration_checksum(migration);
+            drifted_checksum[0] ^= 0xff;
+            assert!(!migration_checksum_matches(migration, &drifted_checksum));
+        }
+
+        let legacy_23_checksum = legacy_migration_checksum(23).expect("version 23 compatibility");
+        assert!(!migration_checksum_matches(
+            &MIGRATIONS[28],
+            legacy_23_checksum
+        ));
+    }
+
+    #[test]
     fn source_bundle_unit_memberships_is_the_registered_version_forty_three() {
         let migration = &MIGRATIONS[42];
 
@@ -1186,9 +1301,14 @@ mod tests {
                 .contains("REVOKE ALL ON TABLE _orna_kernel.source_bundle_units FROM PUBLIC")
         );
         assert!(
-            migration.sql.contains(
-                "source bundle membership migration found a non-empty bundle without units"
-            )
+            migration
+                .sql
+                .contains("CREATE TEMP TABLE _orna_migration_0043_membership_guard")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("valid boolean NOT NULL CHECK (valid)")
         );
     }
 
