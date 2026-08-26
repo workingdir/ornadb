@@ -87,8 +87,6 @@ std.ui.panel@1
 std.ui.row@1
 std.ui.column@1
 std.ui.text_input@1
-std.ui.list@1
-std.ui.table@1
 std.ui.tabs@1
 ```
 
@@ -114,10 +112,14 @@ not count as runtime mutation.
 
 ## Handles and ownership
 
-Every runtime, surface, node, action, model, and request handle is non-zero,
-created by the runtime, scoped to its owning runtime, and never reused during
-that runtime's lifetime. The client may retain a handle only while its owning
-surface and runtime remain live.
+Runtime and surface handles are non-zero, created by the runtime, scoped to
+their owning runtime, and never reused during that runtime's lifetime. The
+current ABI has no node/action allocator, so node and action fields in mount
+and bind operations are non-zero client reservation aliases. The runtime
+adopts an alias only once, rejects aliases already live in another surface,
+and retires each accepted alias permanently when its node or action ends.
+Model and request handles emitted by the runtime follow the runtime-created
+rule.
 
 The runtime rejects a zero, foreign, retired, or wrong-kind handle with
 `ORNA_STATUS_INVALID_ARGUMENT` or `ORNA_STATUS_NOT_FOUND` according to whether
@@ -144,8 +146,6 @@ The following properties have closed v1 meaning:
 | `std.ui.text@1` | `text` |
 | `std.ui.button@1` | `label`, `enabled` |
 | `std.ui.text_input@1` | `text`, `placeholder`, `enabled` |
-| `std.ui.list@1` | `selection` |
-| `std.ui.table@1` | `selection` |
 | all container contracts | no required properties; children use declared slots |
 
 A property value must use the declared canonical type. Unsupported property
@@ -171,17 +171,16 @@ serializes events in the caller-pumps loop. Every action event includes the
 owning surface, node, action handle, and a validated payload reference. It does
 not include a principal or grant.
 
-A list or table model may request a bounded range or child set through the
-client callback. The client completes or fails the request exactly once. The
-runtime accepts model rows only for the live request, the owning surface, and
-the expected model type. It rejects late, foreign, duplicate, or malformed
-completion data without changing the model.
+The Qt v1 provider emits action, surface-closed, and diagnostic events. It does
+not advertise list/table model contracts in this provider version. Model range,
+child, completion, and cancellation semantics remain a later provider
+extension because the current ABI has no accepted model-construction operation.
 
-`cancel_request` is idempotent for one live request. Cancellation marks the
-request terminal, prevents later rows or failures from being applied, and
-emits no second terminal result. A completed request wins over a later
-cancellation. Surface destruction, runtime shutdown, and client disconnect
-cancel all pending requests exactly once.
+For every model request that a later provider creates, the client completes or
+fails the request exactly once and the runtime rejects late, foreign, duplicate,
+or malformed completion data. `cancel_request` remains idempotent for that
+future request contract. Surface destruction, runtime shutdown, and client
+disconnect cancel pending requests exactly once.
 
 ## Shutdown and failure reporting
 
