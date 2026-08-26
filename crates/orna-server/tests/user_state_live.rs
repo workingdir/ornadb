@@ -62,11 +62,16 @@ const PRINCIPAL_B: PrincipalId = PrincipalId::from_bytes([0xbb; 16]);
 const UNKNOWN_ROOT: FunctionId = FunctionId::from_bytes([0xe1; 16]);
 const INACTIVE_ROOT: FunctionId = FunctionId::from_bytes([0xe2; 16]);
 const RAW_USER_STATE_SOURCE: &str = "CREATE SCHEMA user_state_fixture;\n\
+    CREATE TYPE user_state_fixture.server_row AS OBJECT (value INTEGER NOT NULL);\n\
     CREATE CLIENT FUNCTION user_state_fixture.state() RETURNS BOOLEAN IS\n\
       STATE value INTEGER SCOPE USER DEFAULT 0;\n\
     BEGIN\n\
       RETURN TRUE;\n\
-    END;\n";
+    END;\n\
+    CREATE SERVER FUNCTION user_state_fixture.server()\n\
+    RETURNS ROWS (value INTEGER)\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT server_row.value FROM user_state_fixture.server_row server_row;\n";
 
 fn kernel(database: &TestDatabase) -> PostgresKernel {
     database.connection_string().parse().expect("kernel URL")
