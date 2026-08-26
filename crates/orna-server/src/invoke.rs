@@ -8097,7 +8097,61 @@ mod tests {
     async fn broker_drains_late_acceptance_and_values_after_cancel_before_completion() {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
+        let sibling_request = transport_test_request(active.pair(), 2);
+        let malformed_acceptance_request = transport_test_request(active.pair(), 3);
+        let malformed_values_request = transport_test_request(active.pair(), 4);
         let nested_invocation_id = InvocationId::from_bytes([0x40; 16]);
+        let sibling_nested_invocation_id = InvocationId::from_bytes([0x45; 16]);
+
+        let make_state =
+            |request: ResourceRequest,
+             completion: Sender<Result<ResourceTransportOutcome, ResourceTransportFailure>>,
+             cancellation_requested: bool,
+             accepted_nested_invocation_id: Option<InvocationId>| {
+                let mut protocol = ResourceProtocolConnection::new();
+                protocol
+                    .open(request.clone())
+                    .expect("resource request opens");
+                if let Some(nested_invocation_id) = accepted_nested_invocation_id.clone() {
+                    protocol
+                        .apply_constructed(
+                            &active,
+                            &registry,
+                            ResourceServerFrame::Accepted(ResourceAccepted {
+                                stream_id: request.stream_id,
+                                request_id: request.request_id,
+                                nested_invocation_id,
+                                target_revision: request.target_revision,
+                                resource_kind: request.resource_kind,
+                            }),
+                        )
+                        .expect("resource acceptance applies");
+                }
+                if cancellation_requested {
+                    protocol
+                        .receive(ResourceClientFrame::Cancel(ResourceCancel {
+                            stream_id: request.stream_id,
+                            request_id: request.request_id,
+                            reason: ResourceCancellationCode::ParentInvocationCancelled,
+                        }))
+                        .expect("resource cancellation applies");
+                }
+                BrokerResourceState {
+                    request,
+                    expected_type: ResolvedType::Scalar(StandardScalar::Integer),
+                    resource_kind: ProtocolResourceKind::Single,
+                    protocol,
+                    completion,
+                    accepted: accepted_nested_invocation_id.is_some(),
+                    accepted_nested_invocation_id,
+                    scalar_value: None,
+                    cancellation_requested,
+                    stream_values_seen: false,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+                    scalar_value_after_cancellation: false,
+                }
+            };
+
         let accepted = ResourceAccepted {
             stream_id: request.stream_id,
             request_id: request.request_id,
@@ -8105,135 +8159,325 @@ mod tests {
             target_revision: request.target_revision,
             resource_kind: request.resource_kind,
         };
-        let mut protocol = ResourceProtocolConnection::new();
-        protocol
-            .open(request.clone())
-            .expect("resource request opens");
-        protocol
-            .receive(ResourceClientFrame::Cancel(ResourceCancel {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                reason: ResourceCancellationCode::ParentInvocationCancelled,
-            }))
-            .expect("resource cancellation applies");
-        let (completion, mut completions) = mpsc::channel(2);
-        let mut state = BrokerResourceState {
-            request: request.clone(),
-            expected_type: ResolvedType::Scalar(StandardScalar::Integer),
-            resource_kind: ProtocolResourceKind::Single,
-            protocol,
-            completion,
-            accepted: false,
-            accepted_nested_invocation_id: None,
-            scalar_value: None,
-            cancellation_requested: true,
-            stream_values_seen: false,
-            terminal_provenance: ResourceTerminalProvenance::Uncommitted,
-            scalar_value_after_cancellation: false,
-        };
-        let (_reader, mut writer) = tokio::io::duplex(128);
-        assert!(
-            handle_shared_resource_frame(
-                &mut state,
-                ResourceServerFrame::Accepted(accepted),
-                &mut writer,
-                &active,
-                &registry,
-            )
-            .await
-            .expect("late acceptance is drained")
-        );
-        assert!(state.accepted);
-        assert_eq!(
-            state.accepted_nested_invocation_id,
-            Some(nested_invocation_id)
-        );
-
-        let malformed_acceptance = ResourceServerFrame::Accepted(ResourceAccepted {
+        let value = RuntimeValue::Integer(7);
+        let byte_count = encode_constructed_value(&active, &registry, &value)
+            .expect("encoded resource value")
+            .len() as u32;
+        let values = ResourceValues {
             stream_id: request.stream_id,
             request_id: request.request_id,
-            nested_invocation_id: InvocationId::from_bytes([0x41; 16]),
-            target_revision: request.target_revision,
-            resource_kind: ProtocolResourceKind::Stream,
-        });
-        let encoded_malformed_acceptance =
-            encode_resource_server_frame(&active, &registry, &malformed_acceptance)
-                .expect("malformed late acceptance encodes");
-        let decoded_malformed_acceptance =
-            decode_resource_server_frame(&active, &registry, &encoded_malformed_acceptance)
-                .expect("decoder permits mismatched resource kind payload");
-        let error = handle_shared_resource_frame(
-            &mut state,
-            decoded_malformed_acceptance,
+            target_revision: active.pair(),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        let completed = ResourceCompleted {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            target_revision: active.pair(),
+            final_batch_sequence: 0,
+            total_items: 1,
+        };
+
+        let sibling_accepted = ResourceAccepted {
+            stream_id: sibling_request.stream_id,
+            request_id: sibling_request.request_id,
+            nested_invocation_id: sibling_nested_invocation_id,
+            target_revision: sibling_request.target_revision,
+            resource_kind: sibling_request.resource_kind,
+        };
+        let sibling_value = RuntimeValue::Integer(8);
+        let sibling_byte_count = encode_constructed_value(&active, &registry, &sibling_value)
+            .expect("encoded sibling resource value")
+            .len() as u32;
+        let sibling_values = ResourceValues {
+            stream_id: sibling_request.stream_id,
+            request_id: sibling_request.request_id,
+            target_revision: active.pair(),
+            batch_sequence: 0,
+            item_count: 1,
+            byte_count: sibling_byte_count,
+            values: vec![sibling_value],
+        };
+        let sibling_completed = ResourceCompleted {
+            stream_id: sibling_request.stream_id,
+            request_id: sibling_request.request_id,
+            target_revision: active.pair(),
+            final_batch_sequence: 0,
+            total_items: 1,
+        };
+
+        let (completion, mut completions) = mpsc::channel(2);
+        let (sibling_completion, mut sibling_completions) = mpsc::channel(2);
+        let (malformed_acceptance_completion, mut malformed_acceptance_completions) =
+            mpsc::channel(1);
+        let (malformed_values_completion, mut malformed_values_completions) = mpsc::channel(1);
+        let mut resources = BTreeMap::from([
+            (
+                request.stream_id,
+                make_state(request.clone(), completion, true, None),
+            ),
+            (
+                sibling_request.stream_id,
+                make_state(sibling_request.clone(), sibling_completion, false, None),
+            ),
+            (
+                malformed_acceptance_request.stream_id,
+                make_state(
+                    malformed_acceptance_request.clone(),
+                    malformed_acceptance_completion,
+                    true,
+                    None,
+                ),
+            ),
+            (
+                malformed_values_request.stream_id,
+                make_state(
+                    malformed_values_request.clone(),
+                    malformed_values_completion,
+                    true,
+                    Some(InvocationId::from_bytes([0x44; 16])),
+                ),
+            ),
+        ]);
+        let mut tombstones = BrokerResourceTombstones::new();
+        let mut root = None;
+        let resource_terminal_provenance = Arc::new(Mutex::new(BTreeMap::new()));
+        let resource_high_water_mark = Some(malformed_values_request.stream_id);
+        let (_reader, mut writer) = tokio::io::duplex(512);
+
+        let bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Accepted(accepted),
+        )
+        .expect("encoded late acceptance");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
             &mut writer,
             &active,
             &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
         )
         .await
-        .expect_err("malformed late acceptance is rejected");
-        assert!(matches!(error, ResourceTransportFailure::Shape));
-        assert!(state.accepted);
+        .expect("late acceptance is drained by the outer broker");
+        let primary = resources
+            .get(&request.stream_id)
+            .expect("late acceptance retains primary state");
+        assert!(primary.accepted);
         assert_eq!(
-            state.accepted_nested_invocation_id,
+            primary.accepted_nested_invocation_id,
             Some(nested_invocation_id)
         );
+        assert!(resources.contains_key(&sibling_request.stream_id));
+
+        let bytes =
+            encode_resource_server_frame(&active, &registry, &ResourceServerFrame::Values(values))
+                .expect("encoded late values");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
+        )
+        .await
+        .expect("late values are drained by the outer broker");
+        let primary = resources
+            .get(&request.stream_id)
+            .expect("late values retain primary state");
+        assert!(matches!(
+            &primary.scalar_value,
+            Some(RuntimeValue::Integer(7))
+        ));
+        assert!(primary.scalar_value_after_cancellation);
+        assert!(resources.contains_key(&sibling_request.stream_id));
+
+        let malformed_acceptance = ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id: malformed_acceptance_request.stream_id,
+            request_id: malformed_acceptance_request.request_id,
+            nested_invocation_id: InvocationId::from_bytes([0x41; 16]),
+            target_revision: malformed_acceptance_request.target_revision,
+            resource_kind: ProtocolResourceKind::Stream,
+        });
+        let bytes = encode_resource_server_frame(&active, &registry, &malformed_acceptance)
+            .expect("malformed late acceptance encodes");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
+        )
+        .await
+        .expect("outer broker contains malformed late acceptance");
+        assert!(!resources.contains_key(&malformed_acceptance_request.stream_id));
+        assert_eq!(
+            tombstones.get(&malformed_acceptance_request.stream_id),
+            Some(&malformed_acceptance_request.request_id)
+        );
+        assert!(matches!(
+            malformed_acceptance_completions.recv().await,
+            Some(Err(ResourceTransportFailure::Shape))
+        ));
+        assert!(resources.contains_key(&sibling_request.stream_id));
 
         let malformed_value = RuntimeValue::Text("late wrong type".to_owned());
         let malformed_byte_count = encode_constructed_value(&active, &registry, &malformed_value)
             .expect("encoded malformed late value")
             .len() as u32;
         let malformed_values = ResourceServerFrame::Values(ResourceValues {
-            stream_id: request.stream_id,
-            request_id: request.request_id,
+            stream_id: malformed_values_request.stream_id,
+            request_id: malformed_values_request.request_id,
             target_revision: active.pair(),
             batch_sequence: 0,
             item_count: 1,
             byte_count: malformed_byte_count,
             values: vec![malformed_value],
         });
-        let encoded_malformed_values =
-            encode_resource_server_frame(&active, &registry, &malformed_values)
-                .expect("malformed late values encode");
-        let decoded_malformed_values =
-            decode_resource_server_frame(&active, &registry, &encoded_malformed_values)
-                .expect("decoder permits wrong result type payload");
-        let error = handle_shared_resource_frame(
-            &mut state,
-            decoded_malformed_values,
+        let bytes = encode_resource_server_frame(&active, &registry, &malformed_values)
+            .expect("malformed late values encode");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
             &mut writer,
             &active,
             &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
         )
         .await
-        .expect_err("malformed late values are rejected");
-        assert!(matches!(error, ResourceTransportFailure::Shape));
-        assert!(state.accepted);
+        .expect("outer broker contains malformed late values");
+        assert!(!resources.contains_key(&malformed_values_request.stream_id));
         assert_eq!(
-            state.accepted_nested_invocation_id,
-            Some(nested_invocation_id)
+            tombstones.get(&malformed_values_request.stream_id),
+            Some(&malformed_values_request.request_id)
         );
-        assert_eq!(state.scalar_value, None);
-        let keep = handle_shared_resource_frame(
-            &mut state,
-            ResourceServerFrame::Completed(ResourceCompleted {
-                stream_id: request.stream_id,
-                request_id: request.request_id,
-                target_revision: active.pair(),
-                final_batch_sequence: 0,
-                total_items: 1,
-            }),
+        assert!(matches!(
+            malformed_values_completions.recv().await,
+            Some(Err(ResourceTransportFailure::Shape))
+        ));
+        assert!(resources.contains_key(&sibling_request.stream_id));
+
+        for frame in [
+            ResourceServerFrame::Accepted(sibling_accepted),
+            ResourceServerFrame::Values(sibling_values),
+        ] {
+            let bytes = encode_resource_server_frame(&active, &registry, &frame)
+                .expect("encoded sibling resource response");
+            handle_shared_broker_frame(
+                BrokerWireFrame {
+                    resource: true,
+                    bytes,
+                },
+                &mut writer,
+                &active,
+                &registry,
+                &mut root,
+                &mut resources,
+                resource_high_water_mark,
+                &mut tombstones,
+                &resource_terminal_provenance,
+            )
+            .await
+            .expect("sibling resource remains isolated");
+        }
+        assert!(resources.contains_key(&request.stream_id));
+        assert!(resources.contains_key(&sibling_request.stream_id));
+        assert!(sibling_completions.try_recv().is_err());
+
+        let bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Completed(completed),
+        )
+        .expect("encoded late completion");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
             &mut writer,
             &active,
             &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
         )
         .await
-        .expect("late completion closes the resource");
-        assert!(!keep);
+        .expect("late completion closes the cancelled primary resource");
+        assert!(!resources.contains_key(&request.stream_id));
+        assert!(resources.contains_key(&sibling_request.stream_id));
+        assert_eq!(
+            tombstones.get(&request.stream_id),
+            Some(&request.request_id)
+        );
         assert!(matches!(
             completions.recv().await,
             Some(Ok(ResourceTransportOutcome::Cancelled {
                 nested_invocation_id: Some(actual),
             })) if actual == nested_invocation_id
+        ));
+        assert!(sibling_completions.try_recv().is_err());
+
+        let bytes = encode_resource_server_frame(
+            &active,
+            &registry,
+            &ResourceServerFrame::Completed(sibling_completed),
+        )
+        .expect("encoded sibling completion");
+        handle_shared_broker_frame(
+            BrokerWireFrame {
+                resource: true,
+                bytes,
+            },
+            &mut writer,
+            &active,
+            &registry,
+            &mut root,
+            &mut resources,
+            resource_high_water_mark,
+            &mut tombstones,
+            &resource_terminal_provenance,
+        )
+        .await
+        .expect("sibling completion remains isolated");
+        assert!(resources.is_empty());
+        assert!(matches!(
+            sibling_completions.recv().await,
+            Some(Ok(ResourceTransportOutcome::Ready {
+                value: RuntimeValue::Integer(8),
+                nested_invocation_id,
+            })) if nested_invocation_id == sibling_nested_invocation_id
         ));
     }
 
@@ -8395,7 +8639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_publishes_failure_for_dropped_late_completed_without_value() {
+    async fn broker_publishes_cancelled_for_dropped_late_completed_without_value() {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
         let accepted = ResourceAccepted {
@@ -8449,7 +8693,7 @@ mod tests {
             &registry,
         )
         .await
-        .expect("late committed completion closes the resource");
+        .expect("late uncommitted completion is superseded by cancellation");
         assert!(!keep);
         assert!(matches!(
             completions.recv().await,
@@ -8460,7 +8704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_publishes_failure_before_acceptance_after_cancel() {
+    async fn broker_publishes_cancelled_after_late_failure_before_acceptance() {
         let (active, registry) = transport_test_context();
         let request = transport_test_request(active.pair(), 1);
         let mut protocol = ResourceProtocolConnection::new();
@@ -8503,7 +8747,7 @@ mod tests {
             &registry,
         )
         .await
-        .expect("late failure closes the resource");
+        .expect("late failure is superseded by cancellation");
         assert!(!keep);
         assert!(matches!(
             completions.recv().await,
@@ -8711,6 +8955,46 @@ mod tests {
                 DroppedLate,
                 false,
                 true,
+                ResourceTerminalProvenance::Uncommitted,
+                false,
+            ),
+            ResourceFrameDispositionAction::Reject,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(
+                Applied,
+                true,
+                true,
+                ResourceTerminalProvenance::Uncommitted,
+                true,
+            ),
+            ResourceFrameDispositionAction::Apply,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(
+                DroppedLate,
+                true,
+                true,
+                ResourceTerminalProvenance::Uncommitted,
+                true,
+            ),
+            ResourceFrameDispositionAction::Apply,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(
+                Applied,
+                false,
+                false,
+                ResourceTerminalProvenance::Uncommitted,
+                false,
+            ),
+            ResourceFrameDispositionAction::Apply,
+        );
+        assert_eq!(
+            resource_transport_disposition_action(
+                DroppedLate,
+                false,
+                false,
                 ResourceTerminalProvenance::Uncommitted,
                 false,
             ),
