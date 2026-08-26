@@ -612,6 +612,7 @@ pub(crate) async fn recover_active_revision(
     let active_ancestry =
         validate_revision_ancestry(transaction, header.catalogue, header.source).await?;
     validate_source_ancestry(transaction, &active_ancestry).await?;
+    validate_catalogue_ancestry(transaction, header.catalogue, &active_ancestry).await?;
     let units = load_source_units(transaction, header.bundle).await?;
     let mut function_state = load_function_state(
         transaction,
@@ -620,7 +621,6 @@ pub(crate) async fn recover_active_revision(
         &catalogue_hash_context,
     )
     .await?;
-    validate_catalogue_ancestry(transaction, header.catalogue, &active_ancestry).await?;
     let functions = std::mem::take(&mut function_state.functions);
     let function_origins = std::mem::take(&mut function_state.origins);
     let semantics = load_catalogue_semantics(
