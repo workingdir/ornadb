@@ -36,8 +36,8 @@ use orna_core::{
     inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
-        VerifiedStandardLibrarySnapshot,
+        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
+        Sha256Digest, StandardExecutable, VerifiedStandardLibrarySnapshot,
     },
     security::{AuthenticatedSessionBinding, AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
@@ -2720,17 +2720,90 @@ struct ResolvedResourceTarget<'a> {
     definition: &'a FunctionDefinition,
 }
 
+struct ResolvedClientFunction<'a> {
+    definition: &'a FunctionDefinition,
+    revision: &'a FunctionRevisionRecord,
+    references: &'a [orna_core::revision::DefinitionReference],
+    standard: Option<&'a VerifiedStandardLibrarySnapshot>,
+}
+
+fn verified_standard_executable<'a>(
+    standard: &'a VerifiedStandardLibrarySnapshot,
+    function: FunctionId,
+) -> Option<&'a StandardExecutable> {
+    let mut executables = standard
+        .executables()
+        .iter()
+        .filter(|executable| executable.function() == function);
+    let executable = executables.next()?;
+    executables.next().is_none().then_some(executable)
+}
+
+/// Resolves one CLIENT function from the active application first, then from
+/// the exact verified standard snapshot pinned by that application revision.
+///
+/// Application definitions retain precedence even when a malformed or
+/// incomplete application revision would otherwise allow a standard fallback.
+/// A standard definition is executable only when its snapshot carries exactly
+/// one executable whose immutable revision is the definition's current
+/// revision.
+fn resolve_client_function<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Option<ResolvedClientFunction<'a>> {
+    if let Some(definition) = active.catalogue().function_by_id(function) {
+        let revision = active.function_revisions().iter().find(|candidate| {
+            candidate.function() == function && candidate.id() == definition.current_revision()
+        })?;
+        return Some(ResolvedClientFunction {
+            definition,
+            revision,
+            references: active.references(),
+            standard: None,
+        });
+    }
+
+    let standard = active.catalogue_hash_context().standard()?;
+    let definition = standard.catalogue().function_by_id(function)?;
+    let executable = verified_standard_executable(standard, function)?;
+    let revision = executable.revision();
+    if revision.function() != function || revision.id() != definition.current_revision() {
+        return None;
+    }
+    Some(ResolvedClientFunction {
+        definition,
+        revision,
+        references: executable.references(),
+        standard: Some(standard),
+    })
+}
+
+fn client_invocation_target_is_resolved(
+    active: &ActiveDatabaseRevision,
+    target: InvocationTarget,
+) -> bool {
+    let Some(resolved) = resolve_client_function(active, target.function()) else {
+        return false;
+    };
+    match resolved.standard {
+        Some(standard) => {
+            target.class() == Some(TargetClass::VerifiedStandard)
+                && target.standard_revision() == Some(standard.revision())
+                && target.executable_revision() == Some(resolved.revision.id())
+        }
+        None => {
+            matches!(target.class(), None | Some(TargetClass::Application))
+                && target.standard_revision().is_none()
+                && target.executable_revision().is_none()
+        }
+    }
+}
+
 fn verified_standard_executable_revision(
     standard: &VerifiedStandardLibrarySnapshot,
     function: FunctionId,
 ) -> Option<FunctionRevisionId> {
-    let mut revisions = standard
-        .executables()
-        .iter()
-        .filter(|executable| executable.function() == function)
-        .map(|executable| executable.revision().id());
-    let revision = revisions.next()?;
-    revisions.next().is_none().then_some(revision)
+    verified_standard_executable(standard, function).map(|executable| executable.revision().id())
 }
 
 /// Resolves a resource target against the active application catalogue and its
@@ -4904,6 +4977,12 @@ fn evaluate_client_function_in_state_context_with_executor(
         });
     }
     validate_active_catalogue(active, target.function())?;
+    if !client_invocation_target_is_resolved(active, target) {
+        return Err(ClientExecutionError::FunctionNotFound {
+            pair: active.pair(),
+            function: target.function(),
+        });
+    }
     let mut staged = state.clone();
     staged.set_context(state_context.clone());
     // Security is invocation-scoped; refresh it for every root evaluation while
@@ -5067,17 +5146,10 @@ fn evaluate_function(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
-    let definition = active
-        .catalogue()
-        .function_by_id(function)
+    let resolved = resolve_client_function(active, function)
         .ok_or(ClientExecutionError::FunctionNotFound { pair, function })?;
-    let revision = active
-        .function_revisions()
-        .iter()
-        .find(|candidate| {
-            candidate.function() == function && candidate.id() == definition.current_revision()
-        })
-        .ok_or(ClientExecutionError::FunctionNotFound { pair, function })?;
+    let definition = resolved.definition;
+    let revision = resolved.revision;
     let context = ClientExecutionContext {
         pair,
         function,
@@ -5177,6 +5249,8 @@ fn evaluate_function(
     }
     validate_selected_references(
         active,
+        resolved.references,
+        definition,
         revision.semantic_hash_version(),
         context,
         return_shape,
@@ -7211,19 +7285,17 @@ fn client_action_target_is_provenance_safe(
     parent: ClientExecutionContext,
     target: FunctionId,
 ) -> bool {
-    if active
-        .catalogue()
-        .function_by_id(parent.function())
-        .is_none_or(|definition| definition.domain() != FunctionDomain::Client)
-    {
+    let Some(owner) = resolve_client_function(active, parent.function()) else {
         return false;
-    }
-    active.references().iter().any(|reference| {
-        reference.source_function() == parent.function()
-            && reference.source_revision() == parent.function_revision()
-            && reference.kind() == DefinitionReferenceKind::FunctionCall
-            && reference.target() == DefinitionReferenceTarget::Function(target)
-    })
+    };
+    owner.revision.id() == parent.function_revision()
+        && owner.definition.domain() == FunctionDomain::Client
+        && owner.references.iter().any(|reference| {
+            reference.source_function() == parent.function()
+                && reference.source_revision() == parent.function_revision()
+                && reference.kind() == DefinitionReferenceKind::FunctionCall
+                && reference.target() == DefinitionReferenceTarget::Function(target)
+        })
 }
 
 /// Adapts nested CLIENT resource execution to the terminal action contract.
@@ -8595,11 +8667,10 @@ fn expression_returns_stream(
             local_environment.get(local),
             Some(ClientLocalBinding::StreamValue(_))
         ),
-        ClientExpressionNode::Call { function, .. } => active
-            .catalogue()
-            .function_by_id(*function)
-            .is_some_and(|function| matches!(function.return_type(), FunctionReturn::Stream(_))),
-        ClientExpressionNode::Inspect { .. } => false,
+        ClientExpressionNode::Call { function, .. } => resolve_client_function(active, *function)
+            .is_some_and(|resolved| {
+                matches!(resolved.definition.return_type(), FunctionReturn::Stream(_))
+            }),
         _ => false,
     }
 }
@@ -9290,19 +9361,19 @@ fn is_expression_reference_allowed(
 
 fn validate_selected_references(
     active: &ActiveDatabaseRevision,
+    references: &[orna_core::revision::DefinitionReference],
+    function: &FunctionDefinition,
     semantic_hash_version: FunctionSemanticHashVersion,
     context: ClientExecutionContext,
     return_shape: ClientReturnShape,
 ) -> Result<(), ClientExecutionError> {
-    let selected = active
-        .references()
+    let selected = references
         .iter()
         .filter(|reference| {
             reference.source_function() == context.function()
                 && reference.source_revision() == context.function_revision()
         })
         .collect::<Vec<_>>();
-    let function = active.catalogue().function_by_id(context.function());
 
     match active.catalogue_hash_context() {
         orna_core::revision::CatalogueHashContext::Version1 => {
@@ -9332,7 +9403,7 @@ fn validate_selected_references(
             ) {
                 if selected
                     .iter()
-                    .any(|reference| !is_expression_reference_allowed(function, reference))
+                    .any(|reference| !is_expression_reference_allowed(Some(function), reference))
                 {
                     return Err(invalid_function(context, ClientExecutionRule::References));
                 }
@@ -9406,7 +9477,13 @@ fn client_call_target_is_referenced(
     context: ClientExecutionContext,
     target: FunctionId,
 ) -> bool {
-    active.references().iter().any(|reference| {
+    let Some(owner) = resolve_client_function(active, context.function()) else {
+        return false;
+    };
+    if owner.revision.id() != context.function_revision() {
+        return false;
+    }
+    owner.references.iter().any(|reference| {
         reference.source_function() == context.function()
             && reference.source_revision() == context.function_revision()
             && reference.kind() == DefinitionReferenceKind::FunctionCall
@@ -9431,14 +9508,25 @@ fn preflight_client_expression_calls(
 
     preflight_client_call_targets(active, context, decoded_targets)
 }
-
 fn preflight_client_call_targets(
     active: &ActiveDatabaseRevision,
     context: ClientExecutionContext,
     decoded_targets: Vec<FunctionId>,
 ) -> Result<(), ClientExecutionError> {
-    let mut durable_references = active
-        .references()
+    let Some(owner) = resolve_client_function(active, context.function()) else {
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
+    };
+    if owner.revision.id() != context.function_revision() {
+        return Err(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        ));
+    }
+    let mut durable_references = owner
+        .references
         .iter()
         .filter(|reference| {
             reference.source_function() == context.function()
@@ -9711,12 +9799,13 @@ fn collect_client_expression_call_targets(
             function,
             arguments,
         } => {
-            let Some(definition) = active.catalogue().function_by_id(*function) else {
+            let Some(resolved) = resolve_client_function(active, *function) else {
                 return Err(expression_error(
                     context,
                     ClientExpressionError::InvalidCall,
                 ));
             };
+            let definition = resolved.definition;
             if arguments.len() != definition.parameters().len()
                 || definition.parameters().iter().any(|parameter| {
                     arguments
@@ -9849,10 +9938,10 @@ fn invalid_function(
 mod tests {
     use super::{
         ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
-        ClientActionState, ClientExecutionContext, ClientReferenceLoader,
-        ClientReferenceLoaderError, ClientReferenceLoaderFixture, ClientReferenceObject,
-        ClientResource, ClientResourceCompletion, ClientResourceExecutor, ClientResourceKey,
-        ClientResourceRequest, ClientResourceStatus, ClientStateStore,
+        ClientActionState, ClientExecutionContext, ClientExternalContractRequest,
+        ClientReferenceLoader, ClientReferenceLoaderError, ClientReferenceLoaderFixture,
+        ClientReferenceObject, ClientResource, ClientResourceCompletion, ClientResourceExecutor,
+        ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
         DeterministicClientResourceExecutor, ResourceKind, action_target_result_type, capability,
         complete_client_action, decode_action_payload, encode_action_payload,
         trigger_client_action,
@@ -20023,6 +20112,70 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         assert_eq!(value.opaque_type(), orna_standard::STD_UI_TYPE_ID);
         assert_eq!(value.canonical_payload(), payload);
     }
+    #[test]
+    fn evaluates_v7_standard_client_external_contract_with_ordered_arguments() {
+        let standard = standard_v7();
+        let active = empty_version_two_active(&standard);
+        let body = br#"{"kind":"empty"}"#;
+        let mut payload = Vec::from(b"ORNA-UI/1 ".as_slice());
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(body);
+        let registry = orna_standard::registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .expect("the V7 fixture pins a standard snapshot"),
+        )
+        .expect("the V7 fixture has a registered UI codec");
+        let content = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, orna_standard::STD_UI_TYPE_ID, payload)
+                .expect("the UI argument has a valid opaque payload"),
+        );
+        let arguments = vec![
+            (
+                orna_standard::STD_UI_WINDOW_TITLE_PARAMETER_ID,
+                RuntimeValue::Text("title".to_owned()),
+            ),
+            (
+                orna_standard::STD_UI_WINDOW_CONTENT_PARAMETER_ID,
+                content.clone(),
+            ),
+        ];
+        let expected_arguments = arguments.clone();
+        let returned = content.clone();
+        let mut executor = DeterministicClientResourceExecutor::new(
+            |_request: &ClientResourceRequest| -> Result<RuntimeValue, String> {
+                Err("resource executor was not used".to_owned())
+            },
+        )
+        .with_external_contract(
+            move |request: &ClientExternalContractRequest| -> Result<RuntimeValue, String> {
+                assert_eq!(
+                    request.identity(),
+                    orna_standard::STD_UI_WINDOW_RUNTIME_CONTRACT
+                );
+                assert_eq!(request.arguments(), expected_arguments.as_slice());
+                Ok(returned.clone())
+            },
+        );
+        let grants = capability::LocalCapabilityGrantSet::new();
+        let mut state = ClientStateStore::new();
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+        let (_, value) = super::evaluate_function(
+            &active,
+            orna_standard::STD_UI_WINDOW_FUNCTION_ID,
+            arguments,
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x5a; 16]),
+            super::ObserverLineage::top_level(InvocationId::from_bytes([0x5b; 16])),
+            &mut executor_slot,
+        )
+        .expect("the pinned V7 standard executable evaluates");
+        assert_eq!(value, content);
+    }
 
     #[test]
     fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() {
@@ -21257,6 +21410,12 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
     fn standard_v6() -> VerifiedStandardLibrarySnapshot {
         orna_standard::verify_standard_library_v6_snapshot(
             orna_standard::retained_standard_library_v6_snapshot().unwrap(),
+        )
+        .unwrap()
+    }
+    fn standard_v7() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v7_snapshot(
+            orna_standard::retained_standard_library_v7_snapshot().unwrap(),
         )
         .unwrap()
     }
