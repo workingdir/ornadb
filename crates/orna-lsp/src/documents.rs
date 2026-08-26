@@ -132,15 +132,27 @@ impl<'text> PositionMapper<'text> {
         let end = span.end.min(self.text.len());
         while start < end {
             let line = self.line_of(start);
-            let segment_end = self.line_end_byte(line).min(end);
+            let line_end = self.line_end_byte(line);
+
+            // CRLF bytes belong to the preceding logical line's terminator,
+            // not to a semantic-token segment. Skip either terminator byte
+            // before looking for content on the next line.
+            if start >= line_end {
+                let Some(&next_start) = self.line_starts.get(line + 1) else {
+                    break;
+                };
+                start = next_start;
+                continue;
+            }
+
+            let segment_end = line_end.min(end);
             let position = self.position(start);
             let length = utf16_len(&self.text[start..segment_end]);
             segments.push((position, length as u32));
-            start = if segment_end == end {
-                segment_end
-            } else {
-                self.line_starts[line + 1]
-            };
+            if segment_end == end {
+                break;
+            }
+            start = self.line_starts[line + 1];
         }
         segments
     }
@@ -326,6 +338,12 @@ mod tests {
             }),
             5
         );
+
+        assert_eq!(
+            mapper.byte_offset(mapper.position(6)),
+            5,
+            "the LF byte resolves to the CR byte's canonical line-end offset"
+        );
         assert_eq!(
             mapper.byte_offset(Position {
                 line: 1,
@@ -339,6 +357,34 @@ mod tests {
                 character: 0
             }),
             15
+        );
+    }
+
+    #[test]
+    fn standalone_carriage_return_remains_source_text() {
+        let text = "first\rsecond";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.position(5),
+            Position {
+                line: 0,
+                character: 5
+            }
+        );
+        assert_eq!(
+            mapper.position(6),
+            Position {
+                line: 0,
+                character: 6
+            }
+        );
+        assert_eq!(
+            mapper.byte_offset(Position {
+                line: 0,
+                character: 6
+            }),
+            6
         );
     }
 
@@ -431,6 +477,33 @@ mod tests {
                     6
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn segments_skip_crlf_terminator_bytes() {
+        let text = "first\r\nsecond";
+        let mapper = PositionMapper::new(text);
+
+        assert_eq!(
+            mapper.segments(&SourceSpan { start: 5, end: 8 }),
+            vec![(
+                Position {
+                    line: 1,
+                    character: 0
+                },
+                1
+            )]
+        );
+        assert_eq!(
+            mapper.segments(&SourceSpan { start: 6, end: 8 }),
+            vec![(
+                Position {
+                    line: 1,
+                    character: 0
+                },
+                1
+            )]
         );
     }
 }
