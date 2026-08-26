@@ -392,6 +392,7 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation.starts_with("std_def_")
         || relation.starts_with("std_fn_")
         || relation.starts_with("user_state_cells")
+        || relation.starts_with("source_bundle_units")
 }
 
 fn is_later_catalogue_trigger(trigger: &str) -> bool {
@@ -1812,6 +1813,7 @@ async fn bootstrap_enforces_nested_record_field_target_storage() -> TestResult<(
 async fn bootstrap_owner_qualifies_registered_v4_semantic_references() -> TestResult<()> {
     with_test_database(|database| async move {
         seed_registered_v4_semantic_catalogue(&database, false).await?;
+        seed_registered_v4_physical_catalogue(&database).await?;
         let kernel = PostgresKernel::from_str(&database.connection_string())?;
 
         kernel.bootstrap().await?;
@@ -7135,7 +7137,8 @@ async fn seed_registered_v4_physical_catalogue(database: &TestDatabase) -> TestR
     let result = session
         .client()
         .batch_execute(
-            "CREATE TABLE _orna_data.t_06060606060606060606060606060606 (
+            "CREATE SCHEMA IF NOT EXISTS _orna_data;
+             CREATE TABLE _orna_data.t_06060606060606060606060606060606 (
                  _orna_object_id bytea NOT NULL,
                  CONSTRAINT pk_06060606060606060606060606060606
                      PRIMARY KEY (_orna_object_id),
