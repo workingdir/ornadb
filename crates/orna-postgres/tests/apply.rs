@@ -84,7 +84,7 @@ use orna_core::{
     system::{
         SYS_SECURITY_ACTIVE_ROLES_FUNCTION_ID, SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID,
         SYS_SECURITY_EFFECTIVE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_PRINCIPAL_TYPE_ID,
-        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID,
+        SYS_SECURITY_SESSION_PRINCIPAL_FUNCTION_ID, SYS_STATE_LOAD_USER_STATE_FUNCTION_ID,
     },
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError, SealedInvocationResult};
@@ -213,7 +213,7 @@ const RACE_RIGHT_SOURCE: &str = "CREATE SCHEMA race_right;\n\
 
 const APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const RACE_LOCK_KEY: i64 = 0x4f52_4e41_4150_504c;
-const USER_STATE_RACE_LOCK_KEY: i64 = 0x5553_4552_5354_4154;
+const USER_STATE_INSERT_RACE_LOCK_KEY: i64 = 0x4f52_4e41_5354_4154;
 const EMPTY_STANDARD_SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
 const EMPTY_STANDARD_DIGEST: [u8; 32] = [
     0x6d, 0x3f, 0xaa, 0x32, 0x82, 0x0e, 0xeb, 0x73, 0x77, 0xc5, 0xbd, 0xfa, 0x3e, 0x8d, 0x6c, 0xaf,
@@ -2578,21 +2578,6 @@ async fn every_apply_failure_point_rolls_back_to_the_exact_base() -> TestResult<
     Ok(())
 }
 
-async fn install_user_state_race_pause_trigger(database: &TestDatabase) -> TestResult<()> {
-    let session = database.open().await?;
-    session
-        .client()
-        .batch_execute(&format!(
-            "CREATE FUNCTION _orna_kernel.test_user_state_pause_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-             BEGIN PERFORM pg_advisory_xact_lock({}); RETURN NEW; END $$;
-             CREATE TRIGGER pause_user_state_insert BEFORE INSERT ON _orna_kernel.user_state_cells
-             FOR EACH ROW EXECUTE FUNCTION _orna_kernel.test_user_state_pause_insert();",
-            USER_STATE_RACE_LOCK_KEY,
-        ))
-        .await?;
-    session.shutdown().await
-}
-
 async fn install_race_pause_trigger(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
     session
@@ -2606,6 +2591,47 @@ async fn install_race_pause_trigger(database: &TestDatabase) -> TestResult<()> {
          FOR EACH ROW EXECUTE FUNCTION _orna_kernel.test_apply_pause_pointer();",
     ).await?;
     session.shutdown().await
+}
+
+async fn install_user_state_insert_pause_trigger(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = session
+        .client()
+        .batch_execute(&format!(
+            "CREATE FUNCTION _orna_kernel.test_user_state_insert_pause() \
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 PERFORM pg_advisory_xact_lock({USER_STATE_INSERT_RACE_LOCK_KEY});
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER pause_user_state_insert
+             AFTER INSERT ON _orna_kernel.user_state_cells
+             FOR EACH ROW EXECUTE FUNCTION _orna_kernel.test_user_state_insert_pause();"
+        ))
+        .await
+        .map_err(Into::into);
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "USER state INSERT pause trigger installation",
+    )
+}
+
+async fn remove_user_state_insert_pause_trigger(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = session
+        .client()
+        .batch_execute(
+            "DROP TRIGGER IF EXISTS pause_user_state_insert ON _orna_kernel.user_state_cells;
+             DROP FUNCTION IF EXISTS _orna_kernel.test_user_state_insert_pause();",
+        )
+        .await
+        .map_err(Into::into);
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "USER state INSERT pause trigger cleanup",
+    )
 }
 
 async fn wait_for_advisory_wait(database: &TestDatabase, application: &str) -> TestResult<()> {
@@ -2688,6 +2714,30 @@ async fn wait_for_apply_task(
     }
     task.await
         .map_err(|error| failure(format!("{name} apply task failed: {error}")))
+}
+
+async fn wait_for_kernel_task<T>(
+    task: tokio::task::JoinHandle<Result<T, PostgresKernelError>>,
+    name: &'static str,
+) -> TestResult<Result<T, PostgresKernelError>> {
+    let deadline = Instant::now() + APPLY_TIMEOUT;
+    while !task.is_finished() {
+        if Instant::now() >= deadline {
+            task.abort();
+            let _ = task.await;
+            return Err(failure(format!("timed out waiting for {name} task")));
+        }
+        tokio::task::yield_now().await;
+    }
+    task.await
+        .map_err(|error| failure(format!("{name} task failed: {error}")))
+}
+
+async fn abort_kernel_task<T>(task: Option<tokio::task::JoinHandle<T>>) {
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -7395,11 +7445,10 @@ async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestRe
     .await
 }
 
-/// Proves the missing-cell optimistic-write race at the PostgreSQL transaction
-/// boundary. Both authenticated writers reach the same test-only INSERT pause
-/// after observing the cell as absent and carrying `expected_revision = None`.
-/// The disposable advisory lock is released only after both writers are waiting;
-/// it does not exist in production code or schema.
+/// Proves the active-revision lock serialises concurrent missing-cell writes
+/// before persistence. One writer commits revision one and the other observes
+/// the committed cell, returns the accepted ORNA0902 conflict, and appends its
+/// redacted audit without leaking a database uniqueness error.
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn concurrent_missing_user_state_writes_return_one_write_and_one_conflict() -> TestResult<()>
@@ -7465,18 +7514,6 @@ async fn concurrent_missing_user_state_writes_return_one_write_and_one_conflict(
             expected_key == second_change.key_without_principal(),
             "concurrent USER state writers did not target one missing cell",
         )?;
-
-        install_user_state_race_pause_trigger(&database).await?;
-        let coordinator = database.open().await?;
-        coordinator.client().batch_execute("BEGIN").await?;
-        coordinator
-            .client()
-            .query_one(
-                "SELECT pg_advisory_xact_lock($1)",
-                &[&USER_STATE_RACE_LOCK_KEY],
-            )
-            .await?;
-
         let first_kernel = named_kernel(&database, "orna-user-state-race-a")?;
         let second_kernel = named_kernel(&database, "orna-user-state-race-b")?;
         let first_task = tokio::spawn(async move {
@@ -7490,17 +7527,6 @@ async fn concurrent_missing_user_state_writes_return_one_write_and_one_conflict(
                 .await
         });
 
-        // The INSERT trigger is reached only after each writer has loaded the
-        // missing cell, so these waits name the exact race boundary rather than
-        // relying on scheduler timing or a sleep.
-        let first_wait = wait_for_advisory_wait(&database, "orna-user-state-race-a").await;
-        let second_wait = wait_for_advisory_wait(&database, "orna-user-state-race-b").await;
-        let release_result = coordinator.client().batch_execute("COMMIT").await;
-        let shutdown_result = coordinator.shutdown().await;
-        first_wait?;
-        second_wait?;
-        release_result?;
-        shutdown_result?;
 
         let (first_join, second_join) = tokio::time::timeout(
             APPLY_TIMEOUT,
@@ -7602,6 +7628,305 @@ async fn concurrent_missing_user_state_writes_return_one_write_and_one_conflict(
             "concurrent USER state writes did not leave two redacted write audits",
         )?;
         Ok(())
+    })
+    .await
+}
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn user_state_write_linearizes_before_concurrent_security_replacement() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let chain = install_v3_standard_chain(&database).await?;
+        let setup_kernel = kernel(&database)?;
+        let application =
+            user_state_plan_candidate(&chain.version_three, &chain.version_three_upgrade)?;
+        let active = setup_kernel.apply(&application).await?;
+        let function = active
+            .catalogue()
+            .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+                "app", "enabled",
+            ])?)
+            .ok_or_else(|| failure("linearization USER state proof function did not persist"))?
+            .id();
+        let slot = StateSlotId::from_bytes([0xa5; 16]);
+        let value_type = orna_standard::BOOLEAN_TYPE_ID;
+        let expected_types = BTreeMap::from([((function, slot), value_type)]);
+        let recovered_security = setup_kernel.recover_security_snapshot().await?;
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            recovered_security.function_targets().collect(),
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )?;
+        let security = setup_kernel.replace_security_snapshot(&security).await?;
+        let retained_session = security.bind_authenticated_session(V3_PROOF_CLIENT_USER, vec![])?;
+        let change = UserStateChange::new(
+            function,
+            String::new(),
+            function,
+            String::new(),
+            slot,
+            None,
+            RuntimeValue::Boolean(true),
+            value_type,
+        )?;
+        let expected_key = change.key_without_principal();
+        let disabled = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            security.function_targets().collect(),
+            vec![Principal::new(
+                V3_PROOF_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+        )?;
+        let initial_audits = setup_kernel.recover_security_audit_events().await?;
+        let initial_audit_count = initial_audits.len();
+        let initial_write_audits = initial_audits
+            .iter()
+            .filter(|event| {
+                let decision = event.decision();
+                decision.kind() == SecurityAuditKind::UserState
+                    && decision.outcome() == SecurityAuditOutcome::Allowed
+                    && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                    && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                    && decision.user_state_root_function() == Some(function)
+                    && decision.user_state_cell_count() == Some(1)
+            })
+            .count();
+        require(
+            initial_write_audits == 0,
+            "linearization USER state fixture unexpectedly wrote an audit before the race",
+        )?;
+
+        install_user_state_insert_pause_trigger(&database).await?;
+        let race_result: TestResult<()> = async {
+            let coordinator = database.open().await?;
+            coordinator
+                .client()
+                .query_one(
+                    "SELECT pg_advisory_lock($1)",
+                    &[&USER_STATE_INSERT_RACE_LOCK_KEY],
+                )
+                .await?;
+
+            let writer_kernel =
+                named_kernel(&database, "orna-user-state-linearization-writer")?;
+            let writer_session = retained_session.clone();
+            let writer_change = change.clone();
+            let mut writer_task = Some(tokio::spawn(async move {
+                writer_kernel
+                    .write_user_state(
+                        &writer_session,
+                        std::slice::from_ref(&writer_change),
+                    )
+                    .await
+            }));
+            if let Err(error) =
+                wait_for_advisory_wait(&database, "orna-user-state-linearization-writer").await
+            {
+                abort_kernel_task(writer_task.take()).await;
+                let _ = coordinator.shutdown().await;
+                return Err(error);
+            }
+
+            let replacement_kernel =
+                named_kernel(&database, "orna-user-state-linearization-replacement")?;
+            let replacement_snapshot = disabled.clone();
+            let mut replacement_task = Some(tokio::spawn(async move {
+                replacement_kernel
+                    .replace_security_snapshot(&replacement_snapshot)
+                    .await
+            }));
+            if let Err(error) = wait_for_active_lock_block(
+                &database,
+                "orna-user-state-linearization-writer",
+                "orna-user-state-linearization-replacement",
+            )
+            .await
+            {
+                abort_kernel_task(replacement_task.take()).await;
+                abort_kernel_task(writer_task.take()).await;
+                let _ = coordinator.shutdown().await;
+                return Err(error);
+            }
+
+            if let Err(error) = coordinator
+                .client()
+                .query_one(
+                    "SELECT pg_advisory_unlock($1)",
+                    &[&USER_STATE_INSERT_RACE_LOCK_KEY],
+                )
+                .await
+            {
+                abort_kernel_task(replacement_task.take()).await;
+                abort_kernel_task(writer_task.take()).await;
+                let _ = coordinator.shutdown().await;
+                return Err(Box::new(error));
+            }
+            if let Err(error) = coordinator.shutdown().await {
+                abort_kernel_task(replacement_task.take()).await;
+                abort_kernel_task(writer_task.take()).await;
+                return Err(error);
+            }
+
+            let writer_task = writer_task
+                .take()
+                .ok_or_else(|| failure("linearization USER state writer task disappeared"))?;
+            let replacement_task = replacement_task.take().ok_or_else(|| {
+                failure("linearization security replacement task disappeared")
+            })?;
+            let (writer_join, replacement_join) = tokio::join!(
+                wait_for_kernel_task(writer_task, "linearization USER state writer"),
+                wait_for_kernel_task(replacement_task, "linearization security replacement"),
+            );
+            let writer_results = writer_join?;
+            let replacement_snapshot = replacement_join?;
+            let writer_results = writer_results?;
+            let replacement_snapshot = replacement_snapshot?;
+
+            // The replacement was observed waiting on the writer's active
+            // revision lock; joining the writer first makes the commit order
+            // explicit before the replacement result is accepted.
+            require(
+                writer_results.len() == 1
+                    && writer_results[0].key() == &expected_key
+                    && writer_results[0].outcome()
+                        == UserStateWriteOutcome::Written { revision: 1 },
+                "linearized USER state writer did not commit exactly one revision-one result",
+            )?;
+            let replacement_status = replacement_snapshot
+                .principals()
+                .find(|principal| principal.id() == V3_PROOF_CLIENT_USER)
+                .map(|principal| principal.status());
+            require(
+                replacement_snapshot.revision() == active.pair()
+                    && replacement_status == Some(PrincipalStatus::Disabled),
+                "concurrent security replacement did not commit the disabled principal",
+            )?;
+
+            let final_kernel = kernel(&database)?;
+            let after_replacement_audits =
+                final_kernel.recover_security_audit_events().await?;
+            let after_replacement_write_audits = after_replacement_audits
+                .iter()
+                .filter(|event| {
+                    let decision = event.decision();
+                    decision.kind() == SecurityAuditKind::UserState
+                        && decision.outcome() == SecurityAuditOutcome::Allowed
+                        && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                        && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                        && decision.user_state_root_function() == Some(function)
+                        && decision.user_state_cell_count() == Some(1)
+                })
+                .count();
+            require(
+                after_replacement_audits.len() == initial_audit_count + 1
+                    && after_replacement_write_audits == initial_write_audits + 1,
+                "security replacement left a stale or duplicate allowed USER state audit",
+            )?;
+
+            let recovered_disabled = final_kernel.recover_security_snapshot().await?;
+            let recovered_status = recovered_disabled
+                .principals()
+                .find(|principal| principal.id() == V3_PROOF_CLIENT_USER)
+                .map(|principal| principal.status());
+            require(
+                recovered_disabled.revision() == active.pair()
+                    && recovered_status == Some(PrincipalStatus::Disabled),
+                "disabled security replacement did not persist durably",
+            )?;
+            let denied = final_kernel
+                .load_user_state(
+                    &retained_session,
+                    function,
+                    "",
+                    &[],
+                    &expected_types,
+                )
+                .await
+                .expect_err("retained disabled session must be denied on a later USER state load");
+            require(
+                matches!(
+                    denied,
+                    PostgresKernelError::StateExecuteDenied {
+                        pair,
+                        function: denied_function,
+                        reason: ExecuteDenial::InvalidSession,
+                    } if pair == active.pair()
+                        && denied_function == SYS_STATE_LOAD_USER_STATE_FUNCTION_ID
+                ),
+                "retained disabled session returned the wrong typed USER state denial",
+            )?;
+            let after_denial_audits = final_kernel.recover_security_audit_events().await?;
+            let after_denial_write_audits = after_denial_audits
+                .iter()
+                .filter(|event| {
+                    let decision = event.decision();
+                    decision.kind() == SecurityAuditKind::UserState
+                        && decision.outcome() == SecurityAuditOutcome::Allowed
+                        && decision.session_principal() == Some(V3_PROOF_CLIENT_USER)
+                        && decision.user_state_operation() == Some(UserStateAuditOperation::Write)
+                        && decision.user_state_root_function() == Some(function)
+                        && decision.user_state_cell_count() == Some(1)
+                })
+                .count();
+            require(
+                after_denial_audits.len() == after_replacement_audits.len()
+                    && after_denial_write_audits == after_replacement_write_audits,
+                "denied retained USER state session appended an unexpected allowed audit",
+            )?;
+
+            let principal_bytes = V3_PROOF_CLIENT_USER.to_bytes().to_vec();
+            let function_bytes = function.to_bytes().to_vec();
+            let slot_bytes = slot.to_bytes().to_vec();
+            let inspection = database.open().await?;
+            let operation: TestResult<(i64, i64, i64)> = async {
+                let row = inspection
+                    .client()
+                    .query_one(
+                        "SELECT COUNT(*)::BIGINT,
+                                COALESCE(MIN(revision), 0)::BIGINT,
+                                COALESCE(MAX(revision), 0)::BIGINT
+                         FROM _orna_kernel.user_state_cells
+                         WHERE principal_id = $1
+                           AND root_function_id = $2
+                           AND root_state_profile = ''
+                           AND function_id = $2
+                           AND function_instance_key = ''
+                           AND state_slot_id = $3",
+                        &[&principal_bytes, &function_bytes, &slot_bytes],
+                    )
+                    .await?;
+                Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?))
+            }
+            .await;
+            let (row_count, min_revision, max_revision) = finish_test_session(
+                operation,
+                inspection.shutdown().await,
+                "linearization USER state cell inspection",
+            )?;
+            require(
+                row_count == 1 && min_revision == 1 && max_revision == 1,
+                "linearized USER state write did not leave exactly one revision-one cell",
+            )
+        }
+        .await;
+        let cleanup_result = remove_user_state_insert_pause_trigger(&database).await;
+        match (race_result, cleanup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(test_error), Err(cleanup_error)) => Err(failure(format!(
+                "USER state linearization proof failed: {test_error}; trigger cleanup also failed: {cleanup_error}"
+            ))),
+        }
     })
     .await
 }
