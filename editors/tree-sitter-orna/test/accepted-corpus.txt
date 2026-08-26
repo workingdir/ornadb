@@ -24,9 +24,11 @@ server function with update body
 server function with delete body
 create schema
 create schema lowercase keywords
+create schema accepts keyword-initial qualified names
 string escapes and quoted identifiers
 create enum type
 create object type with field modifiers
+create object type accepts keyword-initial qualified names
 canonical scalar type spellings and alias boundaries
 unicode unquoted identifiers
 normal whitespace remains extras
