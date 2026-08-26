@@ -57,6 +57,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "security_principals",
     "security_privilege_grants",
     "security_role_memberships",
+    "source_bundle_units",
     "source_bundles",
     "source_revisions",
     "source_units",
@@ -278,6 +279,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         41,
         "nullable resource audit nested invocation",
         include_str!("../migrations/0041_nullable_resource_audit_nested_invocation.sql"),
+    ),
+    (
+        42,
+        "non-empty security principal identities",
+        include_str!("../migrations/0042_security_principal_non_empty.sql"),
+    ),
+    (
+        43,
+        "source bundle unit memberships",
+        include_str!("../migrations/0043_source_bundle_units.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
@@ -6265,6 +6276,14 @@ async fn verify_nested_record_field_target_storage(client: &Client) -> TestResul
                 (id, bundle_id, ordinal, logical_path, content, content_hash)
              VALUES ($1, $2, 0, 'records.orna', $3, $4)",
             &[&unit, &bundle, &source, &unit_hash],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundle_units
+                (bundle_id, source_unit_id, ordinal)
+             VALUES ($1, $2, $3)",
+            &[&bundle, &unit, &0_i64],
         )
         .await?;
     client
