@@ -15909,10 +15909,10 @@ fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<(
         .checked_bundle()
         .ok_or_else(|| failure("accepted SERVER dogfood fixture produced no checked bundle"))?;
     require(
-        checked.server_functions().len() == 4,
+        checked.server_functions().len() == 5,
         "accepted SERVER dogfood fixture produced an unexpected function count",
     )?;
-    for name in ["read", "distinct_values", "read_item", "update"] {
+    for name in ["read", "distinct_values", "stream", "read_item", "update"] {
         require(
             checked
                 .server_functions()
@@ -16063,6 +16063,13 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
             .find(|function| function.name().parts() == ["dogfood", "read"])
             .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.read"))?
             .id();
+        let stream_id = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["dogfood", "stream"])
+            .ok_or_else(|| failure("the kernel-applied dogfood source is missing dogfood.stream"))?
+            .id();
         let distinct_id = active
             .catalogue()
             .functions()
@@ -16118,6 +16125,7 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
             vec![],
             vec![
                 ExecuteGrant::new(RAW_CLIENT_USER, read_id),
+                ExecuteGrant::new(RAW_CLIENT_USER, stream_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, distinct_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, read_item_id),
                 ExecuteGrant::new(RAW_CLIENT_USER, update_id),
@@ -16191,6 +16199,30 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
             read_stderr.is_empty(),
             "the quiet SERVER dogfood read invocation wrote progress diagnostics",
         )?;
+        let (stream_outcome, stream_stdout, stream_stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::function_id(stream_id),
+                vec![],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        if stream_outcome != Ok(InstalledInvokeOutcome::Completed) {
+            return Err(failure(format!(
+                "the kernel-applied SERVER dogfood stream invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
+                stream_outcome, stream_stdout, stream_stderr,
+            )));
+        }
+        require(
+            stream_stdout == expected,
+            "the kernel-applied SERVER dogfood stream invocation returned the wrong values",
+        )?;
+        require(
+            stream_stderr.is_empty(),
+            "the quiet SERVER dogfood stream invocation wrote progress diagnostics",
+        )?;
 
         let (update_outcome, update_stdout, update_stderr) = installed_invoke_run(
             &database,
@@ -16211,10 +16243,12 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
             ),
         )
         .await?;
-        require(
-            update_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the kernel-applied SERVER dogfood update invocation did not complete",
-        )?;
+        if update_outcome != Ok(InstalledInvokeOutcome::Completed) {
+            return Err(failure(format!(
+                "the kernel-applied SERVER dogfood update invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
+                update_outcome, update_stdout, update_stderr,
+            )));
+        }
         require(
             update_stdout == expected_reference,
             "the kernel-applied SERVER dogfood update invocation returned the wrong reference",
@@ -16243,10 +16277,12 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
             ),
         )
         .await?;
-        require(
-            read_item_outcome == Ok(InstalledInvokeOutcome::Completed),
-            "the kernel-applied SERVER dogfood read_item invocation did not complete",
-        )?;
+        if read_item_outcome != Ok(InstalledInvokeOutcome::Completed) {
+            return Err(failure(format!(
+                "the kernel-applied SERVER dogfood read_item invocation did not complete: {:?}, stdout={:?}, stderr={:?}",
+                read_item_outcome, read_item_stdout, read_item_stderr,
+            )));
+        }
         require(
             read_item_stdout == expected_updated,
             "the kernel-applied SERVER dogfood read_item invocation returned the wrong value",
@@ -16254,6 +16290,35 @@ async fn proves_kernel_source_apply_candidate_audit_and_invoke_path() -> TestRes
         require(
             read_item_stderr.is_empty(),
             "the quiet SERVER dogfood read_item invocation wrote progress diagnostics",
+        )?;
+        let missing_reference = format!(
+            "@dogfood.item/{}",
+            ObjectId::from_bytes([0x93; 16]).canonical()
+        );
+        let (missing_outcome, missing_stdout, missing_stderr) = installed_invoke_run(
+            &database,
+            installed_invoke_request(
+                InvocationRequestTarget::function_id(update_id),
+                vec![
+                    CliArgumentInput::Canonical {
+                        parameter: update_parameter_id.canonical(),
+                        value: missing_reference,
+                    },
+                    CliArgumentInput::Canonical {
+                        parameter: update_value_parameter_id.canonical(),
+                        value: "75".to_owned(),
+                    },
+                ],
+                true,
+                false,
+            ),
+        )
+        .await?;
+        require(
+            missing_outcome == Ok(InstalledInvokeOutcome::Completed)
+                && missing_stdout.is_empty()
+                && missing_stderr.is_empty(),
+            "the kernel-applied SERVER dogfood missing update did not commit an empty result",
         )?;
 
         let duplicate_object_id = format!("{:032x}", u128::from_be_bytes([0x92; 16]));

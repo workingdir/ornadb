@@ -488,6 +488,7 @@ pub(crate) enum ResourceProducerExit {
     Completed(ResourceProducerCompleted),
     Cancelled(ResourceProducerCancelled),
     Failed(ResourceProducerFailed),
+    SealedFailed(ResourceProducerSealedFailed),
 }
 
 pub(crate) struct ResourceProducerCompleted {
@@ -509,6 +510,12 @@ pub(crate) struct ResourceProducerFailed {
         tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
     >,
     pub(crate) error: PostgresKernelError,
+}
+pub(crate) struct ResourceProducerSealedFailed {
+    response: Option<
+        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
+    >,
+    failure: SealedInvocationFailureClass,
 }
 
 #[derive(Default)]
@@ -1151,6 +1158,8 @@ impl SealedInvocationOperation {
     }
 
     /// Executes the accepted invocation after its start Event is delivered.
+    /// Long-lived SERVER stream producers are spawned on `resource_runtime`,
+    /// not on the short-lived worker runtime that calls this method.
     #[doc(hidden)]
     pub async fn execute_after_started(
         &mut self,
@@ -1158,6 +1167,7 @@ impl SealedInvocationOperation {
         state: &mut ClientStateStore,
         capability_audit_appended: &mut bool,
         cancellation: &ResourceCancellation,
+        resource_runtime: tokio::runtime::Handle,
     ) -> Result<SealedInvocationExecution, PostgresKernelError> {
         if self.consumed {
             return Err(PostgresKernelError::DurableInvariant {
@@ -1194,16 +1204,17 @@ impl SealedInvocationOperation {
                 },
             ));
         }
+        // Native STREAM and accepted mutation ROWS targets use a live
+        // producer. Read-only ROWS targets use the existing sealed executor.
         if let SealedInvocationPreparedOutcome::Allowed {
             target: PreparedSealedTarget::Application { definition },
             authorisation,
             ..
         } = &self.outcome
             && definition.domain() == FunctionDomain::Server
-            && matches!(
-                definition.return_type(),
-                FunctionReturn::Stream(_) | FunctionReturn::Rows(_)
-            )
+            && (matches!(definition.return_type(), FunctionReturn::Stream(_))
+                || (matches!(definition.return_type(), FunctionReturn::Rows(_))
+                    && sealed_server_target_is_mutation(&self.active, definition.id())))
         {
             let arguments = match bind_sealed_invoke_arguments(definition, self.decoded.arguments())
             {
@@ -1223,6 +1234,7 @@ impl SealedInvocationOperation {
                 arguments,
                 self.invocation,
                 cancellation.clone(),
+                resource_runtime,
             )
             .await;
             return match producer {
@@ -4806,11 +4818,23 @@ async fn run_authenticated_server_resource_producer_task_body(
                 terminal_error = Some(error);
             }
         }
+        ResourceProducerExit::SealedFailed(_) => {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "resource producer",
+                record: request.request_id.canonical(),
+                rule: "sealed mutation failure reached generic resource finalizer",
+            });
+        }
     }
     match terminal_error {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+fn sealed_server_target_is_mutation(active: &ActiveDatabaseRevision, function: FunctionId) -> bool {
+    raw_server_insert_target_is_selected(active, function)
+        || raw_server_reference_mutation_target(active, function).is_some()
 }
 
 fn sealed_server_result_kind(return_type: &FunctionReturn) -> Option<ProtocolResourceKind> {
@@ -5036,6 +5060,137 @@ fn sealed_server_stream_completed_event(
     }
 }
 
+/// Executes one accepted mutation target and serves its bounded returned rows
+/// through the existing sealed pull protocol.
+async fn run_sealed_server_mutation_stream(
+    transaction: &mut Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+    commands: &mut tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    cancellation: &ResourceCancellation,
+) -> ResourceProducerExit {
+    let failed = |response, failure| {
+        ResourceProducerExit::SealedFailed(ResourceProducerSealedFailed {
+            response: Some(response),
+            failure,
+        })
+    };
+    let mut values = None;
+    let mut next_value = 0usize;
+    let mut batch_sequence = 0u64;
+    let mut total_items = 0u64;
+    let mut total_bytes = 0u64;
+
+    loop {
+        let command = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None });
+            }
+            command = commands.recv() => command,
+        };
+        let Some(ResourceProducerCommand::Pull(ResourceProducerPull { credit, response })) =
+            command
+        else {
+            return ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None });
+        };
+        if cancellation.is_requested() {
+            return ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: Some(response),
+            });
+        }
+
+        if values.is_none() {
+            let mutation_values = match execute_sealed_server_target(
+                transaction,
+                active,
+                authorisation,
+                arguments,
+                ProtocolResourceKind::Stream,
+            )
+            .await
+            {
+                Ok(values) => values,
+                Err(failure) => return failed(response, failure),
+            };
+            if mutation_values.len() > 1 {
+                return failed(response, SealedInvocationFailureClass::Internal);
+            }
+            values = Some(mutation_values);
+            if cancellation.is_requested() {
+                return ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: Some(response),
+                });
+            }
+        }
+
+        let mutation_values = values.as_ref().expect("sealed mutation values are loaded");
+        let Some(value) = mutation_values.get(next_value).cloned() else {
+            return ResourceProducerExit::Completed(ResourceProducerCompleted {
+                response,
+                final_batch_sequence: batch_sequence.saturating_sub(1),
+                total_items,
+                total_bytes,
+            });
+        };
+        let byte_count = match encode_active_value(active, &value) {
+            Ok(encoded) => match u64::try_from(encoded.len()) {
+                Ok(byte_count) => byte_count,
+                Err(_) => return failed(response, SealedInvocationFailureClass::Internal),
+            },
+            Err(_) => return failed(response, SealedInvocationFailureClass::Internal),
+        };
+        if credit.item_count == 0 || byte_count > credit.byte_count {
+            if response
+                .send(Ok(AuthenticatedServerResourceEvent::Waiting {
+                    required_bytes: byte_count,
+                }))
+                .is_err()
+            {
+                return ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                    response: None,
+                });
+            }
+            continue;
+        }
+        if cancellation.is_requested() {
+            return ResourceProducerExit::Cancelled(ResourceProducerCancelled {
+                response: Some(response),
+            });
+        }
+        let next_index = match next_value.checked_add(1) {
+            Some(next_index) => next_index,
+            None => return failed(response, SealedInvocationFailureClass::Internal),
+        };
+        let total_items_next = match total_items.checked_add(1) {
+            Some(total_items) => total_items,
+            None => return failed(response, SealedInvocationFailureClass::Internal),
+        };
+        let total_bytes_next = match total_bytes.checked_add(byte_count) {
+            Some(total_bytes) => total_bytes,
+            None => return failed(response, SealedInvocationFailureClass::Internal),
+        };
+        let next_batch_sequence = match batch_sequence.checked_add(1) {
+            Some(next_batch_sequence) => next_batch_sequence,
+            None => return failed(response, SealedInvocationFailureClass::Internal),
+        };
+        let event = AuthenticatedServerResourceEvent::Values {
+            batch_sequence,
+            item_count: 1,
+            byte_count,
+            values: vec![value],
+        };
+        next_value = next_index;
+        total_items = total_items_next;
+        total_bytes = total_bytes_next;
+        batch_sequence = next_batch_sequence;
+        if response.send(Ok(event)).is_err() {
+            return ResourceProducerExit::Cancelled(ResourceProducerCancelled { response: None });
+        }
+    }
+}
+
 async fn run_sealed_server_stream_producer(
     kernel: PostgresKernel,
     active: ActiveDatabaseRevision,
@@ -5054,7 +5209,7 @@ async fn run_sealed_server_stream_producer(
             return;
         }
     };
-    let transaction = match database_session
+    let mut transaction = match database_session
         .client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -5103,15 +5258,29 @@ async fn run_sealed_server_stream_producer(
         return;
     }
 
-    let stream_result = run_authenticated_server_resource_stream(
-        &transaction,
-        &active,
-        &authorisation,
-        &arguments,
-        &mut commands,
-        &cancellation,
-    )
-    .await;
+    let mutation_target =
+        sealed_server_target_is_mutation(&active, authorisation.target().function());
+    let stream_result = if mutation_target {
+        Ok(run_sealed_server_mutation_stream(
+            &mut transaction,
+            &active,
+            &authorisation,
+            &arguments,
+            &mut commands,
+            &cancellation,
+        )
+        .await)
+    } else {
+        run_authenticated_server_resource_stream(
+            &transaction,
+            &active,
+            &authorisation,
+            &arguments,
+            &mut commands,
+            &cancellation,
+        )
+        .await
+    };
     let stream_result = match stream_result {
         Ok(result) => result,
         Err(error) => match wait_for_resource_producer_pull_or_cancel(&mut commands, &cancellation)
@@ -5131,19 +5300,25 @@ async fn run_sealed_server_stream_producer(
             total_items,
             total_bytes,
         }) => {
-            let commit = transaction.commit().await;
-            if commit.is_ok() {
-                let _ = response.send(Ok(sealed_server_stream_completed_event(
-                    final_batch_sequence,
-                    total_items,
-                    total_bytes,
-                )));
+            if !cancellation.try_begin_commit() {
+                let _ = transaction.rollback().await;
+                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Cancelled));
             } else {
-                let _ = response.send(Err(PostgresKernelError::DurableInvariant {
-                    relation: "sealed invocation producer",
-                    record: invocation.canonical(),
-                    rule: "sealed server stream transaction commit failed",
-                }));
+                let commit = transaction.commit().await;
+                if commit.is_ok() {
+                    cancellation.commit_finished();
+                    let _ = response.send(Ok(sealed_server_stream_completed_event(
+                        final_batch_sequence,
+                        total_items,
+                        total_bytes,
+                    )));
+                } else {
+                    let _ = response.send(Err(PostgresKernelError::DurableInvariant {
+                        relation: "sealed invocation producer",
+                        record: invocation.canonical(),
+                        rule: "sealed server stream transaction commit failed",
+                    }));
+                }
             }
         }
         ResourceProducerExit::Cancelled(ResourceProducerCancelled { response }) => {
@@ -5165,6 +5340,18 @@ async fn run_sealed_server_stream_producer(
                 let _ = response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
             }
         }
+        ResourceProducerExit::SealedFailed(ResourceProducerSealedFailed { response, failure }) => {
+            let _ = transaction.rollback().await;
+            if let Some(response) = response {
+                let failure = match failure {
+                    SealedInvocationFailureClass::Target | SealedInvocationFailureClass::Bind => {
+                        CallFailure::TargetUnavailable
+                    }
+                    SealedInvocationFailureClass::Internal => CallFailure::InternalFailure,
+                };
+                let _ = response.send(Ok(AuthenticatedServerResourceEvent::Failed { failure }));
+            }
+        }
     }
     let _ = database_session.shutdown().await;
 }
@@ -5177,11 +5364,12 @@ async fn start_sealed_server_stream_producer(
     arguments: Vec<FunctionArgument>,
     invocation: InvocationId,
     cancellation: ResourceCancellation,
+    runtime_handle: tokio::runtime::Handle,
 ) -> Result<AuthenticatedServerResourceProducer, SealedInvocationFailureClass> {
     let target_revision = active.pair();
     let (commands, receiver) = tokio::sync::mpsc::channel(1);
     let (ready, ready_receiver) = tokio::sync::oneshot::channel();
-    tokio::spawn(run_sealed_server_stream_producer(
+    runtime_handle.spawn(run_sealed_server_stream_producer(
         kernel,
         active,
         security,

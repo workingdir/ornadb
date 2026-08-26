@@ -1520,6 +1520,9 @@ impl DispatchService for RawDispatchService {
         let continuation = continuation.expect("sealed invocation preflight continuation");
         let invocation = continuation.invocation();
         let dispatch_session = _session.clone();
+        // The worker below uses a short-lived runtime; stream producers must
+        // stay owned by this raw-socket driver runtime.
+        let resource_runtime = tokio::runtime::Handle::current();
         let kernel = self.kernel.clone();
         let started = ServerAction::InvokeEvents {
             stream,
@@ -1614,6 +1617,7 @@ impl DispatchService for RawDispatchService {
                             &mut state,
                             &mut capability_audit_appended,
                             &cancellation,
+                            resource_runtime,
                         )
                         .await
                 })
