@@ -6,7 +6,7 @@ use orna_protocol::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     error::Error,
     fmt,
     hash::{Hash, Hasher},
@@ -23,8 +23,8 @@ use orna_artifact::client_plan::{
     ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
-    CallSiteId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ObjectId, ParameterId,
-    PrincipalId, StateSlotId, TypeId,
+    CallSiteId, FieldId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ObjectId,
+    ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
@@ -2828,6 +2828,30 @@ fn resolve_action_target<'a>(
     Ok(resolved)
 }
 
+/// Returns whether raw arguments match a function's exact active signature.
+///
+/// Matching is by stable `ParameterId`, not declaration position or source
+/// name. The argument count must match exactly, every parameter may occur only
+/// once, and each runtime value must match its active resolved type.
+pub fn client_function_arguments_match(
+    active: &ActiveDatabaseRevision,
+    definition: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> bool {
+    if arguments.len() != definition.parameters().len() {
+        return false;
+    }
+    let mut seen = HashSet::with_capacity(arguments.len());
+    arguments.iter().all(|argument| {
+        seen.insert(argument.parameter())
+            && definition
+                .parameter_by_id(argument.parameter())
+                .is_some_and(|parameter| {
+                    runtime_value_matches(active, argument.value(), parameter.resolved_type())
+                })
+    })
+}
+
 fn validate_resource_arguments(
     active: &ActiveDatabaseRevision,
     target: InvocationTarget,
@@ -2915,6 +2939,14 @@ fn security_context_digest(authorisation: &AuthorisedInvocation) -> Sha256Digest
     }
     hasher.update(authorisation.security_context_digest().to_bytes());
     Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+/// Returns the derived security-context digest used by CLIENT evaluation.
+///
+/// Hosts that preload reference objects must bind their loader with this
+/// digest from the same authorised invocation that will be evaluated.
+pub fn client_security_context_digest(authorisation: &AuthorisedInvocation) -> Sha256Digest {
+    security_context_digest(authorisation)
 }
 
 /// Combines the active catalogue, host data epoch, security context, root state context, and USER mutation epoch into
@@ -3045,6 +3077,207 @@ impl ClientStateContext {
     /// Returns the mounted root instance key.
     pub fn instance_key(&self) -> &str {
         &self.instance_key
+    }
+}
+
+/// One host-preloaded durable object used by a CLIENT reference field path.
+///
+/// The host supplies the object's stable type and object identities together
+/// with a declaration-ordered subset of fields. The client validates each
+/// supplied field against the active catalogue before exposing its value to an
+/// expression; an omitted requested field remains unavailable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientReferenceObject {
+    target: TypeId,
+    object: ObjectId,
+    fields: Vec<(FieldId, RuntimeValue)>,
+}
+
+impl ClientReferenceObject {
+    /// Creates one host-preloaded object record.
+    pub fn new(target: TypeId, object: ObjectId, fields: Vec<(FieldId, RuntimeValue)>) -> Self {
+        Self {
+            target,
+            object,
+            fields,
+        }
+    }
+
+    /// Returns the stable object type identity.
+    pub const fn target(&self) -> TypeId {
+        self.target
+    }
+
+    /// Returns the stable durable object identity.
+    pub const fn object(&self) -> ObjectId {
+        self.object
+    }
+
+    /// Returns fields in the host-supplied declaration order.
+    pub fn fields(&self) -> &[(FieldId, RuntimeValue)] {
+        &self.fields
+    }
+}
+
+/// A typed error raised while constructing a host-preloaded reference loader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientReferenceLoaderError {
+    /// More than one supplied object has the same type and object identity.
+    DuplicateIdentity {
+        /// The repeated object's stable type identity.
+        target: TypeId,
+        /// The repeated object's stable durable identity.
+        object: ObjectId,
+    },
+}
+
+impl fmt::Display for ClientReferenceLoaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateIdentity { target, object } => write!(
+                formatter,
+                "CLIENT reference loader contains duplicate object identity ({target}, {object})"
+            ),
+        }
+    }
+}
+
+impl Error for ClientReferenceLoaderError {}
+
+/// A host-preloaded, authenticated CLIENT reference-object loader.
+///
+/// This value contains no storage or transport capability. It is a snapshot
+/// of objects already loaded by the authenticated host, bound to one active
+/// revision, principal, and derived security-context digest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientReferenceLoader {
+    revision: RevisionPair,
+    principal: PrincipalId,
+    security_context_digest: Sha256Digest,
+    objects: HashMap<(TypeId, ObjectId), ClientReferenceObject>,
+}
+
+impl ClientReferenceLoader {
+    /// Creates a preloaded loader bound to one authenticated invocation context.
+    ///
+    /// Every `(TypeId, ObjectId)` identity must occur at most once. Rejecting
+    /// duplicates keeps host input deterministic instead of silently retaining
+    /// whichever object happened to be supplied last.
+    pub fn new(
+        revision: RevisionPair,
+        principal: PrincipalId,
+        security_context_digest: Sha256Digest,
+        objects: impl IntoIterator<Item = ClientReferenceObject>,
+    ) -> Result<Self, ClientReferenceLoaderError> {
+        let mut indexed = HashMap::new();
+        for object in objects {
+            let identity = (object.target(), object.object());
+            if indexed.insert(identity, object).is_some() {
+                return Err(ClientReferenceLoaderError::DuplicateIdentity {
+                    target: identity.0,
+                    object: identity.1,
+                });
+            }
+        }
+        Ok(Self {
+            revision,
+            principal,
+            security_context_digest,
+            objects: indexed,
+        })
+    }
+
+    fn load(
+        &self,
+        active: &ActiveDatabaseRevision,
+        principal: PrincipalId,
+        security_context_digest: Sha256Digest,
+        reference: &RuntimeValue,
+    ) -> Option<&ClientReferenceObject> {
+        if self.revision != active.pair()
+            || self.principal != principal
+            || self.security_context_digest != security_context_digest
+        {
+            return None;
+        }
+        let RuntimeValue::Reference { target, object } = reference else {
+            return None;
+        };
+        if active.catalogue().object_type_by_id(*target).is_none() {
+            return None;
+        }
+        self.objects.get(&(*target, *object))
+    }
+}
+
+fn client_reference_object_is_active(
+    active: &ActiveDatabaseRevision,
+    target: TypeId,
+    object: ObjectId,
+    value: &ClientReferenceObject,
+) -> bool {
+    if value.target() != target || value.object() != object {
+        return false;
+    }
+    let Some(definition) = active.catalogue().object_type_by_id(target) else {
+        return false;
+    };
+    let mut previous_index = None;
+    for (field_id, field_value) in value.fields() {
+        let Some((index, field)) = definition
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id() == *field_id)
+        else {
+            return false;
+        };
+        if previous_index.is_some_and(|previous| index <= previous) {
+            return false;
+        }
+        if (field_value.is_null() && !field.nullable())
+            || !client_reference_field_value_matches(active, field_value, field.resolved_type())
+        {
+            return false;
+        }
+        previous_index = Some(index);
+    }
+    true
+}
+
+fn client_reference_field_value_matches(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    expected: ResolvedType,
+) -> bool {
+    if runtime_value_matches(active, value, expected) {
+        return true;
+    }
+    let ResolvedType::Named(type_id) = expected else {
+        return false;
+    };
+    let Some(definition) = active
+        .catalogue_hash_context()
+        .standard()
+        .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+    else {
+        return false;
+    };
+    if let RuntimeValue::Null(null) = value {
+        return null.resolved_type() == expected;
+    }
+    match definition.representation_contract() {
+        "orna.kernel.value.boolean@1" => runtime_scalar_matches(StandardScalar::Boolean, value),
+        "orna.kernel.value.integer@1" => runtime_scalar_matches(StandardScalar::Integer, value),
+        "orna.kernel.value.bigint@1" => runtime_scalar_matches(StandardScalar::BigInt, value),
+        "orna.kernel.value.float@1" => runtime_scalar_matches(StandardScalar::Float, value),
+        "orna.kernel.value.character-large-object@1" => {
+            runtime_scalar_matches(StandardScalar::CharacterLargeObject, value)
+        }
+        "orna.kernel.value.binary-large-object@1" => {
+            runtime_scalar_matches(StandardScalar::BinaryLargeObject, value)
+        }
+        _ => false,
     }
 }
 
@@ -3289,6 +3522,7 @@ pub struct ClientStateStore {
     /// reused after a state update.
     user_state_epoch: u64,
     reference_loader: Option<ClientReferenceLoaderFixture>,
+    installed_reference_loader: Option<ClientReferenceLoader>,
     local: HashMap<ClientStateKey, RuntimeValue>,
     session: HashMap<ClientStateKey, RuntimeValue>,
     user: HashMap<ClientStateKey, ClientUserState>,
@@ -3303,6 +3537,7 @@ impl Default for ClientStateStore {
             security_context_digest: DEFAULT_SECURITY_CONTEXT_DIGEST,
             user_state_epoch: 0,
             reference_loader: None,
+            installed_reference_loader: None,
             local: HashMap::new(),
             session: HashMap::new(),
             user: HashMap::new(),
@@ -3337,6 +3572,11 @@ impl ClientStateStore {
         }
         self.session_binding = Some(binding);
         Ok(())
+    }
+
+    /// Installs a host-preloaded loader for authenticated reference field paths.
+    pub fn install_reference_loader(&mut self, loader: ClientReferenceLoader) {
+        self.installed_reference_loader = Some(loader);
     }
 
     /// Installs a private fixture for trusted reference-root evaluation tests.
@@ -8264,13 +8504,33 @@ fn evaluate_field_path(
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let mut current = value.clone();
     for field_id in fields {
-        if matches!(current, RuntimeValue::Reference { .. }) {
-            let Some(loader) = state.reference_loader.as_ref() else {
-                return Err(expression_error(context, ClientExpressionError::FieldPath));
-            };
-            current = loader
-                .load(active, principal, state.security_context_digest(), &current)
-                .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+        if let RuntimeValue::Reference { target, object } = &current {
+            let target = *target;
+            let object = *object;
+            if let Some(loader) = state.installed_reference_loader.as_ref() {
+                let Some(loaded) =
+                    loader.load(active, principal, state.security_context_digest(), &current)
+                else {
+                    return Err(expression_error(context, ClientExpressionError::FieldPath));
+                };
+                if !client_reference_object_is_active(active, target, object, loaded) {
+                    return Err(expression_error(context, ClientExpressionError::FieldPath));
+                }
+                current = loaded
+                    .fields()
+                    .iter()
+                    .find(|(candidate, _)| candidate == field_id)
+                    .map(|(_, value)| value.clone())
+                    .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+                continue;
+            } else {
+                let Some(loader) = state.reference_loader.as_ref() else {
+                    return Err(expression_error(context, ClientExpressionError::FieldPath));
+                };
+                current = loader
+                    .load(active, principal, state.security_context_digest(), &current)
+                    .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?;
+            }
         }
         let RuntimeValue::Record(record) = &current else {
             return Err(expression_error(context, ClientExpressionError::FieldPath));
@@ -8299,7 +8559,7 @@ fn evaluate_field_path(
             .ok_or_else(|| expression_error(context, ClientExpressionError::FieldPath))?
             .clone();
     }
-    Ok(current.clone())
+    Ok(current)
 }
 
 fn expression_returns_stream(
@@ -9570,11 +9830,13 @@ fn invalid_function(
 mod tests {
     use super::{
         ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
-        ClientActionState, ClientExecutionContext, ClientReferenceLoaderFixture, ClientResource,
-        ClientResourceCompletion, ClientResourceExecutor, ClientResourceKey, ClientResourceRequest,
-        ClientResourceStatus, ClientStateStore, DeterministicClientResourceExecutor, ResourceKind,
-        action_target_result_type, capability, complete_client_action, decode_action_payload,
-        encode_action_payload, trigger_client_action,
+        ClientActionState, ClientExecutionContext, ClientReferenceLoader,
+        ClientReferenceLoaderError, ClientReferenceLoaderFixture, ClientReferenceObject,
+        ClientResource, ClientResourceCompletion, ClientResourceExecutor, ClientResourceKey,
+        ClientResourceRequest, ClientResourceStatus, ClientStateStore,
+        DeterministicClientResourceExecutor, ResourceKind, action_target_result_type, capability,
+        complete_client_action, decode_action_payload, encode_action_payload,
+        trigger_client_action,
     };
     use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
     use std::{cell::Cell, collections::HashMap, rc::Rc, time::SystemTime};
@@ -17987,6 +18249,53 @@ mod tests {
         .expect("trusted reference loader resolves nested field paths");
 
         assert_eq!(value, RuntimeValue::Text("Ada".to_owned()));
+        let digest = super::client_security_context_digest(&authorisation);
+        let mut host_state = ClientStateStore::new();
+        host_state.set_security_context_digest(digest);
+        host_state.install_reference_loader(
+            ClientReferenceLoader::new(
+                active.pair(),
+                authorisation.session_principal(),
+                digest,
+                [
+                    ClientReferenceObject::new(
+                        outer_object,
+                        ObjectId::from_bytes([0x31; 16]),
+                        vec![(
+                            outer_field,
+                            RuntimeValue::Reference {
+                                target: inner_object,
+                                object: ObjectId::from_bytes([0x32; 16]),
+                            },
+                        )],
+                    ),
+                    ClientReferenceObject::new(
+                        inner_object,
+                        ObjectId::from_bytes([0x32; 16]),
+                        vec![(inner_field, RuntimeValue::Text("Ada".to_owned()))],
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut host_executor: Option<&mut dyn super::ClientResourceExecutor> = None;
+        let mut host_locals = super::ClientLocalEnvironment::new();
+        let host_value = super::evaluate_expression(
+            &active,
+            &expression,
+            context,
+            super::ObserverLineage::top_level(context.parent_invocation_id()),
+            &[(argument.parameter(), argument.value().clone())],
+            &[],
+            &super::capability::LocalCapabilityGrantSet::new(),
+            &mut host_state,
+            0,
+            authorisation.session_principal(),
+            &mut host_executor,
+            &mut host_locals,
+        )
+        .expect("host-installed reference loader resolves nested field paths");
+        assert_eq!(host_value, RuntimeValue::Text("Ada".to_owned()));
         let direct = super::evaluate_field_path(
             &active,
             &RuntimeValue::Record(
@@ -18009,6 +18318,198 @@ mod tests {
         )
         .expect("direct record field paths retain their existing behaviour");
         assert_eq!(direct, RuntimeValue::Text("Ada".to_owned()));
+    }
+
+    #[test]
+    fn client_reference_loader_rejects_duplicate_object_identities() {
+        let target = TypeId::from_bytes([0xd1; 16]);
+        let object = ObjectId::from_bytes([0xd2; 16]);
+        let error = ClientReferenceLoader::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0xd3; 16]),
+                CatalogueRevisionId::from_bytes([0xd4; 16]),
+            ),
+            PrincipalId::from_bytes([0xd5; 16]),
+            Sha256Digest::from_bytes([0xd6; 32]),
+            [
+                ClientReferenceObject::new(target, object, Vec::new()),
+                ClientReferenceObject::new(target, object, Vec::new()),
+            ],
+        )
+        .expect_err("duplicate reference-object identities must fail closed");
+
+        assert_eq!(
+            error,
+            ClientReferenceLoaderError::DuplicateIdentity { target, object }
+        );
+    }
+
+    #[test]
+    fn client_function_arguments_match_requires_exact_ids_and_active_types() {
+        let first_id = ParameterId::from_bytes([0xd7; 16]);
+        let second_id = ParameterId::from_bytes([0xd8; 16]);
+        let unknown_id = ParameterId::from_bytes([0xd9; 16]);
+        let (active, function, _pair, _revision) = version_one_active_with_shape(
+            FunctionDomain::Client,
+            vec![
+                ParameterDefinition::new(
+                    first_id,
+                    "first",
+                    0,
+                    ResolvedType::Scalar(StandardScalar::Integer),
+                    None,
+                ),
+                ParameterDefinition::new(
+                    second_id,
+                    "second",
+                    1,
+                    ResolvedType::Scalar(StandardScalar::Boolean),
+                    None,
+                ),
+            ],
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        let definition = active
+            .catalogue()
+            .function_by_id(function)
+            .expect("argument matcher fixture function is active");
+        let first = FunctionArgument::new(first_id, RuntimeValue::Integer(7)).unwrap();
+        let second = FunctionArgument::new(second_id, RuntimeValue::Boolean(true)).unwrap();
+
+        assert!(super::client_function_arguments_match(
+            &active,
+            definition,
+            &[first.clone(), second.clone()],
+        ));
+        assert!(!super::client_function_arguments_match(
+            &active,
+            definition,
+            std::slice::from_ref(&first),
+        ));
+        assert!(!super::client_function_arguments_match(
+            &active,
+            definition,
+            &[first.clone(), first.clone()],
+        ));
+        assert!(!super::client_function_arguments_match(
+            &active,
+            definition,
+            &[
+                first.clone(),
+                FunctionArgument::new(unknown_id, RuntimeValue::Boolean(true)).unwrap(),
+            ],
+        ));
+        assert!(!super::client_function_arguments_match(
+            &active,
+            definition,
+            &[
+                FunctionArgument::new(first_id, RuntimeValue::Boolean(true)).unwrap(),
+                second,
+            ],
+        ));
+    }
+
+    #[test]
+    fn host_reference_loader_accepts_partial_fields_but_missing_requested_field_fails() {
+        let (
+            active,
+            context,
+            _parameter,
+            outer_type,
+            outer_object,
+            _outer_record,
+            _inner_object,
+            _inner_record,
+            outer_field,
+            _inner_field,
+            authorisation,
+        ) = reference_field_path_fixture();
+        let object = ObjectId::from_bytes([0x31; 16]);
+        let digest = super::client_security_context_digest(&authorisation);
+        let partial = ClientReferenceObject::new(outer_object, object, Vec::new());
+
+        assert!(super::client_reference_object_is_active(
+            &active,
+            outer_object,
+            object,
+            &partial,
+        ));
+        assert!(!super::client_reference_object_is_active(
+            &active,
+            outer_object,
+            object,
+            &ClientReferenceObject::new(
+                outer_object,
+                object,
+                vec![(
+                    FieldId::from_bytes([0xff; 16]),
+                    RuntimeValue::Reference {
+                        target: outer_type,
+                        object,
+                    },
+                )],
+            ),
+        ));
+        let field_value = RuntimeValue::Reference {
+            target: _inner_object,
+            object: ObjectId::from_bytes([0x32; 16]),
+        };
+        assert!(!super::client_reference_object_is_active(
+            &active,
+            outer_object,
+            object,
+            &ClientReferenceObject::new(
+                outer_object,
+                object,
+                vec![
+                    (outer_field, field_value.clone()),
+                    (outer_field, field_value)
+                ],
+            ),
+        ));
+        assert!(!super::client_reference_object_is_active(
+            &active,
+            outer_object,
+            object,
+            &ClientReferenceObject::new(
+                outer_object,
+                object,
+                vec![(outer_field, RuntimeValue::Text("wrong".to_owned()))],
+            ),
+        ));
+
+        let mut state = ClientStateStore::new();
+        state.set_security_context_digest(digest);
+        state.install_reference_loader(
+            ClientReferenceLoader::new(
+                active.pair(),
+                authorisation.session_principal(),
+                digest,
+                [partial],
+            )
+            .unwrap(),
+        );
+        let error = super::evaluate_field_path(
+            &active,
+            &RuntimeValue::Reference {
+                target: outer_type,
+                object,
+            },
+            &[outer_field],
+            context,
+            authorisation.session_principal(),
+            &state,
+        )
+        .expect_err("an omitted requested field must remain a FieldPath failure");
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::FieldPath,
+                ..
+            }
+        ));
     }
 
     #[test]
