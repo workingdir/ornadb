@@ -169,6 +169,13 @@ fn validate_user_state_root_definition(
         record: format!("{root_function:?}"),
         rule: "USER state root must identify an active CLIENT function",
     })?;
+    if definition.id() != root_function {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: STATE_RELATION,
+            record: format!("{root_function:?}"),
+            rule: "USER state root catalogue definition must match its supplied identity",
+        });
+    }
     if definition.domain() != FunctionDomain::Client {
         return Err(PostgresKernelError::DurableInvariant {
             relation: STATE_RELATION,
@@ -1112,6 +1119,20 @@ mod tests {
     fn active_client_user_state_root_is_accepted() {
         let definition = root_definition(FunctionDomain::Client);
         assert!(validate_user_state_root_definition(ROOT, Some(&definition)).is_ok());
+    }
+
+    #[test]
+    fn mismatched_user_state_root_definition_is_rejected() {
+        let definition = root_definition(FunctionDomain::Client);
+        let error = validate_user_state_root_definition(FUNCTION, Some(&definition))
+            .expect_err("a catalogue definition for another identity must fail closed");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                rule: "USER state root catalogue definition must match its supplied identity",
+                ..
+            }
+        ));
     }
 
     #[test]
