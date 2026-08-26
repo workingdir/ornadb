@@ -7042,8 +7042,12 @@ mod tests {
     #[tokio::test]
     async fn queued_resource_completion_wins_over_cancellation() {
         let (version, revision) = constructed_test_version();
+        let (active, registry) = match &version {
+            RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+            _ => unreachable!("constructed test version"),
+        };
         let request = resource_request(revision);
-        let (server, _client) = UnixStream::pair().unwrap();
+        let (server, mut client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
             mpsc::channel::<(u64, ResourceDispatchCompletion)>(
@@ -7129,6 +7133,7 @@ mod tests {
         ));
         assert!(requests.contains_key(&request.stream_id));
         assert!(!hook_called.load(Ordering::SeqCst));
+        assert!(cancelled.is_empty());
         assert!(
             flush_resource_pending(
                 &version,
@@ -7145,6 +7150,46 @@ mod tests {
         );
         assert!(pending.is_empty());
         assert!(!requests.contains_key(&request.stream_id));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Accepted(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.nested_invocation_id == InvocationId::from_bytes([0x21; 16])
+                    && frame.target_revision == request.target_revision
+                    && frame.resource_kind == request.resource_kind
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Values(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.batch_sequence == 0
+                    && frame.item_count == 1
+                    && frame.byte_count
+                        == resource_value_byte_count(&version, &RuntimeValue::Integer(7))
+                            .expect("resource value byte count")
+                    && frame.values == vec![RuntimeValue::Integer(7)]
+        ));
+        assert!(matches!(
+            read_resource_server_frame(&mut client, &active, &registry).await,
+            ResourceServerFrame::Completed(frame)
+                if frame.stream_id == request.stream_id
+                    && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.final_batch_sequence == 0
+                    && frame.total_items == 1
+        ));
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "committed completion must not emit cancellation or stale frames",
+        );
     }
     #[tokio::test]
     async fn committing_resource_cancellation_does_not_terminalise_stream() {
@@ -7366,8 +7411,19 @@ mod tests {
             ResourceServerFrame::Completed(frame)
                 if frame.stream_id == request.stream_id
                     && frame.request_id == request.request_id
+                    && frame.target_revision == request.target_revision
+                    && frame.final_batch_sequence == 0
                     && frame.total_items == 1
         ));
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                read_resource_server_frame(&mut client, &active, &registry),
+            )
+            .await
+            .is_err(),
+            "committed completion must not emit stale acceptance, values, or cancellation",
+        );
     }
 
     #[tokio::test]
