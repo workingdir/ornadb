@@ -5087,6 +5087,19 @@ async fn rejects_tampered_source_only_ancestor_hash_without_changing_active_stat
             session
                 .client()
                 .execute(
+                    "INSERT INTO _orna_kernel.source_bundle_units
+                        (bundle_id, source_unit_id, ordinal)
+                     VALUES ($1, $2, $3)",
+                    &[
+                        &child_bundle.to_bytes().to_vec(),
+                        &child_unit.id().to_bytes().to_vec(),
+                        &i64::from(child_unit.ordinal()),
+                    ],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
                     "INSERT INTO _orna_kernel.source_revisions
                         (id, parent_source_revision_id, bundle_id, content_hash)
                      VALUES ($1, $2, $3, $4)",
@@ -5235,6 +5248,19 @@ async fn rejects_tampered_catalogue_only_ancestor_hash_without_changing_active_s
                         &child_unit.logical_path(),
                         &child_unit.content(),
                         &child_unit.content_hash().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.source_bundle_units
+                        (bundle_id, source_unit_id, ordinal)
+                     VALUES ($1, $2, $3)",
+                    &[
+                        &child_bundle.to_bytes().to_vec(),
+                        &child_unit.id().to_bytes().to_vec(),
+                        &i64::from(child_unit.ordinal()),
                     ],
                 )
                 .await?;
@@ -6239,6 +6265,13 @@ async fn rejects_schema_origin_from_another_bundle_or_invalid_span() -> TestResu
              'other',
              decode(repeat('00', 32), 'hex')
          );
+         INSERT INTO _orna_kernel.source_bundle_units
+             (bundle_id, source_unit_id, ordinal)
+         VALUES (
+             decode(repeat('71', 16), 'hex'),
+             decode(repeat('72', 16), 'hex'),
+             0
+         );
          UPDATE _orna_kernel.catalogue_schemas
          SET source_unit_id = decode(repeat('72', 16), 'hex')",
         ExpectedRecoveryError::Revision,
@@ -6624,7 +6657,7 @@ async fn rejects_source_content_ordinals_encoding_and_contract_tampering() -> Te
     )
     .await?;
     reject_source_tamper(
-        "UPDATE _orna_kernel.source_units SET ordinal = 1",
+        "UPDATE _orna_kernel.source_bundle_units SET ordinal = 1",
         ExpectedRecoveryError::Canonical,
     )
     .await?;
@@ -6907,6 +6940,19 @@ async fn install_source_only_revision(
                     &unit.logical_path(),
                     &unit.content(),
                     &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, $3)",
+                &[
+                    &bundle.to_bytes().to_vec(),
+                    &unit.id().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
                 ],
             )
             .await?;
@@ -7856,6 +7902,19 @@ async fn insert_standard_snapshot(
                     &unit.logical_path(),
                     &unit.content(),
                     &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, $3)",
+                &[
+                    &source.bundle().to_bytes().to_vec(),
+                    &unit.id().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
                 ],
             )
             .await?;
@@ -8889,6 +8948,19 @@ async fn install_reused_function_catalogue(
         session
             .client()
             .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, $3)",
+                &[
+                    &bundle.to_bytes().to_vec(),
+                    &unit.id().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
                 "INSERT INTO _orna_kernel.source_revisions
                     (id, parent_source_revision_id, bundle_id, content_hash)
                  VALUES ($1, $2, $3, $4)",
@@ -9233,6 +9305,19 @@ async fn install_valid_sibling_introduction(
                     &unit.logical_path(),
                     &unit.content(),
                     &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, $3)",
+                &[
+                    &bundle.to_bytes().to_vec(),
+                    &unit.id().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
                 ],
             )
             .await?;

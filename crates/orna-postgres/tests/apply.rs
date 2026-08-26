@@ -2719,7 +2719,7 @@ async fn baseline(
             "SELECT
           (SELECT count(*) FROM _orna_kernel.schema_migrations),
           (SELECT count(*) FROM _orna_kernel.source_bundles),
-          (SELECT count(*) FROM _orna_kernel.source_units),
+          (SELECT count(*) FROM _orna_kernel.source_bundle_units),
           (SELECT count(*) FROM _orna_kernel.source_revisions),
           (SELECT count(*) FROM _orna_kernel.catalogue_revisions),
           (SELECT count(*) FROM _orna_kernel.catalogue_schemas),
@@ -2939,9 +2939,13 @@ async fn require_standard_upgrade_storage(
         let source_units = session
             .client()
             .query(
-                "SELECT id, bundle_id, ordinal, logical_path, content, content_hash
-                 FROM _orna_kernel.source_units
-                 WHERE bundle_id = $1 ORDER BY ordinal",
+                "SELECT membership.source_unit_id, membership.bundle_id,
+                        membership.ordinal, source_unit.logical_path,
+                        source_unit.content, source_unit.content_hash
+                 FROM _orna_kernel.source_bundle_units AS membership
+                 JOIN _orna_kernel.source_units AS source_unit
+                   ON source_unit.id = membership.source_unit_id
+                 WHERE membership.bundle_id = $1 ORDER BY membership.ordinal",
                 &[&standard.source().bundle().to_bytes().to_vec()],
             )
             .await?;
@@ -3678,7 +3682,7 @@ impl CandidateSqlState {
         format!(
             "EXISTS (SELECT 1 FROM _orna_kernel.source_bundles
                       WHERE id = {source_bundle})
-             AND (SELECT count(*) FROM _orna_kernel.source_units
+             AND (SELECT count(*) FROM _orna_kernel.source_bundle_units
                   WHERE bundle_id = {source_bundle}) = {source_unit_count}
              AND EXISTS (SELECT 1 FROM _orna_kernel.source_revisions
                          WHERE id = {source_revision} AND bundle_id = {source_bundle})",
@@ -3974,6 +3978,15 @@ async fn reject_inactive_application_type_collision(
                     (id, bundle_id, ordinal, logical_path, content, content_hash)
                  VALUES ($1, $2, 0, 'hostile/type.orna', 'hostile', $3)",
                 &[&unit, &bundle, &content_hash],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundle_units
+                    (bundle_id, source_unit_id, ordinal)
+                 VALUES ($1, $2, 0)",
+                &[&bundle, &unit],
             )
             .await?;
         session
@@ -4928,10 +4941,10 @@ async fn require_no_candidate_residue(
         )
         .await?
         .try_get(0)?;
-    let source_unit_rows: i64 = session
+    let source_membership_rows: i64 = session
         .client()
         .query_one(
-            "SELECT count(*) FROM _orna_kernel.source_units WHERE bundle_id = $1",
+            "SELECT count(*) FROM _orna_kernel.source_bundle_units WHERE bundle_id = $1",
             &[&source_bundle],
         )
         .await?
@@ -5014,7 +5027,7 @@ async fn require_no_candidate_residue(
     )?;
     require(
         source_bundle_rows == 0
-            && source_unit_rows == 0
+            && source_membership_rows == 0
             && source_revision_rows == 0
             && catalogue_and_semantic_rows == 0
             && immutable_rows == 0
@@ -6289,6 +6302,14 @@ async fn insert_inactive_application_function(
         .await?;
     client
         .execute(
+            "INSERT INTO _orna_kernel.source_bundle_units
+                (bundle_id, source_unit_id, ordinal)
+             VALUES ($1, $2, 0)",
+            &[&bundle, &unit],
+        )
+        .await?;
+    client
+        .execute(
             "INSERT INTO _orna_kernel.source_revisions
                 (id, parent_source_revision_id, bundle_id, content_hash)
              VALUES ($1, NULL, $2, $3)",
@@ -6492,8 +6513,11 @@ async fn persists_the_v2_standard_snapshot_and_authority_atomically() -> TestRes
 
         let units = client
             .query(
-                "SELECT ordinal, logical_path FROM _orna_kernel.source_units
-                 WHERE bundle_id = $1 ORDER BY ordinal",
+                "SELECT membership.ordinal, source_unit.logical_path
+                 FROM _orna_kernel.source_bundle_units AS membership
+                 JOIN _orna_kernel.source_units AS source_unit
+                   ON source_unit.id = membership.source_unit_id
+                 WHERE membership.bundle_id = $1 ORDER BY membership.ordinal",
                 &[&standard.source().bundle().to_bytes().to_vec()],
             )
             .await?;
@@ -7671,6 +7695,12 @@ async fn proves_the_v3_standard_install_and_reopen() -> TestResult<()> {
         let client = session.client();
         let v3_revision = standard.revision().to_bytes().to_vec();
         let v3_bundle = standard.source().bundle().to_bytes().to_vec();
+        let v2_standard = chain
+            .version_two
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the V2 active revision omitted its standard snapshot"))?;
+        let v2_bundle = v2_standard.source().bundle().to_bytes().to_vec();
         let header = client
             .query_one(
                 "SELECT id, source_revision_id, catalogue_revision_id, digest_version,
@@ -7691,27 +7721,74 @@ async fn proves_the_v3_standard_install_and_reopen() -> TestResult<()> {
         )?;
         let stored_units = client
             .query(
-                "SELECT ordinal, logical_path, id, content_hash
-                 FROM _orna_kernel.source_units
-                 WHERE bundle_id = $1 ORDER BY ordinal",
+                "SELECT membership.ordinal, source_unit.logical_path,
+                        membership.source_unit_id, source_unit.content_hash,
+                        source_unit.bundle_id, source_unit.content
+                 FROM _orna_kernel.source_bundle_units AS membership
+                 JOIN _orna_kernel.source_units AS source_unit
+                   ON source_unit.id = membership.source_unit_id
+                 WHERE membership.bundle_id = $1 ORDER BY membership.ordinal",
                 &[&v3_bundle],
             )
             .await?;
+        let parent_units = client
+            .query(
+                "SELECT membership.ordinal, source_unit.logical_path,
+                        membership.source_unit_id, source_unit.content_hash,
+                        source_unit.bundle_id, source_unit.content
+                 FROM _orna_kernel.source_bundle_units AS membership
+                 JOIN _orna_kernel.source_units AS source_unit
+                   ON source_unit.id = membership.source_unit_id
+                 WHERE membership.bundle_id = $1 ORDER BY membership.ordinal",
+                &[&v2_bundle],
+            )
+            .await?;
+        require(
+            parent_units.len() == 2
+                && parent_units[0].try_get::<_, i64>(0)? == 0
+                && parent_units[0].try_get::<_, String>(1)? == "std/types.orna"
+                && parent_units[0].try_get::<_, Vec<u8>>(2)?
+                    == orna_compiler::STD_TYPES_SOURCE_UNIT_ID.to_bytes()
+                && parent_units[0].try_get::<_, Vec<u8>>(4)? == v2_bundle
+                && parent_units[0].try_get::<_, Vec<u8>>(3)?
+                    == stored_units[0].try_get::<_, Vec<u8>>(3)?
+                && parent_units[0].try_get::<_, String>(5)?
+                    == stored_units[0].try_get::<_, String>(5)?
+                && parent_units[1].try_get::<_, i64>(0)? == 1
+                && parent_units[1].try_get::<_, String>(1)? == "std/invoke.orna"
+                && parent_units[1].try_get::<_, Vec<u8>>(2)?
+                    == orna_compiler::STD_INVOKE_SOURCE_UNIT_ID.to_bytes()
+                && parent_units[1].try_get::<_, Vec<u8>>(4)? == v2_bundle
+                && parent_units[1].try_get::<_, Vec<u8>>(3)?
+                    == stored_units[1].try_get::<_, Vec<u8>>(3)?
+                && parent_units[1].try_get::<_, String>(5)?
+                    == stored_units[1].try_get::<_, String>(5)?,
+            "the V2 parent source bundle lost reused source-unit membership or bytes",
+        )?;
         require(
             stored_units.len() == 3
                 && stored_units[0].try_get::<_, i64>(0)? == 0
                 && stored_units[0].try_get::<_, String>(1)? == "std/types.orna"
                 && stored_units[0].try_get::<_, Vec<u8>>(2)?
                     == orna_compiler::STD_TYPES_SOURCE_UNIT_ID.to_bytes()
+                && stored_units[0].try_get::<_, Vec<u8>>(3)? == units[0].content_hash().to_bytes()
+                && stored_units[0].try_get::<_, Vec<u8>>(4)? == v2_bundle
+                && stored_units[0].try_get::<_, String>(5)? == units[0].content()
                 && stored_units[1].try_get::<_, i64>(0)? == 1
                 && stored_units[1].try_get::<_, String>(1)? == "std/invoke.orna"
                 && stored_units[1].try_get::<_, Vec<u8>>(2)?
                     == orna_compiler::STD_INVOKE_SOURCE_UNIT_ID.to_bytes()
+                && stored_units[1].try_get::<_, Vec<u8>>(3)? == units[1].content_hash().to_bytes()
+                && stored_units[1].try_get::<_, Vec<u8>>(4)? == v2_bundle
+                && stored_units[1].try_get::<_, String>(5)? == units[1].content()
                 && stored_units[2].try_get::<_, i64>(0)? == 2
                 && stored_units[2].try_get::<_, String>(1)? == "std/output.orna"
                 && stored_units[2].try_get::<_, Vec<u8>>(2)?
-                    == STD_OUTPUT_SOURCE_UNIT_ID.to_bytes(),
-            "the V3 source units did not persist the exact ordered bundle",
+                    == STD_OUTPUT_SOURCE_UNIT_ID.to_bytes()
+                && stored_units[2].try_get::<_, Vec<u8>>(3)? == units[2].content_hash().to_bytes()
+                && stored_units[2].try_get::<_, Vec<u8>>(4)? == v3_bundle
+                && stored_units[2].try_get::<_, String>(5)? == units[2].content(),
+            "the V3 source units did not persist complete parent/child membership or bytes",
         )?;
         let schemas = client
             .query(
@@ -7870,6 +7947,46 @@ async fn proves_the_v3_standard_install_and_reopen() -> TestResult<()> {
             "the V3 companion authority row did not pin the exact standard executable",
         )?;
         session.shutdown().await?;
+        let marker = database.open().await?;
+        marker
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.active_revision
+                 SET source_revision_id = $1, catalogue_revision_id = $2
+                 WHERE singleton = true",
+                &[
+                    &chain.version_two.pair().source().to_bytes().to_vec(),
+                    &chain.version_two.pair().catalogue().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        marker.shutdown().await?;
+        let recovered_parent = named_kernel(&database, "orna-v2-parent-recover")?
+            .recover()
+            .await?;
+        require(
+            recovered_parent.pair() == chain.version_two.pair()
+                && recovered_parent
+                    .catalogue_hash_context()
+                    .standard()
+                    .map(|snapshot| snapshot.revision())
+                    == Some(STANDARD_LIBRARY_V2_REVISION_ID),
+            "the V2 parent standard bundle was not recoverable after the V3 upgrade",
+        )?;
+        let marker = database.open().await?;
+        marker
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.active_revision
+                 SET source_revision_id = $1, catalogue_revision_id = $2
+                 WHERE singleton = true",
+                &[
+                    &chain.version_three.pair().source().to_bytes().to_vec(),
+                    &chain.version_three.pair().catalogue().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        marker.shutdown().await?;
 
         // Historical pins intact: the V1, V2, and V3 standard headers all
         // remain installed, and the three historical application catalogue
