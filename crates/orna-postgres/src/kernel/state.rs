@@ -15,7 +15,9 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     bootstrap::require_current_migrations,
     is_sealed_inspect_type_id,
-    security::{append_security_audit_event, recover_security_snapshot_for_active},
+    security::{
+        append_security_audit_event, lock_active_revision, recover_security_snapshot_for_active,
+    },
     server_runtime::configure_and_recover,
 };
 use orna_artifact::client_plan::{
@@ -327,6 +329,7 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&audit_transaction).await?;
+            lock_active_revision(&audit_transaction, loaded_pair).await?;
             let audit_active = configure_and_recover(&audit_transaction).await?;
             if audit_active.pair() != loaded_pair {
                 return Err(PostgresKernelError::DurableInvariant {
