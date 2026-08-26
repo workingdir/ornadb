@@ -15,9 +15,8 @@ CREATE TYPE "Demo Schema"."odd type" AS OBJECT (
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (identifier
-            (quoted_identifier)))
+        (identifier
+          (quoted_identifier))
         (dot)
         (identifier
           (quoted_identifier)))
@@ -50,4 +49,3 @@ CREATE TYPE "Demo Schema"."odd type" AS OBJECT (
             (kw_int))))
       (rparen)
       (semicolon))))
-

@@ -12,8 +12,7 @@ CREATE TYPE tasks.priority AS ENUM ('low', 'medium', 'high',);
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (identifier))
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
@@ -27,4 +26,3 @@ CREATE TYPE tasks.priority AS ENUM ('low', 'medium', 'high',);
       (comma)
       (rparen)
       (semicolon))))
-

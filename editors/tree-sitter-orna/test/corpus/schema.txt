@@ -18,8 +18,7 @@ CREATE SCHEMA std.invoke;
     (kw_create)
     (kw_schema)
     name: (qualified_name
-      (qualified_name
-        (identifier))
+      (identifier)
       (dot)
       (identifier))
     (semicolon)))
@@ -40,3 +39,27 @@ create schema demo;
       (identifier))
     (semicolon)))
 
+====================
+create schema accepts keyword-initial qualified names
+====================
+
+CREATE SCHEMA SELECT;
+CREATE SCHEMA SELECT.FROM;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (kw_select))
+    (semicolon))
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (kw_select)
+      (dot)
+      (kw_from))
+    (semicolon)))

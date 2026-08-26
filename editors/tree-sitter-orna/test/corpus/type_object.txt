@@ -20,8 +20,7 @@ CREATE TYPE people.person AS OBJECT (
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (identifier))
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
@@ -120,3 +119,23 @@ CREATE TYPE people.person AS OBJECT (
       (string_literal)
       (semicolon))))
 
+====================
+create object type accepts keyword-initial qualified names
+====================
+
+CREATE TYPE END AS OBJECT ();
+
+---
+
+(source_file
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (kw_end))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (rparen)
+      (semicolon))))

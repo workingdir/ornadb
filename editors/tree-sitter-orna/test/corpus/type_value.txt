@@ -15,8 +15,7 @@ CREATE TYPE accounts.audit_entry AS VALUE (
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (identifier))
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
@@ -97,11 +96,9 @@ CREATE TYPE std.terminal.Document AS VALUE OPAQUE
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (qualified_name
-            (identifier))
-          (dot)
-          (identifier))
+        (identifier)
+        (dot)
+        (identifier)
         (dot)
         (identifier))
       (kw_as)
@@ -131,11 +128,9 @@ CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE
       (kw_create)
       (kw_type)
       name: (qualified_name
-        (qualified_name
-          (qualified_name
-            (identifier))
-          (dot)
-          (identifier))
+        (identifier)
+        (dot)
+        (identifier)
         (dot)
         (kw_boolean))
       (kw_as)
@@ -205,4 +200,3 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
     prelude_name: (kw_large)
     prelude_name: (kw_object)
     (semicolon)))
-
