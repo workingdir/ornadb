@@ -85,12 +85,13 @@ does not by itself claim that the named test ran in this checkout.
   `client-inspector` was skipped because it is Compose-only. The source-authored
   `static-ui` demo at `crates/orna-server/tests/fixtures/static_ui_dogfood.orna`
   is accepted evidence; no excluded scalar fixture is accepted.
-- `just kernel-test` passed with the dedicated temporary
-  `ornadb_kernel_gate` database: 38 `standard_database` tests, 5 user-state
-  tests, 3 PostgreSQL library tests, 53 `apply` tests, 20 `bootstrap` tests,
-  4 catalogue-health tests, 64 recovery tests, 20 server-execution tests,
-  and 22 server-mutation tests passed. The expected negative-path diagnostics
-  were emitted by their tests; no failure was reported.
+- `just kernel-test` passed with the dedicated temporary `ornadb_kernel_gate`
+  database; final run artifact is `artifact://22571`. It covered 38
+  `standard_database` tests, 5 user-state tests, 3 PostgreSQL library tests,
+  53 `apply` tests, 20 `bootstrap` tests, 4 catalogue-health tests, 64
+  recovery tests, 20 server-execution tests, and 22 server-mutation tests.
+  The expected negative-path diagnostics were emitted by their tests; no
+  failure was reported.
 
 The initial LSP expectation mismatch, CLIENT fixture compile mismatch, and
 workspace private-import compile failure were development corrections, not gate
