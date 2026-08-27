@@ -33,11 +33,14 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading remains deferred except for the bounded Qt v1 provider accepted by 0082; browser, second-toolkit, and native platform expansion remain deferred. |
 | 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
-| 0082 | First production Qt non-TTY runtime boundary, provider, loader, and session bridge | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio database operations, and gateways remain separately gated. |
-| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, populated Inspector rows, launch metadata, gateways, and broader UI transport remain deferred. |
+| 0082 | First production Qt non-TTY runtime boundary, provider, loader, and session bridge | Browser runtime, second toolkit/platform, production CLIENT VM, Studio database operations, and gateways remain separately gated. |
+| 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, launch metadata, and second runtimes remain separately gated. |
+| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, launch metadata, gateways, and broader UI transport remain deferred. |
+| 0085 | Fixed installed Qt runtime package path and fail-closed production selection | Browser/second toolkit, arbitrary runtime paths, database-selected native code, and model contracts remain deferred. |
 | 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
 | 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
 | 0088 | Structural UI constructors for source-authored CLIENT work | Seven V9 pure UI constructors are accepted after Rows V8; actions, models, Studio operations, metadata, and runtime expansion remain deferred. |
+| 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
 
 ## Current work ADRs
 
@@ -198,3 +201,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Bounded `std.data.Rows` and Retained Table Presenter](0087-std-data-rows.md)
 * **work ADR 0088:**
   [Structural UI Constructors for Source-Authored CLIENT Work](0088-structural-ui-constructors.md)
+* **work ADR 0089:**
+  [Resource Lineage Authority](0089-resource-lineage-authority.md)
