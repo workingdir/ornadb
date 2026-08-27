@@ -40,7 +40,7 @@ use orna_core::{
     state::{UserStateCell, UserStateKeyWithoutPrincipal, is_sealed_inspect_runtime_value},
     types::TypeDescriptor,
     value::{
-        MAX_OPAQUE_CODEC_PAYLOAD_LENGTH, MAX_RUNTIME_VALUE_NODES, OpaqueCodecRegistry,
+        MAX_OPAQUE_CODEC_PAYLOAD_LENGTH, MAX_RUNTIME_VALUE_NODES, OpaqueCodecRegistry, OpaqueValue,
         RuntimeValue,
     },
 };
@@ -1675,7 +1675,7 @@ fn presenter_alias_from_capture(
             Some("table".to_owned())
         }
         RuntimeValue::Opaque(value) if value.opaque_type() == STD_IO_BYTE_STREAM_TYPE_ID => {
-            match byte_stream_media_type(value) {
+            match byte_stream_media_type_opaque(value) {
                 Some("application/json") => Some("json".to_owned()),
                 Some("text/csv") => Some("csv".to_owned()),
                 _ => None,
@@ -1689,6 +1689,10 @@ fn byte_stream_media_type(value: &RuntimeValue) -> Option<&str> {
     let RuntimeValue::Opaque(value) = value else {
         return None;
     };
+    byte_stream_media_type_opaque(value)
+}
+
+fn byte_stream_media_type_opaque(value: &OpaqueValue) -> Option<&str> {
     if value.opaque_type() != STD_IO_BYTE_STREAM_TYPE_ID {
         return None;
     }
