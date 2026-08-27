@@ -12,7 +12,8 @@ CLIENT state blocks reject AWAIT in returns
 CLIENT procedural blocks reject CONST declarations
 CLIENT procedural blocks reject CALL statements
 CLIENT procedural blocks reject standalone AWAIT statements
-CLIENT procedural blocks reject IF statements
+CLIENT procedural blocks accept IF statements
+CLIENT comparison operators accept standalone angle brackets
 closed CLIENT calls, named arguments, concatenation
 CLIENT expression bodies reject AWAIT
 expression literals and qualified names
