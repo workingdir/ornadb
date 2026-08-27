@@ -12,9 +12,7 @@ use lsp_types::{
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{
-    retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
-};
+use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
