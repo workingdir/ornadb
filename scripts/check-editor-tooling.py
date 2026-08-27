@@ -2090,6 +2090,46 @@ def check_lsp_protocol(cargo: str, repository: Path) -> bool:
     return True
 
 
+def check_lsp_accepted_corpus_manifest(cargo: str, repository: Path) -> bool:
+    """Run the manifest-driven LSP diagnostics test as a separately labelled check."""
+    test_name = "serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges"
+    log(f"checking {test_name}")
+    result = run_command(
+        [
+            cargo,
+            "test",
+            "--package",
+            "orna-lsp",
+            "--test",
+            "lsp_e2e",
+            test_name,
+            "--",
+            "--exact",
+            "--nocapture",
+        ],
+        cwd=repository,
+        label=f"orna-lsp accepted corpus test ({test_name})",
+    )
+    if result is None or result.returncode != 0:
+        if result is not None:
+            fixture_details = sorted(
+                {
+                    line.strip()
+                    for line in (result.stdout + "\n" + result.stderr).splitlines()
+                    if "accepted corpus fixture" in line
+                    or "accepted corpus manifest case" in line
+                }
+            )
+            for detail in fixture_details:
+                log(f"orna-lsp accepted corpus fixture failure: {detail}", error=True)
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"orna-lsp accepted corpus manifest check failed ({status})", error=True)
+        return False
+    log(f"{test_name} passed")
+    return True
+
+
+
 
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
@@ -2191,6 +2231,8 @@ def main() -> int:
     if not check_zed_extension(cargo, zed_directory, repository):
         return 1
     if not check_lsp_protocol(cargo, repository):
+        return 1
+    if not check_lsp_accepted_corpus_manifest(cargo, repository):
         return 1
 
 
