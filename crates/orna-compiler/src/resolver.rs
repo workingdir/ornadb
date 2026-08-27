@@ -26,10 +26,12 @@ pub use model::{
     CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse,
     ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
     STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
-    STANDARD_LIBRARY_V7_REVISION_ID, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID,
+    STANDARD_LIBRARY_V7_REVISION_ID, STANDARD_LIBRARY_V8_REVISION_ID, STD_ACTION_SCHEMA_ID,
+    STD_ACTION_SOURCE_UNIT_ID,
     STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
     STD_CSV_ENCODE_FUNCTION_ID, STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
-    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
+    STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
@@ -65,6 +67,7 @@ use orna_artifact::client_plan::{
     ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
     ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
+use orna_artifact::server_terminal_table;
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
@@ -395,6 +398,7 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V8_REVISION_ID => check_standard_library_source_v8(snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
             STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
             STANDARD_LIBRARY_V5_REVISION_ID => check_standard_library_source_v5(snapshot),
@@ -1062,6 +1066,331 @@ fn check_standard_library_source_v7_parts(
     )?;
     Ok((families, vec![checked_echo, checked_json, checked_window]))
 }
+/// Checks one retained V8 standard source bundle.
+///
+/// V8 is the append-only V7 child: it retains the seven historical units and
+/// executable records byte-for-byte, then appends `std/data.orna` and the
+/// retained terminal-table executable. The appended unit owns the `std.data`
+/// schema, Rows value/export, and the table declaration; its result type is a
+/// checked cross-unit reference to the retained terminal Document type.
+fn check_standard_library_source_v8(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let (families, checked_executables) = check_standard_library_source_v8_parts(
+        snapshot.source().units(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executables,
+    })
+}
+
+fn check_standard_library_source_v8_parts(
+    source_units: &[StoredSourceUnit],
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
+    let [
+        types_unit,
+        invoke_unit,
+        output_unit,
+        ui_unit,
+        json_unit,
+        action_unit,
+        window_unit,
+        data_unit,
+    ] = source_units
+    else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    check_standard_source_units(
+        source_units,
+        &[
+            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
+            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
+            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
+            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
+            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
+            (STD_ACTION_SOURCE_UNIT_ID, "std/action.orna", 5),
+            (STD_WINDOW_SOURCE_UNIT_ID, "std/window.orna", 6),
+            (STD_DATA_SOURCE_UNIT_ID, "std/data.orna", 7),
+        ],
+    )?;
+    if executables.len() != 4 {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: executables.len(),
+        });
+    }
+    let expected_functions = [
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        STD_UI_WINDOW_FUNCTION_ID,
+    ];
+    if executables
+        .iter()
+        .map(StandardExecutable::function)
+        .ne(expected_functions.into_iter())
+    {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+
+    let mut v7_origins = Vec::with_capacity(origins.len());
+    let mut data_origins = Vec::new();
+    for origin in origins {
+        if origin.source().source_unit() == STD_DATA_SOURCE_UNIT_ID {
+            data_origins.push(origin.clone());
+        } else {
+            v7_origins.push(origin.clone());
+        }
+    }
+    let v7_executables = vec![
+        executables[0].clone(),
+        executables[1].clone(),
+        executables[3].clone(),
+    ];
+    let (mut families, mut checked_executables) = check_standard_library_source_v7_parts(
+        &[
+            types_unit.clone(),
+            invoke_unit.clone(),
+            output_unit.clone(),
+            ui_unit.clone(),
+            json_unit.clone(),
+            action_unit.clone(),
+            window_unit.clone(),
+        ],
+        catalogue,
+        &v7_origins,
+        &v7_executables,
+    )?;
+
+    let data_bundle = SourceBundle::new([SourceUnit::new(
+        data_unit.logical_path(),
+        data_unit.content(),
+    )])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let data_report = parse_bundle(&data_bundle);
+    if !data_report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: data_report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_data] = data_report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let data_families =
+        reconcile_standard_data_unit(data_unit, parsed_data, catalogue, &data_origins)?;
+    families.schemas.extend(data_families.schemas);
+    families.value_types.extend(data_families.value_types);
+    families.type_bindings.extend(data_families.type_bindings);
+
+    let terminal_schema_origin = v7_origins
+        .iter()
+        .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_TERMINAL_SCHEMA_ID))
+        .map(DefinitionOrigin::source)
+        .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
+    let table_executable = reconcile_standard_terminal_executable(
+        catalogue,
+        &data_origins,
+        &executables[3],
+        data_unit,
+        parsed_data,
+        terminal_schema_origin,
+    )?;
+    checked_executables.insert(2, table_executable);
+    Ok((families, checked_executables))
+}
+
+/// Reconciles the appended `std/data.orna` unit and returns its catalogue
+/// families. The table declaration is checked through the shared retained
+/// terminal-table checker below; this function additionally requires the
+/// complete source-owned origin set and the cross-unit terminal reference.
+fn reconcile_standard_data_unit(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<StandardSourceFamilies, StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+        || parsed_unit.parsed().schemas().len() != 1
+        || parsed_unit.parsed().opaque_value_types().len() != 1
+        || parsed_unit.parsed().type_exports().len() != 1
+        || parsed_unit.parsed().server_functions().len() != 1
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [schema_declaration] = parsed_unit.parsed().schemas() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [rows_type_declaration] = parsed_unit.parsed().opaque_value_types() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [rows_export] = parsed_unit.parsed().type_exports() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let [table_function] = parsed_unit.parsed().server_functions() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+
+    let expected_schema_name =
+        QualifiedSemanticName::new(["std", "data"]).expect("fixed data schema is valid");
+    let schema_name = unquoted_semantic_name(&schema_declaration.name)?;
+    if schema_name != expected_schema_name
+        || catalogue
+            .schema_by_id(STD_DATA_SCHEMA_ID)
+            .ok_or(StandardLibraryCheckError::MissingSchema)?
+            .name()
+            != &schema_name
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_rows_name =
+        QualifiedSemanticName::new(["std", "data", "rows"]).expect("fixed Rows type is valid");
+    let rows_name = unquoted_semantic_name(&rows_type_declaration.name)?;
+    let rows_contract = decode_string_literal(&rows_type_declaration.kernel_contract)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let rows_definition = catalogue
+        .value_type_by_id(STD_DATA_ROWS_TYPE_ID)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if rows_name != expected_rows_name
+        || rows_contract != "orna.std.value.rows@1"
+        || rows_definition.name() != &rows_name
+        || rows_definition.kind() != ValueTypeKind::Opaque
+        || rows_definition.mutability() != ValueTypeMutability::Immutable
+        || rows_definition.persistence() != ValueTypePersistence::Transient
+        || rows_definition.representation_contract() != rows_contract
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let expected_binding_name =
+        QualifiedSemanticName::new(["std", "rows"]).expect("fixed Rows export is valid");
+    let rows_binding = catalogue
+        .type_binding_by_name(&TypeLookupName::qualified(expected_binding_name.clone()))
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let TypeExportTarget::Qualified { name: target_name } = &rows_export.target else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if unquoted_semantic_name(&rows_export.source_type)? != rows_name
+        || unquoted_semantic_name(target_name)? != expected_binding_name
+        || rows_binding.id() != STD_DATA_ROWS_TYPE_BINDING_ID
+        || rows_binding.kind() != TypeBindingKind::Qualified
+        || rows_binding.name() != &TypeLookupName::qualified(expected_binding_name)
+        || rows_binding.target() != STD_DATA_ROWS_TYPE_ID
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let mut origins_by_identity = HashMap::with_capacity(origins.len());
+    for origin in origins {
+        if !matches!(
+            origin.identity(),
+            DefinitionIdentity::Schema(_)
+                | DefinitionIdentity::ValueType(_)
+                | DefinitionIdentity::TypeBinding(_)
+                | DefinitionIdentity::Function(_)
+                | DefinitionIdentity::Parameter { .. }
+        ) || origins_by_identity
+            .insert(origin.identity(), origin.source())
+            .is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    let schema_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Schema(STD_DATA_SCHEMA_ID),
+        stored_unit.id(),
+        &schema_declaration.span,
+    )?;
+    let rows_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::ValueType(STD_DATA_ROWS_TYPE_ID),
+        stored_unit.id(),
+        &rows_type_declaration.span,
+    )?;
+    let binding_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::TypeBinding(rows_binding.id()),
+        stored_unit.id(),
+        &rows_export.span,
+    )?;
+    let function_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID),
+        stored_unit.id(),
+        &table_function.span,
+    )?;
+    let parameter = table_function
+        .parameters
+        .first()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let parameter_origin = take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Parameter {
+            owner: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            parameter: STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        },
+        stored_unit.id(),
+        &parameter.span,
+    )?;
+    if !origins_by_identity.is_empty()
+        || schema_origin.source_unit() != stored_unit.id()
+        || rows_origin.source_unit() != stored_unit.id()
+        || binding_origin.source_unit() != stored_unit.id()
+        || function_origin.source_unit() != stored_unit.id()
+        || parameter_origin.source_unit() != stored_unit.id()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    check_standard_terminal_present_table(
+        table_function,
+        catalogue,
+        origins,
+        STD_DATA_ROWS_TYPE_ID,
+    )?;
+    Ok(StandardSourceFamilies {
+        schemas: vec![CheckedStandardSchema {
+            id: STD_DATA_SCHEMA_ID,
+            name: schema_name,
+            origin: schema_origin,
+        }],
+        value_types: vec![CheckedStandardValueType {
+            id: STD_DATA_ROWS_TYPE_ID,
+            name: rows_name,
+            kind: rows_definition.kind(),
+            mutability: rows_definition.mutability(),
+            persistence: rows_definition.persistence(),
+            representation_contract: rows_definition.representation_contract().to_owned(),
+            origin: rows_origin,
+        }],
+        type_bindings: vec![CheckedStandardTypeBinding {
+            id: rows_binding.id(),
+            kind: rows_binding.kind(),
+            name: rows_binding.name().clone(),
+            target: rows_binding.target(),
+            origin: binding_origin,
+        }],
+    })
+}
+
 
 fn check_standard_library_source_v6_parts(
     source_units: &[StoredSourceUnit],
@@ -1299,6 +1628,153 @@ fn expected_standard_json_executable(
     .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
     StandardExecutable::new(STD_JSON_ENCODE_FUNCTION_ID, revision, Vec::new())
         .map_err(|source| StandardLibraryCheckError::Revision { source })
+}
+
+fn expected_standard_terminal_executable(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored_unit: &StoredSourceUnit,
+) -> Result<StandardExecutable, StandardLibraryCheckError> {
+    let checked =
+        check_standard_terminal_present_table(declaration, catalogue, origins, STD_DATA_ROWS_TYPE_ID)?;
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+        })
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunctionOrigin)?
+        .source();
+    let declaration_bytes = &stored_unit.content().as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let function = catalogue
+        .function_by_id(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunction)?;
+    let payload = server_terminal_table::TerminalTablePlan::new(
+        STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        STD_DATA_ROWS_TYPE_ID,
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?
+    .encode()
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let artifact_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        server_terminal_table::FORMAT_IDENTITY,
+        server_terminal_table::FORMAT_VERSION,
+        payload,
+        artifact_hash,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        SourceOrigin::new(stored_unit.id(), start, end)
+            .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+    };
+    let parameter = declaration
+        .parameters
+        .first()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let result = match &declaration.return_type {
+        FunctionReturnType::Single(result) => result,
+        FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    };
+    let body = declaration
+        .body
+        .as_no_input_parameter_select()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let references = vec![
+        DefinitionReference::new(
+            checked.function_id(),
+            checked.revision_id(),
+            0,
+            DefinitionReferenceTarget::ValueType(STD_DATA_ROWS_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin(parameter.type_specification.span())?,
+        ),
+        DefinitionReference::new(
+            checked.function_id(),
+            checked.revision_id(),
+            1,
+            DefinitionReferenceTarget::ValueType(STD_TERMINAL_DOCUMENT_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            source_origin(result.span())?,
+        ),
+        DefinitionReference::new(
+            checked.function_id(),
+            checked.revision_id(),
+            2,
+            DefinitionReferenceTarget::Parameter {
+                owner: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+                parameter: STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            source_origin(&body.parameter.span)?,
+        ),
+    ];
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+        &artifact,
+        &[],
+        &references,
+    )
+    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let revision = FunctionRevisionRecord::new(
+        checked.function_id(),
+        checked.revision_id(),
+        u64::from(server_terminal_table::FORMAT_VERSION),
+        function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+        artifact,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    StandardExecutable::new(checked.function_id(), revision, references)
+        .map_err(|source| StandardLibraryCheckError::Revision { source })
+}
+
+fn reconcile_standard_terminal_executable(
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored: &StandardExecutable,
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    schema_origin: SourceOrigin,
+) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !parsed_unit.parsed().schemas().is_empty()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().primitive_value_types().is_empty()
+        || !parsed_unit.parsed().opaque_value_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+        || parsed_unit.parsed().server_functions().len() != 1
+        || !parsed_unit.parsed().type_exports().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let [declaration] = parsed_unit.parsed().server_functions() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let expected = expected_standard_terminal_executable(declaration, catalogue, origins, stored_unit)?;
+    if stored != &expected {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    checked_standard_executable_from_record(&expected, catalogue, origins, schema_origin)
 }
 
 fn reconcile_standard_json_executable(
