@@ -16,14 +16,14 @@ use orna_artifact::client_plan::{
 use orna_client::ClientInspectError;
 #[cfg(feature = "test-hooks")]
 use orna_client::{
-    ClientActionError, ClientActionOutcome, ClientActionState, ClientExternalContractRequest,
-    ClientInspectRequest, ClientResourceStatus, ClientStateStore, complete_client_action,
-    decode_action_payload,
+    ClientActionError, ClientActionOutcome, ClientActionState, ClientInspectRequest,
+    ClientResourceStatus, ClientStateStore, complete_client_action, decode_action_payload,
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
     trigger_client_action,
 };
 use orna_client::{
-    ClientExecutionError, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
+    ClientExecutionError, ClientExternalContractRequest, ClientResourceCompletion,
+    ClientResourceExecutor, ClientResourceRequest,
     capability::{
         LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
         LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
@@ -16143,6 +16143,241 @@ fn checks_and_evaluates_accepted_client_local_assignment_fixture_offline() -> Te
         result.value() == &RuntimeValue::Integer(42),
         "offline CLIENT local assignment evaluation returned the wrong value",
     )
+}
+#[test]
+fn checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/ui_constructor_showcase_dogfood.orna",
+        include_str!("fixtures/ui_constructor_showcase_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted UI constructor showcase did not check: {:?}",
+            report.diagnostics()
+        )));
+    }
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    let active = offline_active_from_prepared(&prepared)?;
+
+    let function_ids = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(FunctionDefinition::id)
+        .collect::<Vec<_>>();
+    let security = SecuritySnapshot::new(
+        active.pair(),
+        function_ids.iter().copied().collect(),
+        vec![Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        function_ids
+            .iter()
+            .copied()
+            .map(|function| ExecuteGrant::new(RAW_CLIENT_USER, function))
+            .collect(),
+    )?;
+    let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+    let roots: [(&str, &str, &[&str]); 3] = [
+        (
+            "main",
+            "UI Constructor Showcase",
+            &[
+                "std.ui.tabs",
+                "std.ui.column",
+                "std.ui.panel",
+                "std.ui.text",
+            ],
+        ),
+        (
+            "input_window",
+            "Input Constructor Showcase",
+            &["std.ui.text_input"],
+        ),
+        (
+            "control_window",
+            "Button Constructor Showcase",
+            &["std.ui.row", "std.ui.button"],
+        ),
+    ];
+    for (root_name, expected_title, expected_contracts) in roots {
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["ui_constructor_showcase", root_name])
+            .ok_or_else(|| {
+                failure(format!(
+                    "prepared UI constructor showcase is missing {root_name}"
+                ))
+            })?;
+        let authorisation = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(function.id(), active.pair()),
+        ) {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(reason) => {
+                return Err(failure(format!(
+                    "UI constructor showcase root {root_name} authorisation was denied: {reason:?}"
+                )));
+            }
+        };
+
+        let expected_title = expected_title.to_owned();
+        let expected_contracts = expected_contracts
+            .iter()
+            .map(|contract| (*contract).to_owned())
+            .collect::<Vec<_>>();
+        let window_calls = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let provider_window_calls = window_calls.clone();
+        let mut executor = orna_client::DeterministicClientResourceExecutor::new(
+            |_request: &ClientResourceRequest| -> Result<RuntimeValue, String> {
+                Err("resource executor was not used".to_owned())
+            },
+        )
+        .with_external_contract(
+            move |request: &ClientExternalContractRequest| -> Result<RuntimeValue, String> {
+                provider_window_calls.set(provider_window_calls.get() + 1);
+                assert_eq!(
+                    request.identity(),
+                    orna_standard::STD_UI_WINDOW_RUNTIME_CONTRACT
+                );
+                assert_eq!(request.arguments().len(), 2);
+                assert_eq!(
+                    request.arguments()[0].0,
+                    orna_standard::STD_UI_WINDOW_TITLE_PARAMETER_ID
+                );
+                assert_eq!(
+                    request.arguments()[0].1,
+                    RuntimeValue::Text(expected_title.clone())
+                );
+                assert_eq!(
+                    request.arguments()[1].0,
+                    orna_standard::STD_UI_WINDOW_CONTENT_PARAMETER_ID
+                );
+                let RuntimeValue::Opaque(content) = &request.arguments()[1].1 else {
+                    panic!("std.ui.window content argument was not an opaque UI value");
+                };
+                assert_eq!(content.opaque_type(), orna_standard::STD_UI_TYPE_ID);
+
+                let payload = content.canonical_payload();
+                let magic = orna_standard::UI_MAGIC.as_bytes();
+                let prefix_length = magic.len() + 4;
+                assert!(
+                    payload.len() >= prefix_length && payload.starts_with(magic),
+                    "std.ui.window content did not use canonical ORNA-UI/1 framing"
+                );
+                let body_length = u32::from_be_bytes(
+                    payload[magic.len()..prefix_length]
+                        .try_into()
+                        .expect("the UI body length is exactly four bytes"),
+                ) as usize;
+                assert_eq!(
+                    payload.len(),
+                    prefix_length + body_length,
+                    "std.ui.window content framing had trailing or truncated bytes"
+                );
+                let body_bytes = &payload[prefix_length..];
+                let body: serde_json::Value =
+                    serde_json::from_slice(body_bytes).expect("UI content body must be JSON");
+                assert_eq!(
+                    serde_json::to_vec(&body).expect("UI content body must re-encode"),
+                    body_bytes,
+                    "std.ui.window content body was not canonical JSON"
+                );
+                let mut node = &body;
+                for (index, expected_contract) in expected_contracts.iter().enumerate() {
+                    assert_eq!(
+                        node.get("kind").and_then(serde_json::Value::as_str),
+                        Some("node")
+                    );
+                    let contract = node
+                        .get("contract")
+                        .and_then(serde_json::Value::as_object)
+                        .expect("UI content node must carry a contract");
+                    assert_eq!(
+                        contract.get("id").and_then(serde_json::Value::as_str),
+                        Some(expected_contract.as_str())
+                    );
+                    assert_eq!(
+                        contract.get("name").and_then(serde_json::Value::as_str),
+                        Some(expected_contract.as_str())
+                    );
+                    assert_eq!(
+                        contract.get("version").and_then(serde_json::Value::as_str),
+                        Some("1.0")
+                    );
+                    if index + 1 < expected_contracts.len() {
+                        let children = node
+                            .get("slots")
+                            .and_then(serde_json::Value::as_object)
+                            .and_then(|slots| slots.get("content"))
+                            .and_then(serde_json::Value::as_array)
+                            .expect("container UI node must carry a content slot");
+                        assert_eq!(children.len(), 1);
+                        node = children
+                            .first()
+                            .expect("container UI content slot must have one child");
+                    }
+                }
+                Ok(RuntimeValue::Opaque(content.clone()))
+            },
+        );
+        let result = evaluate_client_function_with_arguments_and_executor(
+            &active,
+            &authorisation,
+            &[],
+            &mut executor,
+        )?;
+        require(
+            window_calls.get() == 1,
+            "UI constructor showcase root did not reach std.ui.window exactly once",
+        )?;
+        let RuntimeValue::Opaque(ui) = result.value() else {
+            return Err(failure(format!(
+                "UI constructor showcase root {root_name} did not return an opaque UI value"
+            )));
+        };
+        require(
+            ui.opaque_type() == orna_standard::STD_UI_TYPE_ID,
+            "UI constructor showcase root returned the wrong opaque type",
+        )?;
+        let payload = ui.canonical_payload();
+        let magic = orna_standard::UI_MAGIC.as_bytes();
+        let prefix_length = magic.len() + 4;
+        require(
+            payload.len() >= prefix_length && payload.starts_with(magic),
+            "UI constructor showcase root returned a non-canonical UI frame",
+        )?;
+        let body_length = u32::from_be_bytes(
+            payload[magic.len()..prefix_length]
+                .try_into()
+                .map_err(|_| failure("UI result body length was truncated"))?,
+        ) as usize;
+        require(
+            payload.len() == prefix_length + body_length,
+            "UI constructor showcase root returned trailing or truncated UI bytes",
+        )?;
+        let body = &payload[prefix_length..];
+        let decoded: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|error| failure(format!("UI result body was not JSON: {error}")))?;
+        require(
+            serde_json::to_vec(&decoded)
+                .map_err(|error| failure(format!("UI result body did not re-encode: {error}")))?
+                == body,
+            "UI constructor showcase root returned non-canonical JSON",
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
