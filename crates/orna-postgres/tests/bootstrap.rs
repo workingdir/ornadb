@@ -290,6 +290,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "source bundle unit memberships",
         include_str!("../migrations/0043_source_bundle_units.sql"),
     ),
+    (
+        44,
+        "standard table and CSV executable formats",
+        include_str!("../migrations/0044_standard_presenter_executable_formats.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
