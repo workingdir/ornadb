@@ -3684,6 +3684,7 @@ fn retained_standard_library_v7_snapshot_from_source(
     }
     Ok(snapshot)
 }
+#[allow(clippy::too_many_arguments)]
 fn retained_standard_library_v8_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
@@ -3870,6 +3871,7 @@ fn retained_standard_library_v8_snapshot_from_source(
     Ok(snapshot)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn retained_standard_library_v9_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
