@@ -57,8 +57,9 @@ use orna_core::{
 };
 use orna_protocol::{ValueCodecError, decode_active_value, decode_rows, encode_active_value};
 use orna_standard::{
-    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STD_IO_BYTE_STREAM_TYPE_ID,
-    STD_TERMINAL_DOCUMENT_TYPE_ID, TERMINAL_DOCUMENT_MAGIC,
+    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STANDARD_LIBRARY_V8_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
+    TERMINAL_DOCUMENT_MAGIC,
 };
 use tokio::sync::mpsc;
 use tokio_postgres::{
@@ -2657,15 +2658,16 @@ impl fmt::Display for SealedPresentationError {
 
 /// The immutable sealed presenter registry (ADR 0057 step 7, ADR 0067).
 ///
-/// The standard snapshot does not yet provide the sealed route's presenter
-/// records, so the route constructs the known presenter records here: alias
+/// The V1-V7 compatibility snapshots do not provide retained table-presenter
+/// records, so the route constructs the compatibility selector records here: alias
 /// `json` -> `std.json.encode` (input `std.json.Value`, output
 /// `std.io.ByteStream` with media type `application/json`), alias `table` ->
 /// `std.terminal.present_table` (input `std.data.Rows`, output
 /// `std.terminal.Document`, no media type), and alias `csv` ->
 /// `std.csv.encode` (input `std.data.Rows`, output `std.io.ByteStream` with
-/// media type `text/csv`). The local Rows identity above is deliberately kept
-/// until the V8 standard constants can be adopted at this seam. All entries
+/// media type `text/csv`). The table selector is only compatibility metadata:
+/// V8/V9 execution resolves the function and retained executable from the
+/// active verified standard in `retained_terminal_table_target`. All entries
 /// stream nothing and carry the default priority.
 fn sealed_presenter_registry() -> &'static PresenterRegistry {
     static REGISTRY: OnceLock<PresenterRegistry> = OnceLock::new();
@@ -2860,14 +2862,21 @@ pub(crate) fn present_sealed_standard_output(
         .map_err(sealed_presenter_engine_error),
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID => {
             let rows = sealed_result_rows(value, active, registry)?;
-            execute_standard_terminal_table(
-                &sealed_terminal_table_definition(),
-                &sealed_terminal_table_revision(),
-                &rows,
-                active,
-                registry,
-            )
-            .map_err(sealed_presenter_engine_error)
+            if let Some((function, revision)) =
+                retained_terminal_table_target(active).map_err(sealed_presenter_engine_error)?
+            {
+                execute_standard_terminal_table(function, revision, &rows, active, registry)
+                    .map_err(sealed_presenter_engine_error)
+            } else {
+                execute_standard_terminal_table(
+                    &sealed_terminal_table_definition(),
+                    &sealed_terminal_table_revision(),
+                    &rows,
+                    active,
+                    registry,
+                )
+                .map_err(sealed_presenter_engine_error)
+            }
         }
         STD_CSV_ENCODE_FUNCTION_ID => {
             let rows = sealed_result_rows(value, active, registry)?;
@@ -2888,6 +2897,54 @@ pub(crate) fn present_sealed_standard_output(
             },
         )),
     }
+}
+
+/// Resolves the retained V8/V9 table presenter from the active verified standard.
+///
+/// V1-V7 intentionally return `None` so their historical synthetic presenter
+/// remains explicit. Once Rows is part of the standard snapshot, a missing or
+/// crossed executable is a closed target failure: the compatibility presenter
+/// must not make the table sink available.
+fn retained_terminal_table_target(
+    active: &ActiveDatabaseRevision,
+) -> Result<Option<(&FunctionDefinition, &FunctionRevisionRecord)>, PostgresKernelError> {
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Ok(None);
+    };
+    if standard.revision() != STANDARD_LIBRARY_V8_REVISION_ID
+        && standard.revision() != STANDARD_LIBRARY_V9_REVISION_ID
+    {
+        return Ok(None);
+    }
+
+    let function = standard
+        .catalogue()
+        .function_by_id(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            })
+        })?;
+    let executable = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            })
+        })?;
+    if executable.revision().function() != function.id()
+        || executable.revision().id() != function.current_revision()
+    {
+        return Err(server_error(ServerSelectError::FunctionNotActive {
+            pair: active.pair(),
+            function: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        }));
+    }
+    Ok(Some((function, executable.revision())))
 }
 
 /// Converts the canonical sealed result to the bounded `ResultRows` model the
@@ -6002,6 +6059,15 @@ mod tests {
                 .expect("the retained V8 standard source is valid"),
         )
         .expect("the retained V8 standard source verifies")
+    }
+
+    /// Verifies the append-only `orna.std/9` standard snapshot.
+    fn presenter_v9_standard() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v9_snapshot(
+            orna_standard::retained_standard_library_v9_snapshot()
+                .expect("the retained V9 standard source is valid"),
+        )
+        .expect("the retained V9 standard source verifies")
     }
 
     fn presenter_client_offer() -> InvocationClientOffer {
@@ -10242,6 +10308,64 @@ mod tests {
                 ..
             }) if actual == parameter
         ));
+    }
+
+    #[test]
+    fn retained_table_target_uses_v8_v9_executables_and_legacy_compatibility() {
+        let v8 = presenter_v8_standard();
+        let active_v8 = presenter_active(&v8);
+        let (function, revision) = retained_terminal_table_target(&active_v8)
+            .expect("the V8 retained table target resolves")
+            .expect("V8 must not use the compatibility target");
+        let expected_function = v8
+            .catalogue()
+            .function_by_id(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            .expect("the V8 standard catalogue contains present_table");
+        let expected_revision = v8
+            .executables()
+            .iter()
+            .find(|executable| executable.function() == STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            .expect("the V8 standard retains the table executable")
+            .revision();
+        assert_eq!(function, expected_function);
+        assert_eq!(revision, expected_revision);
+        assert_eq!(revision.function(), function.id());
+        assert_eq!(revision.id(), function.current_revision());
+        assert_eq!(
+            revision.artifact().format(),
+            server_terminal_table::FORMAT_IDENTITY
+        );
+        assert_eq!(
+            revision.artifact().version(),
+            server_terminal_table::FORMAT_VERSION
+        );
+
+        let v9 = presenter_v9_standard();
+        let active_v9 = presenter_active(&v9);
+        let (function, revision) = retained_terminal_table_target(&active_v9)
+            .expect("the V9 retained table target resolves")
+            .expect("V9 must not use the compatibility target");
+        let expected_function = v9
+            .catalogue()
+            .function_by_id(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            .expect("the V9 standard catalogue contains present_table");
+        let expected_revision = v9
+            .executables()
+            .iter()
+            .find(|executable| executable.function() == STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            .expect("the V9 standard retains the table executable")
+            .revision();
+        assert_eq!(function, expected_function);
+        assert_eq!(revision, expected_revision);
+
+        let v7 = presenter_standard();
+        let active_v7 = presenter_active(&v7);
+        assert!(
+            retained_terminal_table_target(&active_v7)
+                .expect("the legacy target lookup is closed")
+                .is_none(),
+            "V1-V7 must retain the explicit compatibility presenter path"
+        );
     }
 
     #[test]
