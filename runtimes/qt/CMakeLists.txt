@@ -28,6 +28,11 @@ set_target_properties(orna-runtime-qt PROPERTIES
     VISIBILITY_INLINES_HIDDEN YES
 )
 
+install(
+    TARGETS orna-runtime-qt
+    LIBRARY DESTINATION lib/orna
+)
+
 add_executable(orna-runtime-qt-demo
     examples/runtime_demo.cpp
 )

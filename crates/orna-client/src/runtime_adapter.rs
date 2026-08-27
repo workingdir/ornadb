@@ -77,6 +77,8 @@ pub struct QtRuntimeExecutor {
     session: RuntimeSession,
     fallback: Option<Box<dyn ClientResourceExecutor>>,
     next_alias: u64,
+    active_surfaces: HashSet<AbiSurfaceHandle>,
+    pending_events: Vec<RuntimeEventSnapshot>,
     action_bindings: HashMap<AbiActionHandle, RuntimeActionBinding>,
 }
 
@@ -87,6 +89,8 @@ impl QtRuntimeExecutor {
             session,
             fallback: None,
             next_alias: 1,
+            active_surfaces: HashSet::new(),
+            pending_events: Vec::new(),
             action_bindings: HashMap::new(),
         }
     }
@@ -100,6 +104,8 @@ impl QtRuntimeExecutor {
             session,
             fallback: Some(Box::new(fallback)),
             next_alias: 1,
+            active_surfaces: HashSet::new(),
+            pending_events: Vec::new(),
             action_bindings: HashMap::new(),
         }
     }
@@ -111,14 +117,20 @@ impl QtRuntimeExecutor {
 
     /// Drains owned callback snapshots without invoking server actions.
     pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEventSnapshot> {
-        let events = self.session.drain_events();
-        for event in &events {
+        let mut events = std::mem::take(&mut self.pending_events);
+        events.extend(self.session.drain_events());
+        self.note_surface_events(&events);
+        events
+    }
+
+    fn note_surface_events(&mut self, events: &[RuntimeEventSnapshot]) {
+        for event in events {
             if let RuntimeEventSnapshot::SurfaceClosed(closed) = event {
+                self.active_surfaces.remove(&closed.surface);
                 self.action_bindings
                     .retain(|_, binding| binding.surface != closed.surface);
             }
         }
-        events
     }
 
     /// Resolves a runtime callback handle to its declared CLIENT action.
@@ -132,6 +144,7 @@ impl QtRuntimeExecutor {
         surface: AbiSurfaceHandle,
     ) -> Result<(), RuntimeSessionError> {
         let result = self.session.destroy_surface(surface);
+        self.active_surfaces.remove(&surface);
         self.action_bindings
             .retain(|_, binding| binding.surface != surface);
         result
@@ -152,6 +165,21 @@ impl QtRuntimeExecutor {
         visible: bool,
     ) -> Result<(), RuntimeSessionError> {
         self.session.set_surface_visible(surface, visible)
+    }
+
+    /// Pumps the caller-owned runtime until every adapter-created surface closes.
+    ///
+    /// Events remain available through [`Self::drain_runtime_events`] after the
+    /// loop returns. This method is intended for a foreground GUI entry point;
+    /// interactive hosts can call [`Self::poll_runtime`] directly instead.
+    pub fn wait_for_surfaces(&mut self) -> Result<(), RuntimeSessionError> {
+        while !self.active_surfaces.is_empty() {
+            self.session.poll_event_loop(50)?;
+            let events = self.session.drain_events();
+            self.note_surface_events(&events);
+            self.pending_events.extend(events);
+        }
+        Ok(())
     }
 
     /// Requests terminal runtime shutdown through the supplied session.
@@ -264,6 +292,7 @@ impl QtRuntimeExecutor {
             let _ = self.session.destroy_surface(surface);
             return Err(ADAPTER_FAILURE.to_owned());
         }
+        self.active_surfaces.insert(surface);
         for (action, action_id) in action_bindings {
             self.action_bindings
                 .insert(action, RuntimeActionBinding { surface, action_id });
