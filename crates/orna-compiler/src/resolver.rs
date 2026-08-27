@@ -1155,7 +1155,7 @@ fn check_standard_library_source_v8_parts(
     if executables
         .iter()
         .map(StandardExecutable::function)
-        .ne(expected_functions.into_iter())
+        .ne(expected_functions)
     {
         return Err(StandardLibraryCheckError::ExecutableMismatch);
     }
@@ -1340,7 +1340,7 @@ fn check_standard_library_source_v9_parts(
         || executables
             .iter()
             .map(StandardExecutable::function)
-            .ne(expected_functions.into_iter())
+            .ne(expected_functions)
     {
         return Err(StandardLibraryCheckError::ExecutableMismatch);
     }
