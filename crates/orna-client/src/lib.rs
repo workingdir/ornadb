@@ -5,6 +5,7 @@ use orna_protocol::{
     decode_active_value, decode_constructed_value, encode_active_client_frame, encode_active_value,
 };
 use sha2::{Digest, Sha256};
+use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     error::Error,
@@ -98,7 +99,21 @@ impl ClientExecutionFuel {
 
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
-    STD_UI_TYPE_ID, registered_opaque_codecs,
+    STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
+    STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
+    STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
+    STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
+    STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID,
+    STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
+    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
+    STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
+    STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID,
+    STD_UI_TEXT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_ID, STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID, STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
+    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
+    STD_UI_TYPE_ID, STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, UI_MAGIC,
+    registered_opaque_codecs,
 };
 
 pub mod capability;
@@ -8239,6 +8254,7 @@ fn trigger_client_action_with_lineage(
                     }
                 }
             }
+
             let outcome =
                 complete_client_action(active, action_state, completion, &mut nested_executor)?;
             if outcome == ClientActionOutcome::Completed {
@@ -8249,6 +8265,443 @@ fn trigger_client_action_with_lineage(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardUiConstructorKind {
+    Text,
+    Button,
+    Panel,
+    Row,
+    Column,
+    TextInput,
+    Tabs,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardUiConstructorParameterKind {
+    Text,
+    Boolean,
+    Content,
+}
+
+#[derive(Clone, Copy)]
+struct StandardUiConstructorSpec {
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    identity: &'static str,
+    node_contract: &'static str,
+    kind: StandardUiConstructorKind,
+    parameters: &'static [(ParameterId, StandardUiConstructorParameterKind)],
+}
+
+const STD_UI_TEXT_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(STD_UI_TEXT_PARAMETER_ID, StandardUiConstructorParameterKind::Text)];
+const STD_UI_BUTTON_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] = &[
+    (
+        STD_UI_BUTTON_LABEL_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Text,
+    ),
+    (
+        STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Boolean,
+    ),
+];
+const STD_UI_PANEL_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(STD_UI_PANEL_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
+const STD_UI_ROW_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(STD_UI_ROW_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
+const STD_UI_COLUMN_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(STD_UI_COLUMN_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
+const STD_UI_TEXT_INPUT_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[
+    (
+        STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Text,
+    ),
+    (
+        STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Text,
+    ),
+    (
+        STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Boolean,
+    ),
+];
+const STD_UI_TABS_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(STD_UI_TABS_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
+
+const STD_UI_TEXT_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_TEXT_FUNCTION_ID,
+    revision: STD_UI_TEXT_FUNCTION_REVISION_ID,
+    identity: STD_UI_TEXT_RUNTIME_CONTRACT,
+    node_contract: "std.ui.text",
+    kind: StandardUiConstructorKind::Text,
+    parameters: STD_UI_TEXT_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_BUTTON_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_BUTTON_FUNCTION_ID,
+    revision: STD_UI_BUTTON_FUNCTION_REVISION_ID,
+    identity: STD_UI_BUTTON_RUNTIME_CONTRACT,
+    node_contract: "std.ui.button",
+    kind: StandardUiConstructorKind::Button,
+    parameters: STD_UI_BUTTON_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_PANEL_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_PANEL_FUNCTION_ID,
+    revision: STD_UI_PANEL_FUNCTION_REVISION_ID,
+    identity: STD_UI_PANEL_RUNTIME_CONTRACT,
+    node_contract: "std.ui.panel",
+    kind: StandardUiConstructorKind::Panel,
+    parameters: STD_UI_PANEL_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_ROW_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_ROW_FUNCTION_ID,
+    revision: STD_UI_ROW_FUNCTION_REVISION_ID,
+    identity: STD_UI_ROW_RUNTIME_CONTRACT,
+    node_contract: "std.ui.row",
+    kind: StandardUiConstructorKind::Row,
+    parameters: STD_UI_ROW_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_COLUMN_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_COLUMN_FUNCTION_ID,
+    revision: STD_UI_COLUMN_FUNCTION_REVISION_ID,
+    identity: STD_UI_COLUMN_RUNTIME_CONTRACT,
+    node_contract: "std.ui.column",
+    kind: StandardUiConstructorKind::Column,
+    parameters: STD_UI_COLUMN_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_TEXT_INPUT_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_TEXT_INPUT_FUNCTION_ID,
+    revision: STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
+    identity: STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
+    node_contract: "std.ui.text_input",
+    kind: StandardUiConstructorKind::TextInput,
+    parameters: STD_UI_TEXT_INPUT_CONSTRUCTOR_PARAMETERS,
+};
+const STD_UI_TABS_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
+    function: STD_UI_TABS_FUNCTION_ID,
+    revision: STD_UI_TABS_FUNCTION_REVISION_ID,
+    identity: STD_UI_TABS_RUNTIME_CONTRACT,
+    node_contract: "std.ui.tabs",
+    kind: StandardUiConstructorKind::Tabs,
+    parameters: STD_UI_TABS_CONSTRUCTOR_PARAMETERS,
+};
+
+fn standard_ui_constructor_spec(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    identity: &str,
+) -> Option<&'static StandardUiConstructorSpec> {
+    // Application definitions retain precedence. A user-owned function that
+    // happens to spell a standard contract must remain a generic external
+    // contract, even if it reuses one of the reserved identities.
+    if context.pair() != active.pair()
+        || active.catalogue().function_by_id(context.function()).is_some()
+    {
+        return None;
+    }
+    let spec = match context.function() {
+        STD_UI_TEXT_FUNCTION_ID => &STD_UI_TEXT_CONSTRUCTOR,
+        STD_UI_BUTTON_FUNCTION_ID => &STD_UI_BUTTON_CONSTRUCTOR,
+        STD_UI_PANEL_FUNCTION_ID => &STD_UI_PANEL_CONSTRUCTOR,
+        STD_UI_ROW_FUNCTION_ID => &STD_UI_ROW_CONSTRUCTOR,
+        STD_UI_COLUMN_FUNCTION_ID => &STD_UI_COLUMN_CONSTRUCTOR,
+        STD_UI_TEXT_INPUT_FUNCTION_ID => &STD_UI_TEXT_INPUT_CONSTRUCTOR,
+        STD_UI_TABS_FUNCTION_ID => &STD_UI_TABS_CONSTRUCTOR,
+        _ => return None,
+    };
+    (spec.function == context.function()
+        && spec.revision == context.function_revision
+        && spec.identity == identity)
+        .then_some(spec)
+}
+
+fn invalid_ui_constructor_value(
+    context: ClientExecutionContext,
+    source: OpaqueValueError,
+) -> Box<ClientExecutionError> {
+    Box::new(ClientExecutionError::InvalidOpaqueValue {
+        context,
+        source: ClientOpaqueValueError::Value(source),
+    })
+}
+
+fn invalid_ui_constructor_registry(
+    context: ClientExecutionContext,
+    source: RegisteredOpaqueCodecsError,
+) -> Box<ClientExecutionError> {
+    Box::new(ClientExecutionError::InvalidOpaqueValue {
+        context,
+        source: ClientOpaqueValueError::Registry(Box::new(source)),
+    })
+}
+
+fn ui_constructor_parameter_matches(
+    value: &RuntimeValue,
+    kind: StandardUiConstructorParameterKind,
+) -> bool {
+    match kind {
+        StandardUiConstructorParameterKind::Text => matches!(value, RuntimeValue::Text(_)),
+        StandardUiConstructorParameterKind::Boolean => matches!(value, RuntimeValue::Boolean(_)),
+        StandardUiConstructorParameterKind::Content => {
+            matches!(value, RuntimeValue::Opaque(opaque) if opaque.opaque_type() == STD_UI_TYPE_ID)
+        }
+    }
+}
+
+fn ui_constructor_text_property(value: &str) -> Value {
+    let mut property = Map::new();
+    property.insert("type".to_owned(), Value::String("std.types.text".to_owned()));
+    property.insert("value".to_owned(), Value::String(value.to_owned()));
+    Value::Object(property)
+}
+
+fn ui_constructor_boolean_property(value: bool) -> Value {
+    let mut property = Map::new();
+    property.insert(
+        "type".to_owned(),
+        Value::String("std.types.boolean".to_owned()),
+    );
+    property.insert("value".to_owned(), Value::Bool(value));
+    Value::Object(property)
+}
+
+fn decode_ui_constructor_body(payload: &[u8]) -> Result<Value, OpaqueValueError> {
+    let magic = UI_MAGIC.as_bytes();
+    let prefix_length = magic
+        .len()
+        .checked_add(4)
+        .ok_or(OpaqueValueError::InvalidFrameLength {
+            opaque_type: STD_UI_TYPE_ID,
+        })?;
+    if payload.len() < prefix_length || !payload.starts_with(magic) {
+        return Err(if payload.starts_with(magic) {
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            }
+        } else {
+            OpaqueValueError::InvalidMagic {
+                opaque_type: STD_UI_TYPE_ID,
+            }
+        });
+    }
+    let body_length = usize::try_from(u32::from_be_bytes(
+        payload[magic.len()..prefix_length]
+            .try_into()
+            .expect("the UI length prefix is exactly four bytes"),
+    ))
+    .map_err(|_| OpaqueValueError::InvalidFrameLength {
+        opaque_type: STD_UI_TYPE_ID,
+    })?;
+    let body_end = prefix_length
+        .checked_add(body_length)
+        .ok_or(OpaqueValueError::InvalidFrameLength {
+            opaque_type: STD_UI_TYPE_ID,
+        })?;
+    if body_length > orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
+        || body_end != payload.len()
+    {
+        return Err(OpaqueValueError::InvalidFrameLength {
+            opaque_type: STD_UI_TYPE_ID,
+        });
+    }
+    let body = &payload[prefix_length..body_end];
+    let value = serde_json::from_slice(body).map_err(|_| OpaqueValueError::InvalidJsonBody {
+        opaque_type: STD_UI_TYPE_ID,
+    })?;
+    let canonical = serde_json::to_vec(&value).map_err(|_| OpaqueValueError::InvalidJsonBody {
+        opaque_type: STD_UI_TYPE_ID,
+    })?;
+    if canonical != body {
+        return Err(OpaqueValueError::InvalidJsonBody {
+            opaque_type: STD_UI_TYPE_ID,
+        });
+    }
+    Ok(value)
+}
+
+fn evaluate_standard_ui_constructor(
+    active: &ActiveDatabaseRevision,
+    context: ClientExecutionContext,
+    spec: &StandardUiConstructorSpec,
+    arguments: &[(ParameterId, RuntimeValue)],
+) -> Result<RuntimeValue, Box<ClientExecutionError>> {
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Err(invalid_ui_constructor_value(
+            context,
+            OpaqueValueError::ActiveStandardRequired,
+        ));
+    };
+    if standard.revision() != STANDARD_LIBRARY_V9_REVISION_ID
+        || standard.catalogue().revision() != STANDARD_CATALOGUE_V9_REVISION_ID
+    {
+        return Err(invalid_ui_constructor_registry(
+            context,
+            RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot,
+        ));
+    }
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|source| invalid_ui_constructor_registry(context, source))?;
+
+    if arguments.len() != spec.parameters.len()
+        || arguments
+            .iter()
+            .zip(spec.parameters)
+            .any(|((parameter, _), (expected, _))| parameter != expected)
+    {
+        return Err(Box::new(expression_error(
+            context,
+            ClientExpressionError::InvalidCall,
+        )));
+    }
+    if arguments
+        .iter()
+        .zip(spec.parameters)
+        .any(|((_, value), (_, kind))| !ui_constructor_parameter_matches(value, *kind))
+    {
+        return Err(Box::new(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        )));
+    }
+    if arguments.iter().zip(spec.parameters).any(|((_, value), (_, kind))| {
+        matches!(
+            (kind, value),
+            (
+                StandardUiConstructorParameterKind::Text,
+                RuntimeValue::Text(text)
+            ) if text.len() > runtime_loader::CLIENT_MAX_RUNTIME_TEXT_BYTES
+        )
+    }) {
+        return Err(invalid_ui_constructor_value(
+            context,
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            },
+        ));
+    }
+
+    let mut properties = Map::new();
+    let mut slots = Map::new();
+    match spec.kind {
+        StandardUiConstructorKind::Text => {
+            let RuntimeValue::Text(text) = &arguments[0].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            properties.insert("text".to_owned(), ui_constructor_text_property(text));
+        }
+        StandardUiConstructorKind::Button => {
+            let RuntimeValue::Text(label) = &arguments[0].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            let RuntimeValue::Boolean(enabled) = arguments[1].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            properties.insert("label".to_owned(), ui_constructor_text_property(label));
+            properties.insert(
+                "enabled".to_owned(),
+                ui_constructor_boolean_property(enabled),
+            );
+        }
+        StandardUiConstructorKind::TextInput => {
+            let RuntimeValue::Text(text) = &arguments[0].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            let RuntimeValue::Text(placeholder) = &arguments[1].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            let RuntimeValue::Boolean(enabled) = arguments[2].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            properties.insert("text".to_owned(), ui_constructor_text_property(text));
+            properties.insert(
+                "placeholder".to_owned(),
+                ui_constructor_text_property(placeholder),
+            );
+            properties.insert(
+                "enabled".to_owned(),
+                ui_constructor_boolean_property(enabled),
+            );
+        }
+        StandardUiConstructorKind::Panel
+        | StandardUiConstructorKind::Row
+        | StandardUiConstructorKind::Column
+        | StandardUiConstructorKind::Tabs => {
+            let RuntimeValue::Opaque(content) = &arguments[0].1 else {
+                unreachable!("constructor arguments were validated above");
+            };
+            let content = OpaqueValue::new(
+                active,
+                &registry,
+                STD_UI_TYPE_ID,
+                content.canonical_payload(),
+            )
+            .map_err(|source| invalid_ui_constructor_value(context, source))?;
+            let content = decode_ui_constructor_body(content.canonical_payload())
+                .map_err(|source| invalid_ui_constructor_value(context, source))?;
+            slots.insert("content".to_owned(), Value::Array(vec![content]));
+        }
+    }
+
+    let mut node = Map::new();
+    node.insert("kind".to_owned(), Value::String("node".to_owned()));
+    let mut contract = Map::new();
+    contract.insert(
+        "id".to_owned(),
+        Value::String(spec.node_contract.to_owned()),
+    );
+    contract.insert(
+        "name".to_owned(),
+        Value::String(spec.node_contract.to_owned()),
+    );
+    contract.insert("version".to_owned(), Value::String("1.0".to_owned()));
+    node.insert("contract".to_owned(), Value::Object(contract));
+    node.insert("properties".to_owned(), Value::Object(properties));
+    node.insert("slots".to_owned(), Value::Object(slots));
+    node.insert("actions".to_owned(), Value::Object(Map::new()));
+    let body = serde_json::to_vec(&Value::Object(node)).map_err(|_| {
+        invalid_ui_constructor_value(
+            context,
+            OpaqueValueError::InvalidJsonBody {
+                opaque_type: STD_UI_TYPE_ID,
+            },
+        )
+    })?;
+    let body_length = u32::try_from(body.len()).map_err(|_| {
+        invalid_ui_constructor_value(
+            context,
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            },
+        )
+    })?;
+    if body.len() > orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
+        return Err(invalid_ui_constructor_value(
+            context,
+            OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            },
+        ));
+    }
+    let payload_capacity = UI_MAGIC
+        .len()
+        .checked_add(4)
+        .and_then(|length| length.checked_add(body.len()))
+        .ok_or_else(|| {
+            invalid_ui_constructor_value(
+                context,
+                OpaqueValueError::InvalidFrameLength {
+                    opaque_type: STD_UI_TYPE_ID,
+                },
+            )
+        })?;
+    let mut payload = Vec::with_capacity(payload_capacity);
+    payload.extend_from_slice(UI_MAGIC.as_bytes());
+    payload.extend_from_slice(&body_length.to_be_bytes());
+    payload.extend_from_slice(&body);
+    let value = OpaqueValue::new(active, &registry, STD_UI_TYPE_ID, payload)
+        .map_err(|source| invalid_ui_constructor_value(context, source))?;
+    Ok(RuntimeValue::Opaque(value))
+}
 pub(crate) fn stable_inspect_provider_error(error: &str) -> String {
     stable_inspect_error_code(error).to_owned()
 }
@@ -9723,6 +10176,9 @@ fn evaluate_expression_with_fuel(
             Ok(value)
         }
         ClientExpressionNode::ExternalContract { identity } => {
+            if let Some(spec) = standard_ui_constructor_spec(active, context, identity) {
+                return evaluate_standard_ui_constructor(active, context, spec, arguments);
+            }
             if identity == INSPECT_RENDER_CONTRACT {
                 validate_inspect_render_contract(active, context, identity, arguments)?;
                 let value =
@@ -11602,6 +12058,517 @@ mod tests {
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
             request.cancelled()
         }
+    }
+
+    fn v9_constructor_value(
+        active: &ActiveDatabaseRevision,
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        identity: &str,
+        arguments: Vec<(ParameterId, RuntimeValue)>,
+    ) -> RuntimeValue {
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function,
+            function_revision: revision,
+            parent_invocation_id: InvocationId::from_bytes([0x92; 16]),
+            observer_lineage: None,
+        };
+        let spec = super::standard_ui_constructor_spec(active, context, identity)
+            .expect("the V9 standard constructor is intrinsically recognised");
+        super::evaluate_standard_ui_constructor(active, context, spec, &arguments)
+            .expect("the V9 standard constructor accepts its checked arguments")
+    }
+
+    fn v9_constructor_body(
+        active: &ActiveDatabaseRevision,
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        identity: &str,
+        arguments: Vec<(ParameterId, RuntimeValue)>,
+    ) -> serde_json::Value {
+        let RuntimeValue::Opaque(value) =
+            v9_constructor_value(active, function, revision, identity, arguments)
+        else {
+            panic!("the constructor returns std.ui.UI");
+        };
+        super::decode_ui_constructor_body(value.canonical_payload())
+            .expect("the generated frame is canonical")
+    }
+
+    #[test]
+    fn standard_ui_text_constructor_builds_canonical_value_without_executor() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_TEXT_FUNCTION_ID,
+            function_revision: super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x91; 16]),
+            observer_lineage: None,
+        };
+        let spec = super::standard_ui_constructor_spec(
+            &active,
+            context,
+            super::STD_UI_TEXT_RUNTIME_CONTRACT,
+        )
+        .expect("the V9 standard text constructor is intrinsically recognised");
+        let value = super::evaluate_standard_ui_constructor(
+            &active,
+            context,
+            spec,
+            &[(
+                super::STD_UI_TEXT_PARAMETER_ID,
+                RuntimeValue::Text("Ready".to_owned()),
+            )],
+        )
+        .expect("pure UI construction does not require an executor");
+        let RuntimeValue::Opaque(value) = value else {
+            panic!("the constructor returns std.ui.UI");
+        };
+        let body = super::decode_ui_constructor_body(value.canonical_payload())
+            .expect("the generated frame is canonical");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "kind": "node",
+                "contract": {
+                    "id": "std.ui.text",
+                    "name": "std.ui.text",
+                    "version": "1.0"
+                },
+                "properties": {
+                    "text": {"type": "std.types.text", "value": "Ready"}
+                },
+                "slots": {},
+                "actions": {}
+            })
+        );
+    }
+    #[test]
+    fn standard_ui_constructors_build_all_closed_mappings_and_singleton_nesting() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let text = v9_constructor_value(
+            &active,
+            super::STD_UI_TEXT_FUNCTION_ID,
+            super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            super::STD_UI_TEXT_RUNTIME_CONTRACT,
+            vec![(
+                super::STD_UI_TEXT_PARAMETER_ID,
+                RuntimeValue::Text("Ready".to_owned()),
+            )],
+        );
+        let text_body = v9_constructor_body(
+            &active,
+            super::STD_UI_TEXT_FUNCTION_ID,
+            super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            super::STD_UI_TEXT_RUNTIME_CONTRACT,
+            vec![(
+                super::STD_UI_TEXT_PARAMETER_ID,
+                RuntimeValue::Text("Ready".to_owned()),
+            )],
+        );
+        assert_eq!(
+            text_body,
+            serde_json::json!({
+                "kind": "node",
+                "contract": {"id": "std.ui.text", "name": "std.ui.text", "version": "1.0"},
+                "properties": {"text": {"type": "std.types.text", "value": "Ready"}},
+                "slots": {},
+                "actions": {}
+            })
+        );
+
+        assert_eq!(
+            v9_constructor_body(
+                &active,
+                super::STD_UI_BUTTON_FUNCTION_ID,
+                super::STD_UI_BUTTON_FUNCTION_REVISION_ID,
+                super::STD_UI_BUTTON_RUNTIME_CONTRACT,
+                vec![
+                    (
+                        super::STD_UI_BUTTON_LABEL_PARAMETER_ID,
+                        RuntimeValue::Text("Run".to_owned()),
+                    ),
+                    (
+                        super::STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+                        RuntimeValue::Boolean(true),
+                    ),
+                ],
+            ),
+            serde_json::json!({
+                "kind": "node",
+                "contract": {"id": "std.ui.button", "name": "std.ui.button", "version": "1.0"},
+                "properties": {
+                    "label": {"type": "std.types.text", "value": "Run"},
+                    "enabled": {"type": "std.types.boolean", "value": true}
+                },
+                "slots": {},
+                "actions": {}
+            })
+        );
+        assert_eq!(
+            v9_constructor_body(
+                &active,
+                super::STD_UI_TEXT_INPUT_FUNCTION_ID,
+                super::STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
+                super::STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
+                vec![
+                    (
+                        super::STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+                        RuntimeValue::Text("".to_owned()),
+                    ),
+                    (
+                        super::STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+                        RuntimeValue::Text("Search".to_owned()),
+                    ),
+                    (
+                        super::STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
+                        RuntimeValue::Boolean(false),
+                    ),
+                ],
+            ),
+            serde_json::json!({
+                "kind": "node",
+                "contract": {
+                    "id": "std.ui.text_input",
+                    "name": "std.ui.text_input",
+                    "version": "1.0"
+                },
+                "properties": {
+                    "text": {"type": "std.types.text", "value": ""},
+                    "placeholder": {"type": "std.types.text", "value": "Search"},
+                    "enabled": {"type": "std.types.boolean", "value": false}
+                },
+                "slots": {},
+                "actions": {}
+            })
+        );
+
+        for (
+            function,
+            revision,
+            identity,
+            parameter,
+            contract,
+        ) in [
+            (
+                super::STD_UI_PANEL_FUNCTION_ID,
+                super::STD_UI_PANEL_FUNCTION_REVISION_ID,
+                super::STD_UI_PANEL_RUNTIME_CONTRACT,
+                super::STD_UI_PANEL_CONTENT_PARAMETER_ID,
+                "std.ui.panel",
+            ),
+            (
+                super::STD_UI_ROW_FUNCTION_ID,
+                super::STD_UI_ROW_FUNCTION_REVISION_ID,
+                super::STD_UI_ROW_RUNTIME_CONTRACT,
+                super::STD_UI_ROW_CONTENT_PARAMETER_ID,
+                "std.ui.row",
+            ),
+            (
+                super::STD_UI_COLUMN_FUNCTION_ID,
+                super::STD_UI_COLUMN_FUNCTION_REVISION_ID,
+                super::STD_UI_COLUMN_RUNTIME_CONTRACT,
+                super::STD_UI_COLUMN_CONTENT_PARAMETER_ID,
+                "std.ui.column",
+            ),
+            (
+                super::STD_UI_TABS_FUNCTION_ID,
+                super::STD_UI_TABS_FUNCTION_REVISION_ID,
+                super::STD_UI_TABS_RUNTIME_CONTRACT,
+                super::STD_UI_TABS_CONTENT_PARAMETER_ID,
+                "std.ui.tabs",
+            ),
+        ] {
+            assert_eq!(
+                v9_constructor_body(
+                    &active,
+                    function,
+                    revision,
+                    identity,
+                    vec![(parameter, text.clone())],
+                ),
+                serde_json::json!({
+                    "kind": "node",
+                    "contract": {"id": contract, "name": contract, "version": "1.0"},
+                    "properties": {},
+                    "slots": {"content": [text_body.clone()]},
+                    "actions": {}
+                })
+            );
+        }
+    }
+
+
+    #[test]
+    fn standard_ui_constructor_dispatches_without_an_executor() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_TEXT_FUNCTION_ID,
+            function_revision: super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x94; 16]),
+            observer_lineage: None,
+        };
+        let expression = ClientExpressionNode::ExternalContract {
+            identity: super::STD_UI_TEXT_RUNTIME_CONTRACT.to_owned(),
+        };
+        let arguments = [(
+            super::STD_UI_TEXT_PARAMETER_ID,
+            RuntimeValue::Text("headless".to_owned()),
+        )];
+        let grants = capability::LocalCapabilityGrantSet::default();
+        let mut state = ClientStateStore::default();
+        let lineage = super::ObserverLineage::compatibility(context);
+        let mut executor: Option<&mut dyn ClientResourceExecutor> = None;
+        let mut locals = super::ClientLocalEnvironment::new();
+        let mut fuel = super::ClientExecutionFuel::new();
+        let value = super::evaluate_expression_with_fuel(
+            &active,
+            &expression,
+            context,
+            &lineage,
+            &arguments,
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x95; 16]),
+            &mut executor,
+            &mut locals,
+            &mut fuel,
+        )
+        .expect("constructor expressions do not require a runtime executor");
+        assert!(matches!(value, RuntimeValue::Opaque(value) if value.opaque_type() == super::STD_UI_TYPE_ID));
+    }
+
+    #[test]
+    fn standard_ui_constructor_rejects_wrong_order_and_runtime_kinds() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_BUTTON_FUNCTION_ID,
+            function_revision: super::STD_UI_BUTTON_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x96; 16]),
+            observer_lineage: None,
+        };
+        let spec = super::standard_ui_constructor_spec(
+            &active,
+            context,
+            super::STD_UI_BUTTON_RUNTIME_CONTRACT,
+        )
+        .expect("the V9 button constructor is intrinsically recognised");
+        let wrong_order = super::evaluate_standard_ui_constructor(
+            &active,
+            context,
+            spec,
+            &[
+                (
+                    super::STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+                    RuntimeValue::Boolean(true),
+                ),
+                (
+                    super::STD_UI_BUTTON_LABEL_PARAMETER_ID,
+                    RuntimeValue::Text("Run".to_owned()),
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            *wrong_order,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::InvalidCall,
+                ..
+            }
+        ));
+
+        let wrong_kind = super::evaluate_standard_ui_constructor(
+            &active,
+            context,
+            spec,
+            &[
+                (
+                    super::STD_UI_BUTTON_LABEL_PARAMETER_ID,
+                    RuntimeValue::Boolean(true),
+                ),
+                (
+                    super::STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+                    RuntimeValue::Boolean(true),
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            *wrong_kind,
+            super::ClientExecutionError::ExpressionEvaluation {
+                source: super::ClientExpressionError::TypeMismatch,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn standard_ui_constructor_rejects_malformed_content_frame() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let registry = orna_standard::registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .expect("the V9 fixture pins a standard snapshot"),
+        )
+        .expect("the V9 fixture has the registered UI codec");
+        let mut malformed = super::UI_MAGIC.as_bytes().to_vec();
+        malformed.extend_from_slice(&1_u32.to_be_bytes());
+        malformed.push(b' ');
+        assert!(matches!(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                super::STD_UI_TYPE_ID,
+                malformed.clone()
+            ),
+            Err(super::OpaqueValueError::InvalidJsonBody { .. })
+        ));
+        assert!(matches!(
+            super::decode_ui_constructor_body(&malformed),
+            Err(super::OpaqueValueError::InvalidJsonBody { .. })
+        ));
+    }
+
+    #[test]
+    fn standard_ui_constructor_rejects_text_over_runtime_bound() {
+        let standard = standard_v9();
+        let active = empty_version_two_active(&standard);
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_TEXT_FUNCTION_ID,
+            function_revision: super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x97; 16]),
+            observer_lineage: None,
+        };
+        let spec = super::standard_ui_constructor_spec(
+            &active,
+            context,
+            super::STD_UI_TEXT_RUNTIME_CONTRACT,
+        )
+        .expect("the V9 text constructor is intrinsically recognised");
+        let error = super::evaluate_standard_ui_constructor(
+            &active,
+            context,
+            spec,
+            &[(
+                super::STD_UI_TEXT_PARAMETER_ID,
+                RuntimeValue::Text(
+                    "x".repeat(super::CLIENT_MAX_RUNTIME_TEXT_BYTES + 1),
+                ),
+            )],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            *error,
+            super::ClientExecutionError::InvalidOpaqueValue {
+                source: super::ClientOpaqueValueError::Value(
+                    super::OpaqueValueError::InvalidFrameLength { .. }
+                ),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn standard_ui_constructor_requires_the_v9_standard_snapshot() {
+        let standard = standard_v7();
+        let active = empty_version_two_active(&standard);
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_TEXT_FUNCTION_ID,
+            function_revision: super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x98; 16]),
+            observer_lineage: None,
+        };
+        let spec = super::standard_ui_constructor_spec(
+            &active,
+            context,
+            super::STD_UI_TEXT_RUNTIME_CONTRACT,
+        )
+        .expect("identity matching is checked before standard admission");
+        let error = super::evaluate_standard_ui_constructor(
+            &active,
+            context,
+            spec,
+            &[(
+                super::STD_UI_TEXT_PARAMETER_ID,
+                RuntimeValue::Text("not-v9".to_owned()),
+            )],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            *error,
+            super::ClientExecutionError::InvalidOpaqueValue {
+                source: super::ClientOpaqueValueError::Registry(_),
+                ..
+            }
+        ));
+    }
+
+
+    #[test]
+    fn same_string_application_function_remains_generic_external_contract() {
+        let active = active_with_application_ui_text_identity();
+        let context = super::ClientExecutionContext {
+            pair: active.pair(),
+            function: super::STD_UI_TEXT_FUNCTION_ID,
+            function_revision: super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            parent_invocation_id: InvocationId::from_bytes([0x99; 16]),
+            observer_lineage: None,
+        };
+        assert!(
+            super::standard_ui_constructor_spec(
+                &active,
+                context,
+                super::STD_UI_TEXT_RUNTIME_CONTRACT
+            )
+            .is_none(),
+            "application definitions retain precedence over standard intrinsics"
+        );
+        let expression = ClientExpressionNode::ExternalContract {
+            identity: super::STD_UI_TEXT_RUNTIME_CONTRACT.to_owned(),
+        };
+        let mut executor =
+            super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
+                Ok::<_, String>(RuntimeValue::Boolean(false))
+            })
+            .with_external_contract(|request| {
+                assert_eq!(request.identity(), super::STD_UI_TEXT_RUNTIME_CONTRACT);
+                Ok(RuntimeValue::Boolean(true))
+            });
+        let mut executor_slot: Option<&mut dyn ClientResourceExecutor> = Some(&mut executor);
+        let grants = capability::LocalCapabilityGrantSet::default();
+        let mut state = ClientStateStore::default();
+        let lineage = super::ObserverLineage::compatibility(context);
+        let mut locals = super::ClientLocalEnvironment::new();
+        let mut fuel = super::ClientExecutionFuel::new();
+        let value = super::evaluate_expression_with_fuel(
+            &active,
+            &expression,
+            context,
+            &lineage,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            0,
+            PrincipalId::from_bytes([0x9a; 16]),
+            &mut executor_slot,
+            &mut locals,
+            &mut fuel,
+        )
+        .expect("same-string application contracts still use the generic executor");
+        assert_eq!(value, RuntimeValue::Boolean(true));
     }
 
     #[test]
@@ -22845,6 +23812,92 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             ),
             active.catalogue_hash_context().clone(),
         )
+    }
+    fn standard_v9() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v9_snapshot(
+            orna_standard::retained_standard_library_v9_snapshot().unwrap(),
+        )
+        .unwrap()
+    }
+    fn active_with_application_ui_text_identity() -> ActiveDatabaseRevision {
+        let (base, _, pair, _) = version_one_active(true);
+        let prior_function = base.catalogue().functions()[0].clone();
+        let function = FunctionDefinition::new(
+            super::STD_UI_TEXT_FUNCTION_ID,
+            QualifiedSemanticName::new(["app", "same_text"]).unwrap(),
+            prior_function.domain(),
+            prior_function.parameters().to_vec(),
+            prior_function.return_type().clone(),
+            super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            prior_function.security(),
+            prior_function.transaction(),
+            prior_function.volatility(),
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            base.catalogue().object_types().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+        let prior_revision = &base.function_revisions()[0];
+        let artifact = prior_revision.artifact().clone();
+        let semantic_hash = function_semantic_digest(
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            base.expressions(),
+            &[],
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            super::STD_UI_TEXT_FUNCTION_ID,
+            super::STD_UI_TEXT_FUNCTION_REVISION_ID,
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap();
+        let origins = base
+            .origins()
+            .iter()
+            .map(|origin| match origin.identity() {
+                DefinitionIdentity::Function(_) => DefinitionOrigin::new(
+                    DefinitionIdentity::Function(super::STD_UI_TEXT_FUNCTION_ID),
+                    origin.source(),
+                ),
+                _ => origin.clone(),
+            })
+            .collect::<Vec<_>>();
+        let context = base.catalogue_hash_context().clone();
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            base.expressions(),
+            &origins,
+            &[],
+        )
+        .unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                base.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    base.expressions().to_vec(),
+                    vec![revision],
+                    origins,
+                    Vec::new(),
+                ),
+            ),
+            context,
+        )
+        .unwrap()
     }
 
     fn replacement_source(active: &ActiveDatabaseRevision, content: &str) -> StoredSourceRevision {
