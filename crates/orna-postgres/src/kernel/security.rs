@@ -164,6 +164,7 @@ use orna_core::{
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
         InvocationArgument, InvocationClientOffer, InvocationEventBody, InvocationFailure,
+        InvocationOutputRequirement,
         InvocationFailurePhase, InvocationParameterSelector, InvocationRetryability,
         InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
         ProtectedInvocationDecision, decide_protected_invocation,
@@ -3096,6 +3097,7 @@ impl PostgresKernel {
                                 &events,
                                 decoded.client_offer(),
                                 loaded_user_state_cells.as_deref(),
+                                decoded.output_requirement(),
                             )
                             .await?;
                             SealedInvocationResult::Completed { invocation, events }
@@ -5610,6 +5612,7 @@ async fn execute_sealed_server_after_audit(
         &events,
         decoded.client_offer(),
         None,
+        decoded.output_requirement(),
     )
     .await
     .is_err()
@@ -6977,6 +6980,7 @@ async fn capture_completed_resource_inspect_snapshot(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -7003,6 +7007,7 @@ async fn capture_sealed_invocation_snapshot(
     events: &InvocationEventBatch,
     client_offer: &InvocationClientOffer,
     loaded_user_state_cells: Option<&[UserStateCell]>,
+    output_requirement: Option<&InvocationOutputRequirement>,
 ) -> Result<InspectEpochId, PostgresKernelError> {
     crate::inspect::capture_inspect_snapshot_in_transaction(
         transaction,
@@ -7020,6 +7025,7 @@ async fn capture_sealed_invocation_snapshot(
         Some(client_offer),
         None,
         loaded_user_state_cells,
+        output_requirement,
     )
     .await
 }
