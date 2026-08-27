@@ -2,25 +2,28 @@
 
 ## Status and scope
 
-This plan covers the remaining roadmap surfaces after the accepted `orna.std/6`
-action snapshot, headless runtime conformance boundary, CLIENT resource and
-transport slices, and the headless ordinary CLIENT Inspector v1 and render
-contracts.
+This plan covers the remaining roadmap surfaces after the accepted `orna.std/9`
+V9 standard snapshot, bounded `std.data.Rows`/retained table route, V9
+structural UI constructors, Qt v1 runtime/provider boundary, bounded populated
+Inspector projections, CLIENT resource/transport slices, and headless ordinary
+CLIENT Inspector/render contracts.
 
-It tracks implementation hardening, external release evidence, and the
-contract work that must precede production graphical runtimes, populated
-Inspector projections, Studio, and reflective gateways. The canonical
-specification still marks those broader surfaces as `CURRENT PROPOSAL` or
-`OPEN`; this plan must not turn them into implementation contracts. Production
-runtime ABI and native-host proof, populated Inspector resource/UI projections,
-reflective gateways, general Rows/object-value semantics, and remote transport
-remain proposal- or contract-gated.
+It tracks implementation hardening, external release evidence, and contract
+work for the remaining production-runtime extensions, richer Inspector/model
+semantics, Studio workflows, and reflective gateways. The accepted Qt v1,
+bounded populated Inspector, V8 Rows/table, and V9 constructor slices are
+implementation baselines. The canonical specification still marks broader
+extensions as `CURRENT PROPOSAL` or `OPEN`; this plan must not turn them into
+implementation contracts. Installed package/clean-host proof, general
+Rows/object-value semantics, models, reflective gateways, and remote transport
+remain proposal-, contract-, or environment-gated.
 
 - The external `../TODO.md` checklist records the completed CLIENT, TTY,
-  Inspector-core, source, security, presenter, state, resource, action,
-  identity, transport, JSON, runtime-conformance, LSP, and verified
-  editor/tooling slices, plus the editor-runtime (Neovim/Vim), host-proof, and
-  gateway blockers. It is intentionally outside `work/` and outside Git.
+  Inspector-core/populated-row, source, security, presenter, state, resource,
+  action, identity, transport, JSON, Qt/runtime-conformance, LSP, V8/V9, and
+  verified editor/tooling/demo slices, plus editor-runtime (Neovim/Vim),
+  installed-package/host-proof, and gateway blockers. It is intentionally
+  outside `work/` and outside Git.
 
 - Work ADRs 0068-0079 define the closed CLIENT expression, state, JSON,
   resource, transport, action, and test-only runtime contracts. The accepted
@@ -34,12 +37,13 @@ remain proposal- or contract-gated.
   `std.inspect.render@1` contract; 0081 supersedes only 0080's product-specific
   helper naming.
 - `docs/decisions/0062-std-ui-value-type.md` accepts the transient `std.ui.UI`
-  value and TTY runtime offer only. A production graphical runtime remains
-  outside the accepted scope.
-- `docs/decisions/0064-sys-inspect-core.md`, work ADR 0080, and work ADR 0081
-  define the current Inspector boundary. The sealed resource and UI carrier
-  identities are accepted, but populated resource/UI rows and richer
-  projection semantics remain deferred.
+  value; ADRs 0082-0085 now accept the bounded Linux x86_64 Qt v1
+  runtime/provider, loader, and package boundary. Additional toolkits,
+  platforms, models, and installed/clean-host proof remain separate gates.
+- `docs/decisions/0064-sys-inspect-core.md`, work ADRs 0080-0081, and ADR 0086
+  define the current Inspector boundary. Bounded resource/UI/presentation/
+  runtime rows are accepted and implemented; richer lifecycle, model, full UI
+  tree, and projection semantics remain deferred.
 - `docs/decisions/0075-std-json-value.md` and
   `docs/decisions/0079-client-action-values.md` define the append-only V5 JSON
   and V6 action snapshots. Work ADR 0077 owns the accepted CLIENT-to-SERVER
@@ -51,18 +55,17 @@ The canonical research plan remains useful as historical evidence, but this
 plan is the current implementation projection. Accepted ADRs and
 `../spec/docs/02-status-decisions.md` remain authoritative.
 
-## Evidence status (2026-08-25)
+## Evidence status (2026-08-27)
 
 - **Current validated focused evidence:** the `work/` checkout records the
-  protocol, sealed-server, LSP UTF-16, no-`STATE` dogfood, resource-span,
-  buffered-preflight, V3/V5 upgrade, same-revision replacement, selected-package
-  check and formatter commands listed below; prior workspace-unit reports remain
-  historical and were not rerun, while the current static editor-tooling gate is
-  recorded below. Installed evaluator/Inspector-recursion, Compose/Docker,
-  clean-host and editor-runtime checks, manual Zed/VSIX runtime parity, live
-  REF, same-major PostgreSQL, and accepted contract gates remain pending or
-  unclaimed; the static editor result is current and the exact runtime limits are
-  recorded below.
+  focused package, protocol, compiler, LSP, no-`STATE` dogfood, resource-span,
+  buffered-preflight, standard-upgrade, runtime-handle, editor-tooling,
+  demo-runner, Compose, Qt runtime/ABI/package, and Studio smoke evidence
+  below. Workspace reports remain historical and were not rerun. Installed Qt
+  package selection, clean-host, Neovim/Vim host sessions, manual Zed/VSIX
+  runtime parity, live REF, same-major PostgreSQL, and remaining contract
+  gates remain pending or unclaimed; resource-terminal provenance is closed by
+  ADR 0078/commit `767991d`.
 
 ## Current validated focused evidence (`work/` checkout)
 
@@ -82,7 +85,7 @@ plan is the current implementation projection. Accepted ADRs and
 - Historical report (not current validation): a prior `cargo test --workspace --all-targets` run recorded 2545 tests, 0 failed, and 235 ignored across 40 suites; it was not rerun for this checkout, so no current workspace result is claimed.
 - Historical report (not current validation): a later proof report recorded 2578 workspace tests and 14 LSP protocol tests plus 31 accepted tree-sitter cases; these checks were not rerun for this checkout and are not claimed as current passes.
 - Historical report (not current validation): a prior `just editor-tooling-check` run recorded 14 LSP protocol tests and the 31-case tree-sitter corpus; it was not rerun for this checkout.
-- `just editor-tooling-check` passed on 2026-08-25: static editor metadata, generated grammar, tree-sitter accepted corpus, Zed ORDER BY captures, TextMate/Vim/Emacs parity, VS Code checks, Helix configuration, and LSP protocol checks passed. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke rather than host-session proof. Manual Zed/VSIX runtime parity is not claimed.
+- `python3 scripts/check-editor-tooling.py` passed on 2026-08-27 over 49 `.orna` files: static editor metadata, generated grammar, tree-sitter accepted corpus, Zed ORDER BY captures, TextMate/Vim/Emacs parity, VS Code checks, Helix configuration, and LSP protocol checks passed. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke rather than host-session proof. Manual Zed/VSIX runtime parity is not claimed.
 - `cargo test -p orna-lsp --test lsp_e2e serves_final_field_name_through_accepted_rename_transition` — 1 final-field rename navigation test returned success; this focused proof is current. Zed ORDER BY highlight parity remains pending.
 - Historical report (not current validation): `cargo test -p orna-client --lib`
   recorded 278 client unit tests returned success. The current source record in
@@ -119,25 +122,70 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-protocol frame::tests::` — 84 protocol frame tests returned success after rejecting stale `InvokeEvents` during cancellation, preserving the accepted operational/audit failure exception, and rejecting late `CALL_ACCEPTED` after pre-accept cancellation. `cargo check -p orna-protocol` also passed with existing warnings.
 - `cargo test -p orna-client --lib client_user_state_` (8 passed), `cargo test -p orna-server --lib user_state` (12 passed), and `cargo check -p orna-client -p orna-server` (passed with existing warnings) — principal isolation checks passed.
 - `cargo test -p orna-server --test standard_database checks_accepted_client_state_fixture_plan_metadata_offline` and `cargo test -p orna-lsp --test lsp_e2e serves_canonical_accepted_dogfood_fixtures_without_diagnostics` — accepted CLIENT STATE fixture and LSP corpus checks passed.
-- `python3 -m py_compile scripts/check-editor-tooling.py` and `python3 scripts/check-editor-tooling.py` — static editor tooling and fail-closed Zed metadata validation passed. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke. Manual Zed/VSIX runtime parity and GUI/runtime launch remain unclaimed.
+- `python3 -m py_compile scripts/check-editor-tooling.py` and `python3 scripts/check-editor-tooling.py` — static editor tooling and fail-closed Zed metadata validation passed on 2026-08-27 over 49 `.orna` files. `nvim` is absent; `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so the Vim result is filetype-only smoke. Manual Zed/VSIX runtime parity and GUI/runtime launch remain unclaimed.
 - `cargo test -p orna-protocol resource_connection_rejects -- --nocapture` — 12 resource connection tests returned success; duplicate/skip sequence and terminal mismatch proofs preserve connection and credit state on rejection.
 
 The initial LSP expectation mismatch, CLIENT fixture compile mismatch, and
 workspace private-import compile failure were development corrections, not gate
-failures. Installed evaluator/Inspector-recursion, Compose/Docker, clean-host, Neovim/Vim host sessions, manual Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and contract results remain pending or unclaimed.
-- **Implementation present, proof pending:** remaining nested source work includes
-  cancellation identity/ownership, the companion raw-preflight ordering check,
-  SecurityAdmin privilege filtering, raw sealed-invocation terminal/cancellation
-  handling, broader ordinary CLIENT compiler fixtures, and Compose/clean-host proof.
-  Installed evaluator/Inspector-recursion, Neovim/Vim host sessions, manual
-  Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and accepted
-  contract gates remain pending or unclaimed.
-  The focused results listed above are current; workspace reports remain historical and were not rerun, while the static editor-tooling gate passed on 2026-08-25. Neovim/Vim host-session and manual Zed/VSIX runtime proof remain pending or unclaimed.
+failures. The current `just kernel-test` matrix covers the Compose/Docker
+installed evaluator and Inspector-recursion paths. Clean-host, Neovim/Vim host
+sessions, manual Zed/VSIX runtime parity, installed Qt package selection, live
+REF, same-major PostgreSQL, and remaining contract results remain pending or
+unclaimed.
+- **Historical implementation inventory (not current status):** the 2026-08-25
+  nested work list included cancellation, raw-preflight, SecurityAdmin,
+  sealed-invocation, compiler, and Compose/clean-host items. The current
+  accepted slices and focused/Compose evidence are recorded above; remaining
+  gates are installed Qt package selection, clean-host, Neovim/Vim host
+  sessions, manual Zed/VSIX runtime parity, live REF, same-major PostgreSQL,
+  resource-terminal provenance, and proposal-only contract work.
 - **Historical evidence (not current validation):** the post-audit reports and
   nested commit IDs below are retained for provenance only. The outer checkout
   has only `master` ref `ff31b4e`; nested work commit IDs are not verifiable
   as current evidence.
 
+
+
+## Current accepted implementation slices (2026-08-27)
+
+The following source and contract boundaries are present in the current
+`work/` checkout. Focused results are current evidence; historical reports
+remain labelled, and no environment-gated proof is inferred.
+
+- Focused package evidence passed: `cargo test -p orna-core --lib` (542),
+  `cargo test -p orna-compiler --lib` (471), `cargo test -p orna-client --lib`
+  (326), `cargo test -p orna-server --lib` (288 with existing warnings), and
+  `cargo test -p orna-postgres --lib server_execution` (90 with existing
+  warnings). `cargo test -p orna-client --all-targets` passed with 326 tests
+  across 3 suites, and `cargo clippy -p orna-client --all-targets -- -D warnings`
+  passed. `cargo fmt --all -- --check` also passed.
+- `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
+  `python3 scripts/run-demos.py` passed with the unsupported generic scalar
+  fixture excluded. `just kernel-test` passed; the final matrix is
+  `artifact://22027`. Runtime/ABI/package/Studio smokes passed as recorded
+  session evidence. Installed package selection and clean-host proof remain
+  pending.
+- Accepted implementation commits include `f55df8d` (retained V8 table
+  executable), `fd21c1c` (Inspector selected-sink carrier classification),
+  `c68bb0a` (variable-cell Rows validation), `b260ac5`/`50a0cfc` (generic
+  CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
+  `57c0bf9` (ADR 0090 local authority), and `767991d` (resource provenance
+  contract). Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`,
+  and `ca831a5`.
+- Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
+  `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
+  presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
+  (V9 constructors and generic named arguments), `ornadb-el1.3.4.3`
+  (ADR 0090 local authority), `ornadb-el1.4.4` (SERVER dogfood), and
+  `ornadb-br0.2` (developer tools). Broad security parent
+  `ornadb-el1.3.4` remains open. Resource terminal provenance
+  `ornadb-el1.2.1.43` is closed by ADR 0078/commit `767991d`; the accepted
+  commit-receipt authority and producer evidence boundary are reconciled.
+- Generic no-FROM parameter projection (`ornadb-el1.3.14`) and scalar demo
+  (`ornadb-br0.4.4`) remain blocked by ADR 0055: `NoInputParameterSelect` is
+  accepted only for fixed standard `std.invoke.echo` in `orna.std/2`; the
+  canonical spec/standard-source contract does not accept a generic parameter
+  projection or generic scalar executable.
 
 
 ## Language and standard-library dogfooding
@@ -279,7 +327,7 @@ predecessor transition remain separate blockers. No proposal-level
 implementation should start without the contract gate below.
 
 
-### Current implementation present, proof pending
+### Historical 2026-08-25 implementation inventory (not current status)
 
 The current nested source contains the following proof work. Focused results
 recorded above are current; workspace reports remain historical and were not
@@ -354,10 +402,10 @@ remains unclaimed:
   and
   `recovers_closed_security_audit_history_under_hostile_search_path_and_rejects_tamper`.
 
-- Resource cancellation provenance remains in progress under Bead `ornadb-el1.2.1.43`; direct/shared terminal precedence under Bead `ornadb-el1.2.1.44` is closed. The
-  current direct/shared adapter review found no concrete precedence mismatch, but the
-  authority decision and live-producer evidence remain pending. Do not change
-  the wire contract before the accepted provenance decision.
+- Resource cancellation provenance is closed under Bead `ornadb-el1.2.1.43` by
+  ADR 0078/commit `767991d`; direct/shared terminal precedence under Bead
+  `ornadb-el1.2.1.44` is also closed. The accepted adapter review found no
+  concrete precedence mismatch and no wire-contract change.
 - ADR 0080 closed the Inspector epoch-width authority blocker tracked by Bead
   `ornadb-el1.2.1.33`: ORNA-INSPECT/1 treats its u64 `epoch_id` as complete v1
   wire authority; full-width epoch identity is deferred to a future carrier
@@ -386,13 +434,15 @@ manual VSIX parity was not a tracked package gate or editor-runtime result.
 Production graphical runtimes, populated Inspector projections, and gateways
 remain pending behind their accepted contract boundaries.
 
-## 2026-08-22 next contract checkpoint
+## Historical 2026-08-22 next contract checkpoint (superseded by ADRs 0082-0090)
 
 The previously recorded 2026-08-19 checkpoint is superseded by work ADRs
 0076-0081. The current boundary is:
 
 - the test-only headless runtime conformance fixture is accepted and
-  implemented; the production runtime ABI remains a proposal;
+  implemented; ADRs 0082/0085 now accept the bounded Qt v1 production
+  runtime/provider/package boundary, while broader ABI/provider extensions
+  remain proposals;
 - CLIENT resource language, transport, and scheduling are accepted and
   implemented under [0077](docs/decisions/0077-client-server-resource-language.md)
   and [0078](docs/decisions/0078-client-server-resource-transport.md). Focused
@@ -406,10 +456,10 @@ The previously recorded 2026-08-19 checkpoint is superseded by work ADRs
   reserved until a later scheduler contract.
 - The ordinary CLIENT Inspector v1 and generic render contract are accepted
   and implemented under [0080](docs/decisions/0080-client-inspector.md) and
-  [0081](docs/decisions/0081-standard-inspector-render-contract.md). Focused
-  carrier/epoch/lineage checks are local; installed evaluator, recursion, and
-  cross-principal proofs are Compose-gated. Populated resource/UI projections
-  remain outside this contract.
+  [0081](docs/decisions/0081-standard-inspector-render-contract.md). ADR 0086
+  now accepts bounded populated resource/UI/presentation/runtime rows; focused
+  carrier/epoch/lineage checks and the current Compose matrix cover that
+  bounded scope. Richer model/full-tree projections remain outside it.
 - reflective gateways remain on the sealed `sys.invoke` boundary until
   Endpoint, Exposure, Service, authentication, conversion, redaction, and
   protocol lifecycle contracts are accepted.
@@ -427,17 +477,19 @@ start code:
 
 The candidate order is:
 
-1. production runtime ABI and one non-TTY runtime, after the canonical ABI
-   resolves ownership, re-entry, thread, event, and shutdown rules;
-2. populated Inspector resource/UI projections, after the contract resolves
-   epoch ownership, lifecycle capture, privilege, and redaction;
+1. broader production-runtime ABI/provider extensions beyond the accepted Qt
+   v1 boundary, after the canonical ABI resolves their ownership, re-entry,
+   thread, event, and shutdown rules;
+2. richer Inspector resource/UI model/full-tree projections, after a contract
+   resolves epoch ownership, lifecycle capture, privilege, and redaction;
 3. reflective gateway contracts and adapters, after the external
    authentication, exposure versioning, conversion, and protocol rules are
    executable.
 
-Until one candidate is accepted, close the Debian host evidence blocker or
-maintain the current baseline. Do not implement a graphical runtime, populate
-Inspector projections, or add a JSON-RPC/MCP gateway from proposal text alone.
+The Qt v1 runtime and bounded Inspector/Rows/V9 slices are accepted baselines.
+Maintain the Debian host evidence blocker and do not implement a second
+runtime, richer model/full-tree projections, or a JSON-RPC/MCP gateway from
+proposal text alone.
 
 ## Non-negotiable contract gate
 
@@ -462,11 +514,11 @@ not an implementation authority.
 ```text
 Accepted headless runtime conformance
  |
- +--> [contract gate] production runtime ABI and non-TTY runtime
+ +--> [contract gate] broader runtime/provider extensions
  |                                      |
  |                                      +--> Studio
  |
- +--> [contract gate] populated Inspector resource/UI projections
+ +--> [contract gate] richer Inspector/model projections
                                         |
                                         +--> Studio Inspector explorer
  |
@@ -477,9 +529,10 @@ Accepted headless runtime conformance
                                         +--> MCP gateway
 ```
 
-The accepted headless runtime and ordinary CLIENT Inspector are baselines.
-They do not imply acceptance of the production runtime, populated projections,
-Studio, or gateways.
+The accepted headless runtime, Qt v1 provider, bounded populated Inspector
+rows, V8 Rows/table route, and V9 constructors are baselines. They do not imply
+acceptance of a second runtime, richer model/full-tree projections, Studio, or
+gateways.
 
 ## Phase 0: Contract research and acceptance
 
@@ -489,8 +542,11 @@ proposal-level implementation belongs in this phase.
 
 ### 0.1 Production runtime ABI and non-TTY runtime contract
 
-The test-only headless runtime conformance fixture is accepted and implemented.
-Define the next production boundary from the proposal in
+The accepted Qt v1 provider/package boundary is implemented under ADRs 0082 and
+0085, with current ABI, loader, package, and Studio smoke evidence. This section
+now covers hardening and any later provider extension; it must not relabel Qt
+v1 as unimplemented. The test-only headless runtime conformance fixture remains
+the semantic oracle. Define only the next extension boundary from the proposal in
 `../spec/api/runtime-abi.md`, `../spec/api/ui-runtime.md`,
 `../spec/docs/15-runtime-architecture.md`, and
 `../spec/spec/orna_runtime_abi_v1.h`.
@@ -505,10 +561,10 @@ The contract must settle:
 - typed event payloads, model request completion, and cancellation;
 - shutdown ordering, outstanding request handling, and failure reporting.
 
-**Deliverables:** accepted production ABI ADR, updated ABI header, one selected
-non-TTY runtime contract, conformance fixtures, and a runtime proof. Do not
-select Qt, GTK, browser, or other native runtime code before the contract is
-accepted.
+**Deliverables:** focused Qt v1 hardening evidence and, only for a later
+provider, an accepted ABI extension ADR, conformance fixtures, and a runtime
+proof. Qt v1 is already selected and accepted; do not select a second toolkit
+or add model/gateway semantics before its contract is accepted.
 
 **Acceptance:** the selected runtime loads through the accepted ABI, rejects
 incompatible descriptors, obeys ownership and thread rules, applies atomic
@@ -522,10 +578,11 @@ and client modules.
 
 ### 0.2 Populated Inspector resource and UI projection contract
 
-The accepted Inspector v1 exposes immutable headless carriers, including the
-resource and UI carrier identities. Current installed fixtures keep the
-resource/UI rows empty. Define populated resource and UI projection semantics
-before adding data to the Inspector or Studio.
+ADR 0086 accepts bounded population of the existing resource/UI/presentation/
+runtime Inspector rows, and the current source and Compose matrix cover that
+slice. This section now covers richer lifecycle/model/full-tree projection
+semantics and Studio integration. Do not describe the bounded rows as empty or
+unimplemented.
 
 The contract must settle:
 
@@ -537,11 +594,11 @@ The contract must settle:
 - observer suppression and recursion rules for resource and UI inspection;
 - the relationship between server epochs and client runtime epochs.
 
-**Deliverables:** accepted populated-projection ADR, versioned carrier schema,
-compiler and artefact identities, focused carrier tests, and one installed
-Inspector proof with redacted resource/UI data. The proof is an environment-
-dependent Compose integration proof and must not be reported as locally run
-until that service is available.
+**Deliverables:** hardening for the accepted ADR 0086 carriers plus, only for
+richer semantics, an accepted projection ADR/schema, focused tests, and an
+installed Inspector proof with redacted resource/UI data. The installed proof
+is the current Compose integration evidence; no clean-host or package proof is
+inferred.
 
 **Acceptance:** an ordinary CLIENT Inspector can request one permitted
 resource or UI projection, receive an immutable checked carrier, reject stale
@@ -611,9 +668,9 @@ self-inspection proof path.
 **Acceptance:** the headless Inspector root continues to inspect another
 invocation without executing it, inspect itself without an observer loop,
 freeze and resume an epoch, and reject projections outside its privilege
-ladder. These checks do not accept a graphical runtime/UI sink, populated
-resource/UI projections beyond the accepted headless scope, or reflective
-gateways.
+ladder. The bounded populated resource/UI/presentation/runtime rows accepted
+by ADR 0086 remain in scope; richer model/full-tree projections and reflective
+gateways remain separately gated.
 
 **Likely files:** `crates/orna-core/src/inspect.rs`, `crates/orna-client`,
 `crates/orna-compiler`, `crates/orna-artifact`,
@@ -643,25 +700,28 @@ generic standard render contract; the current source contains the implementation
 self-inspection/evaluator proofs remain Compose-gated, and production-runtime
 proof remains outside these ADRs and separately proposal-gated.
 
-The accepted headless baseline is implementation-present. Further work in this
-phase is conditional on an accepted projection contract:
+The accepted headless baseline and bounded populated-row slice are
+implementation-present. Further work in this phase is conditional on the
+richer projection/model contract:
 
 1. preserve the checked Inspector signature and stable projection identities;
 2. preserve snapshot reads without executing the observed target;
 3. preserve recursion suppression, privilege checks, redaction, epoch
-   freeze/resume, and the Compose-gated installed self-inspection proof path;
-4. add populated resource/UI rows only after the Phase 0.2 contract is accepted.
+   freeze/resume, and the current Compose-gated installed self-inspection path;
+4. add only richer resource/UI model rows or full-tree semantics after the
+   corresponding contract is accepted.
 
-The current source contains the accepted headless scope. Installed proof paths
-remain Compose-gated, while production-runtime and native-host proof remain
-separately gated; neither is implied as locally run or as proof of a graphical
-runtime, populated resource/UI projections, or reflective gateways.
+The current source contains the accepted headless and bounded populated-row
+scope. The Compose installed proof is recorded as passed, while installed Qt
+package selection, clean-host and native-host proof remain separately gated;
+neither is proof of richer model/full-tree projections or reflective gateways.
 
-## Phase 3: Implement Studio and the first production UI runtime
+## Phase 3: Implement the full Studio workflow and UI-runtime extensions
 
-This phase is blocked until the production runtime and populated Inspector
-projection contracts are accepted. Studio remains an ordinary CLIENT
-application, not a new core language construct.
+This phase is blocked until the remaining Studio model/launch/exposure
+contracts and installed/clean-host evidence are accepted. Qt v1 and bounded
+Inspector projections are already implementation baselines. Studio remains an
+ordinary CLIENT application, not a new core language construct.
 
 After those contracts are accepted, implement vertical slices in this order:
 
@@ -735,27 +795,30 @@ For every implementation increment:
 These are contract and external-evidence blockers, not missing implementation
 effort:
 
-- `spec/api/runtime-abi.md:1-44` and `spec/api/ui-runtime.md:1-47` remain
-  `CURRENT PROPOSAL` and leave production ownership, lifetime, threading, and
-  value representation unresolved.
+- `spec/api/runtime-abi.md:1-44` and `spec/api/ui-runtime.md:1-47` retain
+  `CURRENT PROPOSAL` status for broader ABI/provider extensions; ADRs 0082 and
+  0085 close the bounded Qt v1 ownership, lifetime, threading, loader, and
+  package boundary.
 - `spec/docs/30-inspector.md` and `spec/docs/31-self-inspection.md` lock the
-  headless carrier and recursion boundaries, but `spec/api/inspect.md` remains
-  `CURRENT PROPOSAL` for populated resource/UI projection semantics.
+  headless carrier and recursion boundaries. ADR 0086 accepts bounded populated
+  resource/UI/presentation/runtime rows; `spec/api/inspect.md` remains
+  `CURRENT PROPOSAL` only for richer projection/model semantics.
 - `spec/api/protocol-gateways.md:1-3` and the wire protocol remain
   `CURRENT PROPOSAL`; Endpoint, Exposure, Service, authentication, conversion,
   redaction, and lifecycle details are not executable.
 - Work ADR 0019 requires a clean Debian 12 amd64, network-disabled host proof,
   which is not available on the current Fedora host.
-- Installed PostgreSQL checks remain Compose-gated `#[ignore]` evidence; no
-  local Compose result is claimed for source apply, Inspector, resource,
-  action, security-admin, or invocation proofs.
+- The current `just kernel-test` matrix passed the Compose PostgreSQL and
+  installed evaluator/Inspector-recursion paths. Standalone package selection,
+  clean-host proof, and any unrun environment-specific source-apply/resource/
+  action/security-admin/invocation result remain separately gated.
 - Offline/static editor tooling is accepted, but editor-runtime proof remains
   blocked: `nvim` is absent, `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax`
   or `-channel` and only provides filetype-only smoke. Manual Zed/VSIX runtime
   parity is not claimed.
-- Studio remains pending behind the production runtime ABI and populated
-  Inspector projection contracts; no Studio source/apply/revision path is
-  accepted yet.
+- Full Studio remains pending behind richer model/launch/projection contracts
+  and installed/clean-host proof; the accepted Qt v1 runtime, bounded Inspector
+  rows, V8 table route, and V9 constructors are not a full Studio path.
 - The checked-in `debian-clean-machine.sh` scenario currently runs its proof
   inside Docker (`crates/orna-system-tests/scenarios/debian-clean-machine.sh:22-27`).
   That is useful isolation evidence but does not satisfy the accepted host
@@ -766,7 +829,8 @@ effort:
 - The same-major PostgreSQL upgrade remains intentionally deferred until a
   real successor release declares a predecessor edge.
 
-Until these blockers change status, maintain the accepted implementation
-baseline, improve its evidence, and prepare the next contract. Do not
-implement a graphical runtime, populated Inspector projections, Studio, or
+Until these blockers change status, maintain the accepted Qt v1, bounded
+Inspector, V8 Rows/table, V9 constructor, and developer-tool baselines while
+improving evidence and preparing the next contract. Do not implement a second
+runtime, richer Inspector/model projections, full Studio workflows, or
 JSON-RPC/MCP gateways from proposal text alone.
