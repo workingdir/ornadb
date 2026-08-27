@@ -6,7 +6,32 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
+use orna_standard::{
+    retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checks_new_application_source_against_verified_v9_standard() {
+        let snapshot = retained_standard_library_v9_snapshot()
+            .and_then(verify_standard_library_v9_snapshot)
+            .expect("retained V9 standard must verify");
+        let standard =
+            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+        let source = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.ui()\nRETURNS std.ui.UI\nAS std.ui.text('Ready');",
+        )])
+        .expect("application source must form a bundle");
+
+        let report = check_new_application(&source, &standard)
+            .expect("application source must be checked against V9");
+        assert_eq!(report.diagnostics(), &[]);
+    }
+}
 
 use crate::source_diagnostics;
 
@@ -37,11 +62,12 @@ pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
         Ok(bundle) if bundle.len() == 1 => bundle,
         _ => return SourceCheckResult::Usage,
     };
-    let snapshot =
-        match retained_standard_library_snapshot().and_then(verify_standard_library_snapshot) {
-            Ok(snapshot) => snapshot,
-            Err(_) => return write_standard_failure(output),
-        };
+    let snapshot = match retained_standard_library_v9_snapshot()
+        .and_then(verify_standard_library_v9_snapshot)
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => return write_standard_failure(output),
+    };
     let standard = match check_standard_library_source(&snapshot) {
         Ok(standard) => standard,
         Err(_) => return write_standard_failure(output),
