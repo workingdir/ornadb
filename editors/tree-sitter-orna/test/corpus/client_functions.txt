@@ -525,8 +525,7 @@ END;
             (client_primary_expression
               (client_parameter_read
                 (identifier))))
-          (ERROR
-            (kw_rows))
+          (ERROR)
           (semicolon))
         (kw_end)))
     (semicolon)))
@@ -681,7 +680,7 @@ END;
     (semicolon)))
 
 ====================
-CLIENT procedural blocks reject IF statements
+CLIENT procedural blocks accept IF statements
 ====================
 
 CREATE CLIENT FUNCTION examples.bad_if() RETURNS TEXT
@@ -689,6 +688,7 @@ IS
 BEGIN
     IF TRUE THEN
         RETURN 'bad';
+    END IF;
 END;
 
 ---
@@ -715,17 +715,62 @@ END;
       (client_no_state_body
         (kw_is)
         (kw_begin)
-        (ERROR
+        (client_procedural_statement
+          (client_if_statement
           (kw_if)
-          (kw_then))
-        (client_return_statement
-          (kw_return)
-          expression: (client_expression
+          condition: (client_expression
             (client_primary_expression
-              (string_literal)))
-          (semicolon))
+              (boolean_literal
+                (kw_true))))
+          (kw_then)
+          (client_return_statement
+            (kw_return)
+            expression: (client_expression
+              (client_primary_expression
+                (string_literal)))
+            (semicolon))
+          (kw_end)
+          (kw_if)
+          (semicolon)))
         (kw_end)))
     (semicolon)))
+====================
+CLIENT comparison operators accept standalone angle brackets
+====================
+
+CREATE CLIENT FUNCTION examples.compare() RETURNS BOOLEAN RETURN 1 > 0;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_boolean))))
+    body: (client_return_body
+      (kw_return)
+      expression: (client_expression
+        (client_expression
+          (client_primary_expression
+            (client_integer_literal)))
+        (client_comparison_operator)
+        (client_primary_expression
+          (client_integer_literal))))
+    (semicolon)))
+
 
 ====================
 CLIENT procedural blocks reject SQL statements
