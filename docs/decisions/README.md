@@ -35,6 +35,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
 | 0082 | First production Qt non-TTY runtime boundary, provider, loader, and session bridge | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio database operations, and gateways remain separately gated. |
 | 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, populated Inspector rows, launch metadata, gateways, and broader UI transport remain deferred. |
+| 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
 
 ## Current work ADRs
 
@@ -189,3 +190,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Registered `std.ui.window` Client Function](0083-standard-ui-window.md)
 * **work ADR 0084:**
   [Programmable CLIENT Plans and Shared Runtime Hosts](0084-client-control-flow.md)
+* **work ADR 0086:**
+  [Populate Existing Inspector Projection Rows](0086-populated-inspector-projections.md)
