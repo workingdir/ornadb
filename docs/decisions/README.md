@@ -37,6 +37,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, populated Inspector rows, launch metadata, gateways, and broader UI transport remain deferred. |
 | 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
 | 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
+| 0088 | Structural UI constructors for source-authored CLIENT work | Seven V9 pure UI constructors are accepted after Rows V8; actions, models, Studio operations, metadata, and runtime expansion remain deferred. |
 
 ## Current work ADRs
 
@@ -195,3 +196,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Populate Existing Inspector Projection Rows](0086-populated-inspector-projections.md)
 * **work ADR 0087:**
   [Bounded `std.data.Rows` and Retained Table Presenter](0087-std-data-rows.md)
+* **work ADR 0088:**
+  [Structural UI Constructors for Source-Authored CLIENT Work](0088-structural-ui-constructors.md)
