@@ -39,7 +39,8 @@ use std::{
 
 use orna_client::{
     ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest,
-    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
+    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest, QtRuntimeExecutor,
+    RuntimeLibrary, RuntimeSession,
 };
 use orna_core::inspect::{
     CallRow, INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, InspectInvocationNodeKind,
@@ -94,7 +95,7 @@ use orna_protocol::{
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
-    STD_UI_TYPE_ID, registered_opaque_codecs,
+    STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -149,31 +150,20 @@ const TTY_RUNTIME_NAME: &str = orna_runtime_tty::RUNTIME_NAME;
 /// The installed tty runtime version (ADR 0063), taken from the runtime
 /// crate so the offer names the exact linked binary.
 const TTY_RUNTIME_VERSION: &str = orna_runtime_tty::RUNTIME_VERSION;
+const QT_RUNTIME_FAMILY_NAME: &str = "qt";
 
-/// The installed runtime family of one `orna invoke` run (ADR 0063).
+/// The installed runtime family of one `orna invoke` run.
 ///
-/// Today the only installed family is [`RuntimeFamily::Tty`]; the spec's
-/// other desktop families (`qt`, `gtk`, `imgui`, `swiftui`, `web`) parse to
-/// `None` so an override to one fails closed at the CLI as a usage error.
-///
-/// `#[allow(clippy::manual_non_exhaustive)]`: the hidden variant below is
-/// deliberately not the `#[non_exhaustive]` marker. A marker would make the
-/// selection policy's fail-closed arm unreachable inside this crate (the
-/// compiler sees a one-variant enum), and the arm must stay live: it is
-/// what rejects a recognised-but-not-installed family once a second variant
-/// exists, and the unit tests exercise it.
+/// The local client selects between the accepted TTY and Qt offers. The
+/// database plan receives pathless capability facts only.
 #[allow(clippy::manual_non_exhaustive)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeFamily {
     /// The terminal runtime (`orna-runtime-tty`).
     Tty,
-    /// A recognised-but-not-installed family (hidden).
-    ///
-    /// `--runtime` parsing never produces this variant — only `tty` parses
-    /// today — so it cannot reach the selection policy through the CLI. It
-    /// exists so the policy's fail-closed arm is expressible and testable:
-    /// when a second family lands as an installed variant, the arm keeps
-    /// rejecting families with no installed runtime.
+    /// The first production graphical runtime (`orna-runtime-qt`).
+    Qt,
+    /// A recognised-but-not-installed family used by fail-closed tests.
     #[doc(hidden)]
     NotInstalled,
 }
@@ -181,11 +171,12 @@ pub enum RuntimeFamily {
 impl RuntimeFamily {
     /// Parses one `--runtime <family>` override value.
     ///
-    /// Only installed families parse; an unknown or not-installed family is
-    /// `None`, which the command parser reports as a usage error.
+    /// Only installed family names parse; an unknown name is `None`, which
+    /// the command parser reports as a usage error.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             TTY_RUNTIME_NAME => Some(RuntimeFamily::Tty),
+            QT_RUNTIME_FAMILY_NAME => Some(RuntimeFamily::Qt),
             _ => None,
         }
     }
@@ -194,6 +185,7 @@ impl RuntimeFamily {
     pub fn name(self) -> &'static str {
         match self {
             RuntimeFamily::Tty => TTY_RUNTIME_NAME,
+            RuntimeFamily::Qt => QT_RUNTIME_FAMILY_NAME,
             RuntimeFamily::NotInstalled => "not-installed",
         }
     }
@@ -1252,6 +1244,31 @@ fn client_capability_inner_artifact(payload: &[u8]) -> Option<(u32, &[u8])> {
     (inner_end == payload.len()).then(|| (inner_version, &payload[21..inner_end]))
 }
 
+fn run_installed_qt_external_contract(
+    request: &ClientExternalContractRequest,
+) -> Result<RuntimeValue, String> {
+    let library =
+        RuntimeLibrary::load_installed_qt().map_err(|_| "runtime.unavailable".to_owned())?;
+    let session = RuntimeSession::new_qt(library, "en-GB", "UTC", "light")
+        .map_err(|_| "runtime.unavailable".to_owned())?;
+    let mut executor = QtRuntimeExecutor::new(session);
+    let result = (|| {
+        let value = ClientResourceExecutor::external_contract(&mut executor, request.clone())?;
+        executor
+            .wait_for_surfaces()
+            .map_err(|_| "runtime.unavailable".to_owned())?;
+        Ok::<RuntimeValue, String>(value)
+    })();
+    let shutdown = executor.shutdown();
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            shutdown.map_err(|_| "runtime.unavailable".to_owned())?;
+            Ok(value)
+        }
+    }
+}
+
 /// Evaluates the installed standard Inspector render contract without selecting a
 /// graphical runtime or reading mutable state. The carrier envelope does not
 /// encode its owning principal, so the full epoch is authenticated through the
@@ -1262,6 +1279,9 @@ async fn run_installed_external_contract(
     active: &ActiveDatabaseRevision,
     request: &ClientExternalContractRequest,
 ) -> Result<RuntimeValue, String> {
+    if request.identity() == STD_UI_WINDOW_RUNTIME_CONTRACT {
+        return run_installed_qt_external_contract(request);
+    }
     if request.identity() != INSPECT_RENDER_CONTRACT {
         return Err("inspect.runtime_unavailable".to_owned());
     }
@@ -5548,7 +5568,9 @@ async fn host_invoke(
         &request.arguments,
     )
     .map_err(|error| usage_error(error.to_string()))?;
-    let sealed = build_sealed_request(&request, arguments)?;
+    let ui_required = client_function_returns_ui(resolved.function);
+    let selected = selected_runtime(&request, ui_required)?;
+    let sealed = build_sealed_request(&request, arguments, selected)?;
 
     if request.explain {
         render_explain(
@@ -5752,28 +5774,25 @@ fn canonicalise_invocation_arguments(
 ///
 /// The caller context is `CliTty` when stdout is a terminal and `CliPipe`
 /// otherwise, with locale and timezone from the environment. The client
-/// offer is protocol major 5 with the two ADR 0057 sink offers
-/// (`std.terminal.Document` and `std.io.ByteStream`), the installed runtime
-/// offer list filtered to the selected family (ADR 0063), and the default
-/// limits.
+/// offer carries the selected family's sink and runtime capabilities without
+/// exposing a native library path.
 fn build_sealed_request(
     request: &InstalledInvokeRequest,
     arguments: Vec<InvocationArgument>,
+    selected: RuntimeFamily,
 ) -> Result<InvokeRequest, InstalledInvokeError> {
     let arguments = canonicalise_invocation_arguments(arguments);
     let caller_context = build_caller_context()?;
-    let runtime_offers = match selected_runtime(request)? {
-        Some(RuntimeFamily::Tty) => installed_runtime_offers(),
-        // A future selection path could select a family with no installed
-        // runtime; the sealed request then carries no runtime offer. Today
-        // every request selects the tty runtime.
-        _ => Vec::new(),
+    let runtime_offers = match selected {
+        RuntimeFamily::Tty => installed_tty_runtime_offers(),
+        RuntimeFamily::Qt => vec![installed_qt_runtime_offer()?],
+        RuntimeFamily::NotInstalled => Vec::new(),
     };
     let client_offer = InvocationClientOffer::new(
         CONNECTION_PROTOCOL_MAJOR,
         caller_context.locale(),
         caller_context.timezone(),
-        client_sink_offers()?,
+        client_sink_offers(selected)?,
         runtime_offers,
         MAXIMUM_FRAME_SIZE,
         MAXIMUM_ARTIFACT_SIZE,
@@ -5807,15 +5826,8 @@ fn build_sealed_request(
     .map_err(|error| usage_error(format!("the sealed request is invalid: {error}")))
 }
 
-/// Builds the runtime offers for the installed tty runtime (ADR 0063).
-///
-/// The one offer names the two sink types the tty runtime renders
-/// (`std.terminal.Document` and `std.io.ByteStream`), carries no UI
-/// contract surface yet, and marks the linked runtime trusted with the
-/// default preference rank. The construction cannot fail: the name and
-/// version are non-empty and the consumed descriptors are the same
-/// standard named descriptors the sink offers already carry.
-fn installed_runtime_offers() -> Vec<InvocationRuntimeOffer> {
+/// Builds the runtime offer for the installed TTY runtime.
+fn installed_tty_runtime_offers() -> Vec<InvocationRuntimeOffer> {
     vec![
         InvocationRuntimeOffer::new(
             TTY_RUNTIME_NAME,
@@ -5833,36 +5845,90 @@ fn installed_runtime_offers() -> Vec<InvocationRuntimeOffer> {
     ]
 }
 
-/// Selects the runtime family for one invoke request (ADR 0063).
-///
-/// The default (no `--runtime` override) is the tty runtime, the only
-/// runtime installed in this workspace, and an explicit `tty` override
-/// selects the same. Any other family — a future desktop family such as
-/// `qt`, `gtk`, or `imgui` — fails closed as a usage error because no such
-/// runtime is installed. Platform preference defaults (Linux desktop
-/// gtk > qt > imgui) are a later slice that depends on local configuration;
-/// this policy is deliberately family-explicit.
+/// Builds one pathless offer from the validated installed Qt descriptor.
+fn installed_qt_runtime_offer() -> Result<InvocationRuntimeOffer, InstalledInvokeError> {
+    let library = RuntimeLibrary::load_installed_qt().map_err(|_| {
+        InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the installed Qt runtime is unavailable".to_owned(),
+        )
+    })?;
+    let descriptor = library.descriptor();
+    let consumed_descriptors = descriptor
+        .sinks
+        .iter()
+        .map(|sink| match sink.type_name.as_str() {
+            "std.ui.UI" => Ok(TypeDescriptor::named(STD_UI_TYPE_ID)),
+            _ => Err(InstalledInvokeError::new(
+                InstalledInvokeErrorKind::Internal,
+                "the installed Qt runtime advertises an unknown sink".to_owned(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let contracts = descriptor
+        .contracts
+        .iter()
+        .map(|contract| {
+            InvocationRuntimeContract::new(
+                contract.name.clone(),
+                format!("{}.{}", contract.major, contract.minor),
+                contract.features.iter().cloned(),
+            )
+            .map_err(|_| {
+                InstalledInvokeError::new(
+                    InstalledInvokeErrorKind::Internal,
+                    "the installed Qt runtime advertises an invalid contract".to_owned(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    InvocationRuntimeOffer::new(
+        descriptor.runtime_name.clone(),
+        descriptor.runtime_version.clone(),
+        consumed_descriptors,
+        contracts,
+        0,
+        true,
+        None,
+    )
+    .map_err(|_| {
+        InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the installed Qt runtime offer is invalid".to_owned(),
+        )
+    })
+}
+
+/// Selects the local runtime family before sealed request construction.
 fn selected_runtime(
     request: &InstalledInvokeRequest,
-) -> Result<Option<RuntimeFamily>, InstalledInvokeError> {
-    match request.runtime {
-        None => Ok(Some(RuntimeFamily::Tty)),
-        Some(RuntimeFamily::Tty) => Ok(Some(RuntimeFamily::Tty)),
-        Some(other) => Err(usage_error(format!(
-            "the {} runtime family is not installed",
-            other.name()
-        ))),
+    ui_required: bool,
+) -> Result<RuntimeFamily, InstalledInvokeError> {
+    match (request.runtime, ui_required) {
+        (None, true) => Ok(RuntimeFamily::Qt),
+        (None, false) | (Some(RuntimeFamily::Tty), false) => Ok(RuntimeFamily::Tty),
+        (Some(RuntimeFamily::Tty), true) => Err(usage_error(
+            "the tty runtime cannot consume a std.ui.UI result".to_owned(),
+        )),
+        (Some(RuntimeFamily::Qt), _) => Ok(RuntimeFamily::Qt),
+        (Some(RuntimeFamily::NotInstalled), _) => Err(usage_error(
+            "the not-installed runtime family is not installed".to_owned(),
+        )),
     }
 }
 
-/// Builds the two sink offers the installed client consumes (ADR 0057 step 9).
-///
-/// The offer names `std.terminal.Document` and `std.io.ByteStream` so the
-/// sealed route's presentation planning sees the sinks the client can
-/// consume. Neither sink streams in this slice, both carry the default
-/// preference rank, and runtime selection stays the client's own
-/// deterministic decision, not a server-visible negotiation.
-fn client_sink_offers() -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError> {
+/// Returns whether the target's result is consumed by the graphical runtime.
+fn client_function_returns_ui(function: &FunctionDefinition) -> bool {
+    matches!(
+        function.return_type(),
+        FunctionReturn::Single(ResolvedType::Value(type_id)) if *type_id == STD_UI_TYPE_ID
+    )
+}
+
+/// Builds the sink offers consumed by the selected local runtime.
+fn client_sink_offers(
+    selected: RuntimeFamily,
+) -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError> {
     let document = InvocationSinkOffer::new(
         TypeDescriptor::named(STD_TERMINAL_DOCUMENT_TYPE_ID),
         [DOCUMENT_SINK_MEDIA_TYPE],
@@ -5879,7 +5945,20 @@ fn client_sink_offers() -> Result<Vec<InvocationSinkOffer>, InstalledInvokeError
         None,
     )
     .map_err(|error| sink_offer_error("std.io.ByteStream", error))?;
-    Ok(vec![document, byte_stream])
+    let mut offers = vec![document, byte_stream];
+    if matches!(selected, RuntimeFamily::Qt) {
+        offers.push(
+            InvocationSinkOffer::new(
+                TypeDescriptor::named(STD_UI_TYPE_ID),
+                ["application/orna-ui"],
+                false,
+                0,
+                None,
+            )
+            .map_err(|error| sink_offer_error("std.ui.UI", error))?,
+        );
+    }
+    Ok(offers)
 }
 
 /// Maps one structurally invalid sink offer to a closed internal error.
@@ -9330,7 +9409,8 @@ mod tests {
             false,
             None,
         );
-        let sealed = build_sealed_request(&request, Vec::new()).expect("the sealed request builds");
+        let sealed = build_sealed_request(&request, Vec::new(), RuntimeFamily::Tty)
+            .expect("the sealed request builds");
         let offer = sealed.client_offer();
         assert_eq!(offer.sink_offers().len(), 2);
         assert_eq!(
@@ -9388,22 +9468,28 @@ mod tests {
     }
 
     #[test]
-    fn selection_policy_defaults_to_tty_and_rejects_unknown_families() {
-        // No override selects the installed tty runtime...
+    fn selection_policy_defaults_to_tty_for_console_and_selects_qt_for_ui() {
         assert_eq!(
-            selected_runtime(&runtime_request(None)),
-            Ok(Some(RuntimeFamily::Tty))
+            selected_runtime(&runtime_request(None), false),
+            Ok(RuntimeFamily::Tty)
         );
-        // ...and an explicit tty override selects the same runtime.
         assert_eq!(
-            selected_runtime(&runtime_request(Some(RuntimeFamily::Tty))),
-            Ok(Some(RuntimeFamily::Tty))
+            selected_runtime(&runtime_request(Some(RuntimeFamily::Tty)), false),
+            Ok(RuntimeFamily::Tty)
         );
-        // A recognised-but-not-installed family fails closed as a usage
-        // error naming the family. `--runtime` parsing never produces this
-        // variant today — unknown families are rejected at the CLI — so
-        // the hidden variant stands in for the future family that will.
-        let error = selected_runtime(&runtime_request(Some(RuntimeFamily::NotInstalled)))
+        assert_eq!(
+            selected_runtime(&runtime_request(Some(RuntimeFamily::Qt)), false),
+            Ok(RuntimeFamily::Qt)
+        );
+        assert_eq!(
+            selected_runtime(&runtime_request(None), true),
+            Ok(RuntimeFamily::Qt)
+        );
+        let error = selected_runtime(&runtime_request(Some(RuntimeFamily::Tty)), true)
+            .expect_err("TTY cannot consume a UI result");
+        assert_eq!(error.kind(), InstalledInvokeErrorKind::Usage);
+        assert!(error.message().contains("std.ui.UI"));
+        let error = selected_runtime(&runtime_request(Some(RuntimeFamily::NotInstalled)), false)
             .expect_err("a not-installed family is rejected");
         assert_eq!(error.kind(), InstalledInvokeErrorKind::Usage);
         assert!(error.message().contains("not-installed"));
@@ -9412,8 +9498,8 @@ mod tests {
     #[test]
     fn tty_default_selection_maps_document_and_byte_stream() {
         let selected =
-            selected_runtime(&runtime_request(None)).expect("the default selects the tty runtime");
-        assert_eq!(selected, Some(RuntimeFamily::Tty));
+            selected_runtime(&runtime_request(None), false).expect("the default selects TTY");
+        assert_eq!(selected, RuntimeFamily::Tty);
         // The tty family's sink map consumes exactly the two standard
         // sink types; a UI value keeps the ORV5 envelope.
         assert_eq!(
@@ -9484,7 +9570,7 @@ mod tests {
             "en-GB",
             "UTC",
             Vec::new(),
-            installed_runtime_offers(),
+            installed_tty_runtime_offers(),
             MAXIMUM_FRAME_SIZE,
             MAXIMUM_ARTIFACT_SIZE,
             None,
@@ -9596,8 +9682,8 @@ mod tests {
             5,
             "en-GB",
             "UTC",
-            client_sink_offers().expect("client sink offers"),
-            installed_runtime_offers(),
+            client_sink_offers(RuntimeFamily::Tty).expect("client sink offers"),
+            installed_tty_runtime_offers(),
             MAXIMUM_FRAME_SIZE,
             MAXIMUM_ARTIFACT_SIZE,
             None,
