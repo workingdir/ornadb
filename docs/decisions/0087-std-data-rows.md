@@ -111,7 +111,7 @@ UUIDs.
 | Rows semantic name | `std.data.rows` |
 | Rows representation contract | `orna.std.value.rows@1` |
 | Export binding | `std.Rows` → `...12` |
-| Export `TypeBindingId` | `0ec2755d6bfe08211cab49f69968e146` |
+| Export `TypeBindingId` | `6d00a1809c45ec55e8b7de1f6e054f97` |
 | `std.terminal` schema identity | `...04` (retained from V3) |
 | `std.terminal.Document` type | `...0f` (retained from V3) |
 | Retained table function | `std.terminal.present_table` → `...12` |
@@ -124,6 +124,14 @@ The V8 catalogue is V7 plus `std.data`, the Rows opaque value type, the
 `std.Rows` qualified binding, and the retained table function. It has no new
 object type and no `std.csv` source declaration. The V7 catalogue, all V1-V7
 source units, and every historical executable remain unchanged.
+The export identity is derived from `TypeBinding::qualified` over the exact
+qualified lookup words `std` and `Rows`. It is independent of the target
+`TypeId`; the implementation and its golden tests must compute this value
+through the canonical constructor rather than copy a hand-authored identity.
+
+An earlier draft of this ADR listed `0ec2755d6bfe08211cab49f69968e146`.
+That value does not match the repository's canonical type-binding identity
+algorithm and is not part of the accepted V8 contract.
 
 ### Exact retained source unit
 
