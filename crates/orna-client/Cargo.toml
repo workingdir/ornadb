@@ -12,7 +12,7 @@ orna-protocol = { path = "../orna-protocol" }
 sha2 = "0.11.0"
 orna-standard = { path = "../orna-standard" }
 libloading = "0.9.0"
+serde_json = "1.0.151"
 
 [dev-dependencies]
-serde_json = "1.0.151"
 orna-compiler = { path = "../orna-compiler" }

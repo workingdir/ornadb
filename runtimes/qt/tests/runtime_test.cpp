@@ -144,6 +144,12 @@ int main() {
         0,
         no_key,
     };
+    const char key[] = "first";
+    const OrnaValueRefV1 text_key{
+        0,
+        view("std.json.Value"),
+        OrnaBytesView{reinterpret_cast<const std::uint8_t *>(key), sizeof(key) - 1},
+    };
     OrnaMountNodeV1 text_mount{
         101,
         100,
@@ -152,7 +158,7 @@ int main() {
         view("std.ui.text"),
         1,
         0,
-        no_key,
+        text_key,
     };
     OrnaMountNodeV1 button_mount{
         102,
@@ -198,6 +204,7 @@ int main() {
     REQUIRE(capture(api, runtime, surface, state).code == ORNA_STATUS_OK);
     REQUIRE(state.rfind("ORNA-UI/1 ", 0) == 0);
     REQUIRE(state.find("48656c6c6f2066726f6d205174") != std::string::npos);
+    REQUIRE(state.find("\"key\":{\"type\":\"std.json.Value\",\"value\":\"6669727374\"}") != std::string::npos);
 
     OrnaUiBatchV1 stale{1, operations, 0};
     REQUIRE(api->apply_ui_batch(runtime, surface, &stale).code == ORNA_STATUS_STALE_REVISION);

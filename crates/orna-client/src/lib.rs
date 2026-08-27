@@ -16,7 +16,8 @@ use std::{
 use orna_artifact::client_plan::{
     ActionClientPlan, ActionTargetDomain, CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource,
     CapabilityClientPlan, ClientExpressionNode, ClientLocal, ClientLocalKind, ClientPlan,
-    ClientPlanError, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
+    ClientPlanError, ControlFlowBinaryOperator, ControlFlowClientPlan, ControlFlowStatement,
+    ControlFlowUnaryOperator, EXPRESSION_FORMAT_VERSION, ExpressionClientPlan, FORMAT_IDENTITY,
     FORMAT_VERSION, InnerClientPlan, InspectOperationNode, InspectProjection,
     LANGUAGE_VERSION_IDENTITY, OPAQUE_FORMAT_VERSION, OpaqueClientPlan, PROCEDURAL_FORMAT_VERSION,
     ProceduralClientPlan, RESOURCE_FORMAT_VERSION, ResourceClientPlan, ResourceKind,
@@ -55,10 +56,36 @@ use orna_core::{
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
 };
+/// The fixed amount of execution fuel granted to each root CLIENT
+/// evaluation.  A plan cannot increase or disable this limit.
+pub const DEFAULT_CLIENT_EXECUTION_FUEL: u64 = 100_000;
 /// The largest number of queued stream items retained by one CLIENT resource.
 /// This matches the largest single completion batch, keeping one broker-sized
 /// batch available while requiring consumption before another batch is retained.
 const MAX_RESOURCE_QUEUED_ITEMS: u64 = MAX_RESOURCE_BATCH_ITEMS as u64;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClientExecutionFuel {
+    remaining: u64,
+}
+
+impl ClientExecutionFuel {
+    fn new() -> Self {
+        Self {
+            remaining: DEFAULT_CLIENT_EXECUTION_FUEL,
+        }
+    }
+
+    fn consume(&mut self, context: ClientExecutionContext) -> Result<(), ClientExecutionError> {
+        if self.remaining == 0 {
+            return Err(expression_error(
+                context,
+                ClientExpressionError::ExecutionLimit,
+            ));
+        }
+        self.remaining -= 1;
+        Ok(())
+    }
+}
 
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
@@ -68,7 +95,10 @@ use orna_standard::{
 pub mod capability;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
+pub mod runtime_adapter;
 pub mod runtime_loader;
+
+pub use runtime_adapter::{QtRuntimeExecutor, RuntimeActionBinding};
 
 pub use runtime_loader::{
     AbiActionEvent, AbiBindAction, AbiBytesView, AbiChildOperation, AbiClientApi,
@@ -4323,6 +4353,12 @@ pub enum ClientExpressionError {
     FieldPath,
     /// The closed call-depth limit was reached.
     RecursionLimit,
+    /// A checked INTEGER arithmetic operation failed.
+    Arithmetic,
+    /// The per-root CLIENT execution fuel was exhausted.
+    ExecutionLimit,
+    /// A control-flow function reached its end without returning a value.
+    MissingReturn,
 }
 
 impl fmt::Display for ClientExpressionError {
@@ -4333,6 +4369,9 @@ impl fmt::Display for ClientExpressionError {
             Self::InvalidCall => "a CLIENT expression call has invalid arguments",
             Self::FieldPath => "a CLIENT expression field path could not be resolved",
             Self::RecursionLimit => "the CLIENT expression call-depth limit was exceeded",
+            Self::Arithmetic => "client.arithmetic_error",
+            Self::ExecutionLimit => "client.execution_limit",
+            Self::MissingReturn => "client.control_flow_missing_return",
         })
     }
 }
@@ -5145,6 +5184,35 @@ fn evaluate_function(
     lineage: ObserverLineage,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
 ) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
+    let mut fuel = ClientExecutionFuel::new();
+    evaluate_function_with_fuel(
+        active,
+        function,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        lineage,
+        executor,
+        &mut fuel,
+    )
+}
+
+fn evaluate_function_with_fuel(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+    arguments: Vec<(ParameterId, RuntimeValue)>,
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    lineage: ObserverLineage,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<(ClientExecutionContext, RuntimeValue), ClientExecutionError> {
     let pair = active.pair();
     let resolved = resolve_client_function(active, function)
         .ok_or(ClientExecutionError::FunctionNotFound { pair, function })?;
@@ -5176,6 +5244,7 @@ fn evaluate_function(
         .map_or(revision.artifact().version(), |plan| {
             plan.inner_plan_version()
         });
+    fuel.consume(context)?;
     // Bind caller-owned parameter references once, while the declaration owner
     // and its invocation arguments are still in scope. Passing the resulting
     // literal declarations through nested calls prevents a callee from trying
@@ -5278,6 +5347,7 @@ fn evaluate_function(
             principal,
             executor,
             &mut local_environment,
+            fuel,
         )?,
         None => evaluate_plan(
             active,
@@ -5293,6 +5363,7 @@ fn evaluate_function(
             principal,
             executor,
             &mut local_environment,
+            fuel,
         )?,
     };
     Ok((context, value))
@@ -5365,6 +5436,7 @@ fn evaluate_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     match return_shape {
         ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => {
@@ -5396,9 +5468,10 @@ fn evaluate_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )
             } else {
-                evaluate_expression_plan(
+                evaluate_expression_plan_with_fuel(
                     active,
                     plan.expression(),
                     context,
@@ -5412,6 +5485,7 @@ fn evaluate_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )
             }
         }
@@ -5419,7 +5493,7 @@ fn evaluate_plan(
             let plan = ExpressionClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_expression_calls(active, plan.expression(), context)?;
-            evaluate_expression_plan(
+            evaluate_expression_plan_with_fuel(
                 active,
                 plan.expression(),
                 context,
@@ -5433,6 +5507,7 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::StreamState(expected) => {
@@ -5453,6 +5528,7 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::State(expected) => {
@@ -5473,13 +5549,14 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::StreamProcedural(expected) => {
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_procedural_calls(active, &plan, context)?;
-            evaluate_procedural_plan(
+            evaluate_procedural_plan_with_fuel(
                 active,
                 &plan,
                 context,
@@ -5494,13 +5571,14 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::Procedural(expected) => {
             let plan = ProceduralClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
             preflight_client_procedural_calls(active, &plan, context)?;
-            evaluate_procedural_plan(
+            evaluate_procedural_plan_with_fuel(
                 active,
                 &plan,
                 context,
@@ -5515,6 +5593,31 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
+            )
+        }
+        ClientReturnShape::StreamControlFlow(expected)
+        | ClientReturnShape::ControlFlow(expected) => {
+            let plan = ControlFlowClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            preflight_client_control_flow_calls(active, &plan, context)?;
+            validate_control_flow_plan_types(active, &plan, context)?;
+            evaluate_control_flow_plan(
+                active,
+                &plan,
+                context,
+                lineage,
+                expected,
+                matches!(return_shape, ClientReturnShape::StreamControlFlow(_)),
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
             )
         }
         ClientReturnShape::Action(_expected) => {
@@ -5534,6 +5637,7 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::StreamResource(expected) => {
@@ -5554,6 +5658,7 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::Resource(expected) => {
@@ -5574,6 +5679,7 @@ fn evaluate_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
@@ -5634,9 +5740,10 @@ fn evaluate_stream_expression_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     if matches!(expression, ClientExpressionNode::ExternalContract { .. }) {
-        return evaluate_expression(
+        return evaluate_expression_with_fuel(
             active,
             expression,
             context,
@@ -5649,6 +5756,7 @@ fn evaluate_stream_expression_plan(
             principal,
             executor,
             local_environment,
+            fuel,
         );
     }
     if !expression_returns_stream(active, expression, local_environment) {
@@ -5657,7 +5765,7 @@ fn evaluate_stream_expression_plan(
             ClientExpressionError::TypeMismatch,
         ));
     }
-    evaluate_expression_plan(
+    evaluate_expression_plan_with_fuel(
         active,
         expression,
         context,
@@ -5671,6 +5779,7 @@ fn evaluate_stream_expression_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )
 }
 
@@ -5690,7 +5799,42 @@ fn evaluate_expression_plan(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    let value = evaluate_expression(
+    let mut fuel = ClientExecutionFuel::new();
+    evaluate_expression_plan_with_fuel(
+        active,
+        expression,
+        context,
+        lineage,
+        expected,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+        &mut fuel,
+    )
+}
+
+fn evaluate_expression_plan_with_fuel(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    expected: ResolvedType,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let value = evaluate_expression_with_fuel(
         active,
         expression,
         context,
@@ -5703,6 +5847,7 @@ fn evaluate_expression_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )?;
     if runtime_expression_value_matches(active, expression, &value, expected, local_environment) {
         Ok(value)
@@ -5728,6 +5873,7 @@ fn evaluate_stream_state_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
         active,
@@ -5742,6 +5888,7 @@ fn evaluate_stream_state_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )?;
     evaluate_stream_expression_plan(
         active,
@@ -5757,6 +5904,7 @@ fn evaluate_stream_state_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )
 }
 
@@ -5775,6 +5923,7 @@ fn evaluate_state_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     initialize_client_state(
         active,
@@ -5789,8 +5938,9 @@ fn evaluate_state_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )?;
-    evaluate_expression_plan(
+    evaluate_expression_plan_with_fuel(
         active,
         plan.expression(),
         context,
@@ -5804,6 +5954,7 @@ fn evaluate_state_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )
 }
 
@@ -5821,6 +5972,7 @@ fn evaluate_stream_resource_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     evaluate_stream_expression_plan(
         active,
@@ -5836,6 +5988,7 @@ fn evaluate_stream_resource_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )
 }
 
@@ -5853,8 +6006,9 @@ fn evaluate_resource_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
-    evaluate_expression_plan(
+    evaluate_expression_plan_with_fuel(
         active,
         plan.expression(),
         context,
@@ -5868,6 +6022,7 @@ fn evaluate_resource_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )
 }
 
@@ -5894,7 +6049,45 @@ fn evaluate_procedural_plan(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
+    let mut fuel = ClientExecutionFuel::new();
+    evaluate_procedural_plan_with_fuel(
+        active,
+        plan,
+        context,
+        lineage,
+        expected,
+        stream_result,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+        &mut fuel,
+    )
+}
+
+fn evaluate_procedural_plan_with_fuel(
+    active: &ActiveDatabaseRevision,
+    plan: &ProceduralClientPlan,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    expected: ResolvedType,
+    stream_result: bool,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<RuntimeValue, ClientExecutionError> {
     for statement in plan.statements() {
+        fuel.consume(context)?;
         let local_id = statement.local();
         let Some(local) = plan
             .locals()
@@ -5914,7 +6107,7 @@ fn evaluate_procedural_plan(
                         ClientExpressionError::InvalidCall,
                     ));
                 }
-                let binding = evaluate_procedural_local(
+                let binding = evaluate_procedural_local_with_fuel(
                     active,
                     local,
                     expression,
@@ -5928,6 +6121,7 @@ fn evaluate_procedural_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )?;
                 local_environment.insert(local_id, binding);
             }
@@ -5938,7 +6132,7 @@ fn evaluate_procedural_plan(
                         ClientExpressionError::ParameterNotBound,
                     ));
                 }
-                let binding = evaluate_procedural_local(
+                let binding = evaluate_procedural_local_with_fuel(
                     active,
                     local,
                     expression,
@@ -5952,12 +6146,13 @@ fn evaluate_procedural_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )?;
                 local_environment.insert(local_id, binding);
             }
         }
     }
-    let value = evaluate_expression(
+    let value = evaluate_expression_with_fuel(
         active,
         plan.return_expression(),
         context,
@@ -5970,6 +6165,7 @@ fn evaluate_procedural_plan(
         principal,
         executor,
         local_environment,
+        fuel,
     )?;
     let result_matches = if stream_result {
         expression_returns_stream(active, plan.return_expression(), local_environment)
@@ -6008,6 +6204,41 @@ fn evaluate_procedural_local(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<ClientLocalBinding, ClientExecutionError> {
+    let mut fuel = ClientExecutionFuel::new();
+    evaluate_procedural_local_with_fuel(
+        active,
+        local,
+        expression,
+        context,
+        lineage,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+        &mut fuel,
+    )
+}
+
+fn evaluate_procedural_local_with_fuel(
+    active: &ActiveDatabaseRevision,
+    local: &ClientLocal,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<ClientLocalBinding, ClientExecutionError> {
     match local.kind() {
         ClientLocalKind::Value => {
             if procedural_resource_kind_for_runtime(expression, local_environment).is_some() {
@@ -6019,7 +6250,7 @@ fn evaluate_procedural_local(
             let expected = resolve_client_local_type(active, local.type_id())
                 .ok_or_else(|| expression_error(context, ClientExpressionError::TypeMismatch))?;
             let stream_await = expression_returns_stream(active, expression, local_environment);
-            let value = evaluate_expression_plan(
+            let value = evaluate_expression_plan_with_fuel(
                 active,
                 expression,
                 context,
@@ -6033,6 +6264,7 @@ fn evaluate_procedural_local(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )?;
             if stream_await {
                 Ok(ClientLocalBinding::StreamValue(value))
@@ -6041,6 +6273,7 @@ fn evaluate_procedural_local(
             }
         }
         ClientLocalKind::Resource(kind) => {
+            fuel.consume(context)?;
             let ClientExpressionNode::Resource { operation } = expression else {
                 let ClientExpressionNode::LocalRead { local: source } = expression else {
                     return Err(expression_error(
@@ -6102,6 +6335,298 @@ fn validate_procedural_resource_binding(
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct ControlFlowReturnValue {
+    value: RuntimeValue,
+    stream: bool,
+}
+
+fn evaluate_control_flow_plan(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    expected: ResolvedType,
+    stream_result: bool,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let returned = evaluate_control_flow_block(
+        active,
+        plan,
+        plan.statements(),
+        context,
+        lineage,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+        fuel,
+    )?
+    .ok_or_else(|| expression_error(context, ClientExpressionError::MissingReturn))?;
+
+    let matches = if stream_result {
+        returned.stream && runtime_stream_value_matches(active, &returned.value, expected)
+    } else {
+        !returned.stream && runtime_value_matches(active, &returned.value, expected)
+    };
+    if matches {
+        Ok(returned.value)
+    } else {
+        Err(expression_error(
+            context,
+            ClientExpressionError::TypeMismatch,
+        ))
+    }
+}
+
+fn evaluate_control_flow_block(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    statements: &[ControlFlowStatement],
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<Option<ControlFlowReturnValue>, ClientExecutionError> {
+    for statement in statements {
+        fuel.consume(context)?;
+        if let Some(returned) = evaluate_control_flow_statement(
+            active,
+            plan,
+            statement,
+            context,
+            lineage,
+            arguments,
+            declarations,
+            grants,
+            state,
+            depth,
+            principal,
+            executor,
+            local_environment,
+            fuel,
+        )? {
+            return Ok(Some(returned));
+        }
+    }
+    Ok(None)
+}
+
+fn evaluate_control_flow_statement(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    statement: &ControlFlowStatement,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<Option<ControlFlowReturnValue>, ClientExecutionError> {
+    match statement {
+        ControlFlowStatement::Let { local, expression }
+        | ControlFlowStatement::Assignment { local, expression } => {
+            let Some(declaration) = plan
+                .locals()
+                .iter()
+                .find(|candidate| candidate.local_id() == *local)
+            else {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::ParameterNotBound,
+                ));
+            };
+            if matches!(statement, ControlFlowStatement::Assignment { .. })
+                && !local_environment.contains_key(local)
+            {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::ParameterNotBound,
+                ));
+            }
+            let binding = evaluate_procedural_local_with_fuel(
+                active,
+                declaration,
+                expression,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            // A validated plan has one declaration per local identity. A LET
+            // inside a repeated block reinitialises that declaration each time.
+            local_environment.insert(*local, binding);
+            Ok(None)
+        }
+        ControlFlowStatement::Return(return_statement) => {
+            let Some(expression) = return_statement.expression() else {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ));
+            };
+            let stream = expression_returns_stream(active, expression, local_environment);
+            let value = evaluate_expression_with_fuel(
+                active,
+                expression,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            Ok(Some(ControlFlowReturnValue { value, stream }))
+        }
+        ControlFlowStatement::If(if_statement) => {
+            for branch in if_statement.branches() {
+                fuel.consume(context)?;
+                let condition = evaluate_expression_with_fuel(
+                    active,
+                    branch.condition(),
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                    fuel,
+                )?;
+                let RuntimeValue::Boolean(condition) = condition else {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::TypeMismatch,
+                    ));
+                };
+                if condition {
+                    return evaluate_control_flow_block(
+                        active,
+                        plan,
+                        branch.statements(),
+                        context,
+                        lineage,
+                        arguments,
+                        declarations,
+                        grants,
+                        state,
+                        depth,
+                        principal,
+                        executor,
+                        local_environment,
+                        fuel,
+                    );
+                }
+            }
+            if let Some(statements) = if_statement.else_statements() {
+                evaluate_control_flow_block(
+                    active,
+                    plan,
+                    statements,
+                    context,
+                    lineage,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                    fuel,
+                )
+            } else {
+                Ok(None)
+            }
+        }
+        ControlFlowStatement::While(while_statement) => loop {
+            fuel.consume(context)?;
+            fuel.consume(context)?;
+            let condition = evaluate_expression_with_fuel(
+                active,
+                while_statement.condition(),
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            let RuntimeValue::Boolean(condition) = condition else {
+                return Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                ));
+            };
+            if !condition {
+                return Ok(None);
+            }
+            if let Some(returned) = evaluate_control_flow_block(
+                active,
+                plan,
+                while_statement.statements(),
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )? {
+                return Ok(Some(returned));
+            }
+        },
+    }
+}
+
 fn evaluate_capability_plan(
     active: &ActiveDatabaseRevision,
     plan: &CapabilityClientPlan,
@@ -6116,6 +6641,7 @@ fn evaluate_capability_plan(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     preflight_client_inner_plan_calls(active, plan.inner_plan(), context)?;
 
@@ -6143,6 +6669,7 @@ fn evaluate_capability_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 );
             }
             let (ClientReturnShape::Expression(expected) | ClientReturnShape::Inspect(expected)) =
@@ -6150,7 +6677,7 @@ fn evaluate_capability_plan(
             else {
                 unreachable!("function shape was validated against the inner plan version");
             };
-            evaluate_expression_plan(
+            evaluate_expression_plan_with_fuel(
                 active,
                 inner.expression(),
                 context,
@@ -6164,6 +6691,7 @@ fn evaluate_capability_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         InnerClientPlan::State(inner) => {
@@ -6182,6 +6710,7 @@ fn evaluate_capability_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 );
             }
             let ClientReturnShape::State(expected) = return_shape else {
@@ -6201,11 +6730,12 @@ fn evaluate_capability_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         InnerClientPlan::Procedural(inner) => {
             if let ClientReturnShape::StreamProcedural(expected) = return_shape {
-                return evaluate_procedural_plan(
+                return evaluate_procedural_plan_with_fuel(
                     active,
                     inner,
                     context,
@@ -6220,12 +6750,13 @@ fn evaluate_capability_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 );
             }
             let ClientReturnShape::Procedural(expected) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
-            evaluate_procedural_plan(
+            evaluate_procedural_plan_with_fuel(
                 active,
                 inner,
                 context,
@@ -6240,10 +6771,35 @@ fn evaluate_capability_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
+            )
+        }
+        InnerClientPlan::ControlFlow(inner) => {
+            let (expected, stream_result) = match return_shape {
+                ClientReturnShape::ControlFlow(expected) => (expected, false),
+                ClientReturnShape::StreamControlFlow(expected) => (expected, true),
+                _ => unreachable!("function shape was validated against the inner plan version"),
+            };
+            evaluate_control_flow_plan(
+                active,
+                inner,
+                context,
+                lineage,
+                expected,
+                stream_result,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
             )
         }
         InnerClientPlan::Action(inner) => {
-            let ClientReturnShape::Action(_expected) = return_shape else {
+            let ClientReturnShape::Action(_) = return_shape else {
                 unreachable!("function shape was validated against the inner plan version");
             };
             evaluate_action_operation(
@@ -6259,6 +6815,7 @@ fn evaluate_capability_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
         InnerClientPlan::Resource(inner) => {
@@ -6277,6 +6834,7 @@ fn evaluate_capability_plan(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 );
             }
             let ClientReturnShape::Resource(expected) = return_shape else {
@@ -6296,6 +6854,7 @@ fn evaluate_capability_plan(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )
         }
     }
@@ -6411,6 +6970,7 @@ fn evaluate_resource_expression(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let raw_target =
         InvocationTarget::new(operation.target_function(), operation.target_revision());
@@ -6438,7 +6998,7 @@ fn evaluate_resource_expression(
                 }),
             ));
         }
-        let value = evaluate_expression(
+        let value = evaluate_expression_with_fuel(
             active,
             expression,
             context,
@@ -6451,6 +7011,7 @@ fn evaluate_resource_expression(
             principal,
             executor,
             local_environment,
+            fuel,
         )?;
         let Some(parameter_definition) = target_definition
             .parameters()
@@ -7034,10 +7595,11 @@ fn evaluate_action_operation(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     let mut values = Vec::with_capacity(operation.arguments().len());
     for (parameter, expression) in operation.arguments() {
-        let value = evaluate_expression(
+        let value = evaluate_expression_with_fuel(
             active,
             expression,
             context,
@@ -7050,6 +7612,7 @@ fn evaluate_action_operation(
             principal,
             executor,
             local_environment,
+            fuel,
         )?;
         values.push(
             FunctionArgument::new(*parameter, value)
@@ -8130,6 +8693,7 @@ fn evaluate_inspect_expression(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, ClientExecutionError> {
     if context.pair() != active.pair() {
         return Err(ClientExecutionError::Inspect {
@@ -8160,7 +8724,7 @@ fn evaluate_inspect_expression(
                     )),
                 });
             }
-            let target = evaluate_expression(
+            let target = evaluate_expression_with_fuel(
                 active,
                 target,
                 context,
@@ -8173,6 +8737,7 @@ fn evaluate_inspect_expression(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )?;
             let Some(invocation) = inspect_invocation_target(&target) else {
                 return Err(ClientExecutionError::Inspect {
@@ -8187,7 +8752,7 @@ fn evaluate_inspect_expression(
                 });
             }
             if let Some(options) = options {
-                let options = evaluate_expression(
+                let options = evaluate_expression_with_fuel(
                     active,
                     options,
                     context,
@@ -8200,6 +8765,7 @@ fn evaluate_inspect_expression(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )?;
                 if !runtime_value_matches(
                     active,
@@ -8220,7 +8786,7 @@ fn evaluate_inspect_expression(
             projection,
             snapshot,
         } => {
-            let snapshot = evaluate_expression(
+            let snapshot = evaluate_expression_with_fuel(
                 active,
                 snapshot,
                 context,
@@ -8233,6 +8799,7 @@ fn evaluate_inspect_expression(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )?;
             let snapshot_envelope =
                 match decode_inspect_carrier(active, &snapshot, SYS_INSPECT_SNAPSHOT_TYPE_ID) {
@@ -8352,6 +8919,344 @@ fn evaluate_expression(
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
 ) -> Result<RuntimeValue, ClientExecutionError> {
+    let mut fuel = ClientExecutionFuel::new();
+    evaluate_expression_with_fuel(
+        active,
+        expression,
+        context,
+        lineage,
+        arguments,
+        declarations,
+        grants,
+        state,
+        depth,
+        principal,
+        executor,
+        local_environment,
+        &mut fuel,
+    )
+}
+
+fn validate_control_flow_plan_types(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    validate_control_flow_statements_types(active, plan, plan.statements(), context)
+}
+
+fn validate_control_flow_statements_types(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    statements: &[orna_artifact::client_plan::ControlFlowStatement],
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    for statement in statements {
+        match statement {
+            orna_artifact::client_plan::ControlFlowStatement::Let { expression, .. }
+            | orna_artifact::client_plan::ControlFlowStatement::Assignment { expression, .. } => {
+                validate_control_flow_expression_type(active, plan, expression, context)?;
+            }
+            orna_artifact::client_plan::ControlFlowStatement::Return(return_statement) => {
+                if let Some(expression) = return_statement.expression() {
+                    validate_control_flow_expression_type(active, plan, expression, context)?;
+                }
+            }
+            orna_artifact::client_plan::ControlFlowStatement::If(if_statement) => {
+                for branch in if_statement.branches() {
+                    if validate_control_flow_expression_type(
+                        active,
+                        plan,
+                        branch.condition(),
+                        context,
+                    )? != Some(StandardScalar::Boolean)
+                    {
+                        return Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        ));
+                    }
+                    validate_control_flow_statements_types(
+                        active,
+                        plan,
+                        branch.statements(),
+                        context,
+                    )?;
+                }
+                if let Some(statements) = if_statement.else_statements() {
+                    validate_control_flow_statements_types(active, plan, statements, context)?;
+                }
+            }
+            orna_artifact::client_plan::ControlFlowStatement::While(while_statement) => {
+                if validate_control_flow_expression_type(
+                    active,
+                    plan,
+                    while_statement.condition(),
+                    context,
+                )? != Some(StandardScalar::Boolean)
+                {
+                    return Err(expression_error(
+                        context,
+                        ClientExpressionError::TypeMismatch,
+                    ));
+                }
+                validate_control_flow_statements_types(
+                    active,
+                    plan,
+                    while_statement.statements(),
+                    context,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_control_flow_expression_type(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+) -> Result<Option<StandardScalar>, ClientExecutionError> {
+    let mismatch = || expression_error(context, ClientExpressionError::TypeMismatch);
+    match expression {
+        ClientExpressionNode::String { .. } => Ok(Some(StandardScalar::CharacterLargeObject)),
+        ClientExpressionNode::Integer { value } => {
+            i32::try_from(*value).map_err(|_| mismatch())?;
+            Ok(Some(StandardScalar::Integer))
+        }
+        ClientExpressionNode::Boolean { .. } => Ok(Some(StandardScalar::Boolean)),
+        ClientExpressionNode::ParameterRead { parameter } => {
+            Ok(resolve_client_function(active, context.function())
+                .and_then(|resolved| resolved.definition.parameter_by_id(*parameter))
+                .and_then(|parameter| {
+                    static_control_flow_scalar_for_type(active, parameter.resolved_type())
+                }))
+        }
+        ClientExpressionNode::LocalRead { local } => {
+            let Some(declaration) = plan
+                .locals()
+                .iter()
+                .find(|candidate| candidate.local() == *local)
+            else {
+                return Err(mismatch());
+            };
+            if declaration.kind() == ClientLocalKind::Value {
+                let Some(resolved) = resolve_client_local_type(active, declaration.type_id())
+                else {
+                    return Err(mismatch());
+                };
+                Ok(static_control_flow_scalar_for_type(active, resolved))
+            } else {
+                Ok(None)
+            }
+        }
+        ClientExpressionNode::FieldPath { root, fields } => {
+            let Some(mut resolved) = resolve_client_function(active, context.function())
+                .and_then(|function| function.definition.parameter_by_id(*root))
+                .map(|parameter| parameter.resolved_type())
+            else {
+                return Ok(None);
+            };
+            for field in fields {
+                let Some(target) = resolved.reference_target() else {
+                    return Ok(None);
+                };
+                let Some(definition) = active.catalogue().object_type_by_id(target).or_else(|| {
+                    active
+                        .catalogue_hash_context()
+                        .standard()
+                        .and_then(|standard| standard.catalogue().object_type_by_id(target))
+                }) else {
+                    return Ok(None);
+                };
+                let Some(field) = definition.field_by_id(*field) else {
+                    return Ok(None);
+                };
+                resolved = field.resolved_type();
+            }
+            Ok(static_control_flow_scalar_for_type(active, resolved))
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            let left = validate_control_flow_expression_type(active, plan, left, context)?;
+            let right = validate_control_flow_expression_type(active, plan, right, context)?;
+            if left != Some(StandardScalar::CharacterLargeObject)
+                || right != Some(StandardScalar::CharacterLargeObject)
+            {
+                return Err(mismatch());
+            }
+            Ok(Some(StandardScalar::CharacterLargeObject))
+        }
+        ClientExpressionNode::Unary {
+            operator,
+            expression,
+        } => {
+            let operand = validate_control_flow_expression_type(active, plan, expression, context)?;
+            let expected = match operator {
+                ControlFlowUnaryOperator::Plus | ControlFlowUnaryOperator::Minus => {
+                    StandardScalar::Integer
+                }
+                ControlFlowUnaryOperator::Not => StandardScalar::Boolean,
+            };
+            if operand != Some(expected) {
+                return Err(mismatch());
+            }
+            Ok(Some(expected))
+        }
+        ClientExpressionNode::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left = validate_control_flow_expression_type(active, plan, left, context)?;
+            let right = validate_control_flow_expression_type(active, plan, right, context)?;
+            match operator {
+                ControlFlowBinaryOperator::And | ControlFlowBinaryOperator::Or => {
+                    if left != Some(StandardScalar::Boolean)
+                        || right != Some(StandardScalar::Boolean)
+                    {
+                        return Err(mismatch());
+                    }
+                    Ok(Some(StandardScalar::Boolean))
+                }
+                ControlFlowBinaryOperator::Add
+                | ControlFlowBinaryOperator::Subtract
+                | ControlFlowBinaryOperator::Multiply
+                | ControlFlowBinaryOperator::Divide
+                | ControlFlowBinaryOperator::Modulo => {
+                    if left != Some(StandardScalar::Integer)
+                        || right != Some(StandardScalar::Integer)
+                    {
+                        return Err(mismatch());
+                    }
+                    Ok(Some(StandardScalar::Integer))
+                }
+                ControlFlowBinaryOperator::Equal
+                | ControlFlowBinaryOperator::NotEqual
+                | ControlFlowBinaryOperator::LessThan
+                | ControlFlowBinaryOperator::GreaterThan
+                | ControlFlowBinaryOperator::LessThanOrEqual
+                | ControlFlowBinaryOperator::GreaterThanOrEqual => {
+                    let supported = |scalar| {
+                        matches!(
+                            scalar,
+                            Some(
+                                StandardScalar::Integer
+                                    | StandardScalar::Boolean
+                                    | StandardScalar::CharacterLargeObject
+                            )
+                        )
+                    };
+                    if !supported(left) || left != right {
+                        return Err(mismatch());
+                    }
+                    Ok(Some(StandardScalar::Boolean))
+                }
+            }
+        }
+        ClientExpressionNode::Call {
+            function,
+            arguments,
+        } => {
+            for (_, argument) in arguments {
+                validate_control_flow_expression_type(active, plan, argument, context)?;
+            }
+            Ok(
+                resolve_client_function(active, *function).and_then(|resolved| {
+                    let FunctionReturn::Single(return_type) = resolved.definition.return_type()
+                    else {
+                        return None;
+                    };
+                    static_control_flow_scalar_for_type(active, *return_type)
+                }),
+            )
+        }
+        ClientExpressionNode::Await { expression } => {
+            validate_control_flow_expression_type(active, plan, expression, context)?;
+            let type_id = match expression.as_ref() {
+                ClientExpressionNode::Resource { operation } => operation.declared_result_type(),
+                ClientExpressionNode::LocalRead { local } => {
+                    let Some(declaration) = plan
+                        .locals()
+                        .iter()
+                        .find(|candidate| candidate.local() == *local)
+                    else {
+                        return Err(mismatch());
+                    };
+                    if !matches!(declaration.kind(), ClientLocalKind::Resource(_)) {
+                        return Err(mismatch());
+                    }
+                    declaration.type_id()
+                }
+                _ => return Err(mismatch()),
+            };
+            Ok(static_control_flow_scalar_for_type_id(active, type_id))
+        }
+        ClientExpressionNode::Resource { operation } => {
+            for (_, argument) in operation.arguments() {
+                validate_control_flow_expression_type(active, plan, argument, context)?;
+            }
+            Ok(None)
+        }
+        ClientExpressionNode::Action { operation } => {
+            for (_, argument) in operation.arguments() {
+                validate_control_flow_expression_type(active, plan, argument, context)?;
+            }
+            Ok(static_control_flow_scalar_for_type_id(
+                active,
+                operation.declared_result_type(),
+            ))
+        }
+        ClientExpressionNode::Inspect { operation } => {
+            if let Some(target) = operation.target() {
+                validate_control_flow_expression_type(active, plan, target, context)?;
+            }
+            if let Some(options) = operation.options() {
+                validate_control_flow_expression_type(active, plan, options, context)?;
+            }
+            if let Some(snapshot) = operation.snapshot_expression() {
+                validate_control_flow_expression_type(active, plan, snapshot, context)?;
+            }
+            Ok(None)
+        }
+        ClientExpressionNode::ExternalContract { .. } => Ok(None),
+    }
+}
+
+fn static_control_flow_scalar_for_type_id(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+) -> Option<StandardScalar> {
+    resolve_client_local_type(active, type_id)
+        .and_then(|resolved| static_control_flow_scalar_for_type(active, resolved))
+}
+
+fn static_control_flow_scalar_for_type(
+    active: &ActiveDatabaseRevision,
+    resolved: ResolvedType,
+) -> Option<StandardScalar> {
+    match ClientResourceValueKind::from_active(active, resolved) {
+        ClientResourceValueKind::Scalar(scalar) => Some(scalar),
+        _ => None,
+    }
+}
+
+fn evaluate_expression_with_fuel(
+    active: &ActiveDatabaseRevision,
+    expression: &ClientExpressionNode,
+    context: ClientExecutionContext,
+    lineage: ObserverLineage,
+    arguments: &[(ParameterId, RuntimeValue)],
+    declarations: &[capability::LocalCapabilityDeclaration],
+    grants: &capability::LocalCapabilityGrantSet,
+    state: &mut ClientStateStore,
+    depth: usize,
+    principal: PrincipalId,
+    executor: &mut Option<&mut dyn ClientResourceExecutor>,
+    local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    fuel.consume(context)?;
     match expression {
         ClientExpressionNode::Await { expression } => match expression.as_ref() {
             ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
@@ -8367,6 +9272,7 @@ fn evaluate_expression(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             ),
             ClientExpressionNode::LocalRead { local } => {
                 let Some(ClientLocalBinding::Resource(operation)) = local_environment.get(local)
@@ -8390,6 +9296,7 @@ fn evaluate_expression(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )
             }
             _ => Err(expression_error(
@@ -8410,6 +9317,7 @@ fn evaluate_expression(
             principal,
             executor,
             local_environment,
+            fuel,
         ),
         ClientExpressionNode::Action { operation } => evaluate_action_operation(
             active,
@@ -8424,6 +9332,7 @@ fn evaluate_expression(
             principal,
             executor,
             local_environment,
+            fuel,
         ),
         ClientExpressionNode::Inspect { operation } => evaluate_inspect_expression(
             active,
@@ -8438,6 +9347,7 @@ fn evaluate_expression(
             principal,
             executor,
             local_environment,
+            fuel,
         ),
         ClientExpressionNode::String { value } => Ok(RuntimeValue::Text(value.clone())),
         ClientExpressionNode::Integer { value } => i32::try_from(*value)
@@ -8473,7 +9383,7 @@ fn evaluate_expression(
             evaluate_field_path(active, value, fields, context, principal, state)
         }
         ClientExpressionNode::Concat { left, right } => {
-            let left = evaluate_expression(
+            let left = evaluate_expression_with_fuel(
                 active,
                 left,
                 context,
@@ -8486,8 +9396,9 @@ fn evaluate_expression(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )?;
-            let right = evaluate_expression(
+            let right = evaluate_expression_with_fuel(
                 active,
                 right,
                 context,
@@ -8500,6 +9411,7 @@ fn evaluate_expression(
                 principal,
                 executor,
                 local_environment,
+                fuel,
             )?;
             let (RuntimeValue::Text(left), RuntimeValue::Text(right)) = (left, right) else {
                 return Err(expression_error(
@@ -8508,6 +9420,187 @@ fn evaluate_expression(
                 ));
             };
             Ok(RuntimeValue::Text(format!("{left}{right}")))
+        }
+        ClientExpressionNode::Unary {
+            operator,
+            expression,
+        } => {
+            let value = evaluate_expression_with_fuel(
+                active,
+                expression,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            match (operator, value) {
+                (ControlFlowUnaryOperator::Plus, RuntimeValue::Integer(value)) => {
+                    Ok(RuntimeValue::Integer(value))
+                }
+                (ControlFlowUnaryOperator::Minus, RuntimeValue::Integer(value)) => value
+                    .checked_neg()
+                    .map(RuntimeValue::Integer)
+                    .ok_or_else(|| arithmetic_error(context)),
+                (ControlFlowUnaryOperator::Not, RuntimeValue::Boolean(value)) => {
+                    Ok(RuntimeValue::Boolean(!value))
+                }
+                _ => Err(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                )),
+            }
+        }
+        ClientExpressionNode::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let left = evaluate_expression_with_fuel(
+                active,
+                left,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            match operator {
+                ControlFlowBinaryOperator::And => {
+                    let RuntimeValue::Boolean(left) = left else {
+                        return Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        ));
+                    };
+                    if !left {
+                        return Ok(RuntimeValue::Boolean(false));
+                    }
+                    let right = evaluate_expression_with_fuel(
+                        active,
+                        right,
+                        context,
+                        lineage,
+                        arguments,
+                        declarations,
+                        grants,
+                        state,
+                        depth,
+                        principal,
+                        executor,
+                        local_environment,
+                        fuel,
+                    )?;
+                    return match right {
+                        RuntimeValue::Boolean(right) => Ok(RuntimeValue::Boolean(right)),
+                        _ => Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        )),
+                    };
+                }
+                ControlFlowBinaryOperator::Or => {
+                    let RuntimeValue::Boolean(left) = left else {
+                        return Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        ));
+                    };
+                    if left {
+                        return Ok(RuntimeValue::Boolean(true));
+                    }
+                    let right = evaluate_expression_with_fuel(
+                        active,
+                        right,
+                        context,
+                        lineage,
+                        arguments,
+                        declarations,
+                        grants,
+                        state,
+                        depth,
+                        principal,
+                        executor,
+                        local_environment,
+                        fuel,
+                    )?;
+                    return match right {
+                        RuntimeValue::Boolean(right) => Ok(RuntimeValue::Boolean(right)),
+                        _ => Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        )),
+                    };
+                }
+                _ => {}
+            }
+            let right = evaluate_expression_with_fuel(
+                active,
+                right,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            match operator {
+                ControlFlowBinaryOperator::Add
+                | ControlFlowBinaryOperator::Subtract
+                | ControlFlowBinaryOperator::Multiply
+                | ControlFlowBinaryOperator::Divide
+                | ControlFlowBinaryOperator::Modulo => {
+                    let (RuntimeValue::Integer(left), RuntimeValue::Integer(right)) = (left, right)
+                    else {
+                        return Err(expression_error(
+                            context,
+                            ClientExpressionError::TypeMismatch,
+                        ));
+                    };
+                    let left = i64::from(left);
+                    let right = i64::from(right);
+                    let result = match operator {
+                        ControlFlowBinaryOperator::Add => left.checked_add(right),
+                        ControlFlowBinaryOperator::Subtract => left.checked_sub(right),
+                        ControlFlowBinaryOperator::Multiply => left.checked_mul(right),
+                        ControlFlowBinaryOperator::Divide => left.checked_div(right),
+                        ControlFlowBinaryOperator::Modulo => left.checked_rem(right),
+                        _ => unreachable!(),
+                    }
+                    .ok_or_else(|| arithmetic_error(context))?;
+                    i32::try_from(result)
+                        .map(RuntimeValue::Integer)
+                        .map_err(|_| arithmetic_error(context))
+                }
+                ControlFlowBinaryOperator::Equal
+                | ControlFlowBinaryOperator::NotEqual
+                | ControlFlowBinaryOperator::LessThan
+                | ControlFlowBinaryOperator::GreaterThan
+                | ControlFlowBinaryOperator::LessThanOrEqual
+                | ControlFlowBinaryOperator::GreaterThanOrEqual => {
+                    compare_control_flow_values(*operator, &left, &right, context)
+                }
+                ControlFlowBinaryOperator::And | ControlFlowBinaryOperator::Or => {
+                    unreachable!("short-circuit operators return before right evaluation")
+                }
+            }
         }
         ClientExpressionNode::Call {
             function,
@@ -8536,7 +9629,7 @@ fn evaluate_expression(
                         ClientExpressionError::InvalidCall,
                     ));
                 }
-                let value = evaluate_expression(
+                let value = evaluate_expression_with_fuel(
                     active,
                     expression,
                     context,
@@ -8549,10 +9642,11 @@ fn evaluate_expression(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )?;
                 evaluated.push((*parameter, value));
             }
-            let (_, value) = evaluate_function(
+            let (_, value) = evaluate_function_with_fuel(
                 active,
                 *function,
                 evaluated,
@@ -8563,6 +9657,7 @@ fn evaluate_expression(
                 principal,
                 lineage.nested(),
                 executor,
+                fuel,
             )?;
             Ok(value)
         }
@@ -8583,6 +9678,47 @@ fn evaluate_expression(
             }
         }
     }
+}
+
+fn arithmetic_error(context: ClientExecutionContext) -> ClientExecutionError {
+    expression_error(context, ClientExpressionError::Arithmetic)
+}
+
+fn compare_control_flow_values(
+    operator: ControlFlowBinaryOperator,
+    left: &RuntimeValue,
+    right: &RuntimeValue,
+    context: ClientExecutionContext,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    let ordering = match (left, right) {
+        (RuntimeValue::Integer(left), RuntimeValue::Integer(right)) => left.cmp(right),
+        (RuntimeValue::Boolean(left), RuntimeValue::Boolean(right)) => left.cmp(right),
+        (RuntimeValue::Text(left), RuntimeValue::Text(right)) => left.cmp(right),
+        _ => {
+            return Err(expression_error(
+                context,
+                ClientExpressionError::TypeMismatch,
+            ));
+        }
+    };
+    let value = match operator {
+        ControlFlowBinaryOperator::Equal => ordering == std::cmp::Ordering::Equal,
+        ControlFlowBinaryOperator::NotEqual => ordering != std::cmp::Ordering::Equal,
+        ControlFlowBinaryOperator::LessThan => ordering == std::cmp::Ordering::Less,
+        ControlFlowBinaryOperator::GreaterThan => ordering == std::cmp::Ordering::Greater,
+        ControlFlowBinaryOperator::LessThanOrEqual => ordering != std::cmp::Ordering::Greater,
+        ControlFlowBinaryOperator::GreaterThanOrEqual => ordering != std::cmp::Ordering::Less,
+        ControlFlowBinaryOperator::Add
+        | ControlFlowBinaryOperator::Subtract
+        | ControlFlowBinaryOperator::Multiply
+        | ControlFlowBinaryOperator::Divide
+        | ControlFlowBinaryOperator::Modulo
+        | ControlFlowBinaryOperator::And
+        | ControlFlowBinaryOperator::Or => {
+            unreachable!("comparison helper received non-comparison")
+        }
+    };
+    Ok(RuntimeValue::Boolean(value))
 }
 
 fn evaluate_field_path(
@@ -8954,6 +10090,7 @@ fn initialize_client_state(
     principal: PrincipalId,
     executor: &mut Option<&mut dyn ClientResourceExecutor>,
     local_environment: &mut ClientLocalEnvironment,
+    fuel: &mut ClientExecutionFuel,
 ) -> Result<(), ClientExecutionError> {
     // Evaluate and type-check every missing default before committing any
     // staged value to the caller-owned LOCAL, SESSION, or USER maps.
@@ -9002,7 +10139,7 @@ fn initialize_client_state(
                 )
             })?,
             StateDefault::Expression(node) => {
-                let value = evaluate_expression(
+                let value = evaluate_expression_with_fuel(
                     active,
                     node,
                     context,
@@ -9015,6 +10152,7 @@ fn initialize_client_state(
                     principal,
                     executor,
                     local_environment,
+                    fuel,
                 )?;
                 if !runtime_value_matches(active, &value, resolved) {
                     return Err(state_error(
@@ -9179,6 +10317,8 @@ enum ClientReturnShape {
     StreamResource(ResolvedType),
     Procedural(ResolvedType),
     StreamProcedural(ResolvedType),
+    ControlFlow(ResolvedType),
+    StreamControlFlow(ResolvedType),
     Action(TypeId),
     Inspect(ResolvedType),
     OtherValue,
@@ -9198,6 +10338,7 @@ fn classify_client_return(
             | PROCEDURAL_FORMAT_VERSION
             | orna_artifact::client_plan::ACTION_FORMAT_VERSION
             | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+            | orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     );
     let stream_expression_eligible = artifact_version == EXPRESSION_FORMAT_VERSION;
     let expression_shape = |resolved_type: ResolvedType| {
@@ -9207,6 +10348,8 @@ fn classify_client_return(
             ClientReturnShape::Resource(resolved_type)
         } else if artifact_version == PROCEDURAL_FORMAT_VERSION {
             ClientReturnShape::Procedural(resolved_type)
+        } else if artifact_version == orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION {
+            ClientReturnShape::ControlFlow(resolved_type)
         } else if artifact_version == orna_artifact::client_plan::INSPECT_FORMAT_VERSION {
             ClientReturnShape::Inspect(resolved_type)
         } else {
@@ -9226,6 +10369,11 @@ fn classify_client_return(
         }
         FunctionReturn::Stream(resolved_type) if artifact_version == PROCEDURAL_FORMAT_VERSION => {
             return ClientReturnShape::StreamProcedural(*resolved_type);
+        }
+        FunctionReturn::Stream(resolved_type)
+            if artifact_version == orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION =>
+        {
+            return ClientReturnShape::StreamControlFlow(*resolved_type);
         }
         FunctionReturn::Rows(_) | FunctionReturn::Stream(_) => {
             return ClientReturnShape::Unsupported;
@@ -9317,6 +10465,7 @@ fn validate_function_shape(
             | PROCEDURAL_FORMAT_VERSION
             | orna_artifact::client_plan::ACTION_FORMAT_VERSION
             | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+            | orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     ) && !definition.parameters().is_empty()
     {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
@@ -9398,6 +10547,8 @@ fn validate_selected_references(
                     | ClientReturnShape::StreamResource(_)
                     | ClientReturnShape::Procedural(_)
                     | ClientReturnShape::StreamProcedural(_)
+                    | ClientReturnShape::ControlFlow(_)
+                    | ClientReturnShape::StreamControlFlow(_)
                     | ClientReturnShape::Action(_)
                     | ClientReturnShape::Inspect(_)
             ) {
@@ -9448,6 +10599,8 @@ fn validate_selected_references(
                             | ClientReturnShape::StreamResource(_)
                             | ClientReturnShape::Procedural(_)
                             | ClientReturnShape::StreamProcedural(_)
+                            | ClientReturnShape::ControlFlow(_)
+                            | ClientReturnShape::StreamControlFlow(_)
                             | ClientReturnShape::Inspect(_)
                             | ClientReturnShape::OtherValue
                             | ClientReturnShape::Unsupported => false,
@@ -9600,6 +10753,91 @@ fn preflight_client_procedural_calls(
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
+fn preflight_client_control_flow_calls(
+    active: &ActiveDatabaseRevision,
+    plan: &ControlFlowClientPlan,
+    context: ClientExecutionContext,
+) -> Result<(), ClientExecutionError> {
+    let mut decoded_targets = Vec::new();
+    collect_control_flow_block_call_targets(
+        active,
+        plan.statements(),
+        context,
+        &mut decoded_targets,
+    )?;
+    preflight_client_call_targets(active, context, decoded_targets)
+}
+
+fn collect_control_flow_block_call_targets(
+    active: &ActiveDatabaseRevision,
+    statements: &[ControlFlowStatement],
+    context: ClientExecutionContext,
+    decoded_targets: &mut Vec<FunctionId>,
+) -> Result<(), ClientExecutionError> {
+    for statement in statements {
+        match statement {
+            ControlFlowStatement::Let { expression, .. }
+            | ControlFlowStatement::Assignment { expression, .. } => {
+                collect_client_expression_call_targets(
+                    active,
+                    expression,
+                    context,
+                    decoded_targets,
+                )?;
+            }
+            ControlFlowStatement::Return(return_statement) => {
+                if let Some(expression) = return_statement.expression() {
+                    collect_client_expression_call_targets(
+                        active,
+                        expression,
+                        context,
+                        decoded_targets,
+                    )?;
+                }
+            }
+            ControlFlowStatement::If(if_statement) => {
+                for branch in if_statement.branches() {
+                    collect_client_expression_call_targets(
+                        active,
+                        branch.condition(),
+                        context,
+                        decoded_targets,
+                    )?;
+                    collect_control_flow_block_call_targets(
+                        active,
+                        branch.statements(),
+                        context,
+                        decoded_targets,
+                    )?;
+                }
+                if let Some(statements) = if_statement.else_statements() {
+                    collect_control_flow_block_call_targets(
+                        active,
+                        statements,
+                        context,
+                        decoded_targets,
+                    )?;
+                }
+            }
+            ControlFlowStatement::While(while_statement) => {
+                collect_client_expression_call_targets(
+                    active,
+                    while_statement.condition(),
+                    context,
+                    decoded_targets,
+                )?;
+                collect_control_flow_block_call_targets(
+                    active,
+                    while_statement.statements(),
+                    context,
+                    decoded_targets,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn preflight_client_action_calls(
     active: &ActiveDatabaseRevision,
     operation: &orna_artifact::client_plan::ActionOperationNode,
@@ -9630,6 +10868,9 @@ fn preflight_client_inner_plan_calls(
         }
         InnerClientPlan::Procedural(inner) => {
             preflight_client_procedural_calls(active, inner, context)
+        }
+        InnerClientPlan::ControlFlow(inner) => {
+            preflight_client_control_flow_calls(active, inner, context)
         }
         InnerClientPlan::Action(inner) => {
             preflight_client_action_calls(active, inner.operation(), context)
@@ -9836,9 +11077,13 @@ fn collect_client_expression_call_targets(
             }
             decoded_targets.push(*function);
         }
-        ClientExpressionNode::Concat { left, right } => {
+        ClientExpressionNode::Concat { left, right }
+        | ClientExpressionNode::Binary { left, right, .. } => {
             collect_client_expression_call_targets(active, left, context, decoded_targets)?;
             collect_client_expression_call_targets(active, right, context, decoded_targets)?;
+        }
+        ClientExpressionNode::Unary { expression, .. } => {
+            collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
@@ -9877,6 +11122,9 @@ fn validate_artifact(
         }
         ClientReturnShape::Procedural(_) | ClientReturnShape::StreamProcedural(_) => {
             PROCEDURAL_FORMAT_VERSION
+        }
+        ClientReturnShape::ControlFlow(_) | ClientReturnShape::StreamControlFlow(_) => {
+            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
         }
         ClientReturnShape::State(_) | ClientReturnShape::StreamState(_) => STATE_FORMAT_VERSION,
         ClientReturnShape::Resource(_) | ClientReturnShape::StreamResource(_) => {
@@ -9938,15 +11186,18 @@ fn invalid_function(
 mod tests {
     use super::{
         ACTION_FAILURE_CODE, ClientActionDescriptor, ClientActionError, ClientActionOutcome,
-        ClientActionState, ClientExecutionContext, ClientExternalContractRequest,
-        ClientReferenceLoader, ClientReferenceLoaderError, ClientReferenceLoaderFixture,
-        ClientReferenceObject, ClientResource, ClientResourceCompletion, ClientResourceExecutor,
-        ClientResourceKey, ClientResourceRequest, ClientResourceStatus, ClientStateStore,
+        ClientActionState, ClientExecutionContext, ClientExecutionError, ClientExpressionError,
+        ClientExternalContractRequest, ClientReferenceLoader, ClientReferenceLoaderError,
+        ClientReferenceLoaderFixture, ClientReferenceObject, ClientResource,
+        ClientResourceCompletion, ClientResourceExecutor, ClientResourceKey, ClientResourceRequest,
+        ClientResourceStatus, ClientStateStore, ControlFlowBinaryOperator,
         DeterministicClientResourceExecutor, ResourceKind, action_target_result_type, capability,
         complete_client_action, decode_action_payload, encode_action_payload,
         trigger_client_action,
     };
-    use orna_artifact::client_plan::{ActionTargetDomain, InspectProjection};
+    use orna_artifact::client_plan::{
+        ActionTargetDomain, ClientExpressionNode, ControlFlowClientPlan, InspectProjection,
+    };
     use std::{cell::Cell, collections::HashMap, rc::Rc, time::SystemTime};
 
     use orna_core::{
@@ -15599,6 +16850,7 @@ mod tests {
         let before = state.clone();
         let mut executor: Option<&mut dyn super::ClientResourceExecutor> = None;
         let mut local_environment = super::ClientLocalEnvironment::new();
+        let mut fuel = super::ClientExecutionFuel::new();
 
         let error = super::initialize_client_state(
             &active,
@@ -15613,6 +16865,7 @@ mod tests {
             PrincipalId::from_bytes([0x35; 16]),
             &mut executor,
             &mut local_environment,
+            &mut fuel,
         )
         .unwrap_err();
 
@@ -18873,6 +20126,86 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
   END;"#,
             "app.owner",
         );
+    }
+
+    #[test]
+    fn programmable_client_control_flow_executes_compiled_source() {
+        let prepared = prepared_client_source_v6(
+            r#"CREATE SCHEMA app;
+CREATE CLIENT FUNCTION app.counter() RETURNS INTEGER IS
+  LET total INTEGER := 0;
+  BEGIN
+    WHILE total < 5 LOOP
+      LET next INTEGER := total + 1;
+      total := next;
+    END LOOP;
+    IF total = 5 THEN
+      RETURN total;
+    ELSE
+      RETURN 0;
+    END IF;
+  END;"#,
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|candidate| candidate.name().to_string() == "app.counter")
+            .expect("the control-flow function is present")
+            .id();
+
+        let result = evaluate_client_function(&active, function)
+            .expect("the compiled control-flow function evaluates successfully");
+
+        assert_eq!(result.value(), &RuntimeValue::Integer(5));
+    }
+
+    #[test]
+    fn rejects_non_boolean_short_circuit_operands_before_execution() {
+        for (operator, left) in [
+            (ControlFlowBinaryOperator::And, false),
+            (ControlFlowBinaryOperator::Or, true),
+        ] {
+            let plan = ControlFlowClientPlan::new(
+                Vec::new(),
+                vec![orna_artifact::client_plan::ControlFlowStatement::return_(
+                    Some(ClientExpressionNode::Binary {
+                        operator,
+                        left: Box::new(ClientExpressionNode::Boolean { value: left }),
+                        right: Box::new(ClientExpressionNode::Binary {
+                            operator: ControlFlowBinaryOperator::And,
+                            left: Box::new(ClientExpressionNode::Call {
+                                function: FunctionId::from_bytes([6; 16]),
+                                arguments: Vec::new(),
+                            }),
+                            right: Box::new(ClientExpressionNode::Integer { value: 1 }),
+                        }),
+                    }),
+                )],
+            );
+            let payload = plan
+                .encode()
+                .expect("malformed Boolean plan encodes structurally");
+            let (active, function, pair, _) = version_two_active_with_artifact(
+                standard_v6(),
+                orna_standard::BOOLEAN_TYPE_ID,
+                DefinitionReferenceTarget::Function(FunctionId::from_bytes([6; 16])),
+                DefinitionReferenceKind::FunctionCall,
+                orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+                payload,
+            );
+            let error = evaluate_client_function(&active, function)
+                .expect_err("strict Boolean operands must be checked before short-circuiting");
+
+            assert!(matches!(
+                error,
+                ClientExecutionError::ExpressionEvaluation {
+                    context,
+                    source: ClientExpressionError::TypeMismatch,
+                } if context.pair() == pair && context.function() == function
+            ));
+        }
     }
 
     #[test]
@@ -22526,9 +23859,13 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 }
                 targets.push(*function);
             }
-            ClientExpressionNode::Concat { left, right } => {
+            ClientExpressionNode::Concat { left, right }
+            | ClientExpressionNode::Binary { left, right, .. } => {
                 collect_fixture_expression_call_targets(left, targets);
                 collect_fixture_expression_call_targets(right, targets);
+            }
+            ClientExpressionNode::Unary { expression, .. } => {
+                collect_fixture_expression_call_targets(expression, targets);
             }
             ClientExpressionNode::String { .. }
             | ClientExpressionNode::Integer { .. }
@@ -22577,6 +23914,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 }
                 targets.push(inner.operation().target_function());
             }
+            orna_artifact::client_plan::InnerClientPlan::ControlFlow(_) => {}
             orna_artifact::client_plan::InnerClientPlan::Resource(inner) => {
                 collect_fixture_expression_call_targets(inner.expression(), &mut targets);
             }

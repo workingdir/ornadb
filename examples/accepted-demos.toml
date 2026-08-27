@@ -23,6 +23,12 @@ source = "crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna
 description = "CLIENT local assignment and RETURN."
 
 [[demos]]
+name = "client-control-flow"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/client_control_flow_dogfood.orna"
+description = "A bounded console-style CLIENT counter with mutable state and control flow."
+
+[[demos]]
 name = "client-state"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_state_dogfood.orna"

@@ -1,0 +1,15 @@
+CREATE SCHEMA console_demo;
+
+CREATE CLIENT FUNCTION console_demo.bounded_counter() RETURNS INTEGER IS
+    LET total INTEGER := 0;
+BEGIN
+    WHILE total < 5 LOOP
+        total := total + 1;
+    END LOOP;
+
+    IF total = 5 THEN
+        RETURN total;
+    ELSE
+        RETURN 0;
+    END IF;
+END;

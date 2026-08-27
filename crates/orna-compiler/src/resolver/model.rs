@@ -3,9 +3,12 @@
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_artifact::{
-    client_plan::{ActionTargetDomain, ResourceKind},
+    client_plan::{
+        ActionTargetDomain, ControlFlowBinaryOperator, ControlFlowUnaryOperator, ResourceKind,
+    },
     server_parameter_echo::ServerParameterEchoError,
 };
+
 use orna_core::{
     CallSiteId, CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceUnitId, StandardLibraryRevisionId, StateSlotId, TypeBindingId, TypeId,
@@ -1025,6 +1028,95 @@ impl CheckedClientStatement {
     }
 }
 
+/// One checked conditional branch in a programmable CLIENT body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedClientControlFlowBranch {
+    /// The strict Boolean branch condition.
+    pub(crate) condition: CheckedClientExpression,
+    /// The statements executed when the condition is selected.
+    pub(crate) statements: Vec<CheckedClientControlFlowStatement>,
+    /// The exact source location of the complete branch.
+    pub(crate) location: SourceLocation,
+}
+
+impl CheckedClientControlFlowBranch {
+    /// Returns the checked branch condition.
+    pub(crate) fn condition(&self) -> &CheckedClientExpression {
+        &self.condition
+    }
+
+    /// Returns the checked branch statements in source order.
+    pub(crate) fn statements(&self) -> &[CheckedClientControlFlowStatement] {
+        &self.statements
+    }
+
+    /// Returns the complete source location of this branch.
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// One checked statement in a programmable CLIENT body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientControlFlowStatement {
+    /// Declares and initialises one local binding.
+    Let {
+        /// The local ordinal declared by this statement.
+        local: u32,
+        /// The checked initial expression.
+        expression: CheckedClientExpression,
+        /// The exact source location of the statement.
+        location: SourceLocation,
+    },
+    /// Replaces one existing local binding.
+    Assignment {
+        /// The local ordinal assigned by this statement.
+        local: u32,
+        /// The checked replacement expression.
+        expression: CheckedClientExpression,
+        /// The exact source location of the statement.
+        location: SourceLocation,
+    },
+    /// Exits the current CLIENT function.
+    Return {
+        /// The optional checked return expression.
+        expression: Option<CheckedClientExpression>,
+        /// The exact source location of the statement.
+        location: SourceLocation,
+    },
+    /// Selects the first true branch, or the optional ELSE branch.
+    If {
+        /// The ordered IF and ELSIF branches.
+        branches: Vec<CheckedClientControlFlowBranch>,
+        /// The optional ELSE body.
+        else_statements: Option<Vec<CheckedClientControlFlowStatement>>,
+        /// The exact source location of the statement.
+        location: SourceLocation,
+    },
+    /// Repeats its body while the strict Boolean condition is true.
+    While {
+        /// The loop condition.
+        condition: CheckedClientExpression,
+        /// The loop body in source order.
+        statements: Vec<CheckedClientControlFlowStatement>,
+        /// The exact source location of the statement.
+        location: SourceLocation,
+    },
+}
+
+impl CheckedClientControlFlowStatement {
+    /// Returns the complete source location of this statement.
+    pub(crate) fn location(&self) -> &SourceLocation {
+        match self {
+            Self::Let { location, .. }
+            | Self::Assignment { location, .. }
+            | Self::Return { location, .. }
+            | Self::If { location, .. }
+            | Self::While { location, .. } => location,
+        }
+    }
+}
+
 /// A checked CLIENT function body.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1049,6 +1141,14 @@ pub(crate) enum CheckedClientFunctionBody {
         statements: Vec<CheckedClientStatement>,
         /// The final checked return expression.
         return_expression: CheckedClientExpression,
+    },
+    /// A version-10 programmable CLIENT body with explicit control-flow
+    /// statements and ordered local declarations.
+    ControlFlow {
+        /// The local bindings in deterministic declaration order.
+        locals: Vec<CheckedClientLocal>,
+        /// The root statements in source order.
+        statements: Vec<CheckedClientControlFlowStatement>,
     },
     /// A closed CLIENT state block with ordered slot metadata and one return expression (ADR 0069).
     StateBlock {
@@ -1080,6 +1180,7 @@ impl CheckedClientFunctionBody {
             Self::BooleanLiteral { value, location } => Some((*value, location)),
             Self::Expression { .. }
             | Self::Procedural { .. }
+            | Self::ControlFlow { .. }
             | Self::StateBlock { .. }
             | Self::ExternalContract { .. } => None,
             #[cfg(test)]
@@ -1177,6 +1278,34 @@ pub(crate) enum CheckedClientExpression {
         /// The right operand.
         right: Box<CheckedClientExpression>,
         /// The source location of the complete expression.
+        location: SourceLocation,
+    },
+    /// A checked unary arithmetic or Boolean expression.
+    Unary {
+        /// The checked operator.
+        operator: ControlFlowUnaryOperator,
+        /// The checked operand.
+        expression: Box<CheckedClientExpression>,
+        /// The source location of the complete expression.
+        location: SourceLocation,
+    },
+    /// A checked arithmetic, comparison, or Boolean expression.
+    Binary {
+        /// The checked operator.
+        operator: ControlFlowBinaryOperator,
+        /// The checked left operand.
+        left: Box<CheckedClientExpression>,
+        /// The checked right operand.
+        right: Box<CheckedClientExpression>,
+        /// The source location of the complete expression.
+        location: SourceLocation,
+    },
+    /// A parenthesized expression retained for source diagnostics while
+    /// remaining semantically transparent.
+    Parenthesized {
+        /// The checked expression inside the parentheses.
+        expression: Box<CheckedClientExpression>,
+        /// The source location of the complete parenthesized expression.
         location: SourceLocation,
     },
 }
@@ -2172,6 +2301,10 @@ pub const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
 /// The fixed ADR 0058 `std/output.orna` source-unit identity: `...04`.
 pub const STD_OUTPUT_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
+/// The fixed ADR 0055 BOOLEAN value-type identity: `...01`.
+pub const STD_BOOLEAN_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]);
+
 /// The fixed ADR 0055 INTEGER value-type identity: `...02`.
 pub const STD_INTEGER_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);

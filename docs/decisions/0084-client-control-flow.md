@@ -17,8 +17,9 @@ ordered local identities, statement blocks, IF branches, WHILE bodies, and
 explicit RETURN statements. The decoder enforces depth, node, statement, body,
 operand, and encoded-size limits before the evaluator receives the plan.
 
-The new plan uses checked signed 64-bit arithmetic and strict BOOLEAN
-conditions. The evaluator receives a per-root fuel counter. Fuel exhaustion,
+The new plan uses checked signed 32-bit `INTEGER` arithmetic and strict
+BOOLEAN conditions. `BIGINT` remains outside CLIENT return and transport
+support. The evaluator receives a per-root fuel counter. Fuel exhaustion,
 invalid arithmetic, and invalid control flow map to stable redacted client
 errors. No database value or runtime offer can change the limit.
 

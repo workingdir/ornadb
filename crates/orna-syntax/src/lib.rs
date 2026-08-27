@@ -829,12 +829,13 @@ pub struct StateDeclaration {
     pub span: SourceSpan,
 }
 /// A closed state/procedural CLIENT block with declarations, procedural
-/// statements, and one return.
+/// statements, and an optional terminal return.
 ///
 /// The block body accepts `STATE` declarations or `LET` local bindings before
-/// `BEGIN`, zero or more procedural statements after `BEGIN`, and exactly one
-/// `RETURN` statement before `END`. Existing state blocks leave `locals` and
-/// `statements` empty.
+/// `BEGIN`, zero or more procedural statements after `BEGIN`, and an optional
+/// terminal `RETURN` statement before `END`. A simple legacy block keeps its
+/// terminal return in `return_expression`; nested and early returns remain in
+/// `statements`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientStateBlockBody {
     /// The state declarations in source order.
@@ -843,7 +844,10 @@ pub struct ClientStateBlockBody {
     pub locals: Vec<ClientLocalBinding>,
     /// The procedural statements after `BEGIN`, in source order.
     pub statements: Vec<ClientProceduralStatement>,
-    /// The parsed return expression when the statement names one.
+    /// The parsed terminal return expression, when the statement names one.
+    ///
+    /// A bare terminal `RETURN;` is represented by `None`, as is a block that
+    /// has no terminal return and relies on control-flow returns.
     pub return_expression: Option<ClientExpression>,
     /// The span from the `IS` keyword through the closing `END`.
     pub span: SourceSpan,
@@ -873,6 +877,12 @@ pub enum ClientProceduralStatement {
     Let(ClientLetStatement),
     /// An assignment to a local or state name.
     Assignment(ClientAssignmentStatement),
+    /// An early return from the enclosing CLIENT function.
+    Return(ClientReturnStatement),
+    /// A conditional statement with optional ELSIF and ELSE branches.
+    If(ClientIfStatement),
+    /// A condition-controlled loop.
+    While(ClientWhileStatement),
 }
 
 /// One procedural `LET` statement after `BEGIN`.
@@ -897,6 +907,288 @@ pub struct ClientAssignmentStatement {
     pub expression: ClientExpression,
     /// The span from the target through the terminating semicolon.
     pub span: SourceSpan,
+}
+
+/// One procedural `RETURN [expression];` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientReturnStatement {
+    /// The optional value returned by this statement.
+    pub expression: Option<ClientExpression>,
+    /// The span from `RETURN` through its terminating semicolon.
+    pub span: SourceSpan,
+}
+
+impl ClientReturnStatement {
+    /// Return the optional value expression.
+    #[must_use]
+    pub fn expression(&self) -> Option<&ClientExpression> {
+        self.expression.as_ref()
+    }
+
+    /// Return the complete source span of this statement.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// One conditional branch in a CLIENT `IF` statement.
+///
+/// The condition is always present for a `THEN` or `ELSIF` branch. The
+/// [`ClientIfStatement::else_statements`] collection represents the optional
+/// ELSE branch, so this struct does not need a sentinel condition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientIfBranch {
+    /// The branch condition.
+    pub condition: ClientExpression,
+    /// The statements executed when this branch is selected.
+    pub statements: Vec<ClientProceduralStatement>,
+    /// The span from `IF`/`ELSIF` through the branch body.
+    pub span: SourceSpan,
+}
+
+impl ClientIfBranch {
+    /// Return the branch condition.
+    #[must_use]
+    pub const fn condition(&self) -> &ClientExpression {
+        &self.condition
+    }
+
+    /// Return the branch statements in source order.
+    #[must_use]
+    pub fn statements(&self) -> &[ClientProceduralStatement] {
+        &self.statements
+    }
+
+    /// Return the complete source span of this branch.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// One procedural `IF expression THEN ...` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientIfStatement {
+    /// The condition of the initial `IF` branch.
+    pub condition: ClientExpression,
+    /// The statements in the initial `THEN` branch.
+    pub then_statements: Vec<ClientProceduralStatement>,
+    /// The subsequent `ELSIF` branches in source order.
+    pub elsif_branches: Vec<ClientIfBranch>,
+    /// The optional statements in the `ELSE` branch.
+    pub else_statements: Option<Vec<ClientProceduralStatement>>,
+    /// The span from `IF` through `END IF;`.
+    pub span: SourceSpan,
+}
+
+impl ClientIfStatement {
+    /// Return the initial `IF` condition.
+    #[must_use]
+    pub const fn condition(&self) -> &ClientExpression {
+        &self.condition
+    }
+
+    /// Return the initial `THEN` statements in source order.
+    #[must_use]
+    pub fn then_statements(&self) -> &[ClientProceduralStatement] {
+        &self.then_statements
+    }
+
+    /// Return the `ELSIF` branches in source order.
+    #[must_use]
+    pub fn elsif_branches(&self) -> &[ClientIfBranch] {
+        &self.elsif_branches
+    }
+
+    /// Return the optional `ELSE` statements in source order.
+    #[must_use]
+    pub fn else_statements(&self) -> Option<&[ClientProceduralStatement]> {
+        self.else_statements.as_deref()
+    }
+
+    /// Return the complete source span of this statement.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// One procedural `WHILE expression LOOP ...` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientWhileStatement {
+    /// The loop condition.
+    pub condition: ClientExpression,
+    /// The statements executed for each iteration.
+    pub body: Vec<ClientProceduralStatement>,
+    /// The span from `WHILE` through `END LOOP;`.
+    pub span: SourceSpan,
+}
+
+impl ClientWhileStatement {
+    /// Return the loop condition.
+    #[must_use]
+    pub const fn condition(&self) -> &ClientExpression {
+        &self.condition
+    }
+
+    /// Return the loop body in source order.
+    #[must_use]
+    pub fn body(&self) -> &[ClientProceduralStatement] {
+        &self.body
+    }
+
+    /// Return the complete source span of this statement.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// A unary operator in a typed CLIENT expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientUnaryOperator {
+    /// Numeric unary plus (`+expression`).
+    Plus,
+    /// Numeric negation (`-expression`).
+    Minus,
+    /// Boolean negation (`NOT expression`).
+    Not,
+}
+
+impl ClientUnaryOperator {
+    /// Return the canonical source spelling of this operator.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Not => "NOT",
+        }
+    }
+}
+
+/// A unary CLIENT expression with its exact source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientUnaryExpression {
+    /// The operator applied to the operand.
+    pub operator: ClientUnaryOperator,
+    /// The operand expression.
+    pub expression: Box<ClientExpression>,
+    /// The span from the operator through the operand.
+    pub span: SourceSpan,
+}
+
+impl ClientUnaryExpression {
+    /// Return the unary operator.
+    #[must_use]
+    pub const fn operator(&self) -> ClientUnaryOperator {
+        self.operator
+    }
+
+    /// Return the operand expression.
+    #[must_use]
+    pub const fn operand(&self) -> &ClientExpression {
+        &self.expression
+    }
+
+    /// Return the complete source span of this expression.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// A binary CLIENT expression with its exact source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientBinaryExpression {
+    /// The left operand.
+    pub left: Box<ClientExpression>,
+    /// The operator between the operands.
+    pub operator: ClientBinaryOperator,
+    /// The right operand.
+    pub right: Box<ClientExpression>,
+    /// The span from the left operand through the right operand.
+    pub span: SourceSpan,
+}
+
+impl ClientBinaryExpression {
+    /// Return the left operand.
+    #[must_use]
+    pub const fn left(&self) -> &ClientExpression {
+        &self.left
+    }
+
+    /// Return the binary operator.
+    #[must_use]
+    pub const fn operator(&self) -> ClientBinaryOperator {
+        self.operator
+    }
+
+    /// Return the right operand.
+    #[must_use]
+    pub const fn right(&self) -> &ClientExpression {
+        &self.right
+    }
+
+    /// Return the complete source span of this expression.
+    #[must_use]
+    pub const fn span(&self) -> &SourceSpan {
+        &self.span
+    }
+}
+
+/// A binary operator in a typed CLIENT expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientBinaryOperator {
+    /// Integer addition.
+    Add,
+    /// Integer subtraction.
+    Subtract,
+    /// Integer multiplication.
+    Multiply,
+    /// Integer division.
+    Divide,
+    /// Integer remainder.
+    Modulo,
+    /// Equality comparison.
+    Equal,
+    /// Inequality comparison.
+    NotEqual,
+    /// Less-than comparison.
+    LessThan,
+    /// Greater-than comparison.
+    GreaterThan,
+    /// Less-than-or-equal comparison.
+    LessThanOrEqual,
+    /// Greater-than-or-equal comparison.
+    GreaterThanOrEqual,
+    /// Short-circuit Boolean conjunction.
+    And,
+    /// Short-circuit Boolean disjunction.
+    Or,
+}
+
+impl ClientBinaryOperator {
+    /// Return the canonical source spelling of this operator.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Modulo => "%",
+            Self::Equal => "=",
+            Self::NotEqual => "!=",
+            Self::LessThan => "<",
+            Self::GreaterThan => ">",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThanOrEqual => ">=",
+            Self::And => "AND",
+            Self::Or => "OR",
+        }
+    }
 }
 
 /// One closed CLIENT expression in the ADR 0068 expression surface.
@@ -967,6 +1259,17 @@ pub enum ClientExpression {
         /// The span from the left expression through the right expression.
         span: SourceSpan,
     },
+    /// A unary arithmetic or Boolean expression.
+    Unary(ClientUnaryExpression),
+    /// A typed arithmetic, comparison, or Boolean expression.
+    Binary(ClientBinaryExpression),
+    /// A parenthesized expression retained for exact source spans.
+    Parenthesized {
+        /// The expression inside the parentheses.
+        expression: Box<ClientExpression>,
+        /// The span from `(` through `)`.
+        span: SourceSpan,
+    },
 }
 
 impl ClientExpression {
@@ -977,7 +1280,10 @@ impl ClientExpression {
             Self::Call { span, .. }
             | Self::FieldPath { span, .. }
             | Self::Await { span, .. }
-            | Self::Concat { span, .. } => span,
+            | Self::Concat { span, .. }
+            | Self::Parenthesized { span, .. } => span,
+            Self::Unary(unary) => &unary.span,
+            Self::Binary(binary) => &binary.span,
             Self::StringLiteral { source, .. }
             | Self::IntegerLiteral { source, .. }
             | Self::BooleanLiteral { source, .. } => &source.span,
@@ -6419,9 +6725,14 @@ mod tests {
                 "RETURN 2",
             ),
             (
+                "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS STATE count TEXT; BEGIN END;",
+                "CLIENT state blocks accept only a single RETURN statement",
+                "END",
+            ),
+            (
                 "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS BEGIN IF x THEN RETURN TRUE; END;",
-                "CLIENT blocks accept only a single RETURN statement",
-                "IF",
+                "expected keyword IF",
+                "END",
             ),
         ];
 
@@ -6441,6 +6752,43 @@ mod tests {
             let token = marker.split_whitespace().next().expect("marker token");
             assert_eq!(diagnostic.span.end, start + token.len(), "source: {source}");
         }
+    }
+
+    #[test]
+    fn accepts_multiple_no_state_returns_and_trivia_before_block_terminators() {
+        let source = "CREATE CLIENT FUNCTION examples.control() RETURNS INTEGER IS\n\
+            BEGIN\n\
+                IF TRUE THEN\n\
+                    RETURN 1;\n\
+                END -- conditional terminator\n\
+                IF -- keyword and semicolon trivia\n\
+                ;\n\
+                RETURN 2;\n\
+                RETURN 3;\n\
+            END;";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let ClientFunctionBody::StateBlock(block) = &parsed.client_functions()[0].body else {
+            panic!("expected a procedural body");
+        };
+        assert_eq!(block.statements.len(), 2);
+        assert!(matches!(
+            block.statements[0],
+            ClientProceduralStatement::If(_)
+        ));
+        assert!(matches!(
+            block.statements[1],
+            ClientProceduralStatement::Return(_)
+        ));
+        assert!(matches!(
+            block.return_expression,
+            Some(ClientExpression::IntegerLiteral { value: 3, .. })
+        ));
     }
 
     #[test]
