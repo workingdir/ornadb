@@ -67,3 +67,12 @@ BEGIN
         content => ui_constructor_showcase.tabs_child()
     );
 END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.input_window()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Input Constructor Showcase',
+        content => ui_constructor_showcase.text_input_leaf()
+    );
+END;
