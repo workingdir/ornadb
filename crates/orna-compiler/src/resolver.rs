@@ -1409,8 +1409,8 @@ fn reconcile_standard_window_executable(
         SourceOrigin::new(stored_unit.id(), start, end)
             .map_err(|_| StandardLibraryCheckError::SourceMismatch)
     };
-    let title_type_origin = source_origin(&declaration.parameters[0].type_specification.span())?;
-    let content_type_origin = source_origin(&declaration.parameters[1].type_specification.span())?;
+    let title_type_origin = source_origin(declaration.parameters[0].type_specification.span())?;
+    let content_type_origin = source_origin(declaration.parameters[1].type_specification.span())?;
     let result_type = match &declaration.return_type {
         FunctionReturnType::Single(result) => result,
         FunctionReturnType::Rows { .. } | FunctionReturnType::Stream { .. } => {
@@ -8761,9 +8761,7 @@ fn check_client_functions(
                         standard,
                         diagnostics,
                     )?
-                } else
-
-                if let Some((value, body_source)) = input.body.as_boolean_literal() {
+                } else if let Some((value, body_source)) = input.body.as_boolean_literal() {
                     if !input.capabilities.is_empty() {
                         diagnostics.push(diagnostic(
                             DiagnosticCode::CapabilityRequirement,
@@ -13324,7 +13322,7 @@ mod tests {
     use super::{CheckedClientExpression, CheckedClientFunctionBody, ClientResourceTypeParser};
     use std::{cell::Cell, error::Error};
 
-    use crate::relational::{ExpressionKind, NullOrder, SortDirection};
+    use crate::relational::ExpressionKind;
     use orna_artifact::server_mutation_plan::{
         MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
         RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
@@ -30056,7 +30054,7 @@ mod tests {
                     server_target_id,
                     QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
                     FunctionDomain::Server,
-                    vec![parameter(0x89, "p_value", 0, integer.clone())],
+                    vec![parameter(0x89, "p_value", 0, integer)],
                     FunctionReturn::Single(integer),
                     FunctionRevisionId::from_bytes([0x87; 16]),
                     FunctionSecurity::Invoker,
