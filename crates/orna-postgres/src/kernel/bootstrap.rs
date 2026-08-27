@@ -291,6 +291,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0044_standard_presenter_executable_formats.sql"),
         data_step: None,
     },
+    Migration {
+        version: 45,
+        name: "inspect snapshot observer context",
+        sql: include_str!("../../migrations/0045_inspect_snapshot_observer_context.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -1061,7 +1067,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            44
+            45
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -1107,6 +1113,7 @@ mod tests {
         assert_eq!(MIGRATIONS[41].version, 42);
         assert_eq!(MIGRATIONS[42].version, 43);
         assert_eq!(MIGRATIONS[43].version, 44);
+        assert_eq!(MIGRATIONS[44].version, 45);
         assert_eq!(MIGRATIONS[33].name, "resource request identity history");
         assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
         assert_eq!(MIGRATIONS[35].name, "sealed Inspector value types");
@@ -1133,6 +1140,7 @@ mod tests {
             MIGRATIONS[43].name,
             "standard table and CSV executable formats"
         );
+        assert_eq!(MIGRATIONS[44].name, "inspect snapshot observer context");
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
