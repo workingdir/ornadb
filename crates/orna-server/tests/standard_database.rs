@@ -133,10 +133,10 @@ use orna_standard::{
     STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     registered_opaque_codecs, retained_standard_library_snapshot,
     retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
-    retained_standard_library_v6_snapshot, retained_standard_library_v7_snapshot,
+    retained_standard_library_v6_snapshot, retained_standard_library_v9_snapshot,
     verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
     verify_standard_library_v3_snapshot, verify_standard_library_v6_snapshot,
-    verify_standard_library_v7_snapshot,
+    verify_standard_library_v9_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -479,7 +479,7 @@ macro_rules! standard_context_facts {
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()> {
     let expected =
-        retained_standard_library_v7_snapshot().and_then(verify_standard_library_v7_snapshot)?;
+        retained_standard_library_v9_snapshot().and_then(verify_standard_library_v9_snapshot)?;
     let expected_boolean_contract = expected
         .catalogue()
         .value_type_by_id(BOOLEAN_TYPE_ID)
@@ -495,7 +495,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()
             initial_context.0 == 2 && initial_context.1 == expected.revision().to_bytes()
                 && initial_context.2 == expected.catalogue().revision().to_bytes()
                 && initial_context.3 == expected.digest().to_bytes(),
-            "opening a fresh database did not select the exact accepted V7 standard context",
+            "opening a fresh database did not select the exact accepted V9 standard context",
         )?;
         let initial_pair = initial.pair();
         let initial_pointer = active_pointer(&database).await?;
@@ -513,7 +513,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()
         require(
             reopened_active.pair() == initial_pair
                 && standard_context_facts!(&reopened_active) == initial_context,
-            "reopening an installed V7 database changed its active pair or accepted context",
+            "reopening an installed V9 database changed its active pair or accepted context",
         )?;
 
         let mut reconnect_config = database.config()?;
@@ -523,7 +523,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()
         require(
             reconnected_active.pair() == initial_pair
                 && standard_context_facts!(&reconnected_active) == initial_context,
-            "reconnecting to an installed V7 database changed its active pair or accepted context",
+            "reconnecting to an installed V9 database changed its active pair or accepted context",
         )?;
 
         let tampered_contract = format!("{expected_boolean_contract}.tampered");
