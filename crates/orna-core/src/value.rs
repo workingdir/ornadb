@@ -1761,6 +1761,8 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
     if declared != actual {
         return Err(());
     }
+    let type_identity = &bytes[5..21];
+    let has_type_identity = type_identity.iter().any(|byte| *byte != 0);
     let payload = &bytes[HEADER..];
     match tag {
         0x00 | 0x01 | 0x09 => payload.is_empty().then_some(()).ok_or(()),
@@ -1769,7 +1771,11 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
             .ok_or(()),
         0x03 => (payload.len() == 4).then_some(()).ok_or(()),
         0x04 | 0x05 => (payload.len() == 8).then_some(()).ok_or(()),
-        0x06 | 0x07 | 0x0a | 0x0c => Ok(()),
+        0x06 | 0x0a => (has_type_identity && std::str::from_utf8(payload).is_ok())
+            .then_some(())
+            .ok_or(()),
+        0x07 => has_type_identity.then_some(()).ok_or(()),
+        0x0c => Err(()),
         0x08 => (payload.len() == 16).then_some(()).ok_or(()),
         0x0b => validate_rows_record_payload(payload, depth),
         0x0d => validate_rows_constructed_payload(
@@ -9200,5 +9206,76 @@ mod tests {
                 opaque_type: ROWS_TYPE,
             })
         );
+    }
+
+    #[test]
+    fn rows_opaque_registration_rejects_malformed_variable_orv5_cells() {
+        const ROWS_TYPE: TypeId = TypeId::from_bytes([0x8a; 16]);
+        let standard = verified_standard_with_value_types_and_schemas(
+            vec![
+                standard_boolean_definition(),
+                opaque_definition(ROWS_TYPE, ["std", "data", "rows"], "orna.std.value.rows@1"),
+            ],
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x8b; 16]),
+                QualifiedSemanticName::new(["std", "data"]).unwrap(),
+            )],
+        );
+        let active = active_record_revision_with_standard(RECORD_TYPE, standard);
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registration = OpaqueCodecRegistration::rows(
+            ROWS_TYPE,
+            QualifiedSemanticName::new(["std", "data", "rows"]).unwrap(),
+            "orna.std.value.rows@1",
+            "ORNA-ROWS/1 ",
+        )
+        .unwrap();
+        let registry = OpaqueCodecRegistry::new(standard, [registration]).unwrap();
+
+        let rows_frame = |cell: &[u8]| {
+            let mut payload = b"ORNA-ROWS/1 ".to_vec();
+            payload.extend_from_slice(&1_u16.to_be_bytes());
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(b"x");
+            payload.push(0x01);
+            payload.extend_from_slice(&[0; 15]);
+            payload.push(0x01);
+            payload.push(0);
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(&u32::try_from(cell.len()).unwrap().to_be_bytes());
+            payload.extend_from_slice(cell);
+            payload
+        };
+        let orv5 = |tag: u8, type_id: [u8; 16], payload: &[u8]| {
+            let mut cell = b"ORV5".to_vec();
+            cell.push(tag);
+            cell.extend_from_slice(&type_id);
+            cell.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+            cell.extend_from_slice(payload);
+            cell
+        };
+
+        for cell in [
+            orv5(0x06, [0x01; 16], &[0xff]),
+            orv5(0x0a, [0x02; 16], &[0xff]),
+            orv5(0x06, [0; 16], b"text"),
+            orv5(0x07, [0; 16], &[0xde, 0xad]),
+            orv5(0x0c, [0x03; 16], &[0xde, 0xad]),
+        ] {
+            assert_eq!(
+                OpaqueValue::new(&active, &registry, ROWS_TYPE, rows_frame(&cell)),
+                Err(OpaqueValueError::InvalidRowsFrame {
+                    opaque_type: ROWS_TYPE,
+                })
+            );
+        }
+
+        let bytes = orv5(0x07, [0x04; 16], &[0xde, 0xad, 0xbe, 0xef]);
+        let payload = rows_frame(&bytes);
+        let value = OpaqueValue::new(&active, &registry, ROWS_TYPE, payload.clone())
+            .expect("bounded arbitrary BYTES cells are structurally valid");
+        assert_eq!(value.canonical_payload(), payload);
     }
 }
