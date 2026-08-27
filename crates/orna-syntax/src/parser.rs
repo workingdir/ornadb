@@ -980,15 +980,16 @@ impl<'source> Parser<'source> {
         let token = self.current()?;
         let next = self.tokens.get(self.index + 1);
         let adjacent_next = next.is_some_and(|next| next.range.start == token.range.end);
-        let result = if token.is_word("OR") {
+        if token.is_word("OR") {
             Some((ClientBinaryOperator::Or, 1, 1))
         } else if token.is_word("AND") {
             Some((ClientBinaryOperator::And, 2, 1))
         } else if token.text == "=" {
             Some((ClientBinaryOperator::Equal, 3, 1))
-        } else if token.text == "!" && adjacent_next && next.is_some_and(|next| next.text == "=") {
-            Some((ClientBinaryOperator::NotEqual, 3, 2))
-        } else if token.text == "<" && adjacent_next && next.is_some_and(|next| next.text == ">") {
+        } else if adjacent_next
+            && ((token.text == "!" && next.is_some_and(|next| next.text == "="))
+                || (token.text == "<" && next.is_some_and(|next| next.text == ">")))
+        {
             Some((ClientBinaryOperator::NotEqual, 3, 2))
         } else if token.text == "<" && adjacent_next && next.is_some_and(|next| next.text == "=") {
             Some((ClientBinaryOperator::LessThanOrEqual, 3, 2))
@@ -1010,8 +1011,7 @@ impl<'source> Parser<'source> {
             Some((ClientBinaryOperator::Modulo, 6, 1))
         } else {
             None
-        };
-        result
+        }
     }
 
     fn consume_client_binary_operator(&mut self, width: usize) {
