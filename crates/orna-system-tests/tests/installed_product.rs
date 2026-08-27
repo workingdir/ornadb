@@ -11786,3 +11786,86 @@ fn installed_raw_reference_value_update_binds_by_identity_across_replay_and_rest
         "unselected anchor must remain readable with its exact stored value"
     );
 }
+
+/// Prove the installed public source-check/apply/grant/invoke journey for one
+/// parameterised scalar SERVER function.
+///
+/// The checked-in fixture is applied through `/usr/bin/orna`, the exact
+/// canonical function identity returned by apply is granted, and the function
+/// is invoked by qualified name with a named INTEGER argument. Explicit JSON
+/// output and `--no-progress` keep the streams deterministic: stdout must be
+/// exactly the JSON scalar and stderr must remain empty.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_scalar_server_invoke_returns_named_integer_as_json() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("scalar_server_dogfood.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in scalar SERVER fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    assert_eq!(
+        document.functions.len(),
+        1,
+        "source apply must report exactly the scalar SERVER function"
+    );
+    let function_id = document
+        .function_id(&["scalar_server_dogfood", "echo"])
+        .expect("source apply must report scalar_server_dogfood.echo")
+        .to_owned();
+    assert_canonical_identity(
+        &function_id,
+        "function:",
+        "scalar_server_dogfood.echo function identity",
+    )
+    .expect("source apply must return a canonical function identity");
+    let parameter_id = document
+        .parameter_id(&["scalar_server_dogfood", "echo"], "p_value")
+        .expect("source apply must report the p_value parameter");
+    assert_canonical_identity(parameter_id, "parameter:", "scalar_server_dogfood.echo.p_value")
+        .expect("source apply must return a canonical parameter identity");
+
+    let granted = machine
+        .run_as_orna(&["security", "grant-execute", function_id.as_str()])
+        .expect("run installed grant command");
+    require_silent_success("orna security grant-execute", granted)
+        .expect("grant must succeed silently");
+
+    let invoked = machine
+        .run_as_orna(&[
+            "invoke",
+            "scalar_server_dogfood.echo",
+            "--arg",
+            "p_value=41",
+            "--output",
+            "json",
+            "--no-progress",
+        ])
+        .expect("run installed scalar SERVER invoke");
+    let invoked =
+        require_success("orna invoke scalar_server_dogfood.echo", invoked)
+            .expect("scalar SERVER invoke must succeed");
+    assert_eq!(
+        invoked.stdout, b"41",
+        "JSON output must be exactly the invoked INTEGER scalar"
+    );
+    assert!(
+        invoked.stderr.is_empty(),
+        "no-progress JSON invoke must keep standard error empty"
+    );
+}
