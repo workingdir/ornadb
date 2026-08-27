@@ -5,6 +5,7 @@ use std::{
     io::{self, Read, Write},
     mem,
     os::unix::{
+        ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt},
         io::{AsRawFd, FromRawFd},
         net::UnixStream,
@@ -23,8 +24,7 @@ use orna_protocol::{
     RawCallClientResponse, decode_value, encode_client_frame, encode_value,
 };
 
-const RUNTIME_ROOT: &str = "/run/orna/default";
-const SOCKET_PATH: &str = "/run/orna/default/orna.sock";
+const SOCKET_FILENAME: &str = "orna.sock";
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
@@ -357,8 +357,10 @@ fn run_local_raw_call_after_input(
 }
 
 fn require_fixed_socket() -> Result<(), LocalRawCallError> {
-    let runtime = fs::symlink_metadata(RUNTIME_ROOT).map_err(|_| LocalRawCallError::Connection)?;
-    let socket = fs::symlink_metadata(SOCKET_PATH).map_err(|_| LocalRawCallError::Connection)?;
+    let runtime_root = crate::embedded::active_runtime_root();
+    let runtime = fs::symlink_metadata(&runtime_root).map_err(|_| LocalRawCallError::Connection)?;
+    let socket = fs::symlink_metadata(runtime_root.join(SOCKET_FILENAME))
+        .map_err(|_| LocalRawCallError::Connection)?;
     if !runtime.file_type().is_dir() || !socket.file_type().is_socket() || socket.nlink() != 1 {
         return Err(LocalRawCallError::Connection);
     }
@@ -382,7 +384,8 @@ fn connect_interruptibly() -> Result<UnixStream, LocalRawCallError> {
     // SAFETY: an all-zero Unix address is valid before its family and path are filled.
     let mut address: nix::libc::sockaddr_un = unsafe { mem::zeroed() };
     address.sun_family = nix::libc::AF_UNIX as nix::libc::sa_family_t;
-    let path = SOCKET_PATH.as_bytes();
+    let socket_path = crate::embedded::active_runtime_root().join(SOCKET_FILENAME);
+    let path = socket_path.as_os_str().as_bytes();
     if path.len() >= address.sun_path.len() {
         return Err(LocalRawCallError::Connection);
     }
@@ -1004,8 +1007,7 @@ fn protocol_value_failure(_: orna_protocol::ValueCodecError) -> LocalRawCallErro
 #[cfg(test)]
 mod tests {
     use std::{
-        error::Error as _, fs::File, io::Cursor, os::unix::net::UnixStream, path::Path,
-        sync::Mutex, thread,
+        error::Error as _, fs::File, io::Cursor, os::unix::net::UnixStream, sync::Mutex, thread,
     };
 
     use orna_core::{ParameterId, value::RuntimeValue};
@@ -1829,7 +1831,7 @@ mod tests {
 
     #[test]
     fn fixed_socket_metadata_rejects_absent_authority() {
-        if !Path::new(RUNTIME_ROOT).exists() {
+        if !crate::embedded::active_runtime_root().exists() {
             assert!(matches!(
                 require_fixed_socket(),
                 Err(LocalRawCallError::Connection)

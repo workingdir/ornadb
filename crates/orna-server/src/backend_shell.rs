@@ -81,6 +81,7 @@ fn map_host_error(error: EmbeddedHostError) -> BackendShellError {
         EmbeddedHostError::InvalidPackageState => BackendShellError::PackageIncomplete,
         EmbeddedHostError::Engine(_)
         | EmbeddedHostError::InvalidEngineManifest
+        | EmbeddedHostError::MissingDistributionManifest
         | EmbeddedHostError::InvalidDistributionManifest => BackendShellError::EngineInvalid,
         EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
             BackendShellError::InstanceNotInstalled

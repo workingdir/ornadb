@@ -423,6 +423,7 @@ fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
         }
         EmbeddedHostError::Engine(_)
         | EmbeddedHostError::InvalidEngineManifest
+        | EmbeddedHostError::MissingDistributionManifest
         | EmbeddedHostError::InvalidDistributionManifest => {
             InstalledSourceApplyHostFailure::EngineInvalid
         }
