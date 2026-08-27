@@ -2229,6 +2229,19 @@ pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0019 `orna.std/7` standard-library revision identity.
 pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
+/// The fixed Work ADR 0087 `orna.std/8` standard-library revision identity.
+pub const STANDARD_LIBRARY_V8_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
+/// The fixed Work ADR 0087 `std/data.orna` source-unit identity: `...09`.
+pub const STD_DATA_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
+/// The deterministic `std.rows` qualified type-binding identity (derived by
+/// `TypeBinding::qualified` from the normalised unquoted source spelling
+/// `std.Rows`).
+pub const STD_DATA_ROWS_TYPE_BINDING_ID: TypeBindingId = TypeBindingId::from_bytes([
+    0x04, 0xe2, 0x43, 0x98, 0x0b, 0x43, 0xc2, 0xaa, 0xa0, 0x0e, 0x0e, 0x79, 0xc4, 0xce, 0xea,
+    0x10,
+]);
 /// The fixed ADR 0019 `std/window.orna` source-unit identity: `...08`.
 pub const STD_WINDOW_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
