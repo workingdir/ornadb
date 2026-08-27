@@ -774,11 +774,7 @@ fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
     );
 }
 
-fn read_case_diagnostics(
-    client: &mut Client,
-    case_name: &str,
-    path: &Path,
-) -> Value {
+fn read_case_diagnostics(client: &mut Client, case_name: &str, path: &Path) -> Value {
     let message = client.read_message();
     assert_eq!(
         message["method"],
@@ -872,14 +868,8 @@ fn assert_case_diagnostic_ranges(
             diagnostic_index,
             "range start",
         );
-        let end_byte = case_position_byte_offset(
-            source,
-            end,
-            case_name,
-            path,
-            diagnostic_index,
-            "range end",
-        );
+        let end_byte =
+            case_position_byte_offset(source, end, case_name, path, diagnostic_index, "range end");
         assert!(
             start_byte <= end_byte,
             "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} has a reversed UTF-16 range {start:?}..{end:?}",
