@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact formats, versions 1 through 9.
+//! Canonical `orna.client-plan` artefact formats, versions 1 through 10.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -52,14 +52,15 @@
 //! shape, the depth cap, the node-count cap, and per-node limits, so an
 //! untrusted artefact cannot exhaust the evaluator.
 //!
-//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6, version 7, version 8, or version 9
+//! Version 5 (work ADR 0060) wraps one complete version 1-4, version 6,
+//! version 7, version 8, version 9, or version 10 plan
 //! with the owning function's ordered, closed capability requirements:
 //!
 //! ```text
 //! magic[8] = ORNACP\0\0
 //! version: u32 big-endian = 5
 //! operation: u8 = 5
-//! inner plan version: u32 big-endian = 1|2|3|4|6|7|8
+//! inner plan version: u32 big-endian = 1|2|3|4|6|7|8|9|10
 //! inner payload length: u32 big-endian
 //! inner payload: complete inner client-plan artefact bytes
 //! capability count: u32 big-endian, 1..=MAX_CAPABILITY_REQUIREMENTS
@@ -131,6 +132,45 @@
 //! snapshot-options payload decoder. Version 3 remains the format for trees
 //! without Inspector nodes, and rejects the sealed node tag.
 //!
+//! Version 10 (work ADR 0084) carries a bounded programmable CLIENT block:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 10
+//! operation: u8 = 10
+//! local count: u32 big-endian, 0..=MAX_CONTROL_FLOW_LOCALS
+//! local: LocalId[16] TypeId[16] kind: u8 (0 value, 1 scalar resource,
+//!       2 stream resource)
+//! block:
+//!   statement count: u32 big-endian, 0..=MAX_CONTROL_FLOW_STATEMENTS
+//!   statement:
+//!     tag u8 = 1 LET, 2 ASSIGNMENT, 3 RETURN, 4 IF, 5 WHILE
+//!     LET/ASSIGNMENT: LocalId[16] expression node
+//!     RETURN: expression marker u8 = 0 (none) or 1, then expression node
+//!     IF: branch count u32, 1..=MAX_CONTROL_FLOW_BRANCHES; each branch is
+//!         condition expression node followed by a block; then else marker
+//!         u8 = 0 (none) or 1 followed by a block
+//!     WHILE: condition expression node followed by a block
+//! ```
+//!
+//! Version-10 expression nodes retain the closed leaves, calls, resource,
+//! action, Inspector, and local-read nodes above. They append unary and binary
+//! nodes after the legacy node tags: unary is tag 14 followed by operator tag
+//! 1 `PLUS`, 2 `MINUS`, or 3 `NOT`, then one operand; binary is tag 15 followed
+//! by operator tag 1 `ADD`, 2 `SUBTRACT`, 3 `MULTIPLY`, 4 `DIVIDE`, 5
+//! `MODULO`, 6 `EQUAL`, 7 `NOT_EQUAL`, 8 `LESS_THAN`, 9 `GREATER_THAN`, 10
+//! `LESS_THAN_OR_EQUAL`, 11 `GREATER_THAN_OR_EQUAL`, 12 `AND`, or 13 `OR`,
+//! then the left and right operands. All lengths and recursive values are
+//! bounded before allocation. Versions 1 through 9 retain their exact node
+//! sets and reject tags 14 and 15 as unknown nodes.
+//!
+//! A version-10 block is a sequence, not an implicit final expression:
+//! `RETURN` carries an optional expression and exits the current function.
+//! Blocks and branch bodies preserve source order. The version-10 decoder
+//! requires canonical local identities, validates local references, rejects
+//! malformed tags, enforces block/branch/depth/node/size limits, and requires
+//! the input to end immediately after the root block.
+//!
 //! The version 1-4 formats contain no source text, source locations, Orna
 //! names, or backend values.
 
@@ -181,6 +221,22 @@ pub const PROCEDURAL_FORMAT_VERSION: u32 = 7;
 pub const ACTION_FORMAT_VERSION: u32 = 8;
 /// The client-plan version that carries closed Inspector expression nodes.
 pub const INSPECT_FORMAT_VERSION: u32 = 9;
+/// The client-plan version that carries bounded programmable CLIENT control
+/// flow and explicit return statements (work ADR 0084).
+pub const CONTROL_FLOW_FORMAT_VERSION: u32 = 10;
+/// Alias for [`CONTROL_FLOW_FORMAT_VERSION`] used by programmable CLIENT
+/// callers.
+pub const PROGRAMMABLE_FORMAT_VERSION: u32 = CONTROL_FLOW_FORMAT_VERSION;
+/// The maximum number of ordered local declarations in a version-10 plan.
+pub const MAX_CONTROL_FLOW_LOCALS: usize = 64;
+/// The maximum number of statements directly contained by one version-10
+/// block.
+pub const MAX_CONTROL_FLOW_STATEMENTS: usize = 256;
+/// The maximum number of IF/ELSIF branches in one version-10 IF statement.
+pub const MAX_CONTROL_FLOW_BRANCHES: usize = 64;
+/// The maximum nested block depth in a version-10 plan.
+pub const MAX_CONTROL_FLOW_BLOCK_DEPTH: usize = MAX_EXPRESSION_DEPTH;
+
 /// The maximum number of resource operation nodes in one resource plan.
 pub const MAX_RESOURCE_OPERATIONS: usize = 64;
 /// The maximum number of arguments in one resource operation.
@@ -206,6 +262,8 @@ const RETURN_CAPABILITY_OPERATION: u8 = 5;
 const RETURN_RESOURCE_OPERATION: u8 = 6;
 const RETURN_PROCEDURAL_OPERATION: u8 = 7;
 const RETURN_ACTION_OPERATION: u8 = 8;
+const RETURN_CONTROL_FLOW_OPERATION: u8 = 10;
+
 const RETURN_INSPECT_OPERATION: u8 = 9;
 const CAPABILITY_ARGUMENT_TEXT: u8 = 1;
 const CAPABILITY_ARGUMENT_PARAMETER: u8 = 2;
@@ -231,8 +289,21 @@ const NODE_EXTERNAL_CONTRACT: u8 = 8;
 const NODE_LOCAL_READ: u8 = 11;
 const NODE_ACTION: u8 = 12;
 const NODE_INSPECT: u8 = 13;
+const NODE_UNARY: u8 = 14;
+const NODE_BINARY: u8 = 15;
+
 const INSPECT_OPERATION_SNAPSHOT: u8 = 1;
 const INSPECT_OPERATION_PROJECTION: u8 = 2;
+
+const CONTROL_FLOW_STATEMENT_LET: u8 = 1;
+const CONTROL_FLOW_STATEMENT_ASSIGNMENT: u8 = 2;
+const CONTROL_FLOW_STATEMENT_RETURN: u8 = 3;
+const CONTROL_FLOW_STATEMENT_IF: u8 = 4;
+const CONTROL_FLOW_STATEMENT_WHILE: u8 = 5;
+const CONTROL_FLOW_RETURN_NONE: u8 = 0;
+const CONTROL_FLOW_RETURN_EXPRESSION: u8 = 1;
+const CONTROL_FLOW_ELSE_NONE: u8 = 0;
+const CONTROL_FLOW_ELSE_BODY: u8 = 1;
 
 const PROCEDURAL_STATEMENT_LET: u8 = 1;
 const PROCEDURAL_STATEMENT_ASSIGNMENT: u8 = 2;
@@ -508,6 +579,121 @@ impl InspectOperationNode {
     }
 }
 
+/// One unary operator in the version-10 programmable CLIENT expression
+/// language. `Plus` and `Minus` operate on checked signed `INTEGER` values;
+/// `Not` operates on a strict `BOOLEAN` value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlFlowUnaryOperator {
+    /// Unary plus; leaves an INTEGER operand unchanged.
+    Plus,
+    /// Checked unary negation of an INTEGER operand.
+    Minus,
+    /// Boolean negation of a BOOLEAN operand.
+    Not,
+}
+
+impl ControlFlowUnaryOperator {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Plus => 1,
+            Self::Minus => 2,
+            Self::Not => 3,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, ClientPlanError> {
+        match tag {
+            1 => Ok(Self::Plus),
+            2 => Ok(Self::Minus),
+            3 => Ok(Self::Not),
+            tag => Err(ClientPlanError::InvalidControlFlowUnaryOperator(tag)),
+        }
+    }
+
+    /// Returns the canonical wire tag for this operator.
+    pub const fn wire_tag(self) -> u8 {
+        self.tag()
+    }
+}
+
+/// One binary operator in the version-10 programmable CLIENT expression
+/// language. Arithmetic is checked signed `INTEGER`; Boolean operators are
+/// strict and short-circuit; comparisons require two values of one supported
+/// scalar type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlFlowBinaryOperator {
+    /// Checked INTEGER addition.
+    Add,
+    /// Checked INTEGER subtraction.
+    Subtract,
+    /// Checked INTEGER multiplication.
+    Multiply,
+    /// Checked INTEGER division.
+    Divide,
+    /// Checked INTEGER remainder.
+    Modulo,
+    /// Equality comparison.
+    Equal,
+    /// Inequality comparison.
+    NotEqual,
+    /// Less-than comparison.
+    LessThan,
+    /// Greater-than comparison.
+    GreaterThan,
+    /// Less-than-or-equal comparison.
+    LessThanOrEqual,
+    /// Greater-than-or-equal comparison.
+    GreaterThanOrEqual,
+    /// Short-circuit Boolean conjunction.
+    And,
+    /// Short-circuit Boolean disjunction.
+    Or,
+}
+
+impl ControlFlowBinaryOperator {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Add => 1,
+            Self::Subtract => 2,
+            Self::Multiply => 3,
+            Self::Divide => 4,
+            Self::Modulo => 5,
+            Self::Equal => 6,
+            Self::NotEqual => 7,
+            Self::LessThan => 8,
+            Self::GreaterThan => 9,
+            Self::LessThanOrEqual => 10,
+            Self::GreaterThanOrEqual => 11,
+            Self::And => 12,
+            Self::Or => 13,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, ClientPlanError> {
+        match tag {
+            1 => Ok(Self::Add),
+            2 => Ok(Self::Subtract),
+            3 => Ok(Self::Multiply),
+            4 => Ok(Self::Divide),
+            5 => Ok(Self::Modulo),
+            6 => Ok(Self::Equal),
+            7 => Ok(Self::NotEqual),
+            8 => Ok(Self::LessThan),
+            9 => Ok(Self::GreaterThan),
+            10 => Ok(Self::LessThanOrEqual),
+            11 => Ok(Self::GreaterThanOrEqual),
+            12 => Ok(Self::And),
+            13 => Ok(Self::Or),
+            tag => Err(ClientPlanError::InvalidControlFlowBinaryOperator(tag)),
+        }
+    }
+
+    /// Returns the canonical wire tag for this operator.
+    pub const fn wire_tag(self) -> u8 {
+        self.tag()
+    }
+}
+
 /// One closed CLIENT expression-tree node (work ADR 0068).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientExpressionNode {
@@ -582,7 +768,28 @@ pub enum ClientExpressionNode {
         /// The exact contract identity string.
         identity: String,
     },
+    /// A version-10 unary operator expression.
+    Unary {
+        /// The checked operator.
+        operator: ControlFlowUnaryOperator,
+        /// The operand expression.
+        expression: Box<ClientExpressionNode>,
+    },
+    /// A version-10 binary operator expression.
+    Binary {
+        /// The checked operator.
+        operator: ControlFlowBinaryOperator,
+        /// The left operand.
+        left: Box<ClientExpressionNode>,
+        /// The right operand.
+        right: Box<ClientExpressionNode>,
+    },
 }
+
+/// The expression node type used by the version-10 programmable CLIENT
+/// format. Legacy leaves are reused so calls, resources, actions, Inspector
+/// operations, and local reads retain their checked identities.
+pub type ControlFlowExpression = ClientExpressionNode;
 
 impl ExpressionClientPlan {
     /// Creates a checked plan from one closed expression tree.
@@ -908,6 +1115,277 @@ pub type LocalDeclaration = ClientLocal;
 pub type LocalKind = ClientLocalKind;
 pub type ProceduralStatement = ClientStatement;
 pub type ClientProceduralStatement = ClientStatement;
+
+/// One explicit version-10 `RETURN` statement. An absent expression is the
+/// checked representation of `RETURN;`; a present expression is evaluated
+/// before leaving the current CLIENT function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlFlowReturnStatement {
+    expression: Option<ControlFlowExpression>,
+}
+
+impl ControlFlowReturnStatement {
+    /// Creates a return statement with an optional value expression.
+    pub fn new(expression: Option<ControlFlowExpression>) -> Self {
+        Self { expression }
+    }
+
+    /// Creates a value-less `RETURN;` statement.
+    pub const fn empty() -> Self {
+        Self { expression: None }
+    }
+
+    /// Returns the expression evaluated by this return, when present.
+    pub fn expression(&self) -> Option<&ControlFlowExpression> {
+        self.expression.as_ref()
+    }
+}
+
+/// One ordered `IF` or `ELSIF` branch in a version-10 control-flow block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlFlowIfBranch {
+    condition: ControlFlowExpression,
+    statements: Vec<ControlFlowStatement>,
+}
+
+impl ControlFlowIfBranch {
+    /// Creates a branch from its strict Boolean condition and body.
+    pub fn new(condition: ControlFlowExpression, statements: Vec<ControlFlowStatement>) -> Self {
+        Self {
+            condition,
+            statements,
+        }
+    }
+
+    /// Returns the branch condition.
+    pub const fn condition(&self) -> &ControlFlowExpression {
+        &self.condition
+    }
+
+    /// Returns the branch body in source order.
+    pub fn statements(&self) -> &[ControlFlowStatement] {
+        &self.statements
+    }
+
+    /// Alias for [`Self::statements`].
+    pub fn body(&self) -> &[ControlFlowStatement] {
+        self.statements()
+    }
+}
+
+/// One version-10 `IF` statement with ordered branches and an optional
+/// `ELSE` body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlFlowIfStatement {
+    branches: Vec<ControlFlowIfBranch>,
+    else_statements: Option<Vec<ControlFlowStatement>>,
+}
+
+impl ControlFlowIfStatement {
+    /// Creates an `IF` from one or more ordered branches and an optional else
+    /// body.
+    pub fn new(
+        branches: Vec<ControlFlowIfBranch>,
+        else_statements: Option<Vec<ControlFlowStatement>>,
+    ) -> Self {
+        Self {
+            branches,
+            else_statements,
+        }
+    }
+
+    /// Returns the ordered `IF`/`ELSIF` branches.
+    pub fn branches(&self) -> &[ControlFlowIfBranch] {
+        &self.branches
+    }
+
+    /// Returns the optional `ELSE` body in source order.
+    pub fn else_statements(&self) -> Option<&[ControlFlowStatement]> {
+        self.else_statements.as_deref()
+    }
+
+    /// Alias for [`Self::else_statements`].
+    pub fn else_body(&self) -> Option<&[ControlFlowStatement]> {
+        self.else_statements()
+    }
+}
+
+/// One version-10 `WHILE` statement with a strict Boolean condition and body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlFlowWhileStatement {
+    condition: ControlFlowExpression,
+    statements: Vec<ControlFlowStatement>,
+}
+
+impl ControlFlowWhileStatement {
+    /// Creates a `WHILE` from its condition and body.
+    pub fn new(condition: ControlFlowExpression, statements: Vec<ControlFlowStatement>) -> Self {
+        Self {
+            condition,
+            statements,
+        }
+    }
+
+    /// Returns the loop condition.
+    pub const fn condition(&self) -> &ControlFlowExpression {
+        &self.condition
+    }
+
+    /// Returns the loop body in source order.
+    pub fn statements(&self) -> &[ControlFlowStatement] {
+        &self.statements
+    }
+
+    /// Alias for [`Self::statements`].
+    pub fn body(&self) -> &[ControlFlowStatement] {
+        self.statements()
+    }
+}
+
+/// One explicit version-10 programmable CLIENT statement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ControlFlowStatement {
+    /// Declares and initialises one ordered local.
+    Let {
+        /// The declared local identity.
+        local: LocalId,
+        /// The initializer expression.
+        expression: ControlFlowExpression,
+    },
+    /// Replaces one previously initialized local.
+    Assignment {
+        /// The target local identity.
+        local: LocalId,
+        /// The replacement expression.
+        expression: ControlFlowExpression,
+    },
+    /// Exits the current CLIENT function.
+    Return(ControlFlowReturnStatement),
+    /// Selects the first true branch, or the optional else body.
+    If(ControlFlowIfStatement),
+    /// Repeats its body while the strict Boolean condition is true.
+    While(ControlFlowWhileStatement),
+}
+
+impl ControlFlowStatement {
+    /// Creates a `LET` statement.
+    pub const fn let_(local: LocalId, expression: ControlFlowExpression) -> Self {
+        Self::Let { local, expression }
+    }
+
+    /// Creates an assignment statement.
+    pub const fn assignment(local: LocalId, expression: ControlFlowExpression) -> Self {
+        Self::Assignment { local, expression }
+    }
+
+    /// Creates a value-bearing `RETURN` statement.
+    pub fn return_(expression: Option<ControlFlowExpression>) -> Self {
+        Self::Return(ControlFlowReturnStatement::new(expression))
+    }
+    /// Creates a value-bearing `RETURN` statement without an `Option` at the
+    /// call site.
+    pub fn return_value(expression: ControlFlowExpression) -> Self {
+        Self::return_(Some(expression))
+    }
+
+    /// Creates a value-less `RETURN;` statement.
+    pub const fn return_empty() -> Self {
+        Self::Return(ControlFlowReturnStatement::empty())
+    }
+
+    /// Creates an `IF` statement.
+    pub fn if_(statement: ControlFlowIfStatement) -> Self {
+        Self::If(statement)
+    }
+
+    /// Creates a `WHILE` statement.
+    pub fn while_(statement: ControlFlowWhileStatement) -> Self {
+        Self::While(statement)
+    }
+
+    /// Returns the local target for a `LET` or assignment statement.
+    pub const fn local(&self) -> Option<LocalId> {
+        match self {
+            Self::Let { local, .. } | Self::Assignment { local, .. } => Some(*local),
+            Self::Return(_) | Self::If(_) | Self::While(_) => None,
+        }
+    }
+
+    /// Returns the expression for a `LET` or assignment statement.
+    pub const fn expression(&self) -> Option<&ControlFlowExpression> {
+        match self {
+            Self::Let { expression, .. } | Self::Assignment { expression, .. } => Some(expression),
+            Self::Return(_) | Self::If(_) | Self::While(_) => None,
+        }
+    }
+    /// Returns the explicit return statement when this is a `RETURN`.
+    pub const fn return_statement(&self) -> Option<&ControlFlowReturnStatement> {
+        match self {
+            Self::Return(statement) => Some(statement),
+            Self::Let { .. } | Self::Assignment { .. } | Self::If(_) | Self::While(_) => None,
+        }
+    }
+
+    /// Returns the conditional statement when this is an `IF`.
+    pub const fn if_statement(&self) -> Option<&ControlFlowIfStatement> {
+        match self {
+            Self::If(statement) => Some(statement),
+            Self::Let { .. } | Self::Assignment { .. } | Self::Return(_) | Self::While(_) => None,
+        }
+    }
+
+    /// Returns the loop statement when this is a `WHILE`.
+    pub const fn while_statement(&self) -> Option<&ControlFlowWhileStatement> {
+        match self {
+            Self::While(statement) => Some(statement),
+            Self::Let { .. } | Self::Assignment { .. } | Self::Return(_) | Self::If(_) => None,
+        }
+    }
+}
+
+/// A checked version-10 programmable CLIENT plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlFlowClientPlan {
+    locals: Vec<ClientLocal>,
+    statements: Vec<ControlFlowStatement>,
+}
+
+impl ControlFlowClientPlan {
+    /// Creates a plan from ordered local declarations and a root block body.
+    pub fn new(locals: Vec<ClientLocal>, statements: Vec<ControlFlowStatement>) -> Self {
+        Self { locals, statements }
+    }
+
+    /// Returns local declarations in source order.
+    pub fn locals(&self) -> &[ClientLocal] {
+        &self.locals
+    }
+
+    /// Returns root statements in source order.
+    pub fn statements(&self) -> &[ControlFlowStatement] {
+        &self.statements
+    }
+
+    /// Alias for [`Self::statements`].
+    pub fn body(&self) -> &[ControlFlowStatement] {
+        self.statements()
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        CONTROL_FLOW_FORMAT_VERSION
+    }
+
+    /// Encodes this plan into its exact version-10 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ClientPlanError> {
+        encode_control_flow_plan(self)
+    }
+
+    /// Decodes exactly one canonical version-10 control-flow artefact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        decode_control_flow_plan(bytes)
+    }
+}
 
 /// The kind of server result represented by a resource operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1598,7 +2076,8 @@ impl CapabilityRequirement {
 /// The inner plan carried by one version-5 capability envelope.
 ///
 /// The envelope holds a complete decoded version 1-4, version-6, version-7,
-/// version-8, or version-9 client plan so the runtime can evaluate it directly after the capability gate
+/// version-8, version-9, or version-10 client plan so the runtime can evaluate
+/// it directly after the capability gate
 /// admits it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InnerClientPlan {
@@ -1616,6 +2095,8 @@ pub enum InnerClientPlan {
     Procedural(ProceduralClientPlan),
     /// A version-8 action plan.
     Action(ActionClientPlan),
+    /// A version-10 programmable control-flow plan.
+    ControlFlow(ControlFlowClientPlan),
 }
 
 impl InnerClientPlan {
@@ -1629,6 +2110,7 @@ impl InnerClientPlan {
             Self::Resource(_) => RESOURCE_FORMAT_VERSION,
             Self::Procedural(_) => PROCEDURAL_FORMAT_VERSION,
             Self::Action(_) => ACTION_FORMAT_VERSION,
+            Self::ControlFlow(_) => CONTROL_FLOW_FORMAT_VERSION,
         }
     }
 
@@ -1642,13 +2124,13 @@ impl InnerClientPlan {
             Self::Resource(plan) => plan.encode(),
             Self::Procedural(plan) => plan.encode(),
             Self::Action(plan) => plan.encode(),
+            Self::ControlFlow(plan) => plan.encode(),
         }
     }
 }
-
 /// A checked version-5 CLIENT plan that carries one version 1-4, version-6,
-/// version-7, version-8, or version-9 inner plan and the owning function's ordered, closed capability
-/// requirements (work ADR 0060).
+/// version-7, version-8, version-9, or version-10 inner plan and the owning
+/// function's ordered, closed capability requirements (work ADR 0060).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityClientPlan {
     inner_plan_version: u32,
@@ -1807,6 +2289,9 @@ impl CapabilityClientPlan {
             ACTION_FORMAT_VERSION => {
                 InnerClientPlan::Action(ActionClientPlan::decode(inner_payload)?)
             }
+            CONTROL_FLOW_FORMAT_VERSION => {
+                InnerClientPlan::ControlFlow(ControlFlowClientPlan::decode(inner_payload)?)
+            }
             version => return Err(ClientPlanError::UnsupportedInnerVersion(version)),
         };
         let actual_inner_plan_version = inner_plan.format_version();
@@ -1894,6 +2379,1362 @@ impl NodeWriter {
     }
 }
 
+fn encode_control_flow_plan(plan: &ControlFlowClientPlan) -> Result<Vec<u8>, ClientPlanError> {
+    validate_control_flow_model(plan)?;
+
+    let local_count = u32::try_from(plan.locals.len()).map_err(|_| {
+        ClientPlanError::ControlFlowLocalLimitExceeded {
+            limit: MAX_CONTROL_FLOW_LOCALS,
+        }
+    })?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&CONTROL_FLOW_FORMAT_VERSION.to_be_bytes());
+    bytes.push(RETURN_CONTROL_FLOW_OPERATION);
+    bytes.extend_from_slice(&local_count.to_be_bytes());
+    for local in &plan.locals {
+        bytes.extend_from_slice(&local.local.to_bytes());
+        bytes.extend_from_slice(&local.type_id.to_bytes());
+        bytes.push(local.kind.tag());
+    }
+
+    let mut writer = NodeWriter::new();
+    let mut expression_count = 0usize;
+    let mut resource_count = 0usize;
+    let mut statement_count = 0usize;
+    encode_control_flow_block(
+        &plan.statements,
+        0,
+        &mut writer,
+        &mut expression_count,
+        &mut resource_count,
+        &mut statement_count,
+    )?;
+    bytes.extend_from_slice(&writer.finish());
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        return Err(ClientPlanError::ArtifactSizeLimit {
+            size: bytes.len(),
+            maximum: MAX_ARTIFACT_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
+fn decode_control_flow_plan(bytes: &[u8]) -> Result<ControlFlowClientPlan, ClientPlanError> {
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        return Err(ClientPlanError::ArtifactSizeLimit {
+            size: bytes.len(),
+            maximum: MAX_ARTIFACT_BYTES,
+        });
+    }
+    let mut reader = Reader::new(bytes);
+    if reader.array::<8>()? != MAGIC {
+        return Err(ClientPlanError::InvalidMagic);
+    }
+    let version = reader.u32()?;
+    if version != CONTROL_FLOW_FORMAT_VERSION {
+        return Err(ClientPlanError::UnsupportedVersion(version));
+    }
+    let operation = reader.u8()?;
+    if operation != RETURN_CONTROL_FLOW_OPERATION {
+        return Err(ClientPlanError::InvalidOperation(operation));
+    }
+
+    let local_count = reader.u32()? as usize;
+    if local_count > MAX_CONTROL_FLOW_LOCALS {
+        return Err(ClientPlanError::ControlFlowLocalLimitExceeded {
+            limit: MAX_CONTROL_FLOW_LOCALS,
+        });
+    }
+    let mut locals = Vec::with_capacity(local_count);
+    for _ in 0..local_count {
+        let local = LocalId::from_bytes(reader.array()?);
+        if locals
+            .iter()
+            .any(|candidate: &ClientLocal| candidate.local == local)
+        {
+            return Err(ClientPlanError::DuplicateControlFlowLocal(local));
+        }
+        let type_id = TypeId::from_bytes(reader.array()?);
+        let kind = ClientLocalKind::from_tag(reader.u8()?)?;
+        locals.push(ClientLocal::new(local, type_id, kind));
+    }
+
+    let mut expression_count = 0usize;
+    let mut resource_count = 0usize;
+    let mut statement_count = 0usize;
+    let statements = decode_control_flow_block(
+        &mut reader,
+        0,
+        &mut expression_count,
+        &mut resource_count,
+        &mut statement_count,
+    )?;
+    reader.require_finished()?;
+
+    let plan = ControlFlowClientPlan::new(locals, statements);
+    validate_control_flow_model(&plan)?;
+    Ok(plan)
+}
+
+fn encode_control_flow_block(
+    statements: &[ControlFlowStatement],
+    depth: usize,
+    writer: &mut NodeWriter,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+    statement_count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    if depth > MAX_CONTROL_FLOW_BLOCK_DEPTH {
+        return Err(ClientPlanError::ControlFlowBlockDepthExceeded);
+    }
+    if statements.len() > MAX_CONTROL_FLOW_STATEMENTS {
+        return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+            limit: MAX_CONTROL_FLOW_STATEMENTS,
+        });
+    }
+    let count = u32::try_from(statements.len()).map_err(|_| {
+        ClientPlanError::ControlFlowStatementLimitExceeded {
+            limit: MAX_CONTROL_FLOW_STATEMENTS,
+        }
+    })?;
+    writer.extend(&count.to_be_bytes());
+    for statement in statements {
+        *statement_count = statement_count.saturating_add(1);
+        if *statement_count > MAX_CONTROL_FLOW_STATEMENTS {
+            return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+                limit: MAX_CONTROL_FLOW_STATEMENTS,
+            });
+        }
+        match statement {
+            ControlFlowStatement::Let { local, expression } => {
+                writer.push(CONTROL_FLOW_STATEMENT_LET);
+                writer.extend(&local.to_bytes());
+                encode_control_flow_expression(
+                    expression,
+                    0,
+                    writer,
+                    expression_count,
+                    resource_count,
+                )?;
+            }
+            ControlFlowStatement::Assignment { local, expression } => {
+                writer.push(CONTROL_FLOW_STATEMENT_ASSIGNMENT);
+                writer.extend(&local.to_bytes());
+                encode_control_flow_expression(
+                    expression,
+                    0,
+                    writer,
+                    expression_count,
+                    resource_count,
+                )?;
+            }
+            ControlFlowStatement::Return(return_statement) => {
+                writer.push(CONTROL_FLOW_STATEMENT_RETURN);
+                match return_statement.expression.as_ref() {
+                    None => writer.push(CONTROL_FLOW_RETURN_NONE),
+                    Some(expression) => {
+                        writer.push(CONTROL_FLOW_RETURN_EXPRESSION);
+                        encode_control_flow_expression(
+                            expression,
+                            0,
+                            writer,
+                            expression_count,
+                            resource_count,
+                        )?;
+                    }
+                }
+            }
+            ControlFlowStatement::If(if_statement) => {
+                if if_statement.branches.is_empty() {
+                    return Err(ClientPlanError::InvalidControlFlowBranchCount { actual: 0 });
+                }
+                if if_statement.branches.len() > MAX_CONTROL_FLOW_BRANCHES {
+                    return Err(ClientPlanError::ControlFlowBranchLimitExceeded {
+                        limit: MAX_CONTROL_FLOW_BRANCHES,
+                    });
+                }
+                writer.push(CONTROL_FLOW_STATEMENT_IF);
+                let branch_count = u32::try_from(if_statement.branches.len()).map_err(|_| {
+                    ClientPlanError::ControlFlowBranchLimitExceeded {
+                        limit: MAX_CONTROL_FLOW_BRANCHES,
+                    }
+                })?;
+                writer.extend(&branch_count.to_be_bytes());
+                for branch in &if_statement.branches {
+                    encode_control_flow_expression(
+                        &branch.condition,
+                        0,
+                        writer,
+                        expression_count,
+                        resource_count,
+                    )?;
+                    encode_control_flow_block(
+                        &branch.statements,
+                        depth + 1,
+                        writer,
+                        expression_count,
+                        resource_count,
+                        statement_count,
+                    )?;
+                }
+                match if_statement.else_statements.as_ref() {
+                    None => writer.push(CONTROL_FLOW_ELSE_NONE),
+                    Some(statements) => {
+                        writer.push(CONTROL_FLOW_ELSE_BODY);
+                        encode_control_flow_block(
+                            statements,
+                            depth + 1,
+                            writer,
+                            expression_count,
+                            resource_count,
+                            statement_count,
+                        )?;
+                    }
+                }
+            }
+            ControlFlowStatement::While(while_statement) => {
+                writer.push(CONTROL_FLOW_STATEMENT_WHILE);
+                encode_control_flow_expression(
+                    &while_statement.condition,
+                    0,
+                    writer,
+                    expression_count,
+                    resource_count,
+                )?;
+                encode_control_flow_block(
+                    &while_statement.statements,
+                    depth + 1,
+                    writer,
+                    expression_count,
+                    resource_count,
+                    statement_count,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_control_flow_block(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+    statement_count: &mut usize,
+) -> Result<Vec<ControlFlowStatement>, ClientPlanError> {
+    if depth > MAX_CONTROL_FLOW_BLOCK_DEPTH {
+        return Err(ClientPlanError::ControlFlowBlockDepthExceeded);
+    }
+    let count = reader.u32()? as usize;
+    if count > MAX_CONTROL_FLOW_STATEMENTS {
+        return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+            limit: MAX_CONTROL_FLOW_STATEMENTS,
+        });
+    }
+    let mut statements = Vec::with_capacity(count);
+    for _ in 0..count {
+        *statement_count = statement_count.saturating_add(1);
+        if *statement_count > MAX_CONTROL_FLOW_STATEMENTS {
+            return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+                limit: MAX_CONTROL_FLOW_STATEMENTS,
+            });
+        }
+        let tag = reader.u8()?;
+        let statement = match tag {
+            CONTROL_FLOW_STATEMENT_LET | CONTROL_FLOW_STATEMENT_ASSIGNMENT => {
+                let local = LocalId::from_bytes(reader.array()?);
+                let expression =
+                    decode_control_flow_expression(reader, 0, expression_count, resource_count)?;
+                if tag == CONTROL_FLOW_STATEMENT_LET {
+                    ControlFlowStatement::let_(local, expression)
+                } else {
+                    ControlFlowStatement::assignment(local, expression)
+                }
+            }
+            CONTROL_FLOW_STATEMENT_RETURN => {
+                let expression = match reader.u8()? {
+                    CONTROL_FLOW_RETURN_NONE => None,
+                    CONTROL_FLOW_RETURN_EXPRESSION => Some(decode_control_flow_expression(
+                        reader,
+                        0,
+                        expression_count,
+                        resource_count,
+                    )?),
+                    tag => return Err(ClientPlanError::InvalidControlFlowReturnTag(tag)),
+                };
+                ControlFlowStatement::Return(ControlFlowReturnStatement::new(expression))
+            }
+            CONTROL_FLOW_STATEMENT_IF => {
+                let branch_count = reader.u32()? as usize;
+                if branch_count == 0 {
+                    return Err(ClientPlanError::InvalidControlFlowBranchCount { actual: 0 });
+                }
+                if branch_count > MAX_CONTROL_FLOW_BRANCHES {
+                    return Err(ClientPlanError::ControlFlowBranchLimitExceeded {
+                        limit: MAX_CONTROL_FLOW_BRANCHES,
+                    });
+                }
+                let mut branches = Vec::with_capacity(branch_count);
+                for _ in 0..branch_count {
+                    let condition = decode_control_flow_expression(
+                        reader,
+                        0,
+                        expression_count,
+                        resource_count,
+                    )?;
+                    let statements = decode_control_flow_block(
+                        reader,
+                        depth + 1,
+                        expression_count,
+                        resource_count,
+                        statement_count,
+                    )?;
+                    branches.push(ControlFlowIfBranch::new(condition, statements));
+                }
+                let else_statements = match reader.u8()? {
+                    CONTROL_FLOW_ELSE_NONE => None,
+                    CONTROL_FLOW_ELSE_BODY => Some(decode_control_flow_block(
+                        reader,
+                        depth + 1,
+                        expression_count,
+                        resource_count,
+                        statement_count,
+                    )?),
+                    tag => return Err(ClientPlanError::InvalidControlFlowElseTag(tag)),
+                };
+                ControlFlowStatement::If(ControlFlowIfStatement::new(branches, else_statements))
+            }
+            CONTROL_FLOW_STATEMENT_WHILE => {
+                let condition =
+                    decode_control_flow_expression(reader, 0, expression_count, resource_count)?;
+                let statements = decode_control_flow_block(
+                    reader,
+                    depth + 1,
+                    expression_count,
+                    resource_count,
+                    statement_count,
+                )?;
+                ControlFlowStatement::While(ControlFlowWhileStatement::new(condition, statements))
+            }
+            tag => return Err(ClientPlanError::InvalidControlFlowStatement(tag)),
+        };
+        statements.push(statement);
+    }
+    Ok(statements)
+}
+fn encode_control_flow_expression(
+    node: &ControlFlowExpression,
+    depth: usize,
+    writer: &mut NodeWriter,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    if depth > MAX_EXPRESSION_DEPTH {
+        return Err(ClientPlanError::ExpressionDepthExceeded);
+    }
+    *expression_count = expression_count.saturating_add(1);
+    if *expression_count > MAX_EXPRESSION_NODES {
+        return Err(ClientPlanError::ExpressionNodeCountExceeded);
+    }
+
+    match node {
+        ClientExpressionNode::Await { expression } => {
+            writer.push(NODE_AWAIT);
+            encode_control_flow_expression(
+                expression,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::Resource { operation } => {
+            encode_control_flow_resource_operation(
+                operation,
+                depth,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::Action { operation } => {
+            encode_control_flow_action_operation(
+                operation,
+                depth,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::Inspect { operation } => {
+            writer.push(NODE_INSPECT);
+            match operation {
+                InspectOperationNode::Snapshot { target, options } => {
+                    writer.push(INSPECT_OPERATION_SNAPSHOT);
+                    encode_control_flow_expression(
+                        target,
+                        depth + 1,
+                        writer,
+                        expression_count,
+                        resource_count,
+                    )?;
+                    if options.is_some() {
+                        return Err(ClientPlanError::UnsupportedInspectOptions);
+                    }
+                    writer.push(0);
+                }
+                InspectOperationNode::Projection {
+                    projection,
+                    snapshot,
+                } => {
+                    writer.push(INSPECT_OPERATION_PROJECTION);
+                    writer.push(projection.tag());
+                    encode_control_flow_expression(
+                        snapshot,
+                        depth + 1,
+                        writer,
+                        expression_count,
+                        resource_count,
+                    )?;
+                }
+            }
+        }
+        ClientExpressionNode::Call {
+            function,
+            arguments,
+        } => {
+            if arguments.len() > MAX_CALL_ARGUMENTS {
+                return Err(ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_CALL_ARGUMENTS,
+                });
+            }
+            writer.push(NODE_CALL);
+            writer.extend(&function.to_bytes());
+            let length = u32::try_from(arguments.len()).map_err(|_| {
+                ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_CALL_ARGUMENTS,
+                }
+            })?;
+            writer.extend(&length.to_be_bytes());
+            for (parameter, value) in arguments {
+                writer.extend(&parameter.to_bytes());
+                encode_control_flow_expression(
+                    value,
+                    depth + 1,
+                    writer,
+                    expression_count,
+                    resource_count,
+                )?;
+            }
+        }
+        ClientExpressionNode::String { value } => {
+            writer.push(NODE_STRING);
+            let bytes = value.as_bytes();
+            let length = u32::try_from(bytes.len()).map_err(|_| {
+                ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_ARTIFACT_BYTES,
+                }
+            })?;
+            writer.extend(&length.to_be_bytes());
+            writer.extend(bytes);
+        }
+        ClientExpressionNode::Integer { value } => {
+            writer.push(NODE_INTEGER);
+            writer.extend(&value.to_be_bytes());
+        }
+        ClientExpressionNode::Boolean { value } => {
+            writer.push(NODE_BOOLEAN);
+            writer.push(u8::from(*value));
+        }
+        ClientExpressionNode::ParameterRead { parameter } => {
+            writer.push(NODE_PARAMETER_READ);
+            writer.extend(&parameter.to_bytes());
+        }
+        ClientExpressionNode::LocalRead { local } => {
+            writer.push(NODE_LOCAL_READ);
+            writer.extend(&local.to_bytes());
+        }
+        ClientExpressionNode::FieldPath { root, fields } => {
+            if fields.is_empty() || fields.len() > MAX_FIELD_PATH_LENGTH {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH));
+            }
+            writer.push(NODE_FIELD_PATH);
+            writer.extend(&root.to_bytes());
+            let length = u32::try_from(fields.len()).map_err(|_| {
+                ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_FIELD_PATH_LENGTH,
+                }
+            })?;
+            writer.extend(&length.to_be_bytes());
+            for field in fields {
+                writer.extend(&field.to_bytes());
+            }
+        }
+        ClientExpressionNode::Concat { left, right } => {
+            writer.push(NODE_CONCAT);
+            encode_control_flow_expression(
+                left,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+            encode_control_flow_expression(
+                right,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::ExternalContract { identity } => {
+            validate_external_contract_identity(identity)?;
+            writer.push(NODE_EXTERNAL_CONTRACT);
+            let bytes = identity.as_bytes();
+            let length = u32::try_from(bytes.len()).map_err(|_| {
+                ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_ARTIFACT_BYTES,
+                }
+            })?;
+            writer.extend(&length.to_be_bytes());
+            writer.extend(bytes);
+        }
+        ClientExpressionNode::Unary {
+            operator,
+            expression,
+        } => {
+            writer.push(NODE_UNARY);
+            writer.push(operator.tag());
+            encode_control_flow_expression(
+                expression,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+        ClientExpressionNode::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            writer.push(NODE_BINARY);
+            writer.push(operator.tag());
+            encode_control_flow_expression(
+                left,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+            encode_control_flow_expression(
+                right,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_control_flow_resource_operation(
+    operation: &ResourceOperationNode,
+    depth: usize,
+    writer: &mut NodeWriter,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    *resource_count = resource_count.saturating_add(1);
+    if *resource_count > MAX_RESOURCE_OPERATIONS {
+        return Err(ClientPlanError::ResourceOperationLimitExceeded {
+            limit: MAX_RESOURCE_OPERATIONS,
+        });
+    }
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        validate_resource_identity(identity)?;
+    }
+    validate_resource_arguments(&operation.arguments)?;
+    writer.push(NODE_RESOURCE);
+    writer.push(operation.kind.tag());
+    writer.extend(&operation.target.to_bytes());
+    writer.extend(&operation.target_revision.source().to_bytes());
+    writer.extend(&operation.target_revision.catalogue().to_bytes());
+    writer.extend(&operation.call_site.to_bytes());
+    let argument_count = u32::try_from(operation.arguments.len()).map_err(|_| {
+        ClientPlanError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        }
+    })?;
+    writer.extend(&argument_count.to_be_bytes());
+    for (parameter, value) in &operation.arguments {
+        writer.extend(&parameter.to_bytes());
+        encode_control_flow_expression(value, depth + 1, writer, expression_count, resource_count)?;
+    }
+    writer.extend(&operation.result_type.to_bytes());
+    Ok(())
+}
+
+fn encode_control_flow_action_operation(
+    operation: &ActionOperationNode,
+    depth: usize,
+    writer: &mut NodeWriter,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<(), ClientPlanError> {
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        if identity == [0; 16] {
+            return Err(ClientPlanError::InvalidActionIdentity);
+        }
+    }
+    validate_action_arguments(&operation.arguments)?;
+    writer.push(NODE_ACTION);
+    writer.push(operation.domain.tag());
+    writer.extend(&operation.target.to_bytes());
+    writer.extend(&operation.target_revision.source().to_bytes());
+    writer.extend(&operation.target_revision.catalogue().to_bytes());
+    writer.extend(&operation.call_site.to_bytes());
+    writer.extend(&operation.result_type.to_bytes());
+    let argument_count = u32::try_from(operation.arguments.len()).map_err(|_| {
+        ClientPlanError::ActionArgumentLimitExceeded {
+            limit: MAX_ACTION_ARGUMENTS,
+        }
+    })?;
+    writer.extend(&argument_count.to_be_bytes());
+    for (parameter, value) in &operation.arguments {
+        if parameter.to_bytes() == [0; 16] {
+            return Err(ClientPlanError::InvalidActionIdentity);
+        }
+        writer.extend(&parameter.to_bytes());
+        encode_control_flow_expression(value, depth + 1, writer, expression_count, resource_count)?;
+    }
+    Ok(())
+}
+
+fn decode_control_flow_expression(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<ControlFlowExpression, ClientPlanError> {
+    if depth > MAX_EXPRESSION_DEPTH {
+        return Err(ClientPlanError::ExpressionDepthExceeded);
+    }
+    *expression_count = expression_count.saturating_add(1);
+    if *expression_count > MAX_EXPRESSION_NODES {
+        return Err(ClientPlanError::ExpressionNodeCountExceeded);
+    }
+
+    let tag = reader.u8()?;
+    match tag {
+        NODE_AWAIT => Ok(ClientExpressionNode::Await {
+            expression: Box::new(decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?),
+        }),
+        NODE_RESOURCE => Ok(ClientExpressionNode::Resource {
+            operation: decode_control_flow_resource_operation(
+                reader,
+                depth,
+                expression_count,
+                resource_count,
+            )?,
+        }),
+        NODE_ACTION => Ok(ClientExpressionNode::Action {
+            operation: decode_control_flow_action_operation(
+                reader,
+                depth,
+                expression_count,
+                resource_count,
+            )?,
+        }),
+        NODE_INSPECT => {
+            let operation = match reader.u8()? {
+                INSPECT_OPERATION_SNAPSHOT => InspectOperationNode::Snapshot {
+                    target: Box::new(decode_control_flow_expression(
+                        reader,
+                        depth + 1,
+                        expression_count,
+                        resource_count,
+                    )?),
+                    options: match reader.u8()? {
+                        0 => None,
+                        1 => return Err(ClientPlanError::UnsupportedInspectOptions),
+                        tag => return Err(ClientPlanError::InvalidInspectOperation(tag)),
+                    },
+                },
+                INSPECT_OPERATION_PROJECTION => {
+                    let projection = InspectProjection::from_tag(reader.u8()?)?;
+                    InspectOperationNode::Projection {
+                        projection,
+                        snapshot: Box::new(decode_control_flow_expression(
+                            reader,
+                            depth + 1,
+                            expression_count,
+                            resource_count,
+                        )?),
+                    }
+                }
+                tag => return Err(ClientPlanError::InvalidInspectOperation(tag)),
+            };
+            Ok(ClientExpressionNode::Inspect { operation })
+        }
+        NODE_CALL => {
+            let function = FunctionId::from_bytes(reader.array()?);
+            let length = reader.u32()? as usize;
+            if length > MAX_CALL_ARGUMENTS {
+                return Err(ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_CALL_ARGUMENTS,
+                });
+            }
+            let mut arguments = Vec::with_capacity(length);
+            for _ in 0..length {
+                let parameter = ParameterId::from_bytes(reader.array()?);
+                let value = decode_control_flow_expression(
+                    reader,
+                    depth + 1,
+                    expression_count,
+                    resource_count,
+                )?;
+                arguments.push((parameter, value));
+            }
+            Ok(ClientExpressionNode::Call {
+                function,
+                arguments,
+            })
+        }
+        NODE_STRING => {
+            let length = reader.u32()? as usize;
+            let value = std::str::from_utf8(reader.bytes(length)?)
+                .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_STRING))?
+                .to_owned();
+            Ok(ClientExpressionNode::String { value })
+        }
+        NODE_INTEGER => Ok(ClientExpressionNode::Integer {
+            value: i64::from_be_bytes(reader.array()?),
+        }),
+        NODE_BOOLEAN => match reader.u8()? {
+            0 => Ok(ClientExpressionNode::Boolean { value: false }),
+            1 => Ok(ClientExpressionNode::Boolean { value: true }),
+            _ => Err(ClientPlanError::InvalidExpressionNode(NODE_BOOLEAN)),
+        },
+        NODE_PARAMETER_READ => Ok(ClientExpressionNode::ParameterRead {
+            parameter: ParameterId::from_bytes(reader.array()?),
+        }),
+        NODE_LOCAL_READ => Ok(ClientExpressionNode::LocalRead {
+            local: LocalId::from_bytes(reader.array()?),
+        }),
+        NODE_FIELD_PATH => {
+            let root = ParameterId::from_bytes(reader.array()?);
+            let length = reader.u32()? as usize;
+            if length == 0 {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_FIELD_PATH));
+            }
+            if length > MAX_FIELD_PATH_LENGTH {
+                return Err(ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_FIELD_PATH_LENGTH,
+                });
+            }
+            let mut fields = Vec::with_capacity(length);
+            for _ in 0..length {
+                fields.push(FieldId::from_bytes(reader.array()?));
+            }
+            Ok(ClientExpressionNode::FieldPath { root, fields })
+        }
+        NODE_CONCAT => {
+            let left = decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?;
+            let right = decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?;
+            Ok(ClientExpressionNode::Concat {
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        NODE_EXTERNAL_CONTRACT => {
+            let length = reader.u32()? as usize;
+            let identity = std::str::from_utf8(reader.bytes(length)?)
+                .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))?;
+            validate_external_contract_identity(identity)?;
+            Ok(ClientExpressionNode::ExternalContract {
+                identity: identity.to_owned(),
+            })
+        }
+        NODE_UNARY => {
+            let operator = ControlFlowUnaryOperator::from_tag(reader.u8()?)?;
+            let expression = decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?;
+            Ok(ClientExpressionNode::Unary {
+                operator,
+                expression: Box::new(expression),
+            })
+        }
+        NODE_BINARY => {
+            let operator = ControlFlowBinaryOperator::from_tag(reader.u8()?)?;
+            let left = decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?;
+            let right = decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?;
+            Ok(ClientExpressionNode::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        tag => Err(ClientPlanError::InvalidExpressionNode(tag)),
+    }
+}
+
+fn decode_control_flow_resource_operation(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<ResourceOperationNode, ClientPlanError> {
+    *resource_count = resource_count.saturating_add(1);
+    if *resource_count > MAX_RESOURCE_OPERATIONS {
+        return Err(ClientPlanError::ResourceOperationLimitExceeded {
+            limit: MAX_RESOURCE_OPERATIONS,
+        });
+    }
+    let kind = match reader.u8()? {
+        RESOURCE_KIND_SCALAR => ResourceKind::Scalar,
+        RESOURCE_KIND_STREAM => ResourceKind::Stream,
+        tag => return Err(ClientPlanError::InvalidResourceKind(tag)),
+    };
+    let target = FunctionId::from_bytes(read_resource_identity(reader)?);
+    let target_revision = RevisionPair::new(
+        SourceRevisionId::from_bytes(read_resource_identity(reader)?),
+        CatalogueRevisionId::from_bytes(read_resource_identity(reader)?),
+    );
+    let call_site = CallSiteId::from_bytes(read_resource_identity(reader)?);
+    let argument_count = reader.u32()? as usize;
+    if argument_count > MAX_RESOURCE_ARGUMENTS {
+        return Err(ClientPlanError::ResourceArgumentLimitExceeded {
+            limit: MAX_RESOURCE_ARGUMENTS,
+        });
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    let mut previous = None;
+    for _ in 0..argument_count {
+        let parameter = ParameterId::from_bytes(read_resource_identity(reader)?);
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalResourceArgumentOrder);
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateResourceArgument(parameter));
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(parameter);
+        let value =
+            decode_control_flow_expression(reader, depth + 1, expression_count, resource_count)?;
+        arguments.push((parameter, value));
+    }
+    let result_type = TypeId::from_bytes(read_resource_identity(reader)?);
+    Ok(ResourceOperationNode::new(
+        kind,
+        target,
+        target_revision,
+        call_site,
+        arguments,
+        result_type,
+    ))
+}
+
+fn decode_control_flow_action_operation(
+    reader: &mut Reader<'_>,
+    depth: usize,
+    expression_count: &mut usize,
+    resource_count: &mut usize,
+) -> Result<ActionOperationNode, ClientPlanError> {
+    let domain = match reader.u8()? {
+        1 => ActionTargetDomain::Client,
+        2 => ActionTargetDomain::Server,
+        tag => return Err(ClientPlanError::InvalidActionDomain(tag)),
+    };
+    let target = FunctionId::from_bytes(read_action_identity(reader)?);
+    let target_revision = RevisionPair::new(
+        SourceRevisionId::from_bytes(read_action_identity(reader)?),
+        CatalogueRevisionId::from_bytes(read_action_identity(reader)?),
+    );
+    let call_site = CallSiteId::from_bytes(read_action_identity(reader)?);
+    let result_type = TypeId::from_bytes(read_action_identity(reader)?);
+    let argument_count = reader.u32()? as usize;
+    if argument_count > MAX_ACTION_ARGUMENTS {
+        return Err(ClientPlanError::ActionArgumentLimitExceeded {
+            limit: MAX_ACTION_ARGUMENTS,
+        });
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    let mut previous = None;
+    for _ in 0..argument_count {
+        let parameter = ParameterId::from_bytes(read_action_identity(reader)?);
+        if let Some(previous) = previous {
+            match parameter.cmp(&previous) {
+                std::cmp::Ordering::Less => {
+                    return Err(ClientPlanError::NonCanonicalActionArgumentOrder);
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(ClientPlanError::DuplicateActionArgument(parameter));
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        previous = Some(parameter);
+        let value =
+            decode_control_flow_expression(reader, depth + 1, expression_count, resource_count)?;
+        arguments.push((parameter, value));
+    }
+    Ok(ActionOperationNode::new(
+        domain,
+        target,
+        target_revision,
+        call_site,
+        arguments,
+        result_type,
+    ))
+}
+
+fn validate_control_flow_model(plan: &ControlFlowClientPlan) -> Result<(), ClientPlanError> {
+    if plan.locals.len() > MAX_CONTROL_FLOW_LOCALS {
+        return Err(ClientPlanError::ControlFlowLocalLimitExceeded {
+            limit: MAX_CONTROL_FLOW_LOCALS,
+        });
+    }
+    if plan.statements.len() > MAX_CONTROL_FLOW_STATEMENTS {
+        return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+            limit: MAX_CONTROL_FLOW_STATEMENTS,
+        });
+    }
+
+    let mut seen_locals = Vec::with_capacity(plan.locals.len());
+    for local in &plan.locals {
+        if seen_locals.contains(&local.local) {
+            return Err(ClientPlanError::DuplicateControlFlowLocal(local.local));
+        }
+        seen_locals.push(local.local);
+    }
+
+    let mut initialized = Vec::new();
+    let mut let_seen = Vec::new();
+    validate_control_flow_block(
+        &plan.statements,
+        0,
+        &plan.locals,
+        &mut initialized,
+        &mut let_seen,
+    )?;
+    for local in &plan.locals {
+        if !let_seen.contains(&local.local) {
+            return Err(ClientPlanError::MissingControlFlowLet(local.local));
+        }
+    }
+    Ok(())
+}
+
+fn validate_control_flow_block(
+    statements: &[ControlFlowStatement],
+    depth: usize,
+    locals: &[ClientLocal],
+    initialized: &mut Vec<LocalId>,
+    let_seen: &mut Vec<LocalId>,
+) -> Result<(), ClientPlanError> {
+    if depth > MAX_CONTROL_FLOW_BLOCK_DEPTH {
+        return Err(ClientPlanError::ControlFlowBlockDepthExceeded);
+    }
+    if statements.len() > MAX_CONTROL_FLOW_STATEMENTS {
+        return Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+            limit: MAX_CONTROL_FLOW_STATEMENTS,
+        });
+    }
+
+    for statement in statements {
+        match statement {
+            ControlFlowStatement::Let { local, expression } => {
+                let declaration = locals
+                    .iter()
+                    .find(|candidate| candidate.local == *local)
+                    .ok_or(ClientPlanError::UnknownControlFlowLocal(*local))?;
+                if let_seen.contains(local) {
+                    return Err(ClientPlanError::DuplicateControlFlowLet(*local));
+                }
+                let allow_resource_root = matches!(declaration.kind, ClientLocalKind::Resource(_));
+                validate_control_flow_expression(
+                    expression,
+                    locals,
+                    initialized,
+                    allow_resource_root,
+                    true,
+                    matches!(declaration.kind, ClientLocalKind::Value),
+                )?;
+                validate_control_flow_initializer_kind(declaration, expression, locals)?;
+                let_seen.push(*local);
+                if !initialized.contains(local) {
+                    initialized.push(*local);
+                }
+            }
+            ControlFlowStatement::Assignment { local, expression } => {
+                let declaration = locals
+                    .iter()
+                    .find(|candidate| candidate.local == *local)
+                    .ok_or(ClientPlanError::UnknownControlFlowLocal(*local))?;
+                if !initialized.contains(local) {
+                    return Err(ClientPlanError::ControlFlowAssignmentBeforeLet(*local));
+                }
+                let allow_resource_root = matches!(declaration.kind, ClientLocalKind::Resource(_));
+                validate_control_flow_expression(
+                    expression,
+                    locals,
+                    initialized,
+                    allow_resource_root,
+                    true,
+                    matches!(declaration.kind, ClientLocalKind::Value),
+                )?;
+                validate_control_flow_initializer_kind(declaration, expression, locals)?;
+            }
+            ControlFlowStatement::Return(return_statement) => {
+                if let Some(expression) = return_statement.expression.as_ref() {
+                    validate_control_flow_expression(
+                        expression,
+                        locals,
+                        initialized,
+                        false,
+                        true,
+                        true,
+                    )?;
+                }
+            }
+            ControlFlowStatement::If(if_statement) => {
+                if if_statement.branches.is_empty() {
+                    return Err(ClientPlanError::InvalidControlFlowBranchCount { actual: 0 });
+                }
+                if if_statement.branches.len() > MAX_CONTROL_FLOW_BRANCHES {
+                    return Err(ClientPlanError::ControlFlowBranchLimitExceeded {
+                        limit: MAX_CONTROL_FLOW_BRANCHES,
+                    });
+                }
+                let incoming = initialized.clone();
+                let mut branch_exits = Vec::with_capacity(if_statement.branches.len() + 1);
+                for branch in &if_statement.branches {
+                    validate_control_flow_expression(
+                        &branch.condition,
+                        locals,
+                        &incoming,
+                        false,
+                        true,
+                        true,
+                    )?;
+                    let mut branch_initialized = incoming.clone();
+                    validate_control_flow_block(
+                        &branch.statements,
+                        depth + 1,
+                        locals,
+                        &mut branch_initialized,
+                        let_seen,
+                    )?;
+                    branch_exits.push(branch_initialized);
+                }
+                if let Some(statements) = if_statement.else_statements.as_ref() {
+                    let mut else_initialized = incoming.clone();
+                    validate_control_flow_block(
+                        statements,
+                        depth + 1,
+                        locals,
+                        &mut else_initialized,
+                        let_seen,
+                    )?;
+                    branch_exits.push(else_initialized);
+                    initialized
+                        .retain(|local| branch_exits.iter().all(|exit| exit.contains(local)));
+                } else {
+                    *initialized = incoming;
+                }
+            }
+            ControlFlowStatement::While(while_statement) => {
+                let incoming = initialized.clone();
+                validate_control_flow_expression(
+                    &while_statement.condition,
+                    locals,
+                    &incoming,
+                    false,
+                    true,
+                    true,
+                )?;
+                let mut body_initialized = incoming.clone();
+                validate_control_flow_block(
+                    &while_statement.statements,
+                    depth + 1,
+                    locals,
+                    &mut body_initialized,
+                    let_seen,
+                )?;
+                // A WHILE body may execute zero times, so no local initialized
+                // only in that body is definite after the loop.
+                *initialized = incoming;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_control_flow_initializer_kind(
+    declaration: &ClientLocal,
+    expression: &ControlFlowExpression,
+    locals: &[ClientLocal],
+) -> Result<(), ClientPlanError> {
+    let actual = control_flow_resource_kind(expression, locals);
+    match declaration.kind {
+        ClientLocalKind::Value if actual.is_some() => Err(
+            ClientPlanError::ControlFlowLocalKindMismatch(declaration.local),
+        ),
+        ClientLocalKind::Resource(expected) if actual != Some(expected) => Err(
+            ClientPlanError::ControlFlowLocalKindMismatch(declaration.local),
+        ),
+        ClientLocalKind::Value | ClientLocalKind::Resource(_) => Ok(()),
+    }
+}
+
+fn control_flow_resource_kind(
+    expression: &ControlFlowExpression,
+    locals: &[ClientLocal],
+) -> Option<ResourceKind> {
+    match expression {
+        ClientExpressionNode::Resource { operation } => Some(operation.kind()),
+        ClientExpressionNode::LocalRead { local } => locals
+            .iter()
+            .find(|candidate| candidate.local == *local)
+            .and_then(|candidate| match candidate.kind {
+                ClientLocalKind::Resource(kind) => Some(kind),
+                ClientLocalKind::Value => None,
+            }),
+        _ => None,
+    }
+}
+
+fn validate_control_flow_expression(
+    expression: &ControlFlowExpression,
+    locals: &[ClientLocal],
+    initialized: &[LocalId],
+    allow_resource_root: bool,
+    allow_await_root: bool,
+    value_position: bool,
+) -> Result<(), ClientPlanError> {
+    validate_external_contract_placement(expression, true)?;
+    validate_control_flow_expression_shape(
+        expression,
+        locals,
+        initialized,
+        allow_resource_root,
+        allow_await_root,
+        value_position,
+    )
+}
+
+fn validate_control_flow_expression_shape(
+    expression: &ControlFlowExpression,
+    locals: &[ClientLocal],
+    initialized: &[LocalId],
+    allow_resource_root: bool,
+    allow_await_root: bool,
+    value_position: bool,
+) -> Result<(), ClientPlanError> {
+    match expression {
+        ClientExpressionNode::Await { expression } => {
+            if !allow_await_root {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT));
+            }
+            match expression.as_ref() {
+                ClientExpressionNode::Resource { operation } => {
+                    validate_control_flow_resource_operation(operation, locals, initialized)?;
+                }
+                ClientExpressionNode::LocalRead { local } => {
+                    let declaration = locals
+                        .iter()
+                        .find(|candidate| candidate.local == *local)
+                        .ok_or(ClientPlanError::UnknownControlFlowLocal(*local))?;
+                    if !matches!(declaration.kind, ClientLocalKind::Resource(_)) {
+                        return Err(ClientPlanError::InvalidAwaitOperand(*local));
+                    }
+                    if !initialized.contains(local) {
+                        return Err(ClientPlanError::ControlFlowLocalReadBeforeLet(*local));
+                    }
+                }
+                _ => return Err(ClientPlanError::InvalidExpressionNode(NODE_AWAIT)),
+            }
+        }
+        ClientExpressionNode::Resource { operation } => {
+            if !allow_resource_root {
+                return Err(ClientPlanError::InvalidExpressionNode(NODE_RESOURCE));
+            }
+            validate_control_flow_resource_operation(operation, locals, initialized)?;
+        }
+        ClientExpressionNode::Action { operation } => {
+            validate_control_flow_action_operation(operation, locals, initialized)?;
+        }
+        ClientExpressionNode::Inspect { operation } => match operation {
+            InspectOperationNode::Snapshot { target, options } => {
+                if options.is_some() {
+                    return Err(ClientPlanError::UnsupportedInspectOptions);
+                }
+                validate_control_flow_expression_shape(
+                    target,
+                    locals,
+                    initialized,
+                    false,
+                    false,
+                    true,
+                )?;
+            }
+            InspectOperationNode::Projection { snapshot, .. } => {
+                validate_control_flow_expression_shape(
+                    snapshot,
+                    locals,
+                    initialized,
+                    false,
+                    false,
+                    true,
+                )?;
+            }
+        },
+        ClientExpressionNode::LocalRead { local } => {
+            let declaration = locals
+                .iter()
+                .find(|candidate| candidate.local == *local)
+                .ok_or(ClientPlanError::UnknownControlFlowLocal(*local))?;
+            if !initialized.contains(local) {
+                return Err(ClientPlanError::ControlFlowLocalReadBeforeLet(*local));
+            }
+            if value_position && matches!(declaration.kind, ClientLocalKind::Resource(_)) {
+                return Err(ClientPlanError::UnawaitedResourceLocal(*local));
+            }
+        }
+        ClientExpressionNode::Call { arguments, .. } => {
+            if arguments.len() > MAX_CALL_ARGUMENTS {
+                return Err(ClientPlanError::ExpressionCollectionExceeded {
+                    limit: MAX_CALL_ARGUMENTS,
+                });
+            }
+            for (_, value) in arguments {
+                validate_control_flow_expression_shape(
+                    value,
+                    locals,
+                    initialized,
+                    false,
+                    false,
+                    true,
+                )?;
+            }
+        }
+        ClientExpressionNode::Concat { left, right }
+        | ClientExpressionNode::Binary { left, right, .. } => {
+            validate_control_flow_expression_shape(left, locals, initialized, false, false, true)?;
+            validate_control_flow_expression_shape(right, locals, initialized, false, false, true)?;
+        }
+        ClientExpressionNode::Unary { expression, .. } => {
+            validate_control_flow_expression_shape(
+                expression,
+                locals,
+                initialized,
+                false,
+                false,
+                true,
+            )?;
+        }
+        ClientExpressionNode::String { .. }
+        | ClientExpressionNode::Integer { .. }
+        | ClientExpressionNode::Boolean { .. }
+        | ClientExpressionNode::ParameterRead { .. }
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::ExternalContract { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_control_flow_resource_operation(
+    operation: &ResourceOperationNode,
+    locals: &[ClientLocal],
+    initialized: &[LocalId],
+) -> Result<(), ClientPlanError> {
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        validate_resource_identity(identity)?;
+    }
+    validate_resource_arguments(&operation.arguments)?;
+    for (_, value) in &operation.arguments {
+        validate_control_flow_expression_shape(value, locals, initialized, false, false, true)?;
+    }
+    Ok(())
+}
+
+fn validate_control_flow_action_operation(
+    operation: &ActionOperationNode,
+    locals: &[ClientLocal],
+    initialized: &[LocalId],
+) -> Result<(), ClientPlanError> {
+    for identity in [
+        operation.target.to_bytes(),
+        operation.target_revision.source().to_bytes(),
+        operation.target_revision.catalogue().to_bytes(),
+        operation.call_site.to_bytes(),
+        operation.result_type.to_bytes(),
+    ] {
+        if identity == [0; 16] {
+            return Err(ClientPlanError::InvalidActionIdentity);
+        }
+    }
+    validate_action_arguments(&operation.arguments)?;
+    for (_, value) in &operation.arguments {
+        validate_control_flow_expression_shape(value, locals, initialized, false, false, true)?;
+    }
+    Ok(())
+}
+
 fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
     match node {
         ClientExpressionNode::Inspect { operation } => match operation {
@@ -1911,9 +3752,11 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
         ClientExpressionNode::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, value)| expression_contains_inspect(value)),
-        ClientExpressionNode::Concat { left, right } => {
+        ClientExpressionNode::Concat { left, right }
+        | ClientExpressionNode::Binary { left, right, .. } => {
             expression_contains_inspect(left) || expression_contains_inspect(right)
         }
+        ClientExpressionNode::Unary { expression, .. } => expression_contains_inspect(expression),
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -2025,9 +3868,13 @@ fn validate_external_contract_placement_inner(
             }
             Ok(())
         }
-        ClientExpressionNode::Concat { left, right } => {
+        ClientExpressionNode::Concat { left, right }
+        | ClientExpressionNode::Binary { left, right, .. } => {
             validate_external_contract_placement_inner(left, false, depth + 1, count)?;
             validate_external_contract_placement_inner(right, false, depth + 1, count)
+        }
+        ClientExpressionNode::Unary { expression, .. } => {
+            validate_external_contract_placement_inner(expression, false, depth + 1, count)
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
@@ -2316,6 +4163,12 @@ fn encode_expression_node_with_resources(
             })?;
             writer.extend(&length.to_be_bytes());
             writer.extend(bytes);
+        }
+        ClientExpressionNode::Unary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
+        }
+        ClientExpressionNode::Binary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_BINARY));
         }
     }
     Ok(())
@@ -2744,6 +4597,12 @@ fn validate_procedural_local_reads(
             validate_procedural_local_reads(left, initialized_locals)?;
             validate_procedural_local_reads(right, initialized_locals)?;
         }
+        ClientExpressionNode::Unary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
+        }
+        ClientExpressionNode::Binary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_BINARY));
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -2830,9 +4689,13 @@ fn validate_procedural_expression(
                 validate_procedural_expression(value, locals, false, false, true)?;
             }
         }
-        ClientExpressionNode::Concat { left, right } => {
+        ClientExpressionNode::Concat { left, right }
+        | ClientExpressionNode::Binary { left, right, .. } => {
             validate_procedural_expression(left, locals, false, false, true)?;
             validate_procedural_expression(right, locals, false, false, true)?;
+        }
+        ClientExpressionNode::Unary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
@@ -2907,6 +4770,12 @@ fn validate_resource_await_placement(
         }
         ClientExpressionNode::Inspect { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_INSPECT));
+        }
+        ClientExpressionNode::Unary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
+        }
+        ClientExpressionNode::Binary { .. } => {
+            return Err(ClientPlanError::InvalidExpressionNode(NODE_BINARY));
         }
     }
     Ok(())
@@ -3240,6 +5109,53 @@ pub enum ClientPlanError {
     },
     /// A version-3 expression node uses an unknown tag.
     InvalidExpressionNode(u8),
+    /// A version-10 unary operator uses an unknown tag.
+    InvalidControlFlowUnaryOperator(u8),
+    /// A version-10 binary operator uses an unknown tag.
+    InvalidControlFlowBinaryOperator(u8),
+    /// A version-10 statement uses an unknown tag.
+    InvalidControlFlowStatement(u8),
+    /// A version-10 return expression marker uses an unknown tag.
+    InvalidControlFlowReturnTag(u8),
+    /// A version-10 `IF` else-body marker uses an unknown tag.
+    InvalidControlFlowElseTag(u8),
+    /// A version-10 `IF` statement contains no branches.
+    InvalidControlFlowBranchCount {
+        /// The non-canonical branch count from the artefact.
+        actual: u32,
+    },
+    /// A version-10 plan exceeds its local declaration limit.
+    ControlFlowLocalLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A version-10 block or plan exceeds its statement limit.
+    ControlFlowStatementLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A version-10 `IF` statement exceeds its branch limit.
+    ControlFlowBranchLimitExceeded {
+        /// The exceeded limit.
+        limit: usize,
+    },
+    /// A version-10 block nesting depth exceeds the format limit.
+    ControlFlowBlockDepthExceeded,
+    /// A version-10 plan repeats one local identity.
+    DuplicateControlFlowLocal(LocalId),
+    /// A version-10 statement or expression reads an undeclared local.
+    UnknownControlFlowLocal(LocalId),
+    /// A version-10 expression reads a local before its initializing LET.
+    ControlFlowLocalReadBeforeLet(LocalId),
+    /// A version-10 assignment targets a local before its initializing LET.
+    ControlFlowAssignmentBeforeLet(LocalId),
+    /// A version-10 local has more than one initializing LET.
+    DuplicateControlFlowLet(LocalId),
+    /// A version-10 local has no initializing LET statement.
+    MissingControlFlowLet(LocalId),
+    /// A version-10 initializer does not match its local's kind.
+    ControlFlowLocalKindMismatch(LocalId),
+
     /// An Inspector operation uses an unknown operation tag.
     InvalidInspectOperation(u8),
     /// Inspector snapshot options are outside the structural-only v1 contract.
@@ -3429,6 +5345,78 @@ impl fmt::Display for ClientPlanError {
             Self::InvalidExpressionNode(tag) => {
                 write!(formatter, "invalid client-plan expression node tag {tag}")
             }
+            Self::InvalidControlFlowUnaryOperator(tag) => write!(
+                formatter,
+                "invalid client-plan control-flow unary operator tag {tag}"
+            ),
+            Self::InvalidControlFlowBinaryOperator(tag) => write!(
+                formatter,
+                "invalid client-plan control-flow binary operator tag {tag}"
+            ),
+            Self::InvalidControlFlowStatement(tag) => write!(
+                formatter,
+                "invalid client-plan control-flow statement tag {tag}"
+            ),
+            Self::InvalidControlFlowReturnTag(tag) => write!(
+                formatter,
+                "invalid client-plan control-flow return tag {tag}"
+            ),
+            Self::InvalidControlFlowElseTag(tag) => write!(
+                formatter,
+                "invalid client-plan control-flow else-body tag {tag}"
+            ),
+            Self::InvalidControlFlowBranchCount { actual } => write!(
+                formatter,
+                "invalid client-plan control-flow branch count {actual}; an IF requires at least one branch"
+            ),
+            Self::ControlFlowLocalLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan control-flow local count exceeds the limit {limit}"
+            ),
+            Self::ControlFlowStatementLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan control-flow statement count exceeds the limit {limit}"
+            ),
+            Self::ControlFlowBranchLimitExceeded { limit } => write!(
+                formatter,
+                "client-plan control-flow branch count exceeds the limit {limit}"
+            ),
+            Self::ControlFlowBlockDepthExceeded => {
+                formatter.write_str("client-plan control-flow block nesting exceeds the depth cap")
+            }
+            Self::DuplicateControlFlowLocal(local) => {
+                write!(
+                    formatter,
+                    "duplicate client-plan control-flow local {local}"
+                )
+            }
+            Self::UnknownControlFlowLocal(local) => {
+                write!(formatter, "unknown client-plan control-flow local {local}")
+            }
+            Self::ControlFlowLocalReadBeforeLet(local) => write!(
+                formatter,
+                "client-plan control-flow local {local} is read before LET"
+            ),
+            Self::ControlFlowAssignmentBeforeLet(local) => write!(
+                formatter,
+                "client-plan control-flow assignment targets local {local} before LET"
+            ),
+            Self::DuplicateControlFlowLet(local) => {
+                write!(
+                    formatter,
+                    "duplicate LET for client-plan control-flow local {local}"
+                )
+            }
+            Self::MissingControlFlowLet(local) => {
+                write!(
+                    formatter,
+                    "client-plan control-flow local {local} has no LET statement"
+                )
+            }
+            Self::ControlFlowLocalKindMismatch(local) => write!(
+                formatter,
+                "client-plan control-flow local {local} has an incompatible initializer kind"
+            ),
             Self::InvalidInspectOperation(tag) => {
                 write!(
                     formatter,
@@ -7280,5 +9268,123 @@ mod tests {
                 ),
             ],
         );
+    }
+    #[test]
+    fn control_flow_plan_round_trips_operators_blocks_and_returns() {
+        let local = LocalId::from_bytes([0x11; 16]);
+        let value_type = TypeId::from_bytes([0x12; 16]);
+        let integer = |value| ClientExpressionNode::Integer { value };
+        let read = || ClientExpressionNode::LocalRead { local };
+        let increment = || ClientExpressionNode::Binary {
+            operator: ControlFlowBinaryOperator::Add,
+            left: Box::new(read()),
+            right: Box::new(integer(1)),
+        };
+        let plan = ControlFlowClientPlan::new(
+            vec![ClientLocal::new(local, value_type, ClientLocalKind::Value)],
+            vec![
+                ControlFlowStatement::let_(local, integer(0)),
+                ControlFlowStatement::If(ControlFlowIfStatement::new(
+                    vec![ControlFlowIfBranch::new(
+                        ClientExpressionNode::Unary {
+                            operator: ControlFlowUnaryOperator::Not,
+                            expression: Box::new(ClientExpressionNode::Boolean { value: false }),
+                        },
+                        vec![ControlFlowStatement::assignment(local, increment())],
+                    )],
+                    Some(vec![ControlFlowStatement::assignment(local, increment())]),
+                )),
+                ControlFlowStatement::While(ControlFlowWhileStatement::new(
+                    ClientExpressionNode::Boolean { value: false },
+                    vec![ControlFlowStatement::assignment(local, increment())],
+                )),
+                ControlFlowStatement::return_(Some(read())),
+            ],
+        );
+        let encoded = plan.encode().expect("control-flow plan encodes");
+        let decoded = ControlFlowClientPlan::decode(&encoded).expect("control-flow plan decodes");
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.format_version(), CONTROL_FLOW_FORMAT_VERSION);
+        assert_eq!(decoded.locals()[0].local_id(), local);
+        assert_eq!(decoded.statements().len(), 4);
+    }
+
+    #[test]
+    fn control_flow_plan_rejects_legacy_operator_nodes_and_malformed_v10_tags() {
+        let unary = ClientExpressionNode::Unary {
+            operator: ControlFlowUnaryOperator::Minus,
+            expression: Box::new(ClientExpressionNode::Integer { value: 1 }),
+        };
+        assert_eq!(
+            ExpressionClientPlan::new(unary.clone()).encode(),
+            Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY))
+        );
+        let plan = ControlFlowClientPlan::new(
+            Vec::new(),
+            vec![ControlFlowStatement::return_(Some(unary))],
+        );
+        let mut encoded = plan.encode().expect("control-flow plan encodes");
+        encoded[24] = 99;
+        assert_eq!(
+            ControlFlowClientPlan::decode(&encoded),
+            Err(ClientPlanError::InvalidControlFlowUnaryOperator(99))
+        );
+        let mut trailing = plan.encode().expect("control-flow plan encodes");
+        trailing.push(0);
+        assert_eq!(
+            ControlFlowClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn control_flow_plan_rejects_statement_and_branch_limits() {
+        let statements = (0..=MAX_CONTROL_FLOW_STATEMENTS)
+            .map(|_| ControlFlowStatement::return_empty())
+            .collect();
+        assert_eq!(
+            ControlFlowClientPlan::new(Vec::new(), statements).encode(),
+            Err(ClientPlanError::ControlFlowStatementLimitExceeded {
+                limit: MAX_CONTROL_FLOW_STATEMENTS
+            })
+        );
+
+        let branches = (0..=MAX_CONTROL_FLOW_BRANCHES)
+            .map(|_| {
+                ControlFlowIfBranch::new(ClientExpressionNode::Boolean { value: true }, Vec::new())
+            })
+            .collect();
+        assert_eq!(
+            ControlFlowClientPlan::new(
+                Vec::new(),
+                vec![ControlFlowStatement::If(ControlFlowIfStatement::new(
+                    branches, None,
+                ))],
+            )
+            .encode(),
+            Err(ClientPlanError::ControlFlowBranchLimitExceeded {
+                limit: MAX_CONTROL_FLOW_BRANCHES
+            })
+        );
+    }
+    #[test]
+    fn capability_plan_accepts_version_ten_control_flow_inner_plan() {
+        let inner = InnerClientPlan::ControlFlow(ControlFlowClientPlan::new(
+            Vec::new(),
+            vec![ControlFlowStatement::return_value(
+                ClientExpressionNode::Integer { value: 7 },
+            )],
+        ));
+        let plan = CapabilityClientPlan::new(
+            inner.clone(),
+            vec![CapabilityRequirement::new(
+                "std.control.execute",
+                CapabilityArgumentSource::Text("scope".to_owned()),
+            )],
+        );
+        let encoded = plan.encode().expect("the capability plan encodes");
+        let decoded = CapabilityClientPlan::decode(&encoded).expect("the capability plan decodes");
+        assert_eq!(decoded.inner_plan_version(), CONTROL_FLOW_FORMAT_VERSION);
+        assert_eq!(decoded.inner_plan(), &inner);
     }
 }

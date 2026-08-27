@@ -27,9 +27,9 @@ pub use model::{
     ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
     STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
     STANDARD_LIBRARY_V7_REVISION_ID, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID,
-    STD_ACTION_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
-    STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID, STD_DATA_ROWS_TYPE_ID,
-    STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
+    STD_CSV_ENCODE_FUNCTION_ID, STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
+    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
@@ -45,12 +45,13 @@ pub use model::{
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
-    CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal,
-    CheckedClientLocalKind, CheckedClientReturnShape, CheckedClientStateSlot,
-    CheckedClientStatement, CheckedFieldRename, CheckedInspectOperation, CheckedInspectProjection,
-    CheckedResourceOperation, CheckedServerFunctionBody, CheckedServerFunctionReturn,
-    CheckedStateDefault, CheckedStateScope, CheckedStateSlotId, QueryCatalogue, QueryField,
-    QueryObjectType, ResolutionCatalogue, STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
+    CheckedActionOperation, CheckedClientControlFlowBranch, CheckedClientControlFlowStatement,
+    CheckedClientExpression, CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
+    CheckedClientReturnShape, CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
+    CheckedInspectOperation, CheckedInspectProjection, CheckedResourceOperation,
+    CheckedServerFunctionBody, CheckedServerFunctionReturn, CheckedStateDefault, CheckedStateScope,
+    CheckedStateSlotId, QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue,
+    STD_ACTION_CONTRACT, STD_JSON_CONTRACT, STD_UI_CONTRACT,
 };
 use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
@@ -61,7 +62,8 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
+    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
+    ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
@@ -3718,6 +3720,8 @@ struct ResolvedClientFunctionInput<'a> {
     location: SourceLocation,
     declaration_span: SourceSpan,
     logical_path: &'a str,
+    /// Whether this function uses the ADR 0020 expression/statement surface.
+    control_flow_required: bool,
 }
 
 /// One function declaration in source order, independent of its execution domain.
@@ -5139,6 +5143,7 @@ fn resolve_client_function_inputs<'a>(
             location: location(header.logical_path, &declaration.span),
             declaration_span: declaration.span.clone(),
             logical_path: header.logical_path,
+            control_flow_required: client_body_requires_control_flow(&declaration.body),
         });
     }
     inputs
@@ -5584,9 +5589,14 @@ fn client_expression_contains_await_or_resource(
                 client_expression_contains_await_or_resource(snapshot, locals)
             }
         },
-        CheckedClientExpression::Concat { left, right, .. } => {
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_await_or_resource(left, locals)
                 || client_expression_contains_await_or_resource(right, locals)
+        }
+        CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_await_or_resource(expression, locals)
         }
         CheckedClientExpression::LocalRead { local, .. } => locals.values().any(|binding| {
             binding.ordinal == Some(*local)
@@ -5616,8 +5626,14 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
             .arguments()
             .iter()
             .any(|(_, argument)| client_expression_contains_inspect(argument)),
-        CheckedClientExpression::Concat { left, right, .. } => {
+
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
+        }
+        CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_inspect(expression)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5643,6 +5659,14 @@ fn client_expression_contains_action(expression: &ClientExpression) -> bool {
         ClientExpression::Await { expression, .. } => client_expression_contains_action(expression),
         ClientExpression::Concat { left, right, .. } => {
             client_expression_contains_action(left) || client_expression_contains_action(right)
+        }
+        ClientExpression::Binary(binary) => {
+            client_expression_contains_action(&binary.left)
+                || client_expression_contains_action(&binary.right)
+        }
+        ClientExpression::Unary(unary) => client_expression_contains_action(&unary.expression),
+        ClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_action(expression)
         }
         ClientExpression::StringLiteral { .. }
         | ClientExpression::IntegerLiteral { .. }
@@ -7170,6 +7194,7 @@ fn check_inspect_call(
         (
             CheckedInspectOperation::Projection {
                 projection,
+
                 snapshot: Box::new(checked),
                 location: location(input.logical_path, span),
             },
@@ -7193,6 +7218,59 @@ fn check_inspect_call(
             result_shape: ClientExpressionResultShape::Value,
         },
     )))
+}
+fn checked_client_unary_operator(
+    operator: orna_syntax::ClientUnaryOperator,
+) -> ControlFlowUnaryOperator {
+    match operator {
+        orna_syntax::ClientUnaryOperator::Plus => ControlFlowUnaryOperator::Plus,
+        orna_syntax::ClientUnaryOperator::Minus => ControlFlowUnaryOperator::Minus,
+        orna_syntax::ClientUnaryOperator::Not => ControlFlowUnaryOperator::Not,
+    }
+}
+
+fn checked_client_binary_operator(
+    operator: orna_syntax::ClientBinaryOperator,
+) -> ControlFlowBinaryOperator {
+    match operator {
+        orna_syntax::ClientBinaryOperator::Add => ControlFlowBinaryOperator::Add,
+        orna_syntax::ClientBinaryOperator::Subtract => ControlFlowBinaryOperator::Subtract,
+        orna_syntax::ClientBinaryOperator::Multiply => ControlFlowBinaryOperator::Multiply,
+        orna_syntax::ClientBinaryOperator::Divide => ControlFlowBinaryOperator::Divide,
+        orna_syntax::ClientBinaryOperator::Modulo => ControlFlowBinaryOperator::Modulo,
+        orna_syntax::ClientBinaryOperator::Equal => ControlFlowBinaryOperator::Equal,
+        orna_syntax::ClientBinaryOperator::NotEqual => ControlFlowBinaryOperator::NotEqual,
+        orna_syntax::ClientBinaryOperator::LessThan => ControlFlowBinaryOperator::LessThan,
+        orna_syntax::ClientBinaryOperator::GreaterThan => ControlFlowBinaryOperator::GreaterThan,
+        orna_syntax::ClientBinaryOperator::LessThanOrEqual => {
+            ControlFlowBinaryOperator::LessThanOrEqual
+        }
+        orna_syntax::ClientBinaryOperator::GreaterThanOrEqual => {
+            ControlFlowBinaryOperator::GreaterThanOrEqual
+        }
+        orna_syntax::ClientBinaryOperator::And => ControlFlowBinaryOperator::And,
+        orna_syntax::ClientBinaryOperator::Or => ControlFlowBinaryOperator::Or,
+    }
+}
+
+fn control_flow_supported_scalar(expression_type: ClientExpressionType) -> Option<StandardScalar> {
+    if expression_type.result_shape != ClientExpressionResultShape::Value {
+        return None;
+    }
+    match expression_type.semantic_type {
+        SemanticType::Scalar(
+            scalar @ (StandardScalar::Integer
+            | StandardScalar::Boolean
+            | StandardScalar::CharacterLargeObject),
+        ) => Some(scalar),
+        SemanticType::Scalar(_) | SemanticType::Named(_) | SemanticType::Reference { .. } => None,
+    }
+}
+
+fn control_flow_types_match(left: ClientExpressionType, right: ClientExpressionType) -> bool {
+    control_flow_supported_scalar(left).is_some()
+        && control_flow_supported_scalar(left) == control_flow_supported_scalar(right)
+        && left.standard_value_type == right.standard_value_type
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7454,6 +7532,202 @@ fn check_client_expression(
                 expression_type,
             ))
         }
+        ClientExpression::Unary(unary) => {
+            let (checked_expression, expression_type) = check_client_expression(
+                &unary.expression,
+                input,
+                targets,
+                action_targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+                locals,
+            )?;
+            let required = match unary.operator {
+                orna_syntax::ClientUnaryOperator::Plus
+                | orna_syntax::ClientUnaryOperator::Minus => StandardScalar::Integer,
+                orna_syntax::ClientUnaryOperator::Not => StandardScalar::Boolean,
+            };
+            if control_flow_supported_scalar(expression_type) != Some(required) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "CLIENT unary {} requires a {} expression",
+                        unary.operator.as_str(),
+                        match required {
+                            StandardScalar::Integer => "INTEGER",
+                            StandardScalar::Boolean => "BOOLEAN",
+                            _ => "supported scalar",
+                        }
+                    ),
+                    input.logical_path,
+                    &unary.span,
+                ));
+                return None;
+            }
+            Some((
+                CheckedClientExpression::Unary {
+                    operator: checked_client_unary_operator(unary.operator),
+                    expression: Box::new(checked_expression),
+                    location: location(input.logical_path, &unary.span),
+                },
+                ClientExpressionType {
+                    semantic_type: SemanticType::scalar(required),
+                    standard_value_type: expression_type.standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
+                },
+            ))
+        }
+        ClientExpression::Binary(binary) => {
+            let (left_checked, left_type) = check_client_expression(
+                &binary.left,
+                input,
+                targets,
+                action_targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+                locals,
+            )?;
+            let (right_checked, right_type) = check_client_expression(
+                &binary.right,
+                input,
+                targets,
+                action_targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+                locals,
+            )?;
+            let operator = binary.operator;
+            let valid = match operator {
+                orna_syntax::ClientBinaryOperator::Add
+                | orna_syntax::ClientBinaryOperator::Subtract
+                | orna_syntax::ClientBinaryOperator::Multiply
+                | orna_syntax::ClientBinaryOperator::Divide
+                | orna_syntax::ClientBinaryOperator::Modulo => {
+                    control_flow_supported_scalar(left_type) == Some(StandardScalar::Integer)
+                        && control_flow_supported_scalar(right_type)
+                            == Some(StandardScalar::Integer)
+                }
+                orna_syntax::ClientBinaryOperator::And | orna_syntax::ClientBinaryOperator::Or => {
+                    control_flow_supported_scalar(left_type) == Some(StandardScalar::Boolean)
+                        && control_flow_supported_scalar(right_type)
+                            == Some(StandardScalar::Boolean)
+                }
+                orna_syntax::ClientBinaryOperator::Equal
+                | orna_syntax::ClientBinaryOperator::NotEqual
+                | orna_syntax::ClientBinaryOperator::LessThan
+                | orna_syntax::ClientBinaryOperator::GreaterThan
+                | orna_syntax::ClientBinaryOperator::LessThanOrEqual
+                | orna_syntax::ClientBinaryOperator::GreaterThanOrEqual => {
+                    control_flow_types_match(left_type, right_type)
+                }
+            };
+            if !valid {
+                let message = match operator {
+                    orna_syntax::ClientBinaryOperator::Add
+                    | orna_syntax::ClientBinaryOperator::Subtract
+                    | orna_syntax::ClientBinaryOperator::Multiply
+                    | orna_syntax::ClientBinaryOperator::Divide
+                    | orna_syntax::ClientBinaryOperator::Modulo => {
+                        format!(
+                            "CLIENT arithmetic operator {} requires INTEGER operands",
+                            operator.as_str()
+                        )
+                    }
+                    orna_syntax::ClientBinaryOperator::And
+                    | orna_syntax::ClientBinaryOperator::Or => {
+                        format!(
+                            "CLIENT Boolean operator {} requires BOOLEAN operands",
+                            operator.as_str()
+                        )
+                    }
+                    _ => format!(
+                        "CLIENT comparison {} requires operands of the same INTEGER, BOOLEAN, or TEXT type",
+                        operator.as_str()
+                    ),
+                };
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    message,
+                    input.logical_path,
+                    &binary.span,
+                ));
+                return None;
+            }
+            let comparison = matches!(
+                operator,
+                orna_syntax::ClientBinaryOperator::Equal
+                    | orna_syntax::ClientBinaryOperator::NotEqual
+                    | orna_syntax::ClientBinaryOperator::LessThan
+                    | orna_syntax::ClientBinaryOperator::GreaterThan
+                    | orna_syntax::ClientBinaryOperator::LessThanOrEqual
+                    | orna_syntax::ClientBinaryOperator::GreaterThanOrEqual
+            );
+            let result_scalar = if comparison
+                || matches!(
+                    operator,
+                    orna_syntax::ClientBinaryOperator::And | orna_syntax::ClientBinaryOperator::Or
+                ) {
+                StandardScalar::Boolean
+            } else {
+                StandardScalar::Integer
+            };
+            Some((
+                CheckedClientExpression::Binary {
+                    operator: checked_client_binary_operator(operator),
+                    left: Box::new(left_checked),
+                    right: Box::new(right_checked),
+                    location: location(input.logical_path, &binary.span),
+                },
+                ClientExpressionType {
+                    semantic_type: SemanticType::scalar(result_scalar),
+                    standard_value_type: standard_scalar_type_id(standard, result_scalar),
+                    result_shape: ClientExpressionResultShape::Value,
+                },
+            ))
+        }
+        ClientExpression::Parenthesized { expression, span } => {
+            let (checked_expression, expression_type) = check_client_expression(
+                expression,
+                input,
+                targets,
+                action_targets,
+                resource_targets,
+                query_catalogue,
+                base,
+                server_names,
+                standard,
+                diagnostics,
+                references,
+                used_capabilities,
+                locals,
+            )?;
+            Some((
+                CheckedClientExpression::Parenthesized {
+                    expression: Box::new(checked_expression),
+                    location: location(input.logical_path, span),
+                },
+                expression_type,
+            ))
+        }
+
         ClientExpression::Concat { left, right, span } => {
             let (left_checked, left_type) = check_client_expression(
                 left,
@@ -8246,11 +8520,103 @@ pub(crate) fn durable_state_slot_id(function: FunctionId, name: &str) -> StateSl
     let mut payload = function.to_string().into_bytes();
     payload.push(0);
     payload.extend_from_slice(&(name.len() as u32).to_be_bytes());
+
     payload.extend_from_slice(name.as_bytes());
     let digest = artifact_payload_digest(&payload).expect("state-slot identity payload is bounded");
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&digest.to_bytes()[..16]);
     StateSlotId::from_bytes(bytes)
+}
+fn client_body_requires_control_flow(body: &orna_syntax::ClientFunctionBody) -> bool {
+    match body {
+        orna_syntax::ClientFunctionBody::BooleanLiteral { .. }
+        | orna_syntax::ClientFunctionBody::ExternalContract { .. } => false,
+        orna_syntax::ClientFunctionBody::Expression { expression }
+        | orna_syntax::ClientFunctionBody::ReturnExpression { expression } => {
+            client_expression_requires_control_flow(expression)
+        }
+        orna_syntax::ClientFunctionBody::StateBlock(block) => {
+            block
+                .locals
+                .iter()
+                .any(|local| client_expression_requires_control_flow(&local.expression))
+                || block
+                    .return_expression
+                    .as_ref()
+                    .is_some_and(client_expression_requires_control_flow)
+                || block
+                    .statements
+                    .iter()
+                    .any(client_statement_requires_control_flow)
+        }
+        _ => false,
+    }
+}
+
+fn client_statement_requires_control_flow(
+    statement: &orna_syntax::ClientProceduralStatement,
+) -> bool {
+    match statement {
+        orna_syntax::ClientProceduralStatement::Let(statement) => {
+            client_expression_requires_control_flow(&statement.expression)
+        }
+        orna_syntax::ClientProceduralStatement::Assignment(statement) => {
+            client_expression_requires_control_flow(&statement.expression)
+        }
+        orna_syntax::ClientProceduralStatement::Return(_) => true,
+        orna_syntax::ClientProceduralStatement::If(statement) => {
+            client_expression_requires_control_flow(&statement.condition)
+                || statement
+                    .then_statements
+                    .iter()
+                    .any(client_statement_requires_control_flow)
+                || statement.elsif_branches.iter().any(|branch| {
+                    client_expression_requires_control_flow(&branch.condition)
+                        || branch
+                            .statements
+                            .iter()
+                            .any(client_statement_requires_control_flow)
+                })
+                || statement
+                    .else_statements
+                    .as_ref()
+                    .is_some_and(|statements| {
+                        statements
+                            .iter()
+                            .any(client_statement_requires_control_flow)
+                    })
+        }
+        orna_syntax::ClientProceduralStatement::While(statement) => {
+            client_expression_requires_control_flow(&statement.condition)
+                || statement
+                    .body
+                    .iter()
+                    .any(client_statement_requires_control_flow)
+        }
+    }
+}
+
+fn client_expression_requires_control_flow(expression: &ClientExpression) -> bool {
+    match expression {
+        ClientExpression::Unary(_) | ClientExpression::Binary(_) => true,
+        ClientExpression::Parenthesized { expression, .. }
+        | ClientExpression::Await { expression, .. } => {
+            client_expression_requires_control_flow(expression)
+        }
+        ClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|argument| client_expression_requires_control_flow(&argument.value)),
+        ClientExpression::Concat { left, right, .. } => {
+            client_expression_requires_control_flow(left)
+                || client_expression_requires_control_flow(right)
+        }
+        ClientExpression::StringLiteral { .. }
+        | ClientExpression::IntegerLiteral { .. }
+        | ClientExpression::BooleanLiteral { .. }
+        | ClientExpression::ParameterRead { .. }
+        | ClientExpression::LocalRead { .. }
+        | ClientExpression::FieldPath { .. } => false,
+    }
 }
 
 fn validate_client_await_positions(
@@ -8282,6 +8648,16 @@ fn validate_client_await_positions(
             validate_client_await_positions(left, false, input, diagnostics);
             validate_client_await_positions(right, false, input, diagnostics);
         }
+        ClientExpression::Binary(binary) => {
+            validate_client_await_positions(&binary.left, false, input, diagnostics);
+            validate_client_await_positions(&binary.right, false, input, diagnostics);
+        }
+        ClientExpression::Unary(unary) => {
+            validate_client_await_positions(&unary.expression, false, input, diagnostics);
+        }
+        ClientExpression::Parenthesized { expression, .. } => {
+            validate_client_await_positions(expression, false, input, diagnostics);
+        }
         ClientExpression::StringLiteral { .. }
         | ClientExpression::IntegerLiteral { .. }
         | ClientExpression::BooleanLiteral { .. }
@@ -8310,15 +8686,27 @@ fn unsupported_client_state_reference(
             Some(parameter.span.clone())
         }
         ClientExpression::FieldPath { root, .. } if is_state(root) => Some(root.span.clone()),
+
         ClientExpression::Await { expression, .. } => {
             unsupported_client_state_reference(expression, input, state_names)
         }
         ClientExpression::Call { arguments, .. } => arguments.iter().find_map(|argument| {
             unsupported_client_state_reference(&argument.value, input, state_names)
         }),
+
         ClientExpression::Concat { left, right, .. } => {
             unsupported_client_state_reference(left, input, state_names)
                 .or_else(|| unsupported_client_state_reference(right, input, state_names))
+        }
+        ClientExpression::Binary(binary) => {
+            unsupported_client_state_reference(&binary.left, input, state_names)
+                .or_else(|| unsupported_client_state_reference(&binary.right, input, state_names))
+        }
+        ClientExpression::Unary(unary) => {
+            unsupported_client_state_reference(&unary.expression, input, state_names)
+        }
+        ClientExpression::Parenthesized { expression, .. } => {
+            unsupported_client_state_reference(expression, input, state_names)
         }
         ClientExpression::StringLiteral { .. }
         | ClientExpression::IntegerLiteral { .. }
@@ -8360,6 +8748,21 @@ fn check_client_functions(
                 );
             }
             let (body, body_type, body_location, mut references) =
+                if input.control_flow_required {
+                    check_client_control_flow_body(
+                        input,
+                        submitted_ids,
+                        &targets,
+                        &action_targets,
+                        resource_targets,
+                        query_catalogue,
+                        base,
+                        server_names,
+                        standard,
+                        diagnostics,
+                    )?
+                } else
+
                 if let Some((value, body_source)) = input.body.as_boolean_literal() {
                     if !input.capabilities.is_empty() {
                         diagnostics.push(diagnostic(
@@ -8719,6 +9122,18 @@ fn check_client_functions(
                 statements.push(CheckedClientStatement::Assignment { local: binding.ordinal.expect("procedural local has ordinal"), expression: checked.clone() });
                 if let Some(binding) = locals.get_mut(&local_name) { binding.checked = checked; }
             }
+            orna_syntax::ClientProceduralStatement::Return(_)
+            | orna_syntax::ClientProceduralStatement::If(_)
+            | orna_syntax::ClientProceduralStatement::While(_) => {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "CLIENT procedural statements require the control-flow plan",
+                    input.logical_path,
+                    &input.declaration_span,
+                ));
+                return None;
+            }
+
         }
     }
     let Some(expression) = block.return_expression.as_ref() else {
@@ -9187,6 +9602,7 @@ fn check_client_functions(
                 }
                 CheckedClientFunctionBody::Expression { .. }
                 | CheckedClientFunctionBody::Procedural { .. }
+                | CheckedClientFunctionBody::ControlFlow { .. }
                 | CheckedClientFunctionBody::StateBlock { .. } => {
                     let resolved = ResolvedApplicationType {
                         semantic_type: body_type.semantic_type,
@@ -9248,6 +9664,776 @@ fn check_client_functions(
             })
         })
         .collect()
+}
+
+struct ClientControlFlowChecker<'a, 'b> {
+    input: &'a ResolvedClientFunctionInput<'b>,
+    submitted_ids: &'a HashMap<QualifiedSemanticName, SubmittedType>,
+    targets: &'a HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &'a HashMap<QualifiedSemanticName, ClientActionTarget>,
+    resource_targets: &'a HashMap<QualifiedSemanticName, ClientResourceTarget>,
+    query_catalogue: &'a ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &'a CatalogueSnapshot,
+    server_names: &'a [QualifiedSemanticName],
+    standard: Option<&'a CheckedStandardLibrary>,
+    diagnostics: &'a mut Vec<CompilerDiagnostic>,
+    locals: ClientLocalEnvironment,
+    checked_locals: Vec<CheckedClientLocal>,
+    references: Vec<CheckedDefinitionReference>,
+    used_capabilities: HashSet<QualifiedSemanticName>,
+    next_ordinal: u32,
+    _source_lifetime: std::marker::PhantomData<&'b ()>,
+}
+
+impl<'a, 'b> ClientControlFlowChecker<'a, 'b> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        input: &'a ResolvedClientFunctionInput<'b>,
+        submitted_ids: &'a HashMap<QualifiedSemanticName, SubmittedType>,
+        targets: &'a HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+        action_targets: &'a HashMap<QualifiedSemanticName, ClientActionTarget>,
+        resource_targets: &'a HashMap<QualifiedSemanticName, ClientResourceTarget>,
+        query_catalogue: &'a ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+        base: &'a CatalogueSnapshot,
+        server_names: &'a [QualifiedSemanticName],
+        standard: Option<&'a CheckedStandardLibrary>,
+        diagnostics: &'a mut Vec<CompilerDiagnostic>,
+    ) -> Self {
+        Self {
+            input,
+            submitted_ids,
+            targets,
+            action_targets,
+            resource_targets,
+            query_catalogue,
+            base,
+            server_names,
+            standard,
+            diagnostics,
+            locals: ClientLocalEnvironment::new(),
+            checked_locals: Vec::new(),
+            references: Vec::new(),
+            used_capabilities: HashSet::new(),
+            next_ordinal: 0,
+            _source_lifetime: std::marker::PhantomData,
+        }
+    }
+
+    fn expression(
+        &mut self,
+        expression: &ClientExpression,
+    ) -> Option<(CheckedClientExpression, ClientExpressionType)> {
+        check_client_expression(
+            expression,
+            self.input,
+            self.targets,
+            self.action_targets,
+            self.resource_targets,
+            self.query_catalogue,
+            self.base,
+            self.server_names,
+            self.standard,
+            self.diagnostics,
+            &mut self.references,
+            &mut self.used_capabilities,
+            &self.locals,
+        )
+    }
+
+    fn declare_local(
+        &mut self,
+        name: &NamePart,
+        type_source: Option<&SourceSlice>,
+        expression: &ClientExpression,
+        span: &SourceSpan,
+        pre_begin_resource: bool,
+    ) -> Option<(u32, CheckedClientExpression)> {
+        let local_name = semantic_part(name);
+        if self.locals.contains_key(&local_name) {
+            self.diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!(
+                    "duplicate CLIENT local definition {local_name} in {}",
+                    self.input.name
+                ),
+                self.input.logical_path,
+                &name.span,
+            ));
+            return None;
+        }
+        let diagnostics_before = self.diagnostics.len();
+        validate_client_await_positions(expression, true, self.input, self.diagnostics);
+        if self.diagnostics.len() != diagnostics_before {
+            return None;
+        }
+
+        let declared_resource_family = type_source.and_then(client_local_resource_family);
+        let direct_resource = matches!(
+            expression,
+            ClientExpression::Call { callee, .. }
+                if resource_constructor_kind(&semantic_name(callee)).is_some()
+        );
+        if pre_begin_resource && !direct_resource {
+            self.diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!("CLIENT local {local_name} requires a resource constructor initializer"),
+                self.input.logical_path,
+                span,
+            ));
+            return None;
+        }
+
+        let (checked, expression_type, kind) = if declared_resource_family.is_some()
+            || direct_resource
+        {
+            if !direct_resource {
+                self.diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "CLIENT local {local_name} resource type requires a resource constructor"
+                    ),
+                    self.input.logical_path,
+                    span,
+                ));
+                return None;
+            }
+            let (checked, expression_type) = check_resource_constructor(
+                expression,
+                self.input,
+                self.targets,
+                self.action_targets,
+                self.resource_targets,
+                self.query_catalogue,
+                self.base,
+                self.server_names,
+                self.standard,
+                self.diagnostics,
+                &mut self.references,
+                &mut self.used_capabilities,
+                &self.locals,
+            )?;
+            let actual_kind = match &checked {
+                CheckedClientExpression::Resource { operation } => operation.kind,
+                _ => unreachable!("resource constructor checker returns a resource"),
+            };
+            if let Some(source) = type_source {
+                let Some((expected_kind, descriptor)) = client_local_resource_type(source) else {
+                    self.diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            format!(
+                                "CLIENT local {local_name} must declare std.data.Resource<T> or std.data.StreamResource<T>"
+                            ),
+                            self.input.logical_path,
+                            &source.span,
+                        ));
+                    return None;
+                };
+                if reject_deferred_client_resource_descriptor(
+                    descriptor.as_ref(),
+                    &local_name,
+                    self.input,
+                    source,
+                    self.diagnostics,
+                ) {
+                    return None;
+                }
+                if actual_kind != expected_kind {
+                    self.diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "CLIENT local {local_name} type does not match its resource constructor"
+                        ),
+                        self.input.logical_path,
+                        &source.span,
+                    ));
+                    return None;
+                }
+                if let Some(descriptor) = descriptor {
+                    let resolved = resolve_application_type_with_named_standard(
+                        &descriptor,
+                        self.submitted_ids,
+                        self.input.logical_path,
+                        self.diagnostics,
+                        self.standard,
+                        true,
+                    )?;
+                    let expected_type = ClientExpressionType {
+                        semantic_type: resolved.semantic_type,
+                        standard_value_type: resolved.standard_value_type,
+                        result_shape: ClientExpressionResultShape::Value,
+                    };
+                    if !client_expression_types_compatible(expression_type, expected_type) {
+                        self.diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                format!(
+                                    "CLIENT local {local_name} descriptor does not match its SERVER resource result"
+                                ),
+                                self.input.logical_path,
+                                &source.span,
+                            ));
+                        return None;
+                    }
+                }
+            }
+            (
+                checked,
+                expression_type,
+                CheckedClientLocalKind::Resource(actual_kind),
+            )
+        } else {
+            let (checked, expression_type) = self.expression(expression)?;
+            if !client_expression_type_is_evaluable(expression_type, self.base, self.standard) {
+                self.diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "this CLIENT local type is not supported by the local evaluator",
+                    self.input.logical_path,
+                    span,
+                ));
+                return None;
+            }
+            if let Some(source) = type_source {
+                let Some(specification) = client_type_specification_from_source(source) else {
+                    self.diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!("unsupported CLIENT local type for {local_name}"),
+                        self.input.logical_path,
+                        &source.span,
+                    ));
+                    return None;
+                };
+                let resolved = resolve_application_type_with_named_standard(
+                    &specification,
+                    self.submitted_ids,
+                    self.input.logical_path,
+                    self.diagnostics,
+                    self.standard,
+                    true,
+                )?;
+                let expected_type = ClientExpressionType {
+                    semantic_type: resolved.semantic_type,
+                    standard_value_type: resolved.standard_value_type,
+                    result_shape: ClientExpressionResultShape::Value,
+                };
+                if !client_expression_types_compatible(expression_type, expected_type) {
+                    self.diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "CLIENT local {local_name} initializer does not match its declared type"
+                        ),
+                        self.input.logical_path,
+                        &source.span,
+                    ));
+                    return None;
+                }
+            }
+            (checked, expression_type, CheckedClientLocalKind::Value)
+        };
+
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self.next_ordinal.checked_add(1)?;
+        self.checked_locals.push(CheckedClientLocal {
+            ordinal,
+            name: local_name.clone(),
+            semantic_type: expression_type.semantic_type,
+            standard_value_type: expression_type.standard_value_type,
+            kind,
+            location: location(self.input.logical_path, span),
+        });
+        self.locals.insert(
+            local_name,
+            ClientLocalBinding {
+                checked: checked.clone(),
+                expression_type,
+                ordinal: Some(ordinal),
+                kind,
+            },
+        );
+        Some((ordinal, checked))
+    }
+
+    fn statements(
+        &mut self,
+        statements: &[orna_syntax::ClientProceduralStatement],
+    ) -> Option<(Vec<CheckedClientControlFlowStatement>, bool)> {
+        let mut checked = Vec::with_capacity(statements.len());
+        let mut guaranteed_return = false;
+        for statement in statements {
+            let (statement, statement_returns) = match statement {
+                orna_syntax::ClientProceduralStatement::Let(statement) => {
+                    let (local, expression) = self.declare_local(
+                        &statement.name,
+                        statement.type_source.as_ref(),
+                        &statement.expression,
+                        &statement.span,
+                        false,
+                    )?;
+                    (
+                        CheckedClientControlFlowStatement::Let {
+                            local,
+                            expression,
+                            location: location(self.input.logical_path, &statement.span),
+                        },
+                        false,
+                    )
+                }
+                orna_syntax::ClientProceduralStatement::Assignment(statement) => {
+                    let local_name = semantic_part(&statement.target);
+                    let Some(binding) = self.locals.get(&local_name).cloned() else {
+                        self.diagnostics.push(diagnostic(
+                            DiagnosticCode::UnknownQualifiedName,
+                            format!("unknown CLIENT local {local_name}"),
+                            self.input.logical_path,
+                            &statement.target.span,
+                        ));
+                        return None;
+                    };
+                    let diagnostics_before = self.diagnostics.len();
+                    validate_client_await_positions(
+                        &statement.expression,
+                        true,
+                        self.input,
+                        self.diagnostics,
+                    );
+                    if self.diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
+                    let direct_resource = matches!(
+                        &statement.expression,
+                        ClientExpression::Call { callee, .. }
+                            if resource_constructor_kind(&semantic_name(callee)).is_some()
+                    );
+                    let (expression, expression_type) =
+                        if matches!(binding.kind, CheckedClientLocalKind::Resource(_))
+                            && direct_resource
+                        {
+                            check_resource_constructor(
+                                &statement.expression,
+                                self.input,
+                                self.targets,
+                                self.action_targets,
+                                self.resource_targets,
+                                self.query_catalogue,
+                                self.base,
+                                self.server_names,
+                                self.standard,
+                                self.diagnostics,
+                                &mut self.references,
+                                &mut self.used_capabilities,
+                                &self.locals,
+                            )?
+                        } else {
+                            self.expression(&statement.expression)?
+                        };
+                    if !client_expression_types_compatible(expression_type, binding.expression_type)
+                        || (matches!(binding.kind, CheckedClientLocalKind::Resource(_))
+                            != matches!(expression, CheckedClientExpression::Resource { .. }))
+                    {
+                        self.diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            format!(
+                                "CLIENT assignment to local {local_name} does not match its declared type"
+                            ),
+                            self.input.logical_path,
+                            &statement.span,
+                        ));
+                        return None;
+                    }
+                    if let Some(binding) = self.locals.get_mut(&local_name) {
+                        binding.checked = expression.clone();
+                    }
+                    (
+                        CheckedClientControlFlowStatement::Assignment {
+                            local: binding.ordinal.expect("control-flow local has ordinal"),
+                            expression,
+                            location: location(self.input.logical_path, &statement.span),
+                        },
+                        false,
+                    )
+                }
+                orna_syntax::ClientProceduralStatement::Return(statement) => {
+                    let expression = if let Some(expression) = statement.expression.as_ref() {
+                        let diagnostics_before = self.diagnostics.len();
+                        validate_client_await_positions(
+                            expression,
+                            true,
+                            self.input,
+                            self.diagnostics,
+                        );
+                        if self.diagnostics.len() != diagnostics_before {
+                            return None;
+                        }
+                        let (checked, expression_type) = self.expression(expression)?;
+                        let expected = ClientExpressionType {
+                            semantic_type: self.input.return_type,
+                            standard_value_type: self.input.standard_value_type,
+                            result_shape: self.input.result_shape,
+                        };
+                        if !client_expression_types_compatible(expression_type, expected) {
+                            self.diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                "this CLIENT RETURN expression does not match the declared value type",
+                                self.input.logical_path,
+                                expression.span(),
+                            ));
+                            return None;
+                        }
+                        Some(checked)
+                    } else if self.input.return_type == SemanticType::scalar(StandardScalar::Void) {
+                        None
+                    } else {
+                        self.diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            "CLIENT RETURN without an expression requires a VOID return type",
+                            self.input.logical_path,
+                            &statement.span,
+                        ));
+                        return None;
+                    };
+                    (
+                        CheckedClientControlFlowStatement::Return {
+                            expression,
+                            location: location(self.input.logical_path, &statement.span),
+                        },
+                        true,
+                    )
+                }
+                orna_syntax::ClientProceduralStatement::If(statement) => {
+                    let incoming = self.locals.clone();
+                    let mut branches = Vec::with_capacity(1 + statement.elsif_branches.len());
+                    let mut all_return = true;
+
+                    self.locals = incoming.clone();
+                    let diagnostics_before = self.diagnostics.len();
+                    validate_client_await_positions(
+                        &statement.condition,
+                        false,
+                        self.input,
+                        self.diagnostics,
+                    );
+                    if self.diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
+                    let (condition, condition_type) = self.expression(&statement.condition)?;
+                    if control_flow_supported_scalar(condition_type)
+                        != Some(StandardScalar::Boolean)
+                    {
+                        self.diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            "CLIENT IF condition must be BOOLEAN",
+                            self.input.logical_path,
+                            statement.condition.span(),
+                        ));
+                        return None;
+                    }
+                    self.locals = incoming.clone();
+                    let (then_statements, then_returns) =
+                        self.statements(&statement.then_statements)?;
+                    all_return &= then_returns;
+                    branches.push(CheckedClientControlFlowBranch {
+                        condition,
+                        statements: then_statements,
+                        location: location(self.input.logical_path, &statement.span),
+                    });
+
+                    for branch in &statement.elsif_branches {
+                        self.locals = incoming.clone();
+                        let diagnostics_before = self.diagnostics.len();
+                        validate_client_await_positions(
+                            &branch.condition,
+                            false,
+                            self.input,
+                            self.diagnostics,
+                        );
+                        if self.diagnostics.len() != diagnostics_before {
+                            return None;
+                        }
+                        let (condition, condition_type) = self.expression(&branch.condition)?;
+                        if control_flow_supported_scalar(condition_type)
+                            != Some(StandardScalar::Boolean)
+                        {
+                            self.diagnostics.push(diagnostic(
+                                DiagnosticCode::TypeMismatch,
+                                "CLIENT ELSIF condition must be BOOLEAN",
+                                self.input.logical_path,
+                                branch.condition.span(),
+                            ));
+                            return None;
+                        }
+                        self.locals = incoming.clone();
+                        let (branch_statements, branch_returns) =
+                            self.statements(&branch.statements)?;
+                        all_return &= branch_returns;
+                        branches.push(CheckedClientControlFlowBranch {
+                            condition,
+                            statements: branch_statements,
+                            location: location(self.input.logical_path, &branch.span),
+                        });
+                    }
+
+                    let (else_statements, else_returns) =
+                        if let Some(statements) = statement.else_statements.as_ref() {
+                            self.locals = incoming.clone();
+                            let (statements, returns) = self.statements(statements)?;
+                            (Some(statements), returns)
+                        } else {
+                            (None, false)
+                        };
+                    all_return &= else_returns;
+                    self.locals = incoming;
+                    (
+                        CheckedClientControlFlowStatement::If {
+                            branches,
+                            else_statements,
+                            location: location(self.input.logical_path, &statement.span),
+                        },
+                        all_return,
+                    )
+                }
+                orna_syntax::ClientProceduralStatement::While(statement) => {
+                    let diagnostics_before = self.diagnostics.len();
+                    validate_client_await_positions(
+                        &statement.condition,
+                        false,
+                        self.input,
+                        self.diagnostics,
+                    );
+                    if self.diagnostics.len() != diagnostics_before {
+                        return None;
+                    }
+                    let incoming = self.locals.clone();
+                    let (condition, condition_type) = self.expression(&statement.condition)?;
+                    if control_flow_supported_scalar(condition_type)
+                        != Some(StandardScalar::Boolean)
+                    {
+                        self.diagnostics.push(diagnostic(
+                            DiagnosticCode::TypeMismatch,
+                            "CLIENT WHILE condition must be BOOLEAN",
+                            self.input.logical_path,
+                            statement.condition.span(),
+                        ));
+                        return None;
+                    }
+                    self.locals = incoming.clone();
+                    let (statements, _) = self.statements(&statement.body)?;
+                    self.locals = incoming;
+                    (
+                        CheckedClientControlFlowStatement::While {
+                            condition,
+                            statements,
+                            location: location(self.input.logical_path, &statement.span),
+                        },
+                        false,
+                    )
+                }
+            };
+            guaranteed_return |= statement_returns;
+            checked.push(statement);
+        }
+        Some((checked, guaranteed_return))
+    }
+
+    fn finish_capabilities(&mut self) -> bool {
+        for capability in self.input.capabilities {
+            let capability_name = semantic_name(&capability.name);
+            if !self.used_capabilities.contains(&capability_name) {
+                self.diagnostics.push(diagnostic(
+                    DiagnosticCode::CapabilityRequirement,
+                    format!("declared CLIENT capability {capability_name} is not exercised"),
+                    self.input.logical_path,
+                    &self.input.declaration_span,
+                ));
+                return false;
+            }
+        }
+        true
+    }
+
+    fn finish_direct_expression(
+        mut self,
+        expression: &ClientExpression,
+        allow_await: bool,
+    ) -> Option<(
+        CheckedClientFunctionBody,
+        ClientExpressionType,
+        SourceLocation,
+        Vec<CheckedDefinitionReference>,
+    )> {
+        let diagnostics_before = self.diagnostics.len();
+        validate_client_await_positions(expression, allow_await, self.input, self.diagnostics);
+        if self.diagnostics.len() != diagnostics_before {
+            return None;
+        }
+        let (checked, expression_type) = self.expression(expression)?;
+        let expected = ClientExpressionType {
+            semantic_type: self.input.return_type,
+            standard_value_type: self.input.standard_value_type,
+            result_shape: self.input.result_shape,
+        };
+        if !client_expression_types_compatible(expression_type, expected) {
+            self.diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "this CLIENT function must return the declared value type",
+                self.input.logical_path,
+                expression.span(),
+            ));
+            return None;
+        }
+        if !self.finish_capabilities() {
+            return None;
+        }
+        let location = location(self.input.logical_path, expression.span());
+        Some((
+            CheckedClientFunctionBody::ControlFlow {
+                locals: Vec::new(),
+                statements: vec![CheckedClientControlFlowStatement::Return {
+                    expression: Some(checked),
+                    location: location.clone(),
+                }],
+            },
+            expression_type,
+            location,
+            self.references,
+        ))
+    }
+
+    fn finish_block(
+        mut self,
+        block: &orna_syntax::ClientStateBlockBody,
+    ) -> Option<(
+        CheckedClientFunctionBody,
+        ClientExpressionType,
+        SourceLocation,
+        Vec<CheckedDefinitionReference>,
+    )> {
+        if !block.states.is_empty() {
+            self.diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "CLIENT state blocks cannot contain programmable control flow",
+                self.input.logical_path,
+                &block.span,
+            ));
+            return None;
+        }
+
+        let mut checked_statements = Vec::new();
+        for local in &block.locals {
+            let (ordinal, expression) = self.declare_local(
+                &local.name,
+                Some(&local.type_source),
+                &local.expression,
+                &local.span,
+                false,
+            )?;
+            checked_statements.push(CheckedClientControlFlowStatement::Let {
+                local: ordinal,
+                expression,
+                location: location(self.input.logical_path, &local.span),
+            });
+        }
+        let (statements, mut guaranteed_return) = self.statements(&block.statements)?;
+        checked_statements.extend(statements);
+
+        let mut body_type = ClientExpressionType {
+            semantic_type: self.input.return_type,
+            standard_value_type: self.input.standard_value_type,
+            result_shape: self.input.result_shape,
+        };
+        if let Some(expression) = block.return_expression.as_ref() {
+            let diagnostics_before = self.diagnostics.len();
+            validate_client_await_positions(expression, true, self.input, self.diagnostics);
+            if self.diagnostics.len() != diagnostics_before {
+                return None;
+            }
+            let (checked, expression_type) = self.expression(expression)?;
+            if !client_expression_types_compatible(
+                expression_type,
+                ClientExpressionType {
+                    semantic_type: self.input.return_type,
+                    standard_value_type: self.input.standard_value_type,
+                    result_shape: self.input.result_shape,
+                },
+            ) {
+                self.diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "this CLIENT function must return the declared value type",
+                    self.input.logical_path,
+                    expression.span(),
+                ));
+                return None;
+            }
+            body_type = expression_type;
+            checked_statements.push(CheckedClientControlFlowStatement::Return {
+                expression: Some(checked),
+                location: location(self.input.logical_path, expression.span()),
+            });
+            guaranteed_return = true;
+        }
+        if !guaranteed_return {
+            self.diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "CLIENT control-flow blocks must return on every path",
+                self.input.logical_path,
+                &block.span,
+            ));
+            return None;
+        }
+        if !self.finish_capabilities() {
+            return None;
+        }
+        Some((
+            CheckedClientFunctionBody::ControlFlow {
+                locals: self.checked_locals,
+                statements: checked_statements,
+            },
+            body_type,
+            location(self.input.logical_path, &block.span),
+            self.references,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_client_control_flow_body(
+    input: &ResolvedClientFunctionInput<'_>,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
+    targets: &HashMap<QualifiedSemanticName, ClientExpressionTarget>,
+    action_targets: &HashMap<QualifiedSemanticName, ClientActionTarget>,
+    resource_targets: &HashMap<QualifiedSemanticName, ClientResourceTarget>,
+    query_catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    base: &CatalogueSnapshot,
+    server_names: &[QualifiedSemanticName],
+    standard: Option<&CheckedStandardLibrary>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<(
+    CheckedClientFunctionBody,
+    ClientExpressionType,
+    SourceLocation,
+    Vec<CheckedDefinitionReference>,
+)> {
+    let checker = ClientControlFlowChecker::new(
+        input,
+        submitted_ids,
+        targets,
+        action_targets,
+        resource_targets,
+        query_catalogue,
+        base,
+        server_names,
+        standard,
+        diagnostics,
+    );
+    match input.body {
+        orna_syntax::ClientFunctionBody::Expression { expression } => {
+            checker.finish_direct_expression(expression, false)
+        }
+        orna_syntax::ClientFunctionBody::ReturnExpression { expression } => {
+            checker.finish_direct_expression(expression, true)
+        }
+        orna_syntax::ClientFunctionBody::StateBlock(block) => checker.finish_block(block),
+        orna_syntax::ClientFunctionBody::BooleanLiteral { .. }
+        | orna_syntax::ClientFunctionBody::ExternalContract { .. } => None,
+        _ => None,
+    }
 }
 
 fn is_closed_client_boolean_return(specification: &TypeSpecification) -> bool {
@@ -21765,6 +22951,42 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_control_flow_literals() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS INTEGER IS \
+            BEGIN IF TRUE THEN RETURN 2147483648; ELSE RETURN 0; END IF; END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT integer literal is outside the INTEGER range"
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn accepts_let_declarations_inside_while_bodies() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS INTEGER IS \
+            BEGIN \
+                LET index INTEGER := 0; \
+                WHILE index < 2 LOOP \
+                    LET item INTEGER := index; \
+                    index := item + 1; \
+                END LOOP; \
+                RETURN index; \
+            END;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        assert!(report.checked_bundle().is_some());
     }
 
     fn validate_capability_text(

@@ -10,9 +10,11 @@ use std::{
 use orna_artifact::{
     client_plan::{
         ACTION_FORMAT_VERSION as CLIENT_PLAN_ACTION_VERSION, ActionClientPlan, ActionOperationNode,
-        CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION, CapabilityArgumentSource,
+        CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION,
+        CONTROL_FLOW_FORMAT_VERSION as CLIENT_PLAN_CONTROL_FLOW_VERSION, CapabilityArgumentSource,
         CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
-        ClientLocalKind, ClientPlan, ClientStatement,
+        ClientLocalKind, ClientPlan, ClientStatement, ControlFlowClientPlan, ControlFlowIfBranch,
+        ControlFlowIfStatement, ControlFlowStatement, ControlFlowWhileStatement,
         EXPRESSION_FORMAT_VERSION as CLIENT_PLAN_EXPRESSION_VERSION, ExpressionClientPlan,
         FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
         InnerClientPlan, InspectOperationNode, InspectProjection,
@@ -75,7 +77,8 @@ use orna_core::{
 use crate::{
     CheckReport, CheckedBundle, CheckedDefinitionReferenceTarget, CheckedExpressionId,
     CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId, CheckedTypeId,
-    CompilerDiagnostic, ConstantValue, ParseReport, SemanticType, SourceLocation,
+    CompilerDiagnostic, ConstantValue, ParseReport, STD_BOOLEAN_TYPE_ID,
+    STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_INTEGER_TYPE_ID, SemanticType, SourceLocation,
     StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, check_standard_application,
 };
@@ -86,12 +89,12 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedActionOperation, CheckedClientExpression, CheckedClientFunctionBody,
-        CheckedClientLocal, CheckedClientLocalKind, CheckedClientReturnShape,
-        CheckedClientStateSlot, CheckedClientStatement, CheckedFieldRename,
-        CheckedInspectOperation, CheckedInspectProjection, CheckedResourceOperation,
-        CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE, durable_state_slot_id,
-        supports_unique_text_or_required_reference,
+        CheckedActionOperation, CheckedClientControlFlowStatement, CheckedClientExpression,
+        CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
+        CheckedClientReturnShape, CheckedClientStateSlot, CheckedClientStatement,
+        CheckedFieldRename, CheckedInspectOperation, CheckedInspectProjection,
+        CheckedResourceOperation, CheckedStateDefault, CheckedStateScope, UNIQUE_FIELD_MESSAGE,
+        durable_state_slot_id, supports_unique_text_or_required_reference,
     },
 };
 
@@ -1637,6 +1640,11 @@ enum ValidatedClientBody {
         statements: Vec<CheckedClientStatement>,
         return_expression: CheckedClientExpression,
     },
+    ControlFlow {
+        locals: Vec<CheckedClientLocal>,
+        statements: Vec<CheckedClientControlFlowStatement>,
+    },
+
     StateBlock {
         return_expression: CheckedClientExpression,
         states: Vec<CheckedClientStateSlot>,
@@ -3974,6 +3982,13 @@ fn validate_client_function_preflight(
             statements: statements.clone(),
             return_expression: return_expression.clone(),
         },
+        CheckedClientFunctionBody::ControlFlow { locals, statements } => {
+            ValidatedClientBody::ControlFlow {
+                locals: locals.clone(),
+                statements: statements.clone(),
+            }
+        }
+
         CheckedClientFunctionBody::ExternalContract { identity, .. } => {
             ValidatedClientBody::ExternalContract(identity.clone())
         }
@@ -4260,6 +4275,11 @@ fn standard_checked_locations<'a>(
                 }
                 client_expression_locations(return_expression, &mut locations);
             }
+            CheckedClientFunctionBody::ControlFlow { locals, statements } => {
+                locations.extend(locals.iter().map(|local| local.location()));
+                client_control_flow_statement_locations(statements, &mut locations);
+            }
+
             CheckedClientFunctionBody::StateBlock {
                 states,
                 return_expression,
@@ -4283,6 +4303,48 @@ fn standard_checked_locations<'a>(
         );
     }
     Ok(locations)
+}
+
+fn client_control_flow_statement_locations<'a>(
+    statements: &'a [CheckedClientControlFlowStatement],
+    locations: &mut Vec<&'a SourceLocation>,
+) {
+    for statement in statements {
+        locations.push(statement.location());
+        match statement {
+            CheckedClientControlFlowStatement::Let { expression, .. }
+            | CheckedClientControlFlowStatement::Assignment { expression, .. } => {
+                client_expression_locations(expression, locations);
+            }
+            CheckedClientControlFlowStatement::Return { expression, .. } => {
+                if let Some(expression) = expression {
+                    client_expression_locations(expression, locations);
+                }
+            }
+            CheckedClientControlFlowStatement::If {
+                branches,
+                else_statements,
+                ..
+            } => {
+                for branch in branches {
+                    locations.push(branch.location());
+                    client_expression_locations(branch.condition(), locations);
+                    client_control_flow_statement_locations(branch.statements(), locations);
+                }
+                if let Some(statements) = else_statements {
+                    client_control_flow_statement_locations(statements, locations);
+                }
+            }
+            CheckedClientControlFlowStatement::While {
+                condition,
+                statements,
+                ..
+            } => {
+                client_expression_locations(condition, locations);
+                client_control_flow_statement_locations(statements, locations);
+            }
+        }
+    }
 }
 
 fn client_expression_locations<'a>(
@@ -4345,10 +4407,28 @@ fn client_expression_locations<'a>(
             left,
             right,
             location,
+        }
+        | CheckedClientExpression::Binary {
+            left,
+            right,
+            location,
+            ..
         } => {
             locations.push(location);
             client_expression_locations(left, locations);
             client_expression_locations(right, locations);
+        }
+        CheckedClientExpression::Unary {
+            expression,
+            location,
+            ..
+        }
+        | CheckedClientExpression::Parenthesized {
+            expression,
+            location,
+        } => {
+            locations.push(location);
+            client_expression_locations(expression, locations);
         }
     }
 }
@@ -5758,8 +5838,13 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, value)| client_expression_contains_action(value)),
-        CheckedClientExpression::Concat { left, right, .. } => {
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_action(left) || client_expression_contains_action(right)
+        }
+        CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_action(expression)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5787,8 +5872,14 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
             .arguments()
             .iter()
             .any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Concat { left, right, .. } => {
+
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
+        }
+        CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_inspect(expression)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5820,8 +5911,13 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, argument)| client_expression_contains_resource(argument)),
-        CheckedClientExpression::Concat { left, right, .. } => {
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_resource(left) || client_expression_contains_resource(right)
+        }
+        CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_resource(expression)
         }
         CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
@@ -5829,6 +5925,23 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
         | CheckedClientExpression::ParameterRead { .. }
         | CheckedClientExpression::LocalRead { .. }
         | CheckedClientExpression::FieldPath { .. } => false,
+    }
+}
+fn client_control_flow_scalar_type_id(scalar: StandardScalar) -> Option<TypeId> {
+    match scalar {
+        StandardScalar::Boolean => Some(STD_BOOLEAN_TYPE_ID),
+        StandardScalar::Integer => Some(STD_INTEGER_TYPE_ID),
+        StandardScalar::CharacterLargeObject => Some(STD_CHARACTER_LARGE_OBJECT_TYPE_ID),
+        StandardScalar::BigInt
+        | StandardScalar::Float
+        | StandardScalar::Decimal
+        | StandardScalar::BinaryLargeObject
+        | StandardScalar::Uuid
+        | StandardScalar::Date
+        | StandardScalar::Time
+        | StandardScalar::Timestamp
+        | StandardScalar::Duration
+        | StandardScalar::Void => None,
     }
 }
 fn durable_client_local_id(function: FunctionId, ordinal: u32) -> LocalId {
@@ -6825,6 +6938,63 @@ impl<'a> CandidateBuilder<'a> {
                     InnerClientPlan::Procedural(plan),
                 )
             }
+            ValidatedClientBody::ControlFlow { locals, statements } => {
+                let function_id = self.identities.function(validated.id)?;
+                let local_ids: HashMap<u32, LocalId> = locals
+                    .iter()
+                    .map(|local| {
+                        (
+                            local.ordinal(),
+                            durable_client_local_id(function_id, local.ordinal()),
+                        )
+                    })
+                    .collect();
+                let artifact_locals = locals
+                    .iter()
+                    .map(|local| {
+                        let type_id = local
+                            .standard_value_type()
+                            .or_else(|| match local.semantic_type() {
+                                SemanticType::Named(id)
+                                | SemanticType::Reference { target: id } => {
+                                    self.client_named_type_id(id).ok()
+                                }
+                                SemanticType::Scalar(scalar) => {
+                                    client_control_flow_scalar_type_id(scalar)
+                                }
+                            })
+                            .ok_or(PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT control-flow local has no durable value type identity",
+                            })?;
+                        let local_id = *local_ids.get(&local.ordinal()).ok_or(
+                            PrepareError::InvalidCheckedBundle {
+                                reason: "checked CLIENT control-flow local identity map is incomplete",
+                            },
+                        )?;
+                        let kind = match local.kind() {
+                            CheckedClientLocalKind::Value => ClientLocalKind::Value,
+                            CheckedClientLocalKind::Resource(kind) => {
+                                ClientLocalKind::Resource(kind)
+                            }
+                        };
+                        Ok(ClientLocal::new(local_id, type_id, kind))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                let artifact_statements =
+                    self.client_control_flow_statements(statements, &local_ids)?;
+                let plan = ControlFlowClientPlan::new(artifact_locals, artifact_statements);
+                let payload = plan
+                    .encode()
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT control-flow plan exceeds client-plan limits",
+                    })?;
+                (
+                    CLIENT_PLAN_CONTROL_FLOW_VERSION,
+                    payload,
+                    InnerClientPlan::ControlFlow(plan),
+                )
+            }
+
             ValidatedClientBody::StateBlock {
                 return_expression,
                 states,
@@ -7132,11 +7302,117 @@ impl<'a> CandidateBuilder<'a> {
                         .collect::<Result<Vec<_>, PrepareError>>()?,
                 }
             }
+            CheckedClientExpression::Unary {
+                operator,
+                expression,
+                ..
+            } => ClientExpressionNode::Unary {
+                operator: *operator,
+                expression: Box::new(
+                    self.client_expression_node_with_locals(expression, local_ids)?,
+                ),
+            },
+            CheckedClientExpression::Binary {
+                operator,
+                left,
+                right,
+                ..
+            } => ClientExpressionNode::Binary {
+                operator: *operator,
+                left: Box::new(self.client_expression_node_with_locals(left, local_ids)?),
+                right: Box::new(self.client_expression_node_with_locals(right, local_ids)?),
+            },
+            CheckedClientExpression::Parenthesized { expression, .. } => {
+                self.client_expression_node_with_locals(expression, local_ids)?
+            }
+
             CheckedClientExpression::Concat { left, right, .. } => ClientExpressionNode::Concat {
                 left: Box::new(self.client_expression_node_with_locals(left, local_ids)?),
                 right: Box::new(self.client_expression_node_with_locals(right, local_ids)?),
             },
         })
+    }
+
+    fn client_control_flow_statements(
+        &self,
+        statements: &[CheckedClientControlFlowStatement],
+        local_ids: &HashMap<u32, LocalId>,
+    ) -> Result<Vec<ControlFlowStatement>, PrepareError> {
+        statements
+            .iter()
+            .map(|statement| self.client_control_flow_statement(statement, local_ids))
+            .collect()
+    }
+
+    fn client_control_flow_statement(
+        &self,
+        statement: &CheckedClientControlFlowStatement,
+        local_ids: &HashMap<u32, LocalId>,
+    ) -> Result<ControlFlowStatement, PrepareError> {
+        match statement {
+            CheckedClientControlFlowStatement::Let {
+                local, expression, ..
+            } => Ok(ControlFlowStatement::let_(
+                *local_ids
+                    .get(local)
+                    .ok_or(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT control-flow LET targets an unknown local",
+                    })?,
+                self.client_expression_node_with_locals(expression, local_ids)?,
+            )),
+            CheckedClientControlFlowStatement::Assignment {
+                local, expression, ..
+            } => Ok(ControlFlowStatement::assignment(
+                *local_ids
+                    .get(local)
+                    .ok_or(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT control-flow assignment targets an unknown local",
+                    })?,
+                self.client_expression_node_with_locals(expression, local_ids)?,
+            )),
+            CheckedClientControlFlowStatement::Return { expression, .. } => {
+                let expression = expression
+                    .as_ref()
+                    .map(|expression| {
+                        self.client_expression_node_with_locals(expression, local_ids)
+                    })
+                    .transpose()?;
+                Ok(ControlFlowStatement::return_(expression))
+            }
+            CheckedClientControlFlowStatement::If {
+                branches,
+                else_statements,
+                ..
+            } => {
+                let branches = branches
+                    .iter()
+                    .map(|branch| {
+                        Ok(ControlFlowIfBranch::new(
+                            self.client_expression_node_with_locals(branch.condition(), local_ids)?,
+                            self.client_control_flow_statements(branch.statements(), local_ids)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?;
+                let else_statements = else_statements
+                    .as_ref()
+                    .map(|statements| self.client_control_flow_statements(statements, local_ids))
+                    .transpose()?;
+                Ok(ControlFlowStatement::if_(ControlFlowIfStatement::new(
+                    branches,
+                    else_statements,
+                )))
+            }
+            CheckedClientControlFlowStatement::While {
+                condition,
+                statements,
+                ..
+            } => Ok(ControlFlowStatement::while_(
+                ControlFlowWhileStatement::new(
+                    self.client_expression_node_with_locals(condition, local_ids)?,
+                    self.client_control_flow_statements(statements, local_ids)?,
+                ),
+            )),
+        }
     }
 
     fn resource_target_revision(
@@ -7357,6 +7633,10 @@ impl<'a> CandidateBuilder<'a> {
                 }
                 self.append_client_expression_call_references(return_expression, &mut calls)?;
             }
+            ValidatedClientBody::ControlFlow { statements, .. } => {
+                self.append_client_control_flow_call_references(statements, &mut calls)?;
+            }
+
             ValidatedClientBody::StateBlock {
                 return_expression,
                 states,
@@ -7428,9 +7708,14 @@ impl<'a> CandidateBuilder<'a> {
                     self.append_client_expression_call_references(snapshot, calls)?;
                 }
             },
-            CheckedClientExpression::Concat { left, right, .. } => {
+            CheckedClientExpression::Concat { left, right, .. }
+            | CheckedClientExpression::Binary { left, right, .. } => {
                 self.append_client_expression_call_references(left, calls)?;
                 self.append_client_expression_call_references(right, calls)?;
+            }
+            CheckedClientExpression::Unary { expression, .. }
+            | CheckedClientExpression::Parenthesized { expression, .. } => {
+                self.append_client_expression_call_references(expression, calls)?;
             }
             CheckedClientExpression::String { .. }
             | CheckedClientExpression::Integer { .. }
@@ -7438,6 +7723,51 @@ impl<'a> CandidateBuilder<'a> {
             | CheckedClientExpression::ParameterRead { .. }
             | CheckedClientExpression::LocalRead { .. }
             | CheckedClientExpression::FieldPath { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn append_client_control_flow_call_references(
+        &self,
+        statements: &[CheckedClientControlFlowStatement],
+        calls: &mut Vec<(CheckedFunctionId, SourceLocation)>,
+    ) -> Result<(), PrepareError> {
+        for statement in statements {
+            match statement {
+                CheckedClientControlFlowStatement::Let { expression, .. }
+                | CheckedClientControlFlowStatement::Assignment { expression, .. } => {
+                    self.append_client_expression_call_references(expression, calls)?;
+                }
+                CheckedClientControlFlowStatement::Return { expression, .. } => {
+                    if let Some(expression) = expression {
+                        self.append_client_expression_call_references(expression, calls)?;
+                    }
+                }
+                CheckedClientControlFlowStatement::If {
+                    branches,
+                    else_statements,
+                    ..
+                } => {
+                    for branch in branches {
+                        self.append_client_expression_call_references(branch.condition(), calls)?;
+                        self.append_client_control_flow_call_references(
+                            branch.statements(),
+                            calls,
+                        )?;
+                    }
+                    if let Some(statements) = else_statements {
+                        self.append_client_control_flow_call_references(statements, calls)?;
+                    }
+                }
+                CheckedClientControlFlowStatement::While {
+                    condition,
+                    statements,
+                    ..
+                } => {
+                    self.append_client_expression_call_references(condition, calls)?;
+                    self.append_client_control_flow_call_references(statements, calls)?;
+                }
+            }
         }
         Ok(())
     }
