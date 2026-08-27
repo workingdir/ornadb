@@ -59,6 +59,24 @@ const MAX_OPAQUE_CODEC_MAGIC_LENGTH: usize = 64;
 
 /// The largest accepted number of runtime-value nodes.
 pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
+/// The exact ASCII magic prefix of the canonical `std.data.Rows` payload.
+pub const ROWS_MAGIC: &[u8; 12] = b"ORNA-ROWS/1 ";
+
+/// The only supported canonical `std.data.Rows` frame version.
+pub const ROWS_FRAME_VERSION: u16 = 1;
+
+/// The maximum number of ordered columns in one materialised Rows value.
+pub const MAX_ROWS_COLUMNS: usize = 1_000_000;
+
+/// The maximum number of ordered rows in one materialised Rows value.
+pub const MAX_ROWS_ROWS: usize = 10_000;
+
+/// The maximum number of cells in one materialised Rows value.
+pub const MAX_ROWS_CELLS: usize = 1_000_000;
+
+/// The maximum complete payload length of one materialised Rows value.
+pub const MAX_ROWS_PAYLOAD_LENGTH: usize = MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
+
 
 /// One immutable checked-in contract for a sealed `sys.inspect` carrier.
 ///
@@ -1252,6 +1270,11 @@ enum OpaquePayloadContract {
         /// The exact ASCII magic prefix, including any separating space.
         magic: String,
     },
+    /// `ORNA-ROWS/1` with bounded ordered column metadata and cell framing.
+    Rows {
+        /// The exact ASCII magic prefix, including its trailing space.
+        magic: String,
+    },
     /// `MAGIC <len:u32 be> <canonical std.ui.UI JSON UTF-8 bytes>`: a fixed
     /// ASCII magic prefix, then a big-endian `u32` body length, then exactly
     /// that many canonical JSON UTF-8 bytes representing one closed UI value.
@@ -1412,6 +1435,26 @@ impl OpaqueCodecRegistration {
             contract,
         })
     }
+    /// Declares a bounded `ORNA-ROWS/1` opaque codec.
+    ///
+    /// Structural framing is validated by the core registration; active
+    /// catalogue type resolution and cell semantics remain protocol-owned.
+    pub fn rows(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        magic: impl Into<String>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let magic = magic.into();
+        validate_codec_magic(opaque_type, &magic)?;
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            contract: OpaquePayloadContract::Rows { magic },
+        })
+    }
+
 }
 
 /// Identifies the accepted standard terminal-document codec without changing
@@ -1581,8 +1624,342 @@ fn validate_opaque_payload(
         OpaquePayloadContract::MediaTypeFramed { magic } => {
             validate_media_type_framed(opaque_type, magic.as_bytes(), payload)
         }
+        OpaquePayloadContract::Rows { magic } => {
+            validate_rows_payload(opaque_type, magic.as_bytes(), payload)
+        }
     }
 }
+fn validate_rows_payload(
+    opaque_type: TypeId,
+    magic: &[u8],
+    payload: &[u8],
+) -> Result<(), OpaqueValueError> {
+    let invalid = || OpaqueValueError::InvalidRowsFrame { opaque_type };
+    if payload.len() > MAX_ROWS_PAYLOAD_LENGTH || !payload.starts_with(magic) {
+        return Err(invalid());
+    }
+
+    let mut cursor = magic.len();
+    let version = take_rows_u16(payload, &mut cursor).ok_or_else(invalid)?;
+    if version != ROWS_FRAME_VERSION {
+        return Err(invalid());
+    }
+    let column_count = take_rows_u32(payload, &mut cursor)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(invalid)?;
+    if !(1..=MAX_ROWS_COLUMNS).contains(&column_count) {
+        return Err(invalid());
+    }
+    let minimum_columns = column_count
+        .checked_mul(23)
+        .and_then(|bytes| bytes.checked_add(4));
+    if minimum_columns.is_none_or(|minimum| payload.len().saturating_sub(cursor) < minimum) {
+        return Err(invalid());
+    }
+
+    let mut names = HashSet::with_capacity(column_count);
+    for _ in 0..column_count {
+        let name_length = take_rows_u32(payload, &mut cursor)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(invalid)?;
+        let name = take_rows_bytes(payload, &mut cursor, name_length).ok_or_else(invalid)?;
+        if std::str::from_utf8(name).is_err() || name.is_empty() || !names.insert(name) {
+            return Err(invalid());
+        }
+        let type_form = take_rows_bytes(payload, &mut cursor, 1)
+            .and_then(|bytes| bytes.first().copied())
+            .ok_or_else(invalid)?;
+        let type_id = take_rows_bytes(payload, &mut cursor, 16).ok_or_else(invalid)?;
+        if !(0x01..=0x04).contains(&type_form)
+            || (type_form == 0x01 && !is_rows_standard_scalar_type_id(type_id))
+        {
+            return Err(invalid());
+        }
+        let nullable = take_rows_bytes(payload, &mut cursor, 1)
+            .and_then(|bytes| bytes.first().copied())
+            .ok_or_else(invalid)?;
+        if nullable > 1 {
+            return Err(invalid());
+        }
+    }
+
+    let row_count = take_rows_u32(payload, &mut cursor)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(invalid)?;
+    if row_count > MAX_ROWS_ROWS
+        || row_count
+            .checked_mul(column_count)
+            .is_none_or(|cells| cells > MAX_ROWS_CELLS)
+    {
+        return Err(invalid());
+    }
+
+    for _ in 0..row_count {
+        let cell_count = take_rows_u32(payload, &mut cursor)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(invalid)?;
+        if cell_count != column_count {
+            return Err(invalid());
+        }
+        for _ in 0..cell_count {
+            let length = take_rows_u32(payload, &mut cursor)
+                .and_then(|length| usize::try_from(length).ok())
+                .ok_or_else(invalid)?;
+            if length > MAX_ROWS_PAYLOAD_LENGTH {
+                return Err(invalid());
+            }
+            let cell = take_rows_bytes(payload, &mut cursor, length).ok_or_else(invalid)?;
+            if validate_rows_orv5_value(cell, 0).is_err() {
+                return Err(invalid());
+            }
+        }
+    }
+
+    if cursor == payload.len() {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn take_rows_bytes<'a>(
+    payload: &'a [u8],
+    cursor: &mut usize,
+    length: usize,
+) -> Option<&'a [u8]> {
+    let end = cursor.checked_add(length)?;
+    let bytes = payload.get(*cursor..end)?;
+    *cursor = end;
+    Some(bytes)
+}
+
+fn take_rows_u16(payload: &[u8], cursor: &mut usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        take_rows_bytes(payload, cursor, 2)?.try_into().ok()?,
+    ))
+}
+
+fn take_rows_u32(payload: &[u8], cursor: &mut usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        take_rows_bytes(payload, cursor, 4)?.try_into().ok()?,
+    ))
+}
+fn is_rows_standard_scalar_type_id(type_id: &[u8]) -> bool {
+    type_id.len() == 16
+        && type_id[..15].iter().all(|byte| *byte == 0)
+        && matches!(type_id[15], 0x01 | 0x02 | 0x03 | 0x04 | 0x06 | 0x07)
+}
+fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
+    const HEADER: usize = 25;
+    const MARKER: &[u8; 4] = b"ORV5";
+    if depth > 32 {
+        return Err(());
+    }
+    if bytes.len() < HEADER || &bytes[..4] != MARKER {
+        return Err(());
+    }
+    let tag = bytes[4];
+    let declared = u32::from_be_bytes(bytes[21..25].try_into().map_err(|_| ())?) as usize;
+    if declared > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
+        return Err(());
+    }
+    let actual = bytes.len() - HEADER;
+    if declared != actual {
+        return Err(());
+    }
+    let payload = &bytes[HEADER..];
+    match tag {
+        0x00 | 0x01 | 0x09 => payload.is_empty().then_some(()).ok_or(()),
+        0x02 => (payload.len() == 1 && matches!(payload[0], 0 | 1))
+            .then_some(())
+            .ok_or(()),
+        0x03 => (payload.len() == 4).then_some(()).ok_or(()),
+        0x04 | 0x05 => (payload.len() == 8).then_some(()).ok_or(()),
+        0x06 | 0x07 | 0x0a | 0x0c => Ok(()),
+        0x08 => (payload.len() == 16).then_some(()).ok_or(()),
+        0x0b => validate_rows_record_payload(payload, depth),
+        0x0d => validate_rows_constructed_payload(
+            bytes[5..21].try_into().map_err(|_| ())?,
+            payload,
+            depth,
+        ),
+        _ => Err(()),
+    }
+}
+fn validate_rows_record_payload(payload: &[u8], depth: usize) -> Result<(), ()> {
+    if depth > 32 {
+        return Err(());
+    }
+    let mut cursor = 0;
+    let count = take_rows_u32(payload, &mut cursor)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(())?;
+    if count > payload.len().saturating_sub(cursor) / 20 {
+        return Err(());
+    }
+    let mut field_ids = HashSet::with_capacity(count);
+    let mut previous = None;
+    for _ in 0..count {
+        let field_id = take_rows_bytes(payload, &mut cursor, 16).ok_or(())?;
+        if !field_ids.insert(field_id) || previous.is_some_and(|prior: &[u8]| prior >= field_id) {
+            return Err(());
+        }
+        previous = Some(field_id);
+        let length = take_rows_u32(payload, &mut cursor)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or(())?;
+        let nested = take_rows_bytes(payload, &mut cursor, length).ok_or(())?;
+        validate_rows_orv5_value(nested, depth + 1)?;
+    }
+    (cursor == payload.len()).then_some(()).ok_or(())
+}
+
+fn validate_rows_constructed_payload(
+    type_id: [u8; 16],
+    payload: &[u8],
+    depth: usize,
+) -> Result<(), ()> {
+    if type_id != [0; 16] || depth >= 32 {
+        return Err(());
+    }
+    let mut cursor = 0;
+    let descriptor_length = usize::from(u16::from_be_bytes(
+        take_rows_bytes(payload, &mut cursor, 2)
+            .ok_or(())?
+            .try_into()
+            .map_err(|_| ())?,
+    ));
+    if descriptor_length == 0 {
+        return Err(());
+    }
+    let descriptor = take_rows_bytes(payload, &mut cursor, descriptor_length).ok_or(())?;
+    let (descriptor, consumed) = validate_rows_descriptor(descriptor, 0, 0)?;
+    if consumed != descriptor.len() {
+        return Err(());
+    }
+    validate_rows_constructor_content(descriptor, &payload[cursor..], depth + 1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowsDescriptor {
+    Named,
+    Reference,
+    List,
+    Map,
+    Option,
+}
+
+fn validate_rows_descriptor(
+    bytes: &[u8],
+    offset: usize,
+    depth: usize,
+) -> Result<(RowsDescriptor, usize), ()> {
+    if depth > 32 {
+        return Err(());
+    }
+    let tag = *bytes.get(offset).ok_or(())?;
+    let cursor = offset.checked_add(1).ok_or(())?;
+    match tag {
+        0 | 1 => {
+            let end = cursor.checked_add(16).ok_or(())?;
+            if end > bytes.len() {
+                return Err(());
+            }
+            Ok((
+                if tag == 0 {
+                    RowsDescriptor::Named
+                } else {
+                    RowsDescriptor::Reference
+                },
+                end,
+            ))
+        }
+        2..=4 => {
+            let (_child, end) = validate_rows_descriptor(bytes, cursor, depth + 1)?;
+            if tag == 3 {
+                let (_value, end) = validate_rows_descriptor(bytes, end, depth + 1)?;
+                Ok((RowsDescriptor::Map, end))
+            } else {
+                Ok((
+                    match tag {
+                        2 => RowsDescriptor::List,
+                        4 => RowsDescriptor::Option,
+                        _ => unreachable!(),
+                    },
+                    end,
+                ))
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn validate_rows_constructor_content(
+    descriptor: RowsDescriptor,
+    content: &[u8],
+    depth: usize,
+) -> Result<(), ()> {
+    if depth > 32 {
+        return Err(());
+    }
+    match descriptor {
+        RowsDescriptor::Option => {
+            let presence = *content.first().ok_or(())?;
+            match presence {
+                0 if content.len() == 1 => Ok(()),
+                1 => {
+                    let mut cursor = 1;
+                    let length = take_rows_u32(content, &mut cursor)
+                        .and_then(|length| usize::try_from(length).ok())
+                        .ok_or(())?;
+                    let nested = take_rows_bytes(content, &mut cursor, length).ok_or(())?;
+                    if cursor != content.len() {
+                        return Err(());
+                    }
+                    validate_rows_orv5_value(nested, depth)
+                }
+                _ => Err(()),
+            }
+        }
+        RowsDescriptor::List => validate_rows_repeated_content(content, depth),
+        RowsDescriptor::Map => {
+            let mut cursor = 0;
+            let count = take_rows_u32(content, &mut cursor)
+                .and_then(|count| usize::try_from(count).ok())
+                .ok_or(())?;
+            for _ in 0..count {
+                let key_length = take_rows_u32(content, &mut cursor)
+                    .and_then(|length| usize::try_from(length).ok())
+                    .ok_or(())?;
+                let key = take_rows_bytes(content, &mut cursor, key_length).ok_or(())?;
+                validate_rows_orv5_value(key, depth)?;
+                let value_length = take_rows_u32(content, &mut cursor)
+                    .and_then(|length| usize::try_from(length).ok())
+                    .ok_or(())?;
+                let value = take_rows_bytes(content, &mut cursor, value_length).ok_or(())?;
+                validate_rows_orv5_value(value, depth)?;
+            }
+            (cursor == content.len()).then_some(()).ok_or(())
+        }
+        RowsDescriptor::Named | RowsDescriptor::Reference => Err(()),
+    }
+}
+
+fn validate_rows_repeated_content(content: &[u8], depth: usize) -> Result<(), ()> {
+    let mut cursor = 0;
+    let count = take_rows_u32(content, &mut cursor)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(())?;
+    for _ in 0..count {
+        let length = take_rows_u32(content, &mut cursor)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or(())?;
+        let nested = take_rows_bytes(content, &mut cursor, length).ok_or(())?;
+        validate_rows_orv5_value(nested, depth)?;
+    }
+    (cursor == content.len()).then_some(()).ok_or(())
+}
+
 
 /// Parses and validates one canonical JSON frame, returning its body value for
 /// contracts that apply a schema-specific check after the generic framing.
@@ -2471,6 +2848,11 @@ pub enum OpaqueValueError {
         /// The opaque type whose payload was rejected.
         opaque_type: TypeId,
     },
+    /// A bounded `ORNA-ROWS/1` payload is malformed or non-canonical.
+    InvalidRowsFrame {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+    },
 }
 
 impl fmt::Display for OpaqueValueError {
@@ -2520,6 +2902,9 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InvalidMediaType { .. } => {
                 formatter.write_str("opaque value payload has an empty media type")
+            }
+            Self::InvalidRowsFrame { .. } => {
+                formatter.write_str("opaque value Rows frame is malformed or non-canonical")
             }
         }
     }
@@ -8772,6 +9157,52 @@ mod tests {
             OpaqueValue::new_inspect_carrier(&active, unknown_type, payload),
             Err(OpaqueValueError::UnregisteredType {
                 opaque_type: unknown_type,
+            })
+        );
+    }
+    #[test]
+    fn rows_opaque_registration_accepts_bounded_canonical_zero_row_frame() {
+        const ROWS_TYPE: TypeId = TypeId::from_bytes([0x8a; 16]);
+        let standard = verified_standard_with_value_types(vec![
+            standard_boolean_definition(),
+            opaque_definition(
+                ROWS_TYPE,
+                ["std", "data", "rows"],
+                "orna.std.value.rows@1",
+            ),
+        ]);
+        let active = active_record_revision_with_standard(RECORD_TYPE, standard);
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registration = OpaqueCodecRegistration::rows(
+            ROWS_TYPE,
+            QualifiedSemanticName::new(["std", "data", "rows"]).unwrap(),
+            "orna.std.value.rows@1",
+            "ORNA-ROWS/1 ",
+        )
+        .unwrap();
+        let registry = OpaqueCodecRegistry::new(standard, [registration]).unwrap();
+        let mut payload = b"ORNA-ROWS/1 ".to_vec();
+        payload.extend_from_slice(&1_u16.to_be_bytes());
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        payload.push(b'x');
+        payload.push(0x01);
+        payload.extend_from_slice(&[0; 15]);
+        payload.push(0x01);
+        payload.push(0);
+        payload.extend_from_slice(&0_u32.to_be_bytes());
+
+        let value = OpaqueValue::new(&active, &registry, ROWS_TYPE, payload.clone())
+            .expect("the bounded zero-row Rows frame must be structurally valid");
+        assert_eq!(value.opaque_type(), ROWS_TYPE);
+        assert_eq!(value.canonical_payload(), payload);
+
+        let mut trailing = payload;
+        trailing.push(0);
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, ROWS_TYPE, trailing),
+            Err(OpaqueValueError::InvalidRowsFrame {
+                opaque_type: ROWS_TYPE,
             })
         );
     }
