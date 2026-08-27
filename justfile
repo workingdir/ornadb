@@ -7,6 +7,11 @@ check: fmt build lint test
 fmt:
     cargo fmt --all -- --check
 
+
+# Run the accepted TTY renderer demo for terminal documents and byte streams.
+runtime-tty-demo:
+    cargo run -p orna-runtime-tty --example runtime_demo
+
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
