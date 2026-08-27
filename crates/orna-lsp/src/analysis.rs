@@ -1310,24 +1310,20 @@ fn client_expression_part_at<'a>(
         ClientExpression::Call {
             callee, arguments, ..
         } => {
-            if let Some(constructor) = accepted_target_constructor(callee) {
-                if let Some(argument) = arguments
+            if let Some(constructor) = accepted_target_constructor(callee)
+                && let Some(argument) = arguments
                     .iter()
                     .find(|argument| argument.name.as_ref().is_some_and(is_target_argument))
-                {
-                    if let ClientExpression::FieldPath { root, members, .. } = &argument.value {
-                        if members
-                            .last()
-                            .is_some_and(|member| name_part_matches_span(member, selected_span))
-                        {
-                            return Some(ClientExpressionPart::TargetFunction {
-                                root,
-                                members,
-                                constructor,
-                            });
-                        }
-                    }
-                }
+                && let ClientExpression::FieldPath { root, members, .. } = &argument.value
+                && members
+                    .last()
+                    .is_some_and(|member| name_part_matches_span(member, selected_span))
+            {
+                return Some(ClientExpressionPart::TargetFunction {
+                    root,
+                    members,
+                    constructor,
+                });
             }
             arguments.iter().find_map(|argument| {
                 if argument
@@ -2041,10 +2037,10 @@ fn property_declaration_span(
     if let Some(span) = client_field_declaration_span(parse, selected_span) {
         return Some(span);
     }
-    if is_declaration_span(parse, selected_span) {
-        if let Some(span) = field_declaration_span(parse, selected_span) {
-            return Some(span);
-        }
+    if is_declaration_span(parse, selected_span)
+        && let Some(span) = field_declaration_span(parse, selected_span)
+    {
+        return Some(span);
     }
     field_reference_declaration_span(parse, text, highlighted, selected_span)
 }
@@ -3070,9 +3066,9 @@ pub fn references(
         })
         .filter(|token| identifier_spelling_matches(&document.text[token.range.clone()], &name))
         .filter(|token| {
-            declaration_span.as_ref().map_or(true, |span| {
-                span.start != token.range.start || span.end != token.range.end
-            })
+            declaration_span
+                .as_ref()
+                .is_none_or(|span| span.start != token.range.start || span.end != token.range.end)
         })
         .map(|token| Location {
             uri: document.uri.clone(),
@@ -3085,6 +3081,7 @@ pub fn references(
 }
 
 /// Returns the completion items for one document.
+#[allow(dead_code)]
 pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
     completion_at(parse, standard, None, None)
 }
@@ -3185,13 +3182,14 @@ pub fn completion_at(
         );
     }
     for declaration in parse.server_functions() {
-        let detail = target_completion
-            .is_some_and(|constructor| {
-                server_target_is_eligible(declaration, constructor, standard)
-            })
-            .then_some("server function target")
-            .unwrap_or("server function")
-            .to_owned();
+        let detail = if target_completion.is_some_and(|constructor| {
+            server_target_is_eligible(declaration, constructor, standard)
+        }) {
+            "server function target"
+        } else {
+            "server function"
+        }
+        .to_owned();
         add_named(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
@@ -3199,13 +3197,14 @@ pub fn completion_at(
         );
     }
     for declaration in parse.client_functions() {
-        let detail = target_completion
-            .is_some_and(|constructor| {
-                client_target_is_eligible(declaration, constructor, standard)
-            })
-            .then_some("client function target")
-            .unwrap_or("client function")
-            .to_owned();
+        let detail = if target_completion.is_some_and(|constructor| {
+            client_target_is_eligible(declaration, constructor, standard)
+        }) {
+            "client function target"
+        } else {
+            "client function"
+        }
+        .to_owned();
         add_named(
             last_name(&declaration.name),
             CompletionItemKind::FUNCTION,
@@ -3400,22 +3399,14 @@ fn add_client_member_completions(parse: &Parse, byte: usize, items: &mut Vec<Com
     }
 }
 
-fn client_field_path_at_byte<'a>(
-    declaration: &'a ClientFunctionDeclaration,
+fn client_field_path_at_byte(
+    declaration: &ClientFunctionDeclaration,
     byte: usize,
-) -> Option<(
-    &'a orna_syntax::NamePart,
-    &'a [orna_syntax::NamePart],
-    usize,
-)> {
-    fn expression_at_byte<'a>(
-        expression: &'a ClientExpression,
+) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
+    fn expression_at_byte(
+        expression: &ClientExpression,
         byte: usize,
-    ) -> Option<(
-        &'a orna_syntax::NamePart,
-        &'a [orna_syntax::NamePart],
-        usize,
-    )> {
+    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
         match expression {
             ClientExpression::FieldPath { root, members, .. } => members
                 .iter()
@@ -3449,27 +3440,19 @@ fn client_field_path_at_byte<'a>(
             | ClientExpression::BooleanLiteral { .. } => None,
         }
     }
-    fn statements_at_byte<'a>(
-        statements: &'a [orna_syntax::ClientProceduralStatement],
+    fn statements_at_byte(
+        statements: &[orna_syntax::ClientProceduralStatement],
         byte: usize,
-    ) -> Option<(
-        &'a orna_syntax::NamePart,
-        &'a [orna_syntax::NamePart],
-        usize,
-    )> {
+    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
         statements
             .iter()
             .find_map(|statement| statement_at_byte(statement, byte))
     }
 
-    fn statement_at_byte<'a>(
-        statement: &'a orna_syntax::ClientProceduralStatement,
+    fn statement_at_byte(
+        statement: &orna_syntax::ClientProceduralStatement,
         byte: usize,
-    ) -> Option<(
-        &'a orna_syntax::NamePart,
-        &'a [orna_syntax::NamePart],
-        usize,
-    )> {
+    ) -> Option<(&orna_syntax::NamePart, &[orna_syntax::NamePart], usize)> {
         match statement {
             orna_syntax::ClientProceduralStatement::Let(statement) => {
                 expression_at_byte(&statement.expression, byte)
