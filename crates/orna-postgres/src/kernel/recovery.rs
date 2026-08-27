@@ -41,10 +41,11 @@ use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
+    STANDARD_LIBRARY_V8_REVISION_ID,
     verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
     verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
     verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
-    verify_standard_library_v7_snapshot,
+    verify_standard_library_v7_snapshot, verify_standard_library_v8_snapshot,
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
@@ -1456,6 +1457,7 @@ fn verify_recovered_standard_snapshot(
         STANDARD_LIBRARY_V5_REVISION_ID => verify_standard_library_v5_snapshot(snapshot),
         STANDARD_LIBRARY_V6_REVISION_ID => verify_standard_library_v6_snapshot(snapshot),
         STANDARD_LIBRARY_V7_REVISION_ID => verify_standard_library_v7_snapshot(snapshot),
+        STANDARD_LIBRARY_V8_REVISION_ID => verify_standard_library_v8_snapshot(snapshot),
         _ => {
             return Err(DurableRecord::new(
                 "_orna_kernel.standard_library_revisions",
@@ -1500,6 +1502,7 @@ fn verify_recovered_standard_snapshot_for_test_hooks(
             | STANDARD_LIBRARY_V5_REVISION_ID
             | STANDARD_LIBRARY_V6_REVISION_ID
             | STANDARD_LIBRARY_V7_REVISION_ID
+            | STANDARD_LIBRARY_V8_REVISION_ID
     ) {
         return verify_recovered_standard_snapshot(snapshot);
     }
@@ -5313,6 +5316,7 @@ mod tests {
             orna_standard::retained_standard_library_v5_snapshot().expect("retained V5 standard"),
             orna_standard::retained_standard_library_v6_snapshot().expect("retained V6 standard"),
             orna_standard::retained_standard_library_v7_snapshot().expect("retained V7 standard"),
+            orna_standard::retained_standard_library_v8_snapshot().expect("retained V8 standard"),
         ];
         for snapshot in retained {
             let revision = snapshot.revision();
