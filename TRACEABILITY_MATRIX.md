@@ -80,6 +80,10 @@ does not by itself claim that the named test ran in this checkout.
 - `cargo clippy -p orna-client --all-targets -- -D warnings` passed after the
   accepted error-layout and runtime-adapter cleanup; `cargo test -p orna-client
   --all-targets` passed with 326 tests across 3 suites.
+- `cargo test -p orna-postgres --lib` passed with 356 tests and 3 ignored after
+  safe lint cleanup commit `34e39f4`; package Clippy still has residual
+  intentional error-layout and private-enum findings, so no workspace lint pass
+  is claimed.
 - `python3 scripts/run-demos.py` passed after excluding the unsupported generic
   scalar fixture; source-check and offline demos passed, while
   `client-inspector` was skipped because it is Compose-only. The source-authored
