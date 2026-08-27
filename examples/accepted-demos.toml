@@ -11,6 +11,11 @@ source = "crates/orna-server/tests/fixtures/server_function_dogfood.orna"
 description = "SERVER query, stream, and mutation functions."
 
 [[demos]]
+name = "scalar-server"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/scalar_server_dogfood.orna"
+description = "A parameterised SERVER function that returns an INTEGER argument."
+[[demos]]
 name = "client-function"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_function_dogfood.orna"
