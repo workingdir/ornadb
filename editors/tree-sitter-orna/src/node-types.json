@@ -3075,6 +3075,11 @@
     }
   },
   {
+    "type": "client_additive_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "client_argument",
     "named": true,
     "fields": {
@@ -4785,6 +4790,14 @@
       "required": true,
       "types": [
         {
+          "type": "client_additive_operator",
+          "named": true
+        },
+        {
+          "type": "client_comparison_operator",
+          "named": true
+        },
+        {
           "type": "client_concat_operator",
           "named": true
         },
@@ -4793,7 +4806,23 @@
           "named": true
         },
         {
+          "type": "client_multiplicative_operator",
+          "named": true
+        },
+        {
           "type": "client_primary_expression",
+          "named": true
+        },
+        {
+          "type": "client_unary_expression",
+          "named": true
+        },
+        {
+          "type": "kw_and",
+          "named": true
+        },
+        {
+          "type": "kw_or",
           "named": true
         }
       ]
@@ -5376,6 +5405,60 @@
       "types": [
         {
           "type": "dot",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_if_statement",
+    "named": true,
+    "fields": {
+      "condition": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_procedural_statement",
+          "named": true
+        },
+        {
+          "type": "client_return_statement",
+          "named": true
+        },
+        {
+          "type": "kw_else",
+          "named": true
+        },
+        {
+          "type": "kw_elsif",
+          "named": true
+        },
+        {
+          "type": "kw_end",
+          "named": true
+        },
+        {
+          "type": "kw_if",
+          "named": true
+        },
+        {
+          "type": "kw_then",
+          "named": true
+        },
+        {
+          "type": "semicolon",
           "named": true
         }
       ]
@@ -6514,6 +6597,11 @@
     }
   },
   {
+    "type": "client_multiplicative_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "client_no_state_body",
     "named": true,
     "fields": {},
@@ -6576,6 +6664,29 @@
     }
   },
   {
+    "type": "client_parenthesized_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_expression",
+          "named": true
+        },
+        {
+          "type": "lparen",
+          "named": true
+        },
+        {
+          "type": "rparen",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "client_primary_expression",
     "named": true,
     "fields": {},
@@ -6601,6 +6712,10 @@
         },
         {
           "type": "client_parameter_read",
+          "named": true
+        },
+        {
+          "type": "client_parenthesized_expression",
           "named": true
         },
         {
@@ -6642,7 +6757,15 @@
           "named": true
         },
         {
+          "type": "client_if_statement",
+          "named": true
+        },
+        {
           "type": "client_let_statement",
+          "named": true
+        },
+        {
+          "type": "client_while_statement",
           "named": true
         }
       ]
@@ -7346,6 +7469,84 @@
       "types": [
         {
           "type": "kw_return",
+          "named": true
+        },
+        {
+          "type": "semicolon",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_unary_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_primary_expression",
+          "named": true
+        },
+        {
+          "type": "client_unary_expression",
+          "named": true
+        },
+        {
+          "type": "client_unary_operator",
+          "named": true
+        },
+        {
+          "type": "kw_not",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "client_unary_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "client_while_statement",
+    "named": true,
+    "fields": {
+      "condition": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "client_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "client_procedural_statement",
+          "named": true
+        },
+        {
+          "type": "client_return_statement",
+          "named": true
+        },
+        {
+          "type": "kw_end",
+          "named": true
+        },
+        {
+          "type": "kw_loop",
+          "named": true
+        },
+        {
+          "type": "kw_while",
           "named": true
         },
         {
@@ -13223,6 +13424,11 @@
     }
   },
   {
+    "type": "multiplicative_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "null_literal",
     "named": true,
     "fields": {},
@@ -17921,6 +18127,11 @@
     }
   },
   {
+    "type": "unary_operator",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "update_statement",
     "named": true,
     "fields": {
@@ -18594,6 +18805,10 @@
     "named": true
   },
   {
+    "type": "client_comparison_operator",
+    "named": true
+  },
+  {
     "type": "client_concat_operator",
     "named": true
   },
@@ -19151,10 +19366,6 @@
     "named": true
   },
   {
-    "type": "multiplicative_operator",
-    "named": true
-  },
-  {
     "type": "number",
     "named": true
   },
@@ -19184,10 +19395,6 @@
   },
   {
     "type": "string_literal",
-    "named": true
-  },
-  {
-    "type": "unary_operator",
     "named": true
   }
 ]

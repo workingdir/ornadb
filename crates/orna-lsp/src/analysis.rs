@@ -758,17 +758,9 @@ fn client_body_contains_declaration(
             .states
             .iter()
             .any(|state| name_part_matches_span(&state.name, span))
-            || block
-                .locals
+            || all_client_local_declarations(block)
                 .iter()
-                .any(|local| name_part_matches_span(&local.name, span))
-            || block.statements.iter().any(|statement| {
-                matches!(
-                    statement,
-                    orna_syntax::ClientProceduralStatement::Let(local)
-                        if name_part_matches_span(&local.name, span)
-                )
-            })
+                .any(|local| name_part_matches_span(local.name(), span))
     })
 }
 
@@ -976,6 +968,219 @@ struct ClientTargetFunctionPath<'a> {
     members: &'a [orna_syntax::NamePart],
     constructor: ClientTargetConstructor,
 }
+#[derive(Clone, Copy)]
+enum ClientLocalDeclaration<'a> {
+    PreBegin(&'a orna_syntax::ClientLocalBinding),
+    Procedural(&'a orna_syntax::ClientLetStatement),
+}
+
+impl<'a> ClientLocalDeclaration<'a> {
+    fn name(self) -> &'a orna_syntax::NamePart {
+        match self {
+            Self::PreBegin(local) => &local.name,
+            Self::Procedural(local) => &local.name,
+        }
+    }
+
+    fn type_source(self) -> Option<&'a SourceSlice> {
+        match self {
+            Self::PreBegin(local) => Some(&local.type_source),
+            Self::Procedural(local) => local.type_source.as_ref(),
+        }
+    }
+}
+
+fn client_statement_span(statement: &orna_syntax::ClientProceduralStatement) -> &SourceSpan {
+    match statement {
+        orna_syntax::ClientProceduralStatement::Let(statement) => &statement.span,
+        orna_syntax::ClientProceduralStatement::Assignment(statement) => &statement.span,
+        orna_syntax::ClientProceduralStatement::Return(statement) => &statement.span,
+        orna_syntax::ClientProceduralStatement::If(statement) => &statement.span,
+        orna_syntax::ClientProceduralStatement::While(statement) => &statement.span,
+    }
+}
+
+fn statement_contains_span(
+    statements: &[orna_syntax::ClientProceduralStatement],
+    selected_span: &SourceSpan,
+) -> bool {
+    statements
+        .iter()
+        .any(|statement| span_contains_span(client_statement_span(statement), selected_span))
+}
+
+fn client_locals_visible_in_statements<'a>(
+    statements: &'a [orna_syntax::ClientProceduralStatement],
+    selected_span: &SourceSpan,
+    mut visible: Vec<ClientLocalDeclaration<'a>>,
+) -> Vec<ClientLocalDeclaration<'a>> {
+    for statement in statements {
+        let statement_span = client_statement_span(statement);
+        if statement_span.end <= selected_span.start {
+            if let orna_syntax::ClientProceduralStatement::Let(local) = statement {
+                visible.push(ClientLocalDeclaration::Procedural(local));
+            }
+            continue;
+        }
+        if statement_span.start > selected_span.start {
+            break;
+        }
+
+        match statement {
+            orna_syntax::ClientProceduralStatement::If(statement) => {
+                if span_contains_span(statement.condition.span(), selected_span) {
+                    return visible;
+                }
+                if statement_contains_span(&statement.then_statements, selected_span) {
+                    return client_locals_visible_in_statements(
+                        &statement.then_statements,
+                        selected_span,
+                        visible,
+                    );
+                }
+                for branch in &statement.elsif_branches {
+                    if span_contains_span(branch.condition.span(), selected_span) {
+                        return visible;
+                    }
+                    if statement_contains_span(&branch.statements, selected_span) {
+                        return client_locals_visible_in_statements(
+                            &branch.statements,
+                            selected_span,
+                            visible,
+                        );
+                    }
+                }
+                if let Some(else_statements) = &statement.else_statements
+                    && statement_contains_span(else_statements, selected_span)
+                {
+                    return client_locals_visible_in_statements(
+                        else_statements,
+                        selected_span,
+                        visible,
+                    );
+                }
+            }
+            orna_syntax::ClientProceduralStatement::While(statement) => {
+                if span_contains_span(statement.condition.span(), selected_span) {
+                    return visible;
+                }
+                if statement_contains_span(&statement.body, selected_span) {
+                    return client_locals_visible_in_statements(
+                        &statement.body,
+                        selected_span,
+                        visible,
+                    );
+                }
+            }
+            orna_syntax::ClientProceduralStatement::Let(_)
+            | orna_syntax::ClientProceduralStatement::Assignment(_)
+            | orna_syntax::ClientProceduralStatement::Return(_) => {}
+        }
+        return visible;
+    }
+    visible
+}
+
+fn client_local_declarations_visible<'a>(
+    block: &'a orna_syntax::ClientStateBlockBody,
+    selected_span: &SourceSpan,
+) -> Vec<ClientLocalDeclaration<'a>> {
+    let visible = block
+        .locals
+        .iter()
+        .take_while(|local| local.span.end <= selected_span.start)
+        .map(ClientLocalDeclaration::PreBegin)
+        .collect();
+    client_locals_visible_in_statements(&block.statements, selected_span, visible)
+}
+
+fn collect_client_local_declarations<'a>(
+    statements: &'a [orna_syntax::ClientProceduralStatement],
+    locals: &mut Vec<ClientLocalDeclaration<'a>>,
+) {
+    for statement in statements {
+        match statement {
+            orna_syntax::ClientProceduralStatement::Let(local) => {
+                locals.push(ClientLocalDeclaration::Procedural(local));
+            }
+            orna_syntax::ClientProceduralStatement::If(statement) => {
+                collect_client_local_declarations(&statement.then_statements, locals);
+                for branch in &statement.elsif_branches {
+                    collect_client_local_declarations(&branch.statements, locals);
+                }
+                if let Some(else_statements) = &statement.else_statements {
+                    collect_client_local_declarations(else_statements, locals);
+                }
+            }
+            orna_syntax::ClientProceduralStatement::While(statement) => {
+                collect_client_local_declarations(&statement.body, locals);
+            }
+            orna_syntax::ClientProceduralStatement::Assignment(_)
+            | orna_syntax::ClientProceduralStatement::Return(_) => {}
+        }
+    }
+}
+fn all_client_local_declarations<'a>(
+    block: &'a orna_syntax::ClientStateBlockBody,
+) -> Vec<ClientLocalDeclaration<'a>> {
+    let mut locals = block
+        .locals
+        .iter()
+        .map(ClientLocalDeclaration::PreBegin)
+        .collect::<Vec<_>>();
+    collect_client_local_declarations(&block.statements, &mut locals);
+    locals
+}
+fn client_statement_part_at<'a>(
+    statement: &'a orna_syntax::ClientProceduralStatement,
+    selected_span: &SourceSpan,
+) -> Option<ClientExpressionPart<'a>> {
+    match statement {
+        orna_syntax::ClientProceduralStatement::Let(statement) => {
+            client_expression_part_at(&statement.expression, selected_span)
+        }
+        orna_syntax::ClientProceduralStatement::Assignment(statement) => {
+            client_expression_part_at(&statement.expression, selected_span)
+        }
+        orna_syntax::ClientProceduralStatement::Return(statement) => statement
+            .expression
+            .as_ref()
+            .and_then(|expression| client_expression_part_at(expression, selected_span)),
+        orna_syntax::ClientProceduralStatement::If(statement) => {
+            client_expression_part_at(&statement.condition, selected_span)
+                .or_else(|| {
+                    statement
+                        .then_statements
+                        .iter()
+                        .find_map(|statement| client_statement_part_at(statement, selected_span))
+                })
+                .or_else(|| {
+                    statement.elsif_branches.iter().find_map(|branch| {
+                        client_expression_part_at(&branch.condition, selected_span).or_else(|| {
+                            branch.statements.iter().find_map(|statement| {
+                                client_statement_part_at(statement, selected_span)
+                            })
+                        })
+                    })
+                })
+                .or_else(|| {
+                    statement.else_statements.as_ref().and_then(|statements| {
+                        statements.iter().find_map(|statement| {
+                            client_statement_part_at(statement, selected_span)
+                        })
+                    })
+                })
+        }
+        orna_syntax::ClientProceduralStatement::While(statement) => {
+            client_expression_part_at(&statement.condition, selected_span).or_else(|| {
+                statement
+                    .body
+                    .iter()
+                    .find_map(|statement| client_statement_part_at(statement, selected_span))
+            })
+        }
+    }
+}
 
 fn qualified_name_matches_parts(name: &QualifiedName, parts: &[&str]) -> bool {
     name.parts.len() == parts.len()
@@ -1162,6 +1367,14 @@ fn client_expression_part_at<'a>(
             client_expression_part_at(left, selected_span)
                 .or_else(|| client_expression_part_at(right, selected_span))
         }
+        ClientExpression::Unary(unary) => {
+            client_expression_part_at(&unary.expression, selected_span)
+        }
+        ClientExpression::Binary(binary) => client_expression_part_at(&binary.left, selected_span)
+            .or_else(|| client_expression_part_at(&binary.right, selected_span)),
+        ClientExpression::Parenthesized { expression, .. } => {
+            client_expression_part_at(expression, selected_span)
+        }
         ClientExpression::StringLiteral { .. }
         | ClientExpression::IntegerLiteral { .. }
         | ClientExpression::BooleanLiteral { .. } => None,
@@ -1192,14 +1405,7 @@ fn client_body_part_at<'a>(
                 block
                     .statements
                     .iter()
-                    .find_map(|statement| match statement {
-                        orna_syntax::ClientProceduralStatement::Let(local) => {
-                            client_expression_part_at(&local.expression, selected_span)
-                        }
-                        orna_syntax::ClientProceduralStatement::Assignment(assignment) => {
-                            client_expression_part_at(&assignment.expression, selected_span)
-                        }
-                    })
+                    .find_map(|statement| client_statement_part_at(statement, selected_span))
             })
             .or_else(|| {
                 block
@@ -1388,34 +1594,20 @@ fn client_root_binding(
         let block = declaration.body.as_state_block()?;
         // A binding becomes visible only after its declaration. Invalid or
         // ambiguous source must fail closed rather than guessing a target.
-        let mut matches = Vec::new();
-        for local in &block.locals {
-            if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start
-            {
-                matches.push(ClientRootBinding {
-                    declaration_span: local.name.span.clone(),
-                    owner: type_owner_name_from_source(&local.type_source.text),
-                });
-            }
+        let matches: Vec<_> = client_local_declarations_visible(block, &root.span)
+            .into_iter()
+            .filter(|local| name_part_matches_text(local.name(), &root.text))
+            .collect();
+        if matches.len() != 1 {
+            return None;
         }
-        for statement in &block.statements {
-            let orna_syntax::ClientProceduralStatement::Let(local) = statement else {
-                continue;
-            };
-            if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start
-            {
-                matches.push(ClientRootBinding {
-                    declaration_span: local.name.span.clone(),
-                    owner: local
-                        .type_source
-                        .as_ref()
-                        .and_then(|source| type_owner_name_from_source(&source.text)),
-                });
-            }
-        }
-        // Duplicate visible bindings are rejected by the compiler. Treat an
-        // invalid/ambiguous parse the same way rather than guessing a target.
-        (matches.len() == 1).then(|| matches.remove(0))
+        let local = matches[0];
+        Some(ClientRootBinding {
+            declaration_span: local.name().span.clone(),
+            owner: local
+                .type_source()
+                .and_then(|source| type_owner_name_from_source(&source.text)),
+        })
     };
     let find_state = || {
         let block = declaration.body.as_state_block()?;
@@ -1528,9 +1720,10 @@ fn client_parameter_info<'a>(
     };
     let visible_local = || {
         declaration.body.as_state_block().is_some_and(|block| {
-        block.locals.iter().any(|local| name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start)
-            || block.statements.iter().any(|statement| matches!(statement, orna_syntax::ClientProceduralStatement::Let(local) if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start))
-    })
+            client_local_declarations_visible(block, &root.span)
+                .iter()
+                .any(|local| name_part_matches_text(local.name(), &root.text))
+        })
     };
     match kind {
         ClientExpressionPart::ParameterRoot(_) => {
@@ -1540,7 +1733,7 @@ fn client_parameter_info<'a>(
                 find_parameter().or_else(find_state)
             }
         }
-        ClientExpressionPart::LocalRoot(_) => find_state(),
+        ClientExpressionPart::LocalRoot(_) => None,
         ClientExpressionPart::FieldRoot(_) => find_parameter().or_else(find_state),
         ClientExpressionPart::FieldMember { .. }
         | ClientExpressionPart::TargetFunction { .. }
@@ -1555,30 +1748,16 @@ fn client_local_hover(
     doc_link: Option<&str>,
 ) -> Option<Hover> {
     let block = declaration.body.as_state_block()?;
-    let mut source: Option<(&orna_syntax::NamePart, &SourceSlice)> = None;
-    for local in &block.locals {
-        if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start {
-            if source.is_some() {
-                return None;
-            }
-            source = Some((&local.name, &local.type_source));
-        }
+    let matches: Vec<_> = client_local_declarations_visible(block, &root.span)
+        .into_iter()
+        .filter(|local| name_part_matches_text(local.name(), &root.text))
+        .collect();
+    if matches.len() != 1 {
+        return None;
     }
-    for statement in &block.statements {
-        let orna_syntax::ClientProceduralStatement::Let(local) = statement else {
-            continue;
-        };
-        if name_part_matches_text(&local.name, &root.text) && local.span.end <= root.span.start {
-            let Some(type_source) = local.type_source.as_ref() else {
-                continue;
-            };
-            if source.is_some() {
-                return None;
-            }
-            source = Some((&local.name, type_source));
-        }
-    }
-    let (name, type_source) = source?;
+    let local = matches[0];
+    let name = local.name();
+    let type_source = local.type_source()?;
     let specification = type_specification_from_slice(type_source)?;
     let parameter = ParameterInfo {
         name,
@@ -1885,29 +2064,29 @@ fn variable_declaration_span(
     }
 
     let declaration = containing_client_function(parse, selected_span)?;
-    let block = declaration.body.as_state_block();
     let mut exact = Vec::new();
     let mut visible = Vec::new();
-    let mut consider = |name_part: &orna_syntax::NamePart, declaration_span: &SourceSpan| {
-        if !name_part_matches_text(name_part, name) {
-            return;
-        }
-        if name_part_matches_span(name_part, selected_span) {
-            exact.push(name_part.span.clone());
-        } else if declaration_span.end <= selected_span.start {
-            visible.push(name_part.span.clone());
-        }
-    };
-    if let Some(block) = block {
+    if let Some(block) = declaration.body.as_state_block() {
         for state in &block.states {
-            consider(&state.name, &state.span);
+            if !name_part_matches_text(&state.name, name) {
+                continue;
+            }
+            if name_part_matches_span(&state.name, selected_span) {
+                exact.push(state.name.span.clone());
+            } else if state.span.end <= selected_span.start {
+                visible.push(state.name.span.clone());
+            }
         }
-        for local in &block.locals {
-            consider(&local.name, &local.span);
+        for local in all_client_local_declarations(block) {
+            if name_part_matches_text(local.name(), name)
+                && name_part_matches_span(local.name(), selected_span)
+            {
+                exact.push(local.name().span.clone());
+            }
         }
-        for statement in &block.statements {
-            if let orna_syntax::ClientProceduralStatement::Let(local) = statement {
-                consider(&local.name, &local.span);
+        for local in client_local_declarations_visible(block, selected_span) {
+            if name_part_matches_text(local.name(), name) {
+                visible.push(local.name().span.clone());
             }
         }
     }
@@ -2514,6 +2693,46 @@ fn standard_large_object_at(
                 .find_map(|column| in_spec(&column.type_specification, byte)),
         }
     }
+    fn in_statement(
+        statement: &orna_syntax::ClientProceduralStatement,
+        byte: usize,
+    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+        match statement {
+            orna_syntax::ClientProceduralStatement::Let(statement) => statement
+                .type_source
+                .as_ref()
+                .and_then(|source| in_source(source, byte)),
+            orna_syntax::ClientProceduralStatement::If(statement) => {
+                in_statements(&statement.then_statements, byte)
+                    .or_else(|| {
+                        statement
+                            .elsif_branches
+                            .iter()
+                            .find_map(|branch| in_statements(&branch.statements, byte))
+                    })
+                    .or_else(|| {
+                        statement
+                            .else_statements
+                            .as_deref()
+                            .and_then(|statements| in_statements(statements, byte))
+                    })
+            }
+            orna_syntax::ClientProceduralStatement::While(statement) => {
+                in_statements(&statement.body, byte)
+            }
+            orna_syntax::ClientProceduralStatement::Assignment(_)
+            | orna_syntax::ClientProceduralStatement::Return(_) => None,
+        }
+    }
+
+    fn in_statements(
+        statements: &[orna_syntax::ClientProceduralStatement],
+        byte: usize,
+    ) -> Option<(&SourceSpan, StandardLargeObjectKind)> {
+        statements
+            .iter()
+            .find_map(|statement| in_statement(statement, byte))
+    }
 
     for object_type in parse.object_types() {
         if let Some(found) = object_type
@@ -2567,14 +2786,8 @@ fn standard_large_object_at(
             {
                 return Some(found);
             }
-            for statement in &body.statements {
-                if let orna_syntax::ClientProceduralStatement::Let(statement) = statement {
-                    if let Some(source) = statement.type_source.as_ref() {
-                        if let Some(found) = in_source(source, byte) {
-                            return Some(found);
-                        }
-                    }
-                }
+            if let Some(found) = in_statements(&body.statements, byte) {
+                return Some(found);
             }
         }
     }
@@ -2673,13 +2886,22 @@ pub fn hover(
                             })
                     }
                     ClientExpressionPart::FieldRoot(root) => {
-                        client_parameter_info(declaration, root, part).map(|parameter| {
-                            crate::hover::parameter_hover(
-                                &parameter,
-                                &document.text,
-                                doc_link.as_deref(),
-                            )
-                        })
+                        client_parameter_info(declaration, root, part)
+                            .map(|parameter| {
+                                crate::hover::parameter_hover(
+                                    &parameter,
+                                    &document.text,
+                                    doc_link.as_deref(),
+                                )
+                            })
+                            .or_else(|| {
+                                client_local_hover(
+                                    declaration,
+                                    root,
+                                    &document.text,
+                                    doc_link.as_deref(),
+                                )
+                            })
                     }
                     ClientExpressionPart::TargetFunction { .. }
                     | ClientExpressionPart::CallArgumentLabel => None,
@@ -3214,11 +3436,71 @@ fn client_field_path_at_byte<'a>(
             ClientExpression::Concat { left, right, .. } => {
                 expression_at_byte(left, byte).or_else(|| expression_at_byte(right, byte))
             }
+            ClientExpression::Unary(unary) => expression_at_byte(&unary.expression, byte),
+            ClientExpression::Binary(binary) => expression_at_byte(&binary.left, byte)
+                .or_else(|| expression_at_byte(&binary.right, byte)),
+            ClientExpression::Parenthesized { expression, .. } => {
+                expression_at_byte(expression, byte)
+            }
             ClientExpression::ParameterRead { .. }
             | ClientExpression::LocalRead { .. }
             | ClientExpression::StringLiteral { .. }
             | ClientExpression::IntegerLiteral { .. }
             | ClientExpression::BooleanLiteral { .. } => None,
+        }
+    }
+    fn statements_at_byte<'a>(
+        statements: &'a [orna_syntax::ClientProceduralStatement],
+        byte: usize,
+    ) -> Option<(
+        &'a orna_syntax::NamePart,
+        &'a [orna_syntax::NamePart],
+        usize,
+    )> {
+        statements
+            .iter()
+            .find_map(|statement| statement_at_byte(statement, byte))
+    }
+
+    fn statement_at_byte<'a>(
+        statement: &'a orna_syntax::ClientProceduralStatement,
+        byte: usize,
+    ) -> Option<(
+        &'a orna_syntax::NamePart,
+        &'a [orna_syntax::NamePart],
+        usize,
+    )> {
+        match statement {
+            orna_syntax::ClientProceduralStatement::Let(statement) => {
+                expression_at_byte(&statement.expression, byte)
+            }
+            orna_syntax::ClientProceduralStatement::Assignment(statement) => {
+                expression_at_byte(&statement.expression, byte)
+            }
+            orna_syntax::ClientProceduralStatement::Return(statement) => statement
+                .expression
+                .as_ref()
+                .and_then(|expression| expression_at_byte(expression, byte)),
+            orna_syntax::ClientProceduralStatement::If(statement) => {
+                expression_at_byte(&statement.condition, byte)
+                    .or_else(|| statements_at_byte(&statement.then_statements, byte))
+                    .or_else(|| {
+                        statement.elsif_branches.iter().find_map(|branch| {
+                            expression_at_byte(&branch.condition, byte)
+                                .or_else(|| statements_at_byte(&branch.statements, byte))
+                        })
+                    })
+                    .or_else(|| {
+                        statement
+                            .else_statements
+                            .as_deref()
+                            .and_then(|statements| statements_at_byte(statements, byte))
+                    })
+            }
+            orna_syntax::ClientProceduralStatement::While(statement) => {
+                expression_at_byte(&statement.condition, byte)
+                    .or_else(|| statements_at_byte(&statement.body, byte))
+            }
         }
     }
 
@@ -3242,19 +3524,7 @@ fn client_field_path_at_byte<'a>(
                     .iter()
                     .find_map(|local| expression_at_byte(&local.expression, byte))
             })
-            .or_else(|| {
-                block
-                    .statements
-                    .iter()
-                    .find_map(|statement| match statement {
-                        orna_syntax::ClientProceduralStatement::Let(local) => {
-                            expression_at_byte(&local.expression, byte)
-                        }
-                        orna_syntax::ClientProceduralStatement::Assignment(assignment) => {
-                            expression_at_byte(&assignment.expression, byte)
-                        }
-                    })
-            })
+            .or_else(|| statements_at_byte(&block.statements, byte))
             .or_else(|| {
                 block
                     .return_expression

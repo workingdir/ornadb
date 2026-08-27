@@ -73,6 +73,10 @@ module.exports = grammar({
         [$._type_base, $._name_first],
         // ELSIF clauses vs statement repetition inside IF bodies.
         [$.if_statement],
+        // Legacy terminal RETURN vs a fully procedural CLIENT block.
+        [$.client_no_state_body],
+        // ELSIF clauses vs statement repetition inside CLIENT IF bodies.
+        [$.client_if_statement],
         // A dotted CLIENT call callee and a parameter field path share the
         // same prefix until the call opening parenthesis.
         [$.client_call_callee, $.client_field_path],
@@ -327,7 +331,7 @@ module.exports = grammar({
             // surface instead of SERVER's generic procedural_body. A state
             // block has one or more STATE declarations, then BEGIN and exactly
             // one RETURN. A no-STATE block may start with typed LET locals and
-            // has only LET or assignment statements before exactly one RETURN.
+            // may contain nested control flow and early RETURN statements.
             client_procedural_body: ($) =>
                 choice($.client_state_body, $.client_no_state_body),
 
@@ -341,13 +345,33 @@ module.exports = grammar({
                 ),
 
             client_no_state_body: ($) =>
-                seq(
-                    $.kw_is,
-                    repeat($.client_local_declaration),
-                    $.kw_begin,
-                    repeat($.client_procedural_statement),
-                    $.client_return_statement,
-                    $.kw_end,
+                choice(
+                    // Keep the legacy tree shape for blocks with one terminal
+                    // RETURN while allowing the terminal return to be omitted
+                    // when control flow returns from every path.
+                    seq(
+                        $.kw_is,
+                        repeat($.client_local_declaration),
+                        $.kw_begin,
+                        repeat($.client_procedural_statement),
+                        optional($.client_return_statement),
+                        $.kw_end,
+                    ),
+                    // A top-level early RETURN makes the legacy split
+                    // ambiguous; retain every return as a procedural statement
+                    // in that case.
+                    seq(
+                        $.kw_is,
+                        repeat($.client_local_declaration),
+                        $.kw_begin,
+                        repeat(
+                            choice(
+                                $.client_procedural_statement,
+                                $.client_return_statement,
+                            ),
+                        ),
+                        $.kw_end,
+                    ),
                 ),
 
             client_state_declaration: ($) =>
@@ -371,10 +395,15 @@ module.exports = grammar({
                     $.semicolon,
                 ),
 
-            client_procedural_statement: ($) =>
-                choice($.client_let_statement, $.client_assignment_statement),
-
             // Post-BEGIN LET may omit its type, unlike a pre-BEGIN local.
+            client_procedural_statement: ($) =>
+                choice(
+                    $.client_let_statement,
+                    $.client_assignment_statement,
+                    $.client_if_statement,
+                    $.client_while_statement,
+                ),
+
             client_let_statement: ($) =>
                 seq(
                     $.kw_let,
@@ -393,15 +422,62 @@ module.exports = grammar({
                     $.semicolon,
                 ),
 
-            // State-bearing CLIENT blocks accept only one non-suspending return.
-            client_state_return_statement: ($) =>
+            client_if_statement: ($) =>
                 seq(
-                    $.kw_return,
-                    optional(field('expression', $.client_expression)),
+                    $.kw_if,
+                    field('condition', $.client_expression),
+                    $.kw_then,
+                    repeat(
+                        choice(
+                            $.client_procedural_statement,
+                            $.client_return_statement,
+                        ),
+                    ),
+                    repeat(
+                        seq(
+                            $.kw_elsif,
+                            field('condition', $.client_expression),
+                            $.kw_then,
+                            repeat(
+                                choice(
+                                    $.client_procedural_statement,
+                                    $.client_return_statement,
+                                ),
+                            ),
+                        ),
+                    ),
+                    optional(
+                        seq(
+                            $.kw_else,
+                            repeat(
+                                choice(
+                                    $.client_procedural_statement,
+                                    $.client_return_statement,
+                                ),
+                            ),
+                        ),
+                    ),
+                    $.kw_end,
+                    $.kw_if,
                     $.semicolon,
                 ),
 
-            // No-state CLIENT blocks may suspend at a return position.
+            client_while_statement: ($) =>
+                seq(
+                    $.kw_while,
+                    field('condition', $.client_expression),
+                    $.kw_loop,
+                    repeat(
+                        choice(
+                            $.client_procedural_statement,
+                            $.client_return_statement,
+                        ),
+                    ),
+                    $.kw_end,
+                    $.kw_loop,
+                    $.semicolon,
+                ),
+
             client_return_statement: ($) =>
                 seq(
                     $.kw_return,
@@ -409,12 +485,75 @@ module.exports = grammar({
                     $.semicolon,
                 ),
 
+            client_state_return_statement: ($) =>
+                seq(
+                    $.kw_return,
+                    optional(field('expression', $.client_expression)),
+                    $.semicolon,
+                ),
+
             client_expression: ($) =>
-                prec.left(
-                    1,
-                    choice(
-                        seq($.client_expression, $.client_concat_operator, $.client_primary_expression),
-                        $.client_primary_expression,
+                choice(
+                    // Keep the original CLIENT concatenation node shape:
+                    // the right side remains an unwrapped operand.
+                    prec.left(
+                        4,
+                        seq(
+                            $.client_expression,
+                            $.client_concat_operator,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    prec.left(
+                        1,
+                        seq(
+                            $.client_expression,
+                            $.kw_or,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    prec.left(
+                        2,
+                        seq(
+                            $.client_expression,
+                            $.kw_and,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    prec.left(
+                        3,
+                        seq(
+                            $.client_expression,
+                            $.client_comparison_operator,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    prec.left(
+                        4,
+                        seq(
+                            $.client_expression,
+                            $.client_additive_operator,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    prec.left(
+                        5,
+                        seq(
+                            $.client_expression,
+                            $.client_multiplicative_operator,
+                            choice($.client_unary_expression, $.client_primary_expression),
+                        ),
+                    ),
+                    $.client_unary_expression,
+                    $.client_primary_expression,
+                ),
+
+            client_unary_expression: ($) =>
+                prec(
+                    6,
+                    seq(
+                        choice($.client_unary_operator, $.kw_not),
+                        choice($.client_unary_expression, $.client_primary_expression),
                     ),
                 ),
 
@@ -424,9 +563,13 @@ module.exports = grammar({
                     $.string_literal,
                     $.client_integer_literal,
                     $.boolean_literal,
+                    $.client_parenthesized_expression,
                     $.client_field_path,
                     $.client_parameter_read,
                 ),
+
+            client_parenthesized_expression: ($) =>
+                seq($.lparen, $.client_expression, $.rparen),
 
             // AWAIT is only valid in procedural LET, assignment, and RETURN
             // positions. Its operand remains a closed non-suspending CLIENT
@@ -474,6 +617,14 @@ module.exports = grammar({
             client_integer_literal: ($) => token(/\d+/),
 
             client_concat_operator: ($) => token('||'),
+
+            client_comparison_operator: ($) => token(choice('=', '<>', '!=', '<=', '>=', '<', '>')),
+
+            client_additive_operator: ($) => token(choice('+', '-')),
+
+            client_multiplicative_operator: ($) => token(choice('*', '/', '%')),
+
+            client_unary_operator: ($) => token(choice('+', '-')),
 
             procedural_body: ($) =>
                 seq(
