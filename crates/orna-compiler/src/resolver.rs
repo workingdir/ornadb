@@ -7228,11 +7228,17 @@ fn client_resource_targets(
     }
     let standard_functions =
         standard.map(|standard| standard.verified_snapshot().catalogue().functions());
-    for functions in [Some(base.functions()), standard_functions] {
+    for (is_standard, functions) in [(false, Some(base.functions())), (true, standard_functions)] {
         let Some(functions) = functions else {
             continue;
         };
         for function in functions {
+            // Standard resource execution is intentionally closed to the one
+            // executor currently implemented by the client resource path.
+            // Return shape alone must not admit presenters or future functions.
+            if is_standard && function.id() != STD_INVOKE_ECHO_FUNCTION_ID {
+                continue;
+            }
             if function.domain() != FunctionDomain::Server || targets.contains_key(function.name())
             {
                 continue;
