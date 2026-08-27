@@ -192,12 +192,14 @@ use orna_core::{
         system_function_by_name,
     },
     types::TypeDescriptor,
-    value::{FunctionArgument, OpaqueCodecRegistry, RecordValue, RuntimeType, RuntimeValue},
+    value::{
+        FunctionArgument, OpaqueCodecRegistry, RecordValue, ResultRows, RuntimeType, RuntimeValue,
+    },
 };
 use orna_protocol::{
     CallFailure, InvocationEventBatch, InvocationEventRecord, ResourceArgument,
     ResourceKind as ProtocolResourceKind, ResourceRequest, RetainedInvokeRequest,
-    decode_retained_invoke_request, encode_active_value,
+    decode_retained_invoke_request, encode_active_value, encode_rows_value,
 };
 use orna_standard::{
     STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
@@ -4959,13 +4961,23 @@ fn classify_sealed_server_error(error: &PostgresKernelError) -> SealedInvocation
     }
 }
 
+/// Internal result boundary for one sealed SERVER target.
+///
+/// Direct `ROWS` invocations retain the complete [`ResultRows`] until the
+/// caller encodes it as one registered opaque value. Resource and mutation
+/// callers continue through the existing flattened value sequence.
+enum SealedServerTargetResult {
+    Values(Vec<RuntimeValue>),
+    Rows(ResultRows),
+}
 async fn execute_sealed_server_target(
     transaction: &mut Transaction<'_>,
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
     arguments: &[FunctionArgument],
     kind: ProtocolResourceKind,
-) -> Result<Vec<RuntimeValue>, SealedInvocationFailureClass> {
+    preserve_rows: bool,
+) -> Result<SealedServerTargetResult, SealedInvocationFailureClass> {
     let savepoint = transaction
         .savepoint("sealed_server_execution")
         .await
@@ -4980,7 +4992,7 @@ async fn execute_sealed_server_target(
     } else {
         raw_server_reference_mutation_target(active, function).map(Some)
     };
-    let values = match mutation {
+    let result = match mutation {
         Some(None) => {
             let result = if arguments.is_empty() {
                 execute_authorised_raw_server_insert(&savepoint, active, authorisation).await
@@ -4994,7 +5006,7 @@ async fn execute_sealed_server_target(
                 .await
             };
             match result {
-                Ok(value) => Some(vec![value]),
+                Ok(value) => Some(SealedServerTargetResult::Values(vec![value])),
                 Err(error) => {
                     let class = classify_sealed_server_error(&error);
                     if savepoint.rollback().await.is_err() {
@@ -5014,7 +5026,7 @@ async fn execute_sealed_server_target(
             )
             .await
             {
-                Ok(values) => Some(values),
+                Ok(values) => Some(SealedServerTargetResult::Values(values)),
                 Err(error) => {
                     let class = classify_sealed_server_error(&error);
                     if savepoint.rollback().await.is_err() {
@@ -5028,7 +5040,11 @@ async fn execute_sealed_server_target(
             match execute_authorised_server_select(&savepoint, active, authorisation, arguments)
                 .await
             {
-                Ok(server) => resource_values_from_server_result(kind, server),
+                Ok(server) if preserve_rows => {
+                    Some(SealedServerTargetResult::Rows(server.into_rows()))
+                }
+                Ok(server) => resource_values_from_server_result(kind, server)
+                    .map(SealedServerTargetResult::Values),
                 Err(error) => {
                     let class = classify_sealed_server_error(&error);
                     if savepoint.rollback().await.is_err() {
@@ -5039,28 +5055,38 @@ async fn execute_sealed_server_target(
             }
         }
     };
-    let Some(values) =
-        values.filter(|values| values.len() == 1 || kind == ProtocolResourceKind::Stream)
-    else {
+    let Some(result) = result else {
         if savepoint.rollback().await.is_err() {
             return Err(SealedInvocationFailureClass::Internal);
         }
         return Err(SealedInvocationFailureClass::Target);
     };
-    if values
-        .iter()
-        .any(|value| !resource_result_value_is_supported(value))
-    {
-        if savepoint.rollback().await.is_err() {
-            return Err(SealedInvocationFailureClass::Internal);
+    let result = match result {
+        SealedServerTargetResult::Values(values) => {
+            if values.len() != 1 && kind != ProtocolResourceKind::Stream {
+                if savepoint.rollback().await.is_err() {
+                    return Err(SealedInvocationFailureClass::Internal);
+                }
+                return Err(SealedInvocationFailureClass::Target);
+            }
+            if values
+                .iter()
+                .any(|value| !resource_result_value_is_supported(value))
+            {
+                if savepoint.rollback().await.is_err() {
+                    return Err(SealedInvocationFailureClass::Internal);
+                }
+                return Err(SealedInvocationFailureClass::Target);
+            }
+            SealedServerTargetResult::Values(values)
         }
-        return Err(SealedInvocationFailureClass::Target);
-    }
+        SealedServerTargetResult::Rows(rows) => SealedServerTargetResult::Rows(rows),
+    };
     savepoint
         .commit()
         .await
         .map_err(|_| SealedInvocationFailureClass::Internal)?;
-    Ok(values)
+    Ok(result)
 }
 
 fn sealed_server_stream_completed_event(
@@ -5123,10 +5149,14 @@ async fn run_sealed_server_mutation_stream(
                 authorisation,
                 arguments,
                 ProtocolResourceKind::Stream,
+                false,
             )
             .await
             {
-                Ok(values) => values,
+                Ok(SealedServerTargetResult::Values(values)) => values,
+                Ok(SealedServerTargetResult::Rows(_)) => {
+                    return failed(response, SealedInvocationFailureClass::Internal);
+                }
                 Err(failure) => return failed(response, failure),
             };
             if mutation_values.len() > 1 {
@@ -5515,18 +5545,37 @@ async fn execute_sealed_server_after_audit(
             .await;
         }
     };
-    let values = match execute_sealed_server_target(
+    let preserve_rows = matches!(definition.return_type(), FunctionReturn::Rows(_));
+    let target_result = match execute_sealed_server_target(
         &mut transaction,
         active,
         authorisation,
         &arguments,
         kind,
+        preserve_rows,
     )
     .await
     {
-        Ok(values) => values,
+        Ok(result) => result,
         Err(failure) => {
             return finish_sealed_failure(transaction, invocation, failure).await;
+        }
+    };
+    let values = match target_result {
+        SealedServerTargetResult::Values(values) => values,
+        SealedServerTargetResult::Rows(rows) => {
+            let value = match encode_rows_value(active, registry, &rows) {
+                Ok(value) => value,
+                Err(_) => {
+                    return finish_sealed_failure(
+                        transaction,
+                        invocation,
+                        SealedInvocationFailureClass::Internal,
+                    )
+                    .await;
+                }
+            };
+            vec![value]
         }
     };
     let events = match decoded.output_requirement() {
