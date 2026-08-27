@@ -33,10 +33,11 @@
     (kw_values) (kw_returning) (kw_into) (kw_where)
 ] @keyword
 
-; Operators
 [
     (comparison_operator) (additive_operator) (multiplicative_operator)
-    (unary_operator) (assignment_operator) (arrow_operator)
+    (unary_operator) (client_comparison_operator) (client_additive_operator)
+    (client_multiplicative_operator) (client_unary_operator)
+    (client_concat_operator) (assignment_operator) (arrow_operator)
 ] @operator
 
 ; Punctuation
