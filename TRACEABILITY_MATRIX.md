@@ -85,10 +85,11 @@ does not by itself claim that the named test ran in this checkout.
   intentional error-layout and private-enum findings, so no workspace lint pass
   is claimed.
 - `python3 scripts/run-demos.py` passed after excluding the unsupported generic
-  scalar fixture; source-check and offline demos passed, while
-  `client-inspector` was skipped because it is Compose-only. The source-authored
-  `static-ui` demo at `crates/orna-server/tests/fixtures/static_ui_dogfood.orna`
-  is accepted evidence; no excluded scalar fixture is accepted.
+  scalar fixture; source-check and offline demos passed, including the
+  `ui-constructor-showcase` with reachable text, button, panel, row, column,
+  text_input, tabs, and window roots. `client-inspector` was skipped because
+  it is Compose-only. The source-authored `static-ui` demo remains accepted
+  evidence; no excluded scalar fixture is accepted.
 - `just kernel-test` passed with the dedicated temporary `ornadb_kernel_gate`
   database; final run artifact is `artifact://22571`. It covered 38
   `standard_database` tests, 5 user-state tests, 3 PostgreSQL library tests,
@@ -129,9 +130,10 @@ remain pending or unclaimed in `../TODO.md` and `PLAN.md`.
   Rows-cell validation, local principal/session authority, and the registered
   V9 constructor showcase demo.
 - Recent commits `f55df8d`, `fd21c1c`, `c68bb0a`, `b260ac5`, `50a0cfc`,
-  `113012c`, `767991d`, `57c0bf9`, and `33aa485` record the accepted
-  implementation and client quality/demo slices; `2f8509f`, `07ecc28`,
-  `880ca17`, and `ca831a5` record evidence/boundary updates.
+  `113012c`, `34e39f4`, `767991d`, `57c0bf9`, `8d3e4cd`, `33aa485`, and
+  `6e69500` record the accepted implementation, quality, contract, runbook,
+  and demo slices; `2f8509f`, `07ecc28`, `880ca17`, and `ca831a5` record
+  evidence/boundary updates.
 - Closed Beads boundaries are `ornadb-el1.3.2.1.1`,
   `ornadb-el1.5.13.9`, `ornadb-el1.5.14.2`, `ornadb-el1.5.14.7`,
   `ornadb-el1.3.4.3`, `ornadb-el1.4.4`, `ornadb-br0.2`, and
