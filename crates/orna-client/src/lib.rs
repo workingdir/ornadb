@@ -371,6 +371,8 @@ impl ClientActionDescriptor {
     pub fn arguments(&self) -> &[FunctionArgument] {
         &self.arguments
     }
+    // ClientActionError preserves its public diagnostic layout and wire-facing variants.
+    #[allow(clippy::result_large_err)]
     pub fn encode_payload(
         &self,
         active: &ActiveDatabaseRevision,
@@ -439,10 +441,10 @@ impl ClientActionState {
         self.invocation_id = Some(invocation_id);
     }
     fn clear(&mut self) {
-        if let Some(resource) = self.resource.take() {
-            if resource.generation().value() > self.tombstone.value() {
-                self.tombstone = resource.generation();
-            }
+        if let Some(resource) = self.resource.take()
+            && resource.generation().value() > self.tombstone.value()
+        {
+            self.tombstone = resource.generation();
         }
         self.request = None;
         self.invocation_id = None;
@@ -1520,12 +1522,15 @@ pub trait ClientResourceExecutor {
     }
 }
 
+type InspectProvider = Box<dyn FnMut(&ClientInspectRequest) -> Result<RuntimeValue, String>>;
+type ExternalContractProvider =
+    Box<dyn FnMut(&ClientExternalContractRequest) -> Result<RuntimeValue, String>>;
+
 /// A deterministic immediate executor for host glue and focused tests.
 pub struct DeterministicClientResourceExecutor<F> {
     evaluate: F,
-    inspect: Option<Box<dyn FnMut(&ClientInspectRequest) -> Result<RuntimeValue, String>>>,
-    external_contract:
-        Option<Box<dyn FnMut(&ClientExternalContractRequest) -> Result<RuntimeValue, String>>>,
+    inspect: Option<InspectProvider>,
+    external_contract: Option<ExternalContractProvider>,
 }
 
 impl<F> DeterministicClientResourceExecutor<F> {
@@ -2166,15 +2171,6 @@ impl ClientResource {
         Ok(())
     }
 
-    fn append_stream_values(
-        &mut self,
-        active: &ActiveDatabaseRevision,
-        generation: ClientResourceGeneration,
-        values: Vec<RuntimeValue>,
-    ) -> Result<(), ClientResourceError> {
-        self.append_stream_values_with(active, generation, values)
-    }
-
     fn append_stream_values_with<V: ClientResourceRevisionValidation>(
         &mut self,
         validation: &V,
@@ -2187,15 +2183,6 @@ impl ClientResource {
         self.stream_queued_items = queued_items;
         self.stream_total_items = total_items;
         Ok(())
-    }
-
-    fn validate_stream_values(
-        &self,
-        active: &ActiveDatabaseRevision,
-        generation: ClientResourceGeneration,
-        values: &[RuntimeValue],
-    ) -> Result<(u64, u64), ClientResourceError> {
-        self.validate_stream_values_with(active, generation, values)
     }
 
     fn validate_stream_values_with<V: ClientResourceRevisionValidation>(
@@ -2229,14 +2216,6 @@ impl ClientResource {
             return Err(ClientResourceError::TypeMismatch);
         }
         Ok((total_items, queued_items))
-    }
-
-    fn complete_stream(
-        &mut self,
-        active: &ActiveDatabaseRevision,
-        generation: ClientResourceGeneration,
-    ) -> Result<(), ClientResourceError> {
-        self.complete_stream_with(active, generation)
     }
 
     fn complete_stream_with<V: ClientResourceRevisionValidation>(
@@ -2780,10 +2759,10 @@ struct ResolvedClientFunction<'a> {
     standard: Option<&'a VerifiedStandardLibrarySnapshot>,
 }
 
-fn verified_standard_executable<'a>(
-    standard: &'a VerifiedStandardLibrarySnapshot,
+fn verified_standard_executable(
+    standard: &VerifiedStandardLibrarySnapshot,
     function: FunctionId,
-) -> Option<&'a StandardExecutable> {
+) -> Option<&StandardExecutable> {
     let mut executables = standard
         .executables()
         .iter()
@@ -2950,6 +2929,8 @@ fn resolve_unclassified_target<'a>(
     }
 }
 
+// ClientActionError preserves its public diagnostic layout at this resolver boundary.
+#[allow(clippy::result_large_err)]
 fn resolve_action_target<'a>(
     active: &'a ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
@@ -3348,9 +3329,7 @@ impl ClientReferenceLoader {
         let RuntimeValue::Reference { target, object } = reference else {
             return None;
         };
-        if active.catalogue().object_type_by_id(*target).is_none() {
-            return None;
-        }
+        active.catalogue().object_type_by_id(*target)?;
         self.objects.get(&(*target, *object))
     }
 }
@@ -3459,9 +3438,6 @@ impl ClientReferenceLoaderFixture {
         let RuntimeValue::Reference { target, object } = reference else {
             return None;
         };
-        if active.catalogue().object_type_by_id(*target).is_none() {
-            return None;
-        }
         let value = self.objects.get(&(*target, *object))?;
         reference_record_is_active_and_matches_target(active, *target, value).then(|| value.clone())
     }
@@ -3706,6 +3682,8 @@ impl ClientStateStore {
     ///
     /// The first binding is retained. A different session is rejected without
     /// clearing or changing any caller-owned USER values.
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn bind_authenticated_session(
         &mut self,
         binding: AuthenticatedSessionBinding,
@@ -3725,6 +3703,7 @@ impl ClientStateStore {
     }
 
     /// Installs a private fixture for trusted reference-root evaluation tests.
+    #[cfg(test)]
     fn set_reference_loader_fixture(&mut self, fixture: ClientReferenceLoaderFixture) {
         self.reference_loader = Some(fixture);
     }
@@ -4030,6 +4009,8 @@ impl ClientStateStore {
     /// store itself carries no principal identity. Existing cells in that root
     /// context are replaced; cells for other contexts remain available.
     /// Single-instance updates remain enforced by [`Self::set_user_state`].
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn load_user_state(&mut self, cells: &[UserStateCell]) -> Result<(), ClientUserStateError> {
         let context = &self.context;
         let mut loaded = HashMap::with_capacity(cells.len());
@@ -4061,6 +4042,8 @@ impl ClientStateStore {
     /// the requested instances. Existing cells for other instances, including
     /// dirty values, remain untouched; requested instances absent from `cells`
     /// are removed after the complete batch passes validation.
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn load_user_state_for_instances(
         &mut self,
         cells: &[UserStateCell],
@@ -4104,6 +4087,8 @@ impl ClientStateStore {
     }
 
     /// Updates one USER value and marks it for the next explicit flush.
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn set_user_state(
         &mut self,
         key: ClientStateKey,
@@ -4134,6 +4119,8 @@ impl ClientStateStore {
     }
 
     /// Returns dirty USER values as one deterministic change batch.
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn pending_user_state_changes(&self) -> Result<Vec<UserStateChange>, ClientUserStateError> {
         let mut pending = self
             .user
@@ -4154,11 +4141,13 @@ impl ClientStateStore {
                 .map_err(|error| ClientUserStateError::InvalidChange(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        pending.sort_by(|(left, _), (right, _)| left.cmp(right));
+        pending.sort_by_key(|(left, _)| *left);
         Ok(pending.into_iter().map(|(_, change)| change).collect())
     }
 
     /// Applies one aligned server write-result batch.
+    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    #[allow(clippy::result_large_err)]
     pub fn apply_user_state_write_results(
         &mut self,
         changes: &[UserStateChange],
@@ -4718,6 +4707,8 @@ impl Error for ClientExecutionError {
 /// The allow evidence selects the only function and revision that may run. The
 /// evaluator performs no database, protocol, filesystem, process, environment,
 /// clock, random, network, or runtime-library operation.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4726,6 +4717,8 @@ pub fn evaluate_client_function(
 }
 
 /// Evaluates one closed CLIENT function with invocation arguments.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4741,6 +4734,8 @@ pub fn evaluate_client_function_with_arguments(
 }
 
 /// Evaluates one closed CLIENT function after the local capability gate.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_grants(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4762,6 +4757,8 @@ pub fn evaluate_client_function_with_grants(
 /// is discarded when the call returns. Callers that must retain `LOCAL` or
 /// `SESSION` state across calls use
 /// [`evaluate_client_function_with_state_and_grants_and_arguments`].
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_grants_and_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4781,6 +4778,8 @@ pub fn evaluate_client_function_with_grants_and_arguments(
 }
 
 /// Evaluates one closed CLIENT function with an explicit in-memory state store.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4791,6 +4790,8 @@ pub fn evaluate_client_function_with_state(
 
 /// Evaluates one closed CLIENT function with invocation arguments and an
 /// explicit in-memory state store.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state_and_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4809,6 +4810,8 @@ pub fn evaluate_client_function_with_state_and_arguments(
 
 /// Evaluates one closed CLIENT function after the local capability gate with
 /// an explicit in-memory state store.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state_and_grants(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4828,6 +4831,8 @@ pub fn evaluate_client_function_with_state_and_grants(
 
 /// Evaluates one closed CLIENT function with invocation arguments, grants, and
 /// an explicit in-memory state store.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state_and_grants_and_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4850,6 +4855,8 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments(
 
 /// Evaluates one closed CLIENT function with invocation arguments, grants,
 /// and an explicit root state context, without an external resource executor.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_in_state_context_with_grants_and_arguments(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4876,6 +4883,8 @@ pub fn evaluate_client_function_in_state_context_with_grants_and_arguments(
 /// is owned by this compatibility entrypoint. Call
 /// [`evaluate_client_function_with_state_and_grants_and_arguments_and_executor`]
 /// when the host owns the resource work boundary.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_in_state_context(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4899,6 +4908,8 @@ pub fn evaluate_client_function_in_state_context(
 }
 
 /// Evaluates one closed CLIENT function with a caller-owned resource executor.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_executor(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4909,6 +4920,8 @@ pub fn evaluate_client_function_with_executor(
 
 /// Evaluates one CLIENT function with invocation arguments and a caller-owned
 /// resource executor.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_arguments_and_executor(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4934,6 +4947,8 @@ pub fn evaluate_client_function_with_arguments_and_executor(
 /// The executor is the only seam that may perform external work. It receives
 /// validated, principal- and revision-scoped requests; this evaluator never
 /// invents transport or server execution.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4957,6 +4972,10 @@ pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor
 
 /// Evaluates one CLIENT function with an explicit root state context, a
 /// caller-owned resource executor, and an enclosing root invocation identity.
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -4983,6 +5002,10 @@ pub fn evaluate_client_function_in_state_context_with_grants_and_arguments_and_e
 
 /// Evaluates one CLIENT function with a caller-owned resource executor and an
 /// enclosing root invocation identity.
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -5026,6 +5049,10 @@ fn same_revision_terminal_replacement(
         )
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_client_function_in_state_context_with_executor(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
@@ -5201,6 +5228,10 @@ fn evaluate_client_function_in_state_context_with_executor(
     Ok(ClientExecutionResult { context, value })
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_function(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
@@ -5229,6 +5260,10 @@ fn evaluate_function(
     )?)
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_function_with_fuel(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
@@ -5451,6 +5486,10 @@ fn bind_capability_declarations(
         .collect()
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_plan(
     active: &ActiveDatabaseRevision,
     payload: &[u8],
@@ -5739,6 +5778,8 @@ fn evaluate_plan(
 
 /// Evaluates one decoded version-2 opaque plan against the function return
 /// type, sharing the closed value-creation contract of the plain path.
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+#[allow(clippy::result_large_err)]
 fn evaluate_opaque_plan(
     active: &ActiveDatabaseRevision,
     plan: &OpaqueClientPlan,
@@ -5776,6 +5817,10 @@ fn evaluate_opaque_plan(
 }
 
 /// Evaluates a stream expression only when it starts an actual stream await.
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_stream_expression_plan(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -5834,6 +5879,11 @@ fn evaluate_stream_expression_plan(
 }
 
 /// Evaluates one decoded expression tree and type-checks its value.
+#[cfg(test)]
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_expression_plan(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -5868,6 +5918,10 @@ fn evaluate_expression_plan(
     )
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_expression_plan_with_fuel(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -5909,6 +5963,10 @@ fn evaluate_expression_plan_with_fuel(
     }
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_stream_state_plan(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
@@ -5959,6 +6017,10 @@ fn evaluate_stream_state_plan(
 }
 
 /// Evaluates one decoded version-4 state plan after initialising its slots.
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_state_plan(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
@@ -6008,6 +6070,10 @@ fn evaluate_state_plan(
     )
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_stream_resource_plan(
     active: &ActiveDatabaseRevision,
     plan: &ResourceClientPlan,
@@ -6042,6 +6108,10 @@ fn evaluate_stream_resource_plan(
     )
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_resource_plan(
     active: &ActiveDatabaseRevision,
     plan: &ResourceClientPlan,
@@ -6083,6 +6153,11 @@ fn evaluate_resource_plan(
 /// plans: the caller's declaration list is not consulted, so a recursive
 /// CLIENT call validates its own stored requirements instead of inheriting
 /// the parent declaration list.
+#[cfg(test)]
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_procedural_plan(
     active: &ActiveDatabaseRevision,
     plan: &ProceduralClientPlan,
@@ -6119,6 +6194,10 @@ fn evaluate_procedural_plan(
     )
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_procedural_plan_with_fuel(
     active: &ActiveDatabaseRevision,
     plan: &ProceduralClientPlan,
@@ -6239,40 +6318,10 @@ fn evaluate_procedural_plan_with_fuel(
     }
 }
 
-fn evaluate_procedural_local(
-    active: &ActiveDatabaseRevision,
-    local: &ClientLocal,
-    expression: &ClientExpressionNode,
-    context: ClientExecutionContext,
-    lineage: ObserverLineage,
-    arguments: &[(ParameterId, RuntimeValue)],
-    declarations: &[capability::LocalCapabilityDeclaration],
-    grants: &capability::LocalCapabilityGrantSet,
-    state: &mut ClientStateStore,
-    depth: usize,
-    principal: PrincipalId,
-    executor: &mut Option<&mut dyn ClientResourceExecutor>,
-    local_environment: &mut ClientLocalEnvironment,
-) -> Result<ClientLocalBinding, ClientExecutionError> {
-    let mut fuel = ClientExecutionFuel::new();
-    evaluate_procedural_local_with_fuel(
-        active,
-        local,
-        expression,
-        context,
-        lineage,
-        arguments,
-        declarations,
-        grants,
-        state,
-        depth,
-        principal,
-        executor,
-        local_environment,
-        &mut fuel,
-    )
-}
-
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_procedural_local_with_fuel(
     active: &ActiveDatabaseRevision,
     local: &ClientLocal,
@@ -6362,6 +6411,8 @@ fn procedural_resource_kind_for_runtime(
     }
 }
 
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn validate_procedural_resource_binding(
     active: &ActiveDatabaseRevision,
     local: &ClientLocal,
@@ -6391,6 +6442,10 @@ struct ControlFlowReturnValue {
     stream: bool,
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_control_flow_plan(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -6441,6 +6496,10 @@ fn evaluate_control_flow_plan(
     }
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_control_flow_block(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -6481,6 +6540,10 @@ fn evaluate_control_flow_block(
     Ok(None)
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_control_flow_statement(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -6677,6 +6740,10 @@ fn evaluate_control_flow_statement(
     }
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_capability_plan(
     active: &ActiveDatabaseRevision,
     plan: &CapabilityClientPlan,
@@ -6965,6 +7032,9 @@ fn resource_type_matches_id(
     }
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn resource_operation_result_type(
     active: &ActiveDatabaseRevision,
     operation: &ResourceOperationNode,
@@ -7007,6 +7077,10 @@ fn resource_operation_result_type(
     Ok(expected)
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_resource_expression(
     active: &ActiveDatabaseRevision,
     operation: &ResourceOperationNode,
@@ -7226,8 +7300,8 @@ fn evaluate_resource_expression(
     if let Err(source) = resource.apply_completion(active, completion) {
         if same_generation && same_request {
             let cancellation = executor.cancel(request.clone());
-            match resource.apply_completion(active, cancellation) {
-                Ok(()) => match resource.status() {
+            if let Ok(()) = resource.apply_completion(active, cancellation) {
+                match resource.status() {
                     ClientResourceStatus::Ready if resource.kind() == ResourceKind::Stream => {
                         return read_stream_resource_value(active, resource, context);
                     }
@@ -7258,8 +7332,7 @@ fn evaluate_resource_expression(
                         ));
                     }
                     ClientResourceStatus::Loading | ClientResourceStatus::Idle => {}
-                },
-                Err(_) => {}
+                }
             }
         }
         return Err(evaluate_resource_error(
@@ -7307,6 +7380,9 @@ fn evaluate_resource_expression(
     }
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn read_stream_resource_value(
     active: &ActiveDatabaseRevision,
     resource: &mut ClientResource,
@@ -7387,6 +7463,9 @@ fn action_payload_error(message: impl Into<String>) -> ClientActionError {
     ClientActionError::InvalidPayload(message.into())
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 pub fn encode_action_payload(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
@@ -7474,6 +7553,9 @@ pub fn encode_action_payload(
     Ok(payload)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn action_take<'a>(
     body: &'a [u8],
     offset: &mut usize,
@@ -7490,6 +7572,9 @@ fn action_take<'a>(
     Ok(value)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn action_identity_bytes(body: &[u8], offset: &mut usize) -> Result<[u8; 16], ClientActionError> {
     let identity = action_take(body, offset, 16)?
         .try_into()
@@ -7500,6 +7585,9 @@ fn action_identity_bytes(body: &[u8], offset: &mut usize) -> Result<[u8; 16], Cl
     Ok(identity)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 pub fn decode_action_payload(
     active: &ActiveDatabaseRevision,
     payload: &[u8],
@@ -7573,6 +7661,9 @@ pub fn decode_action_payload(
     Ok(descriptor)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn action_target_result_type(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
@@ -7591,6 +7682,9 @@ fn action_target_result_type(
     Ok((kind, resolved))
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_action_arguments(
     active: &ActiveDatabaseRevision,
     descriptor: &ClientActionDescriptor,
@@ -7632,6 +7726,10 @@ fn validate_action_arguments(
     Ok(descriptor.arguments.clone())
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_action_operation(
     active: &ActiveDatabaseRevision,
     operation: &orna_artifact::client_plan::ActionOperationNode,
@@ -7694,6 +7792,8 @@ fn evaluate_action_operation(
     Ok(RuntimeValue::Opaque(value))
 }
 
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn complete_client_action(
     active: &ActiveDatabaseRevision,
     action_state: &mut ClientActionState,
@@ -7703,6 +7803,8 @@ pub fn complete_client_action(
     complete_client_action_inner(active, action_state, completion, executor, true)
 }
 
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn complete_client_action_inner(
     active: &ActiveDatabaseRevision,
     action_state: &mut ClientActionState,
@@ -7850,6 +7952,8 @@ fn complete_client_action_inner(
 ///
 /// The executor owns the transport control. A terminal completion clears the
 /// action state; a pending completion retains it for a later completion.
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn cancel_client_action_with_executor(
     active: &ActiveDatabaseRevision,
     action_state: &mut ClientActionState,
@@ -7868,6 +7972,10 @@ pub fn cancel_client_action_with_executor(
     complete_client_action_inner(active, action_state, completion, executor, false)
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 pub fn trigger_client_action(
     active: &ActiveDatabaseRevision,
     action: &RuntimeValue,
@@ -8026,6 +8134,10 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
     }
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn trigger_client_action_with_lineage(
     active: &ActiveDatabaseRevision,
     action: &RuntimeValue,
@@ -8734,6 +8846,8 @@ pub(crate) fn stable_inspect_provider_error(error: &str) -> String {
     stable_inspect_error_code(error).to_owned()
 }
 
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_external_contract(
     identity: &str,
     context: ClientExecutionContext,
@@ -8811,6 +8925,9 @@ fn inspect_render_artifact_is_external(
     }
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_inspect_render_contract(
     active: &ActiveDatabaseRevision,
     context: ClientExecutionContext,
@@ -9196,6 +9313,10 @@ fn inspect_carrier_value_matches(
     decode_inspect_carrier(active, value, expected).is_ok()
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_inspect_expression(
     active: &ActiveDatabaseRevision,
     operation: &InspectOperationNode,
@@ -9421,6 +9542,11 @@ fn evaluate_inspect_expression(
     Ok(value)
 }
 
+#[cfg(test)]
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_expression(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -9453,6 +9579,9 @@ fn evaluate_expression(
     )?)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_control_flow_plan_types(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -9461,6 +9590,9 @@ fn validate_control_flow_plan_types(
     validate_control_flow_statements_types(active, plan, plan.statements(), context)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_control_flow_statements_types(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -9528,6 +9660,9 @@ fn validate_control_flow_statements_types(
     Ok(())
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_control_flow_expression_type(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -9757,6 +9892,10 @@ fn static_control_flow_scalar_for_type(
     }
 }
 
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn evaluate_expression_with_fuel(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -10230,6 +10369,9 @@ fn arithmetic_error(context: ClientExecutionContext) -> ClientExecutionError {
     expression_error(context, ClientExpressionError::Arithmetic)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn compare_control_flow_values(
     operator: ControlFlowBinaryOperator,
     left: &RuntimeValue,
@@ -10267,6 +10409,9 @@ fn compare_control_flow_values(
     Ok(RuntimeValue::Boolean(value))
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn evaluate_field_path(
     active: &ActiveDatabaseRevision,
     value: &RuntimeValue,
@@ -10443,14 +10588,16 @@ fn runtime_value_matches(
     if let RuntimeValue::Null(null) = value {
         return null.resolved_type() == expected && active_type_is_known(active, expected);
     }
-    let scalar_matches = |scalar| match (scalar, value) {
-        (StandardScalar::Boolean, RuntimeValue::Boolean(_))
-        | (StandardScalar::Integer, RuntimeValue::Integer(_))
-        | (StandardScalar::BigInt, RuntimeValue::BigInt(_))
-        | (StandardScalar::Float, RuntimeValue::Float(_))
-        | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
-        | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_)) => true,
-        _ => false,
+    let scalar_matches = |scalar| {
+        matches!(
+            (scalar, value),
+            (StandardScalar::Boolean, RuntimeValue::Boolean(_))
+                | (StandardScalar::Integer, RuntimeValue::Integer(_))
+                | (StandardScalar::BigInt, RuntimeValue::BigInt(_))
+                | (StandardScalar::Float, RuntimeValue::Float(_))
+                | (StandardScalar::CharacterLargeObject, RuntimeValue::Text(_))
+                | (StandardScalar::BinaryLargeObject, RuntimeValue::Bytes(_))
+        )
     };
     match expected {
         ResolvedType::Scalar(scalar) => scalar_matches(scalar),
@@ -10623,6 +10770,10 @@ fn state_error(context: ClientExecutionContext, source: ClientStateError) -> Cli
 /// state input wins over the plan default). `Unset` defaults leave no entry;
 /// `Null` and checked expression defaults are evaluated and type-checked
 /// against the declared slot type.
+// Evaluator calls retain explicit context and state parameters for recursive semantics.
+#[allow(clippy::too_many_arguments)]
+// ClientExecutionError retains its accepted public context and source diagnostics.
+#[allow(clippy::result_large_err)]
 fn initialize_client_state(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
@@ -10806,6 +10957,9 @@ fn state_slot_type_is_supported(definition: &ValueTypeDefinition) -> bool {
         )
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_active_catalogue(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
@@ -10991,6 +11145,9 @@ fn classify_client_return(
     ClientReturnShape::Unsupported
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_function_shape(
     active: &ActiveDatabaseRevision,
     definition: &orna_core::catalogue::FunctionDefinition,
@@ -11054,6 +11211,9 @@ fn is_expression_reference_allowed(
     }
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn validate_selected_references(
     active: &ActiveDatabaseRevision,
     references: &[orna_core::revision::DefinitionReference],
@@ -11197,6 +11357,8 @@ fn client_call_target_is_referenced(
 /// durable references closes the gap left by a target-set-only check: target
 /// substitutions, reordered/duplicated/missing calls, and malformed argument
 /// bindings are all rejected before any expression is evaluated.
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+#[allow(clippy::result_large_err)]
 fn preflight_client_expression_calls(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -11207,6 +11369,8 @@ fn preflight_client_expression_calls(
 
     preflight_client_call_targets(active, context, decoded_targets)
 }
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+#[allow(clippy::result_large_err)]
 fn preflight_client_call_targets(
     active: &ActiveDatabaseRevision,
     context: ClientExecutionContext,
@@ -11251,6 +11415,9 @@ fn preflight_client_call_targets(
     Ok(())
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn preflight_client_state_calls(
     active: &ActiveDatabaseRevision,
     plan: &StateClientPlan,
@@ -11276,6 +11443,9 @@ fn preflight_client_state_calls(
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn preflight_client_procedural_calls(
     active: &ActiveDatabaseRevision,
     plan: &ProceduralClientPlan,
@@ -11299,6 +11469,9 @@ fn preflight_client_procedural_calls(
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
+// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
+
+#[allow(clippy::result_large_err)]
 fn preflight_client_control_flow_calls(
     active: &ActiveDatabaseRevision,
     plan: &ControlFlowClientPlan,
@@ -11314,6 +11487,8 @@ fn preflight_client_control_flow_calls(
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn collect_control_flow_block_call_targets(
     active: &ActiveDatabaseRevision,
     statements: &[ControlFlowStatement],
@@ -11384,6 +11559,8 @@ fn collect_control_flow_block_call_targets(
     Ok(())
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn preflight_client_action_calls(
     active: &ActiveDatabaseRevision,
     operation: &orna_artifact::client_plan::ActionOperationNode,
@@ -11398,6 +11575,8 @@ fn preflight_client_action_calls(
     preflight_client_call_targets(active, context, decoded_targets)
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn preflight_client_inner_plan_calls(
     active: &ActiveDatabaseRevision,
     plan: &InnerClientPlan,
@@ -11443,6 +11622,8 @@ fn operation_arguments_match_definition(
         .eq(expected)
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn validate_client_resource_operation(
     active: &ActiveDatabaseRevision,
     context: ClientExecutionContext,
@@ -11481,6 +11662,8 @@ fn validate_client_resource_operation(
     Ok(())
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn validate_client_action_operation(
     active: &ActiveDatabaseRevision,
     operation: &orna_artifact::client_plan::ActionOperationNode,
@@ -11522,6 +11705,8 @@ fn validate_client_action_operation(
     Ok(())
 }
 
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn collect_client_expression_call_targets(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -11647,6 +11832,8 @@ fn collect_client_expression_call_targets(
 /// For a version-5 capability envelope the effective version is the inner
 /// plan version (the envelope decode already fixed the outer version); for
 /// versions 1-4 it is the artefact's own version.
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn validate_artifact(
     artifact: &orna_core::revision::ExecutableArtifact,
     language_version: &str,
@@ -11699,6 +11886,8 @@ fn validate_artifact(
 /// Validates the saved CLIENT artefact identity and exact payload digest before
 /// any plan decoder or evaluation side effect. Integrity failures deliberately
 /// use the existing redacted invalid-artifact contract.
+// ClientExecutionError retains its full public execution context and source error.
+#[allow(clippy::result_large_err)]
 fn validate_artifact_identity(
     artifact: &orna_core::revision::ExecutableArtifact,
     context: ClientExecutionContext,
@@ -12723,7 +12912,6 @@ mod tests {
             Ok(RuntimeValue::Boolean(true)),
         );
 
-        drop(forwarding_slot);
         let mut failing =
             super::DeterministicClientResourceExecutor::new(|_: &super::ClientResourceRequest| {
                 Ok::<_, String>(RuntimeValue::Boolean(false))
@@ -13790,6 +13978,8 @@ mod tests {
         (direct, role_authorisation)
     }
 
+    // ClientExecutionError retains its accepted public context and source diagnostics.
+    #[allow(clippy::result_large_err)]
     fn evaluate_client_function(
         active: &ActiveDatabaseRevision,
         function: FunctionId,
@@ -20918,6 +21108,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)]
     fn reference_root_field_path_fails_closed_without_loader_or_object() {
         let (
             active,
@@ -21012,6 +21203,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)]
     fn reference_root_loader_isolated_by_principal_revision_and_unknown_field() {
         let (
             active,
@@ -25140,7 +25332,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                     u32::try_from(ordinal).expect("fixture call ordinal fits"),
                     DefinitionReferenceTarget::Function(target),
                     DefinitionReferenceKind::FunctionCall,
-                    origin.clone(),
+                    origin,
                 )
             })
             .collect()
@@ -25210,12 +25402,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         .unwrap();
         let prior_revision = &version_one.function_revisions()[0];
         let origin = prior_revision.declaration_origin();
-        let references = fixture_client_call_references(
-            function_id,
-            function_revision_id,
-            origin.clone(),
-            &payload,
-        );
+        let references =
+            fixture_client_call_references(function_id, function_revision_id, origin, &payload);
         let resource_payload = vec![0x53];
         let resource_artifact = ExecutableArtifact::new(
             ExecutableArtifactKind::Server,
@@ -25280,18 +25468,18 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
                 owner: function_id,
                 parameter: parameter.id(),
             },
-            origin.clone(),
+            origin,
         ));
         origins.push(DefinitionOrigin::new(
             DefinitionIdentity::Function(resource_target.id()),
-            origin.clone(),
+            origin,
         ));
         origins.push(DefinitionOrigin::new(
             DefinitionIdentity::Parameter {
                 owner: resource_target.id(),
                 parameter: resource_parameter.id(),
             },
-            origin.clone(),
+            origin,
         ));
         let revisions = vec![revision, resource_revision];
         let context = orna_core::revision::CatalogueHashContext::version_two(standard);
@@ -25379,15 +25567,14 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let (base, function, pair, revision, parameter) =
             version_five_expression_active_with_parameter(payload);
         let origin = base.function_revisions()[0].declaration_origin();
-        let mut references = Vec::new();
-        references.push(DefinitionReference::new(
+        let references = vec![DefinitionReference::new(
             function,
             revision,
             0,
             DefinitionReferenceTarget::Function(target),
             DefinitionReferenceKind::FunctionCall,
             origin,
-        ));
+        )];
         let mut revisions = base.function_revisions().to_vec();
         let client_revision = revisions
             .iter()
@@ -32384,9 +32571,6 @@ mod runtime_conformance {
         StaleRevision,
     }
 
-    /// Compatibility alias for callers that use class terminology.
-    pub type HeadlessFixtureErrorClass = HeadlessFixtureErrorKind;
-
     /// A structured error returned by the test-only headless fixture helpers.
     ///
     /// Display retains the existing stable diagnostic text so existing
@@ -32429,11 +32613,6 @@ mod runtime_conformance {
             self.status
         }
 
-        /// Alias for status_code used by callers that name the field status.
-        pub const fn status(&self) -> StatusCode {
-            self.status
-        }
-
         /// Returns the stable fixture error classification.
         pub const fn kind(&self) -> HeadlessFixtureErrorKind {
             self.kind
@@ -32441,16 +32620,6 @@ mod runtime_conformance {
 
         /// Returns the accepted conformance-level error classification.
         pub const fn classification(&self) -> HeadlessFixtureErrorKind {
-            self.kind
-        }
-
-        /// Alias for classification for callers that use class terminology.
-        pub const fn class(&self) -> HeadlessFixtureErrorKind {
-            self.kind
-        }
-
-        /// Alias for classification using explicit error terminology.
-        pub const fn error_class(&self) -> HeadlessFixtureErrorKind {
             self.kind
         }
 
