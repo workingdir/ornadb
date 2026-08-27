@@ -13,7 +13,7 @@ use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_li
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{
-    retained_standard_library_v8_snapshot, verify_standard_library_v8_snapshot,
+    retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
 };
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
@@ -31,15 +31,15 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V8 standard library snapshot.
+    /// Loads and verifies the retained V9 standard library snapshot.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
         let snapshot =
-            retained_standard_library_v8_snapshot().map_err(|error| error.to_string())?;
+            retained_standard_library_v9_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_v8_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v9_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -3524,7 +3524,9 @@ fn client_field_path_at_byte(
 
 #[cfg(test)]
 mod tests {
-    use super::{completion, declaration_at, hover, references, type_owner_name_from_source};
+    use super::{
+        StandardLibrary, completion, declaration_at, hover, references, type_owner_name_from_source,
+    };
     use crate::documents::{Document, PositionMapper};
     use lsp_types::{Hover, HoverContents, Position, Range};
 
@@ -3540,6 +3542,24 @@ mod tests {
             HoverContents::Markup(markup) => &markup.value,
             other => panic!("expected markdown hover, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn standard_library_loads_verified_v9_snapshot() {
+        let standard = StandardLibrary::load().expect("retained V9 standard must load");
+        let snapshot = standard.checked.verified_snapshot();
+
+        assert_eq!(
+            snapshot.revision(),
+            orna_standard::STANDARD_LIBRARY_V9_REVISION_ID
+        );
+        assert_eq!(
+            snapshot.source().id(),
+            orna_standard::STANDARD_SOURCE_V9_REVISION_ID
+        );
+        assert!(snapshot.source().units().iter().any(|unit| {
+            unit.logical_path() == orna_standard::STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
+        }));
     }
 
     #[test]
