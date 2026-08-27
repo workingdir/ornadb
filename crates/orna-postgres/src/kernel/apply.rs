@@ -1,5 +1,7 @@
 //! One atomic, fail-closed installation of a compiler deployable revision.
 
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};

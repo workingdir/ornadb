@@ -14,6 +14,8 @@
 //! produced event batch plus one `inspect_snapshot` row; the model stream
 //! API returns only the events the closed model payload set can express and
 //! retains the richer durable kinds for later slices.
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 
 use std::time::{Duration, SystemTime};
 
@@ -1148,20 +1150,13 @@ fn build_inspect_epoch(
     let mut value_count = 0_u64;
     let mut schema = None;
     for record in events.records() {
-        match record.event().body() {
-            InvocationEventBody::ValueBatch {
-                schema: batch_schema,
-                values,
-            } => {
-                value_count = values.len() as u64;
-                schema = batch_schema.clone();
-            }
-            InvocationEventBody::Started { .. }
-            | InvocationEventBody::Completed { .. }
-            | InvocationEventBody::Diagnostic(_)
-            | InvocationEventBody::Failed(_)
-            | InvocationEventBody::Cancelled { .. }
-            | _ => {}
+        if let InvocationEventBody::ValueBatch {
+            schema: batch_schema,
+            values,
+        } = record.event().body()
+        {
+            value_count = values.len() as u64;
+            schema = batch_schema.clone();
         }
     }
     let (phase, duration_nanoseconds) = inspect_epoch_metadata(outcome, events);
@@ -1300,6 +1295,7 @@ fn ui_nodes_from_events(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn ui_nodes_from_payload(
     invocation: InvocationId,
     root_target: FunctionId,

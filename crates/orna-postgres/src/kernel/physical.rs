@@ -1,5 +1,7 @@
 //! PostgreSQL lowering for backend-neutral physical catalogue changes.
 
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 #[path = "physical/verify.rs"]
 mod verify;
 

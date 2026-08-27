@@ -3,6 +3,8 @@
 //! This module accepts only a recovered active revision and a canonical server
 //! plan. It never derives SQL from semantic names or accepts caller SQL.
 
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,

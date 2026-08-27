@@ -1,3 +1,5 @@
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use orna_core::{
     CatalogueRevisionId, SourceBundleId, SourceRevisionId,
     canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
@@ -1713,7 +1715,7 @@ mod tests {
             .expect("initial bootstrap succeeds");
         let catalogue_id = active.catalogue().to_bytes().to_vec();
 
-        let mut session = kernel.open().await.expect("snapshot session opens");
+        let session = kernel.open().await.expect("snapshot session opens");
         let active_before = session
             .client
             .query_one(
@@ -1770,7 +1772,7 @@ mod tests {
             "bootstrap must fail closed when the current catalogue hash is tampered"
         );
 
-        let mut verification = kernel.open().await.expect("verification session opens");
+        let verification = kernel.open().await.expect("verification session opens");
         let active_after = verification
             .client
             .query_one(

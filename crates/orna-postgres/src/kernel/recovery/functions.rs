@@ -1,5 +1,7 @@
 //! Recovery of executable function catalogue state.
 
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_core::{
@@ -37,10 +39,10 @@ use crate::{
 };
 
 use super::{
-    LegacyResolvedTypeTupleMember, ResolvedTypeTuple, catalogue_hash_context_for,
-    decode_catalogue_hash_version, decode_durable_version, decode_legacy_resolved_type_tuple,
+    LegacyResolvedTypeTupleMember, ResolvedTypeTuple, decode_catalogue_hash_version,
+    decode_durable_version, decode_legacy_resolved_type_tuple,
     decode_legacy_resolved_type_tuple_kind, decode_origin, decode_resolved_type_tuple,
-    load_catalogue_semantics, load_source_units, require_hash_contract,
+    load_source_units, require_hash_contract,
 };
 
 const FUNCTION_RELATION: &str = "_orna_kernel.catalogue_functions";
@@ -81,7 +83,9 @@ pub(super) struct RecoveredFunction {
 pub(super) struct RecoveredIntroduction {
     pub(super) catalogue_hash: Sha256Digest,
     pub(super) source: StoredSourceRevision,
+    #[allow(dead_code)]
     catalogue_hash_version: CatalogueHashVersion,
+    #[allow(dead_code)]
     standard_library_revision: Option<StandardLibraryRevisionId>,
 }
 
