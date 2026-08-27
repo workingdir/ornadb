@@ -5910,7 +5910,10 @@ fn selected_runtime(
         (Some(RuntimeFamily::Tty), true) => Err(usage_error(
             "the tty runtime cannot consume a std.ui.UI result".to_owned(),
         )),
-        (Some(RuntimeFamily::Qt), _) => Ok(RuntimeFamily::Qt),
+        (Some(RuntimeFamily::Qt), true) => Ok(RuntimeFamily::Qt),
+        (Some(RuntimeFamily::Qt), false) => Err(usage_error(
+            "the Qt runtime can consume only a std.ui.UI result".to_owned(),
+        )),
         (Some(RuntimeFamily::NotInstalled), _) => Err(usage_error(
             "the not-installed runtime family is not installed".to_owned(),
         )),
@@ -9477,10 +9480,10 @@ mod tests {
             selected_runtime(&runtime_request(Some(RuntimeFamily::Tty)), false),
             Ok(RuntimeFamily::Tty)
         );
-        assert_eq!(
-            selected_runtime(&runtime_request(Some(RuntimeFamily::Qt)), false),
-            Ok(RuntimeFamily::Qt)
-        );
+        let error = selected_runtime(&runtime_request(Some(RuntimeFamily::Qt)), false)
+            .expect_err("Qt cannot consume a terminal result");
+        assert_eq!(error.kind(), InstalledInvokeErrorKind::Usage);
+        assert!(error.message().contains("std.ui.UI"));
         assert_eq!(
             selected_runtime(&runtime_request(None), true),
             Ok(RuntimeFamily::Qt)
