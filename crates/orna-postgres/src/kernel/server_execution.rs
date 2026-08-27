@@ -55,7 +55,7 @@ use orna_core::{
         RuntimeFloat, RuntimeType, RuntimeValue,
     },
 };
-use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
+use orna_protocol::{ValueCodecError, decode_active_value, decode_rows, encode_active_value};
 use orna_standard::{
     BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STD_IO_BYTE_STREAM_TYPE_ID,
     STD_TERMINAL_DOCUMENT_TYPE_ID, TERMINAL_DOCUMENT_MAGIC,
@@ -108,7 +108,10 @@ const DISTINCT_REFERENCE_SEQUENCE_RULE: &str =
 /// The fixed ADR 0057 `std.json.Value` value-type identity: `...11` (ADR 0058).
 const STD_JSON_VALUE_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-/// The fixed ADR 0057 `std.data.Rows` value-type identity: `...12` (ADR 0058).
+/// The reserved Work ADR 0087 `std.data.Rows` value-type identity (`...12`).
+///
+/// Keep this local until the V8 standard snapshot exports the same identity;
+/// the sealed presenter registry below is the migration seam.
 const STD_DATA_ROWS_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 /// The fixed ADR 0057 `std.json.encode` function identity: `...11`.
@@ -2649,20 +2652,21 @@ impl fmt::Display for SealedPresentationError {
             Self::NoPath => formatter.write_str("no presenter accepts the canonical result type"),
             Self::Kernel(error) => write!(formatter, "{error}"),
         }
-    }
+}
 }
 
 /// The immutable sealed presenter registry (ADR 0057 step 7, ADR 0067).
 ///
-/// The standard snapshot does not yet declare the ADR 0057/0067 presenter
-/// functions as standard-library objects, so the sealed route constructs the
-/// known presenter records here: alias `json` -> `std.json.encode` (input
-/// `std.json.Value`, output `std.io.ByteStream` with media type
-/// `application/json`), alias `table` -> `std.terminal.present_table`
-/// (input `std.data.Rows`, output `std.terminal.Document`, no media type),
-/// and alias `csv` -> `std.csv.encode` (input `std.data.Rows`, output
-/// `std.io.ByteStream` with media type `text/csv`).
-/// All entries stream nothing and carry the default priority.
+/// The standard snapshot does not yet provide the sealed route's presenter
+/// records, so the route constructs the known presenter records here: alias
+/// `json` -> `std.json.encode` (input `std.json.Value`, output
+/// `std.io.ByteStream` with media type `application/json`), alias `table` ->
+/// `std.terminal.present_table` (input `std.data.Rows`, output
+/// `std.terminal.Document`, no media type), and alias `csv` ->
+/// `std.csv.encode` (input `std.data.Rows`, output `std.io.ByteStream` with
+/// media type `text/csv`). The local Rows identity above is deliberately kept
+/// until the V8 standard constants can be adopted at this seam. All entries
+/// stream nothing and carry the default priority.
 fn sealed_presenter_registry() -> &'static PresenterRegistry {
     static REGISTRY: OnceLock<PresenterRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -2768,8 +2772,9 @@ fn resolve_sealed_presenter_type_name(
 /// accepts every argument the closed value channel can carry (any
 /// json-convertible flat value), while `std.terminal.present_table` and
 /// `std.csv.encode` accept the canonical result only when it converts to a
-/// bounded `ResultRows` (the one-column, one-row `result` set this step
-/// builds). An unresolved alias,
+/// bounded `ResultRows`; an opaque value with the exact `std.data.Rows` type
+/// is decoded back to its complete shape, while other values use the legacy
+/// one-column, one-row `result` wrapper. An unresolved alias,
 /// media type, or type name is [`SealedPresentationError::OutputResolution`]
 /// (`ORNA0702`); a result the matched presenter cannot accept is
 /// [`SealedPresentationError::NoPath`] (`ORNA0701`). The presented opaque
@@ -2854,7 +2859,7 @@ pub(crate) fn present_sealed_standard_output(
         )
         .map_err(sealed_presenter_engine_error),
         STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID => {
-            let rows = sealed_result_rows(value)?;
+            let rows = sealed_result_rows(value, active, registry)?;
             execute_standard_terminal_table(
                 &sealed_terminal_table_definition(),
                 &sealed_terminal_table_revision(),
@@ -2865,7 +2870,7 @@ pub(crate) fn present_sealed_standard_output(
             .map_err(sealed_presenter_engine_error)
         }
         STD_CSV_ENCODE_FUNCTION_ID => {
-            let rows = sealed_result_rows(value)?;
+            let rows = sealed_result_rows(value, active, registry)?;
             execute_standard_csv_encode(
                 &sealed_csv_encode_definition(),
                 &sealed_csv_encode_revision(),
@@ -2886,13 +2891,24 @@ pub(crate) fn present_sealed_standard_output(
 }
 
 /// Converts the canonical sealed result to the bounded `ResultRows` model the
-/// terminal-table engine accepts.
+/// terminal-table and CSV engines accept.
 ///
-/// The canonical result cannot ride the value channel as rows, so this step
-/// wraps it as the one-column, one-row `result` set. Only flat runtime forms
-/// convert; opaque, constructed, and invocation-carrier values have no path
-/// to the terminal-document sink (`ORNA0701`).
-fn sealed_result_rows(value: RuntimeValue) -> Result<ResultRows, SealedPresentationError> {
+/// A registered `std.data.Rows` opaque value carries the complete result shape
+/// and is decoded against the already pinned active revision and registry.
+/// Other values retain the legacy one-column, one-row `result` wrapper. Opaque,
+/// constructed, and invocation-carrier values have no scalar path to the
+/// presentation sinks (`ORNA0701`).
+fn sealed_result_rows(
+    value: RuntimeValue,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<ResultRows, SealedPresentationError> {
+    if let RuntimeValue::Opaque(opaque) = &value {
+        if opaque.opaque_type() == STD_DATA_ROWS_TYPE_ID {
+            return decode_rows(active, registry, opaque.canonical_payload())
+                .map_err(|_| SealedPresentationError::NoPath);
+        }
+    }
     let RuntimeType::Flat(resolved_type) = value.runtime_type() else {
         return Err(SealedPresentationError::NoPath);
     };
@@ -5977,6 +5993,15 @@ mod tests {
                 .expect("the retained V5 standard source is valid"),
         )
         .expect("the retained V5 standard source verifies")
+    }
+
+    /// Verifies the append-only `orna.std/8` Rows snapshot.
+    fn presenter_v8_standard() -> VerifiedStandardLibrarySnapshot {
+        orna_standard::verify_standard_library_v8_snapshot(
+            orna_standard::retained_standard_library_v8_snapshot()
+                .expect("the retained V8 standard source is valid"),
+        )
+        .expect("the retained V8 standard source verifies")
     }
 
     fn presenter_client_offer() -> InvocationClientOffer {
@@ -10601,6 +10626,153 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sealed_rows_value_preserves_complete_shape_for_table_and_csv() {
+        let standard = presenter_v8_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V8 opaque codecs register");
+        let active = presenter_active(&standard);
+        let rows = ResultRows::new(
+            [
+                ResultColumn::new("id", ResolvedType::scalar(StandardScalar::Integer), false)
+                    .expect("the id column is valid"),
+                ResultColumn::new(
+                    "name",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                )
+                .expect("the name column is valid"),
+            ],
+            [
+                ResultRow::new([
+                    RuntimeValue::Integer(2),
+                    RuntimeValue::Text("beta".to_owned()),
+                ]),
+                ResultRow::new([
+                    RuntimeValue::Integer(1),
+                    RuntimeValue::Text("alpha".to_owned()),
+                ]),
+            ],
+        )
+        .expect("the multi-column result rows are valid");
+        let value = orna_protocol::encode_rows_value(&active, &registry, &rows)
+            .expect("the complete Rows value encodes");
+        let RuntimeValue::Opaque(opaque) = &value else {
+            panic!("Rows encoding must produce one opaque value");
+        };
+        assert_eq!(opaque.opaque_type(), STD_DATA_ROWS_TYPE_ID);
+
+        let decoded = sealed_result_rows(value.clone(), &active, &registry)
+            .expect("the complete Rows value decodes");
+        assert_eq!(decoded, rows);
+
+        let table = InvocationOutputRequirement::new(
+            Some(String::from("table")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the table requirement is valid");
+        let presented = present_sealed_standard_output(
+            &table,
+            value.clone(),
+            &presenter_client_offer(),
+            &active,
+            &registry,
+        )
+        .expect("the table presenter accepts the complete Rows value");
+        let RuntimeValue::Opaque(document) = presented else {
+            panic!("the table presenter must return one opaque document");
+        };
+        assert_eq!(
+            document.canonical_payload(),
+            frame_terminal_document("id name\n-- -----\n2  beta\n1  alpha\n(2 rows)\n")
+        );
+
+        let csv = InvocationOutputRequirement::new(
+            Some(String::from("csv")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the CSV requirement is valid");
+        let presented = present_sealed_standard_output(
+            &csv,
+            value,
+            &presenter_client_offer(),
+            &active,
+            &registry,
+        )
+        .expect("the CSV presenter accepts the complete Rows value");
+        let RuntimeValue::Opaque(stream) = presented else {
+            panic!("the CSV presenter must return one opaque stream");
+        };
+        assert_eq!(
+            stream.canonical_payload(),
+            frame_byte_stream(b"text/csv", b"id,name\n2,beta\n1,alpha\n")
+        );
+    }
+
+    #[test]
+    fn sealed_result_rows_preserves_scalar_synthetic_column() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let rows = sealed_result_rows(RuntimeValue::Integer(42), &active, &registry)
+            .expect("scalar presentation retains its legacy wrapper");
+
+        assert_eq!(rows.columns().len(), 1);
+        assert_eq!(rows.columns()[0].name(), "result");
+        assert_eq!(
+            rows.columns()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Integer)
+        );
+        assert_eq!(
+            rows.rows(),
+            &[ResultRow::new([RuntimeValue::Integer(42)])]
+        );
+    }
+
+
+    #[test]
+    fn sealed_rows_zero_row_result_stays_one_value_batch_item() {
+        let standard = presenter_v8_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V8 opaque codecs register");
+        let active = presenter_active(&standard);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "id",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .expect("the id column is valid")],
+            std::iter::empty::<ResultRow>(),
+        )
+        .expect("the zero-row result shape is valid");
+        let value = orna_protocol::encode_rows_value(&active, &registry, &rows)
+            .expect("the zero-row Rows value encodes");
+        let events = crate::kernel::security::sealed_completed_events(
+            PrincipalId::from_bytes([0x67; 16]),
+            InvocationId::from_bytes([0x68; 16]),
+            value,
+        )
+        .expect("the zero-row Rows event batch is valid");
+
+        assert_eq!(events.records().len(), 3);
+        let InvocationEventBody::ValueBatch { values, .. } = events.records()[1].event().body()
+        else {
+            panic!("a zero-row Rows result must still emit a ValueBatch");
+        };
+        let [value] = values.as_slice() else {
+            panic!("a zero-row Rows result must emit exactly one value");
+        };
+        let RuntimeValue::Opaque(opaque) = value.value() else {
+            panic!("the ValueBatch item must be the Rows opaque value");
+        };
+        assert_eq!(opaque.opaque_type(), STD_DATA_ROWS_TYPE_ID);
+    }
     #[test]
     fn sealed_output_requires_matching_sink_descriptor_and_media_type() {
         let standard = presenter_standard();
