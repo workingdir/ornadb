@@ -164,10 +164,9 @@ use orna_core::{
     inspect::{InspectOutcomeKind, InspectPrivilege, InspectSnapshotOptions},
     invocation::{
         InvocationArgument, InvocationClientOffer, InvocationEventBody, InvocationFailure,
-        InvocationOutputRequirement,
-        InvocationFailurePhase, InvocationParameterSelector, InvocationRetryability,
-        InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
-        ProtectedInvocationDecision, decide_protected_invocation,
+        InvocationFailurePhase, InvocationOutputRequirement, InvocationParameterSelector,
+        InvocationRetryability, InvocationTarget as InvocationRequestTarget, InvokeEvent,
+        InvokeValue, ProtectedInvocationDecision, decide_protected_invocation,
     },
     revision::{ActiveDatabaseRevision, CatalogueHashContext, RevisionPair, StandardExecutable},
     security::{
@@ -202,7 +201,8 @@ use orna_protocol::{
     decode_retained_invoke_request, encode_active_value, encode_rows_value,
 };
 use orna_standard::{
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
@@ -4861,6 +4861,21 @@ fn sealed_server_result_kind(return_type: &FunctionReturn) -> Option<ProtocolRes
     }
 }
 
+fn sealed_rows_preservation_is_supported(
+    active: &ActiveDatabaseRevision,
+    return_type: &FunctionReturn,
+) -> bool {
+    matches!(return_type, FunctionReturn::Rows(_))
+        && active
+            .catalogue_hash_context()
+            .standard()
+            .is_some_and(|standard| {
+                let revision = standard.revision();
+                revision == STANDARD_LIBRARY_V8_REVISION_ID
+                    || revision == STANDARD_LIBRARY_V9_REVISION_ID
+            })
+}
+
 fn resource_target_security_is_supported(definition: &FunctionDefinition) -> bool {
     definition.security() == FunctionSecurity::Invoker
 }
@@ -5545,7 +5560,7 @@ async fn execute_sealed_server_after_audit(
             .await;
         }
     };
-    let preserve_rows = matches!(definition.return_type(), FunctionReturn::Rows(_));
+    let preserve_rows = sealed_rows_preservation_is_supported(active, definition.return_type());
     let target_result = match execute_sealed_server_target(
         &mut transaction,
         active,

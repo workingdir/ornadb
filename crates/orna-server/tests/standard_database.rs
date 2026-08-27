@@ -475,9 +475,31 @@ macro_rules! standard_context_facts {
     }};
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()> {
+fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("standard-database-live".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "standard database runtime could not start: {error}"
+                    ))
+                })?;
+            runtime.block_on(opens_reopens_and_rejects_tampered_standard_database_inner())
+        })
+        .map_err(|error| failure(format!("standard database thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("standard database thread panicked")),
+    }
+}
+
+async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestResult<()> {
     let expected =
         retained_standard_library_v9_snapshot().and_then(verify_standard_library_v9_snapshot)?;
     let expected_boolean_contract = expected
@@ -2585,9 +2607,34 @@ async fn proves_installed_no_broker_resource_returns_typed_result_and_terminal()
     })
     .await
 }
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_procedural_client_resource_through_installed_evaluator() -> TestResult<()> {
+fn proves_procedural_client_resource_through_installed_evaluator() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("procedural-client-resource-live".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "build procedural client resource runtime failed: {error}"
+                    ))
+                })?;
+            runtime.block_on(proves_procedural_client_resource_through_installed_evaluator_inner())
+        })
+        .map_err(|error| {
+            failure(format!(
+                "spawn procedural client resource thread failed: {error}"
+            ))
+        })?;
+    handle
+        .join()
+        .map_err(|_| failure("procedural client resource thread panicked"))?
+}
+
+async fn proves_procedural_client_resource_through_installed_evaluator_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
         let kernel = open_standard_database(kernel(&database)?)
@@ -2637,12 +2684,22 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
             )
             .await
             .map_err(|error| failure(format!("insert procedural resource fixture row failed: {error:?}")))?;
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
         let security = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions,
@@ -2829,9 +2886,33 @@ async fn proves_procedural_client_resource_through_installed_evaluator() -> Test
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_stream_resource_evaluator_consumes_batch_then_returns_terminal_none()
+fn installed_stream_resource_evaluator_consumes_batch_then_returns_terminal_none() -> TestResult<()>
+{
+    let handle = std::thread::Builder::new()
+        .name("orna-installed-stream-evaluator".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!("build stream evaluator runtime failed: {error}"))
+                })?;
+            runtime.block_on(
+                installed_stream_resource_evaluator_consumes_batch_then_returns_terminal_none_inner(
+                ),
+            )
+        })
+        .map_err(|error| failure(format!("spawn stream evaluator thread failed: {error}")))?;
+    handle
+        .join()
+        .map_err(|_| failure("stream evaluator thread panicked"))?
+}
+
+#[cfg(feature = "test-hooks")]
+async fn installed_stream_resource_evaluator_consumes_batch_then_returns_terminal_none_inner()
 -> TestResult<()> {
     with_test_database(|database| async move {
         let uid = nix::unistd::geteuid().as_raw();
@@ -2935,12 +3016,22 @@ async fn installed_stream_resource_evaluator_consumes_batch_then_returns_termina
             .map_err(|error| {
                 failure(format!("insert second stream evaluator fixture row failed: {error:?}"))
             })?;
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
         let security = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions,
@@ -8014,9 +8105,37 @@ async fn direct_scalar_resource_holds_active_revision_lock_through_execution() -
 }
 
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_executor_reclaims_transport_after_terminal_cancellation() -> TestResult<()> {
+fn installed_executor_reclaims_transport_after_terminal_cancellation() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("installed-executor-cancellation-live".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "build installed executor cancellation runtime failed: {error}"
+                    ))
+                })?;
+            runtime
+                .block_on(installed_executor_reclaims_transport_after_terminal_cancellation_inner())
+        })
+        .map_err(|error| {
+            failure(format!(
+                "spawn installed executor cancellation thread failed: {error}"
+            ))
+        })?;
+    handle
+        .join()
+        .map_err(|_| failure("installed executor cancellation thread panicked"))?
+}
+
+#[cfg(feature = "test-hooks")]
+async fn installed_executor_reclaims_transport_after_terminal_cancellation_inner() -> TestResult<()>
+{
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?)
             .await
@@ -8383,12 +8502,22 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
                 .map_err(|error| failure(format!("insert resource fixture row failed: {error:?}")))?;
         }
 
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(|function| function.id())
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
         let uid = nix::unistd::getuid().as_raw();
         let principal = Principal::new(
             RAW_CLIENT_USER,
@@ -9105,9 +9234,38 @@ async fn installed_resource_socket_delivers_values_and_enforces_windows_and_gran
 /// raw socket adapter therefore drives the same authenticated resource channel
 /// directly with canonical protocol frames.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() -> TestResult<()> {
+fn installed_resource_socket_cancellation_reclaims_and_replaces_request() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("installed-resource-socket-cancellation-live".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "build installed resource socket cancellation runtime failed: {error}"
+                    ))
+                })?;
+            runtime.block_on(
+                installed_resource_socket_cancellation_reclaims_and_replaces_request_inner(),
+            )
+        })
+        .map_err(|error| {
+            failure(format!(
+                "spawn installed resource socket cancellation thread failed: {error}"
+            ))
+        })?;
+    handle
+        .join()
+        .map_err(|_| failure("installed resource socket cancellation thread panicked"))?
+}
+
+#[cfg(feature = "test-hooks")]
+async fn installed_resource_socket_cancellation_reclaims_and_replaces_request_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?).await.map_err(|error| {
             failure(format!("open standard database failed: {error:?}"))
@@ -9178,12 +9336,22 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
             u128::from_be_bytes(probe_type.to_bytes())
         );
 
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
         let uid = nix::unistd::getuid().as_raw();
         let principal = Principal::new(
             RAW_CLIENT_USER,
@@ -9567,10 +9735,38 @@ async fn installed_resource_socket_cancellation_reclaims_and_replaces_request() 
 /// must not receive a late terminal frame, and the cleanup must retain one
 /// allowed terminal audit row linked to the accepted nested invocation.
 #[cfg(feature = "test-hooks")]
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits() -> TestResult<()>
-{
+fn installed_resource_socket_disconnect_cancels_active_producer_and_audits() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("installed-resource-socket-disconnect-live".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!(
+                        "build installed resource socket disconnect runtime failed: {error}"
+                    ))
+                })?;
+            runtime.block_on(
+                installed_resource_socket_disconnect_cancels_active_producer_and_audits_inner(),
+            )
+        })
+        .map_err(|error| {
+            failure(format!(
+                "spawn installed resource socket disconnect thread failed: {error}"
+            ))
+        })?;
+    handle
+        .join()
+        .map_err(|_| failure("installed resource socket disconnect thread panicked"))?
+}
+
+#[cfg(feature = "test-hooks")]
+async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits_inner()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = open_standard_database(kernel(&database)?).await.map_err(|error| {
             failure(format!("open standard database failed: {error:?}"))
@@ -9638,12 +9834,22 @@ async fn installed_resource_socket_disconnect_cancels_active_producer_and_audits
             "_orna_data.t_{:032x}",
             u128::from_be_bytes(probe_type.to_bytes())
         );
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(FunctionDefinition::id)
             .collect::<Vec<_>>();
+        if let Some(standard) = active.catalogue_hash_context().standard() {
+            functions.extend(
+                standard
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(FunctionDefinition::id),
+            );
+        }
+        functions.sort_unstable();
         let uid = nix::unistd::getuid().as_raw();
         let principal = Principal::new(
             RAW_CLIENT_USER,
@@ -16846,7 +17052,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             InspectCarrierKind::RuntimeBindings,
             InspectCarrierKind::SecurityDecisions,
         ];
-        let expected_row_counts = [1usize, 1, 1, 0, 0, 0, 0, 0, 2];
+        let expected_row_counts = [1usize, 1, 1, 3, 0, 0, 0, 0, 2];
         require(
             executor.inspect_count == expected_carrier_kinds.len()
                 && executor.completed_values.len() == expected_carrier_kinds.len()
@@ -16932,7 +17138,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| failure("ordinary Inspector UI carrier_rows property was missing"))?;
         require(
-            ui_carrier_rows == "1,1,1,0,0,0,0,0,2",
+            ui_carrier_rows == "1,1,1,3,0,0,0,0,2",
             "ordinary Inspector UI carrier_rows did not match the echo fixture",
         )?;
         // The installed evaluator returns the canonical ORNA-UI/1 value. The
