@@ -175,19 +175,20 @@ remain labelled, and no environment-gated proof is inferred.
   CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
   `34e39f4` (safe Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local
   authority), `767991d` (resource provenance contract), `8d3e4cd` (operator
-  runbook), `33aa485` (V9 constructor showcase), and `6e69500` (reachable
-  text-input showcase root). Evidence updates are recorded by `2f8509f`,
-  `07ecc28`, `880ca17`, and `ca831a5`.
+  runbook), `33aa485` (V9 constructor showcase), `6e69500` (reachable
+  text-input showcase root), and `3d23e5b` (reachable button showcase root).
+  Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`, and
+  `ca831a5`.
 - Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
   `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
   presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
   (V9 constructors and generic named arguments), `ornadb-el1.3.4.3`
   (ADR 0090 local authority), `ornadb-el1.4.4` (SERVER dogfood),
-  `ornadb-br0.2` (developer tools), and `ornadb-br0.4.5` (V9 constructor
-  showcase). Broad security parent `ornadb-el1.3.4` remains open. Resource
-  terminal provenance `ornadb-el1.2.1.43` is closed by ADR 0078/commit
-  `767991d`; the accepted commit-receipt authority and producer evidence
-  boundary are reconciled.
+  `ornadb-br0.2` (developer tools), and `ornadb-br0.4.5` with children
+  `.1` and `.2` (reachable V9 constructor showcase). Broad security parent
+  `ornadb-el1.3.4` remains open. Resource terminal provenance
+  `ornadb-el1.2.1.43` is closed by ADR 0078/commit `767991d`; the accepted
+  commit-receipt authority and producer evidence boundary are reconciled.
 - Generic no-FROM parameter projection (`ornadb-el1.3.14`) and scalar demo
   (`ornadb-br0.4.4`) remain blocked by ADR 0055: `NoInputParameterSelect` is
   accepted only for fixed standard `std.invoke.echo` in `orna.std/2`; the
