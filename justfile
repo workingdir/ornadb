@@ -18,6 +18,12 @@ runtime-qt-test:
     cmake --build target/runtime-qt --parallel
     ctest --test-dir target/runtime-qt --output-on-failure
 
+# Build the separate Debian package for the fixed Qt runtime path.
+runtime-qt-package:
+    cmake -S runtimes/qt -B target/runtime-qt -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build target/runtime-qt --parallel
+    cpack --config target/runtime-qt/CPackConfig.cmake -G DEB
+
 # Run the Rust Qt runtime loader/session smoke test against an explicit shared library path.
 runtime-qt-rust-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
