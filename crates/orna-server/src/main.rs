@@ -2036,8 +2036,25 @@ mod tests {
                 Some(RuntimeFamily::Tty),
             ))
         );
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "--runtime",
+                "qt",
+                "invoke",
+                "std.invoke.echo",
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+                Some(RuntimeFamily::Qt),
+            ))
+        );
         for values in [
-            vec!["orna", "--runtime", "qt", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
             vec!["orna", "--runtime", "tty"],
@@ -2073,10 +2090,25 @@ mod tests {
         // silently binding a parameter called `runtime`. The accepted form
         // above also pins `arguments` to the empty vector, so no friendly
         // argument named `runtime` is ever emitted.
-        for values in [
-            vec!["orna", "invoke", "std.invoke.echo", "--runtime"],
-            vec!["orna", "invoke", "std.invoke.echo", "--runtime", "qt"],
-        ] {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--runtime",
+                "qt"
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+                Some(RuntimeFamily::Qt),
+            ))
+        );
+        for values in [vec!["orna", "invoke", "std.invoke.echo", "--runtime"]] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
     }
@@ -2160,7 +2192,6 @@ mod tests {
             vec!["orna", "invoke", "std.invoke.echo", "--trace"],
             vec!["orna", "invoke", "std.invoke.echo", "--output"],
             vec!["orna", "invoke", "std.invoke.echo", "--runtime"],
-            vec!["orna", "invoke", "std.invoke.echo", "--runtime", "qt"],
             vec!["orna", "invoke", "std.invoke.echo", "--name"],
             vec!["orna", "invoke", "echo"],
             vec!["orna", "invoke", ""],

@@ -34,6 +34,8 @@ pub const QT_PLATFORM: &str = "linux-x86_64";
 /// The sink consumed by the first Qt provider.
 pub const UI_SINK_NAME: &str = "std.ui.UI";
 
+const INSTALLED_QT_RUNTIME_PATH: &str = "/usr/lib/orna/liborna-runtime-qt.so";
+
 /// Maximum bytes read from one descriptor string.
 ///
 /// Descriptor identity and offer names are metadata, not runtime values.  The
@@ -925,6 +927,16 @@ impl RuntimeLibrary {
             api,
             descriptor,
         })
+    }
+    /// Loads the validated Qt runtime from fixed host package paths.
+    ///
+    /// Only package-owned absolute paths are considered. No database value,
+    /// current-directory lookup, or user override participates in selection.
+    pub fn load_installed_qt() -> Result<Self, RuntimeLoadError> {
+        if !Path::new(INSTALLED_QT_RUNTIME_PATH).is_file() {
+            return Err(RuntimeLoadError::LibraryUnavailable);
+        }
+        Self::load_qt(INSTALLED_QT_RUNTIME_PATH)
     }
 
     /// Returns the copied, typed ABI function table.
