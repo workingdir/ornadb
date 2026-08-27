@@ -81,12 +81,15 @@ impl ClientExecutionFuel {
         }
     }
 
-    fn consume(&mut self, context: ClientExecutionContext) -> Result<(), ClientExecutionError> {
+    fn consume(
+        &mut self,
+        context: ClientExecutionContext,
+    ) -> Result<(), Box<ClientExecutionError>> {
         if self.remaining == 0 {
-            return Err(expression_error(
+            return Err(Box::new(expression_error(
                 context,
                 ClientExpressionError::ExecutionLimit,
-            ));
+            )));
         }
         self.remaining -= 1;
         Ok(())
@@ -9288,7 +9291,7 @@ fn evaluate_expression_with_fuel(
     local_environment: &mut ClientLocalEnvironment,
     fuel: &mut ClientExecutionFuel,
 ) -> Result<RuntimeValue, Box<ClientExecutionError>> {
-    fuel.consume(context).map_err(Box::new)?;
+    fuel.consume(context)?;
     match expression {
         ClientExpressionNode::Await { expression } => match expression.as_ref() {
             ClientExpressionNode::Resource { operation } => evaluate_resource_expression(
