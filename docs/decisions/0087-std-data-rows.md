@@ -122,9 +122,11 @@ UUIDs.
 
 The V8 catalogue is V7 plus `std.data`, the Rows opaque value type, the
 `std.rows` qualified binding (sourced by the unquoted `std.Rows` spelling),
-and the retained table function. It has no new object type and no
-`std.csv` source declaration. The V7 catalogue, all V1-V7 source units, and
-every historical executable remain unchanged.
+and the retained table function. Its function and executable sequences follow
+the existing canonical ascending `FunctionId` order: `std.invoke.echo`,
+`std.json.encode`, `std.terminal.present_table`, then `std.ui.window`. The
+V7 catalogue, all V1-V7 source units, and every historical executable remain
+unchanged.
 The export identity is derived from `TypeBinding::qualified` over the exact
 semantic lookup words `std` and `rows`. Unquoted source identifiers are
 case-insensitive, so the source spelling `std.Rows` normalizes to that
@@ -524,13 +526,16 @@ copies, these values from the retained source and canonical records:
   from the exact source declaration and `orna.server-terminal-table` version-1
   payload.
 
-The V8 executable sequence appends the table executable after the retained V7
-sequence (`std.invoke.echo`, `std.json.encode`, and `std.ui.window`). Existing
-V1-V7 unit, bundle, source-revision, standard, artifact, and semantic goldens
-are asserted unchanged. The sealed CSV artifact keeps its ADR 0067 golden and
-is not copied into the V8 standard digest. Every V8 golden test recomputes its
-value through the canonical encoders and compares it with the pinned compiled
-golden; a hand-authored digest is not authoritative.
+The V8 function and executable sequence is the canonical ascending identity
+order: `std.invoke.echo`, `std.json.encode`, `std.terminal.present_table`, and
+`std.ui.window`. The V7 sequence remains unchanged in the V7 snapshot; V8
+retains the same echo, JSON, and window executable records while placing the
+new table record at its canonical identity position. Existing V1-V7 unit,
+bundle, source-revision, standard, artifact, and semantic goldens are asserted
+unchanged. The sealed CSV artifact keeps its ADR 0067 golden and is not copied
+into the V8 standard digest. Every V8 golden test recomputes its value through
+the canonical encoders and compares it with the pinned compiled golden; a
+hand-authored digest is not authoritative.
 
 ## Alternatives considered
 

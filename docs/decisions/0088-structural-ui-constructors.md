@@ -267,10 +267,11 @@ authority rules:
 * `crates/orna-standard/src/lib.rs` adds the V9 manifest over the verified V8
   Rows snapshot, the retained V9 source snapshot, canonical content/source/
   revision/standard digest checks, the seven executable records, and the V8-
-  to-V9 upgrade seam. The V9 catalogue appends the seven functions in the
-  declaration order shown above; existing V8 executable records for
-  `std.invoke.echo`, `std.json.encode`, `std.ui.window`, and
-  `std.terminal.present_table` remain retained before the constructor records.
+  to-V9 upgrade seam. The V9 catalogue retains the V8 function and executable
+  records in canonical ascending `FunctionId` order: `std.invoke.echo`,
+  `std.json.encode`, `std.terminal.present_table`, and `std.ui.window`. It then
+  appends the seven constructor functions in the declaration order shown
+  above.
 * `registered_opaque_codecs` retains every V8 Rows registration and continues
   to register the same `std.ui.UI` codec (`STD_UI_TYPE_ID`, `STD_UI_CONTRACT`,
   `UI_MAGIC`) for an accepted V9 snapshot. V9 does not add a second UI type, a
