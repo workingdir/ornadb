@@ -209,6 +209,8 @@ impl PostgresSession {
 
 /// A failure to configure or communicate with the private PostgreSQL kernel.
 #[derive(Debug)]
+// Keep the accepted public error layout; boxing variants would change its API.
+#[allow(clippy::large_enum_variant)]
 pub enum PostgresKernelError {
     /// The configured PostgreSQL connection parameters are invalid.
     Configuration(tokio_postgres::Error),

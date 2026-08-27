@@ -1,5 +1,7 @@
 //! Fail-closed verification of PostgreSQL object storage.
 
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_core::{
