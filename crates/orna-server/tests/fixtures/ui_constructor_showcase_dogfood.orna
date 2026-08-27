@@ -1,0 +1,69 @@
+CREATE SCHEMA ui_constructor_showcase;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.text_leaf()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.text(
+        text => 'Ready'
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.button_leaf()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.button(
+        label => 'Run',
+        enabled => TRUE
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.text_input_leaf()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.text_input(
+        text => '',
+        placeholder => 'Search',
+        enabled => TRUE
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.panel_child()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.panel(
+        content => ui_constructor_showcase.text_leaf()
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.row_child()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.row(
+        content => ui_constructor_showcase.button_leaf()
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.column_child()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.column(
+        content => ui_constructor_showcase.panel_child()
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.tabs_child()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.tabs(
+        content => ui_constructor_showcase.column_child()
+    );
+END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.main()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'UI Constructor Showcase',
+        content => ui_constructor_showcase.tabs_child()
+    );
+END;

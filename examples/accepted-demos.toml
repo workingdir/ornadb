@@ -41,6 +41,12 @@ source = "crates/orna-server/tests/fixtures/static_ui_dogfood.orna"
 description = "A static UI composed from text, panel, column, and window constructors."
 
 [[demos]]
+name = "ui-constructor-showcase"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/ui_constructor_showcase_dogfood.orna"
+description = "A source-authored static UI showcase covering all V9 constructors and std.ui.window."
+
+[[demos]]
 name = "scalar-resource"
 mode = "offline-test"
 test = "checks_accepted_scalar_resource_fixture_offline"
