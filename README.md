@@ -131,6 +131,12 @@ boundary and a TTY runtime path; the existence of a runtime name in the
 canonical spec does not by itself mean that runtime is implemented or proved
 here.
 
+The TTY renderer demo exercises the accepted document and byte-stream sinks:
+
+```text
+just runtime-tty-demo
+```
+
 The Qt recipes are separate from the server package:
 
 ```text
