@@ -24,9 +24,23 @@ pub use model::{
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse,
+    CheckedStandardUiConstructor,
     ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
     STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
     STANDARD_LIBRARY_V7_REVISION_ID, STANDARD_LIBRARY_V8_REVISION_ID, STD_ACTION_SCHEMA_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
+    STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
+    STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
+    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID,
+    STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT, STD_UI_ROW_CONTENT_PARAMETER_ID,
+    STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID, STD_UI_ROW_RUNTIME_CONTRACT,
+    STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID,
+    STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID,
+    STD_UI_TEXT_RUNTIME_CONTRACT,
     STD_ACTION_SOURCE_UNIT_ID,
     STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
     STD_CSV_ENCODE_FUNCTION_ID, STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
@@ -384,8 +398,8 @@ pub fn check_standard_application(
 /// output value types, their exports, and every origin on the retained unit.
 /// The V4 standard revision (ADR 0062) carries the ordered four-unit bundle
 /// (`std/types.orna`, `std/invoke.orna`, `std/output.orna`, then `std/ui.orna`);
-/// its branch reconciles the first three units exactly as V3 does and
-/// additionally reconciles the ui unit closed against the `std.ui` schema, the
+/// its branch reconciles the first
+/// three units exactly as V3 does and additionally reconciles the ui unit,
 /// opaque `std.ui.ui` value type, its export, and every origin on the retained
 /// unit. The V5 standard revision (ADR 0075) retains those four units and adds
 /// `std/json.orna`; its explicit branch reconciles the JSON schema, opaque value
@@ -398,6 +412,7 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
+            STANDARD_LIBRARY_V9_REVISION_ID => check_standard_library_source_v9(snapshot),
             STANDARD_LIBRARY_V8_REVISION_ID => check_standard_library_source_v8(snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
             STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
@@ -1158,6 +1173,35 @@ fn check_standard_library_source_v8_parts(
         executables[1].clone(),
         executables[3].clone(),
     ];
+    let v7_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        catalogue.revision(),
+        catalogue
+            .schemas()
+            .iter()
+            .filter(|schema| schema.id() != STD_DATA_SCHEMA_ID)
+            .cloned()
+            .collect(),
+        catalogue.object_types().to_vec(),
+        catalogue
+            .value_types()
+            .iter()
+            .filter(|value_type| value_type.id() != STD_DATA_ROWS_TYPE_ID)
+            .cloned()
+            .collect(),
+        catalogue
+            .type_bindings()
+            .iter()
+            .filter(|binding| binding.target() != STD_DATA_ROWS_TYPE_ID)
+            .cloned()
+            .collect(),
+        catalogue
+            .functions()
+            .iter()
+            .filter(|function| function.id() != STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            .cloned()
+            .collect(),
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
     let (mut families, mut checked_executables) = check_standard_library_source_v7_parts(
         &[
             types_unit.clone(),
@@ -1168,11 +1212,10 @@ fn check_standard_library_source_v8_parts(
             action_unit.clone(),
             window_unit.clone(),
         ],
-        catalogue,
+        &v7_catalogue,
         &v7_origins,
         &v7_executables,
     )?;
-
     let data_bundle = SourceBundle::new([SourceUnit::new(
         data_unit.logical_path(),
         data_unit.content(),
@@ -1201,7 +1244,7 @@ fn check_standard_library_source_v8_parts(
     let table_executable = reconcile_standard_terminal_executable(
         catalogue,
         &data_origins,
-        &executables[3],
+        &executables[2],
         data_unit,
         parsed_data,
         terminal_schema_origin,
@@ -1209,6 +1252,223 @@ fn check_standard_library_source_v8_parts(
     checked_executables.insert(2, table_executable);
     Ok((families, checked_executables))
 }
+
+/// Checks one retained V9 standard source bundle.
+///
+/// V9 retains the complete verified V8 Rows snapshot and appends the exact
+/// `std/ui_constructors.orna` unit. The appended unit contributes no schema,
+/// value type, or binding; it contributes exactly seven external CLIENT
+/// constructor functions and their executable evidence.
+fn check_standard_library_source_v9(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+
+    let (families, checked_executables) = check_standard_library_source_v9_parts(
+        snapshot.source().units(),
+        snapshot.catalogue(),
+        snapshot.origins(),
+        snapshot.executables(),
+    )?;
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executables,
+    })
+}
+
+fn check_standard_library_source_v9_parts(
+    source_units: &[StoredSourceUnit],
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
+    let [
+        types_unit,
+        invoke_unit,
+        output_unit,
+        ui_unit,
+        json_unit,
+        action_unit,
+        window_unit,
+        data_unit,
+        constructors_unit,
+    ] = source_units
+    else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+    check_standard_source_units(
+        source_units,
+        &[
+            (STD_TYPES_SOURCE_UNIT_ID, "std/types.orna", 0),
+            (STD_INVOKE_SOURCE_UNIT_ID, "std/invoke.orna", 1),
+            (STD_OUTPUT_SOURCE_UNIT_ID, "std/output.orna", 2),
+            (STD_UI_SOURCE_UNIT_ID, "std/ui.orna", 3),
+            (STD_JSON_SOURCE_UNIT_ID, "std/json.orna", 4),
+            (STD_ACTION_SOURCE_UNIT_ID, "std/action.orna", 5),
+            (STD_WINDOW_SOURCE_UNIT_ID, "std/window.orna", 6),
+            (STD_DATA_SOURCE_UNIT_ID, "std/data.orna", 7),
+            (
+                STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID,
+                "std/ui_constructors.orna",
+                8,
+            ),
+        ],
+    )?;
+    if executables.len() != 11 {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: executables.len(),
+        });
+    }
+    let expected_functions = [
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        STD_UI_WINDOW_FUNCTION_ID,
+        STD_UI_TEXT_FUNCTION_ID,
+        STD_UI_BUTTON_FUNCTION_ID,
+        STD_UI_PANEL_FUNCTION_ID,
+        STD_UI_ROW_FUNCTION_ID,
+        STD_UI_COLUMN_FUNCTION_ID,
+        STD_UI_TEXT_INPUT_FUNCTION_ID,
+        STD_UI_TABS_FUNCTION_ID,
+    ];
+    if executables.len() != expected_functions.len()
+        || executables
+            .iter()
+            .map(StandardExecutable::function)
+            .ne(expected_functions.into_iter())
+    {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+
+    let mut v8_origins = Vec::with_capacity(origins.len());
+    let mut constructor_origins = Vec::new();
+    for origin in origins {
+        if origin.source().source_unit() == STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID {
+            constructor_origins.push(origin.clone());
+        } else {
+            v8_origins.push(origin.clone());
+        }
+    }
+    let v8_functions = catalogue
+        .functions()
+        .iter()
+        .filter(|function| expected_functions[..4].contains(&function.id()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if v8_functions.len() != 4 {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let v8_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        catalogue.revision(),
+        catalogue.schemas().to_vec(),
+        catalogue.object_types().to_vec(),
+        catalogue.value_types().to_vec(),
+        catalogue.type_bindings().to_vec(),
+        v8_functions,
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let (families, mut checked_executables) = check_standard_library_source_v8_parts(
+        &[
+            types_unit.clone(),
+            invoke_unit.clone(),
+            output_unit.clone(),
+            ui_unit.clone(),
+            json_unit.clone(),
+            action_unit.clone(),
+            window_unit.clone(),
+            data_unit.clone(),
+        ],
+        &v8_catalogue,
+        &v8_origins,
+        &executables[..4],
+    )?;
+
+    let constructors_bundle = SourceBundle::new([SourceUnit::new(
+        constructors_unit.logical_path(),
+        constructors_unit.content(),
+    )])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let constructors_report = parse_bundle(&constructors_bundle);
+    if !constructors_report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: constructors_report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_constructors] = constructors_report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if parsed_constructors.source_text() != constructors_unit.content()
+        || parsed_constructors.source_text() != parsed_constructors.syntax_text()
+        || !parsed_constructors.parsed().schemas().is_empty()
+        || !parsed_constructors.parsed().object_types().is_empty()
+        || !parsed_constructors.parsed().enum_types().is_empty()
+        || !parsed_constructors.parsed().primitive_value_types().is_empty()
+        || !parsed_constructors.parsed().opaque_value_types().is_empty()
+        || !parsed_constructors.parsed().record_value_types().is_empty()
+        || !parsed_constructors.parsed().field_renames().is_empty()
+        || !parsed_constructors.parsed().type_exports().is_empty()
+        || !parsed_constructors.parsed().server_functions().is_empty()
+        || parsed_constructors.parsed().client_functions().len() != 7
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let ui_schema_origin = v8_origins
+        .iter()
+        .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_UI_SCHEMA_ID))
+        .map(DefinitionOrigin::source)
+        .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
+
+    for (index, declaration) in parsed_constructors
+        .parsed()
+        .client_functions()
+        .iter()
+        .enumerate()
+    {
+        let expected_name = unquoted_semantic_name(&declaration.name)?;
+        let spec = standard_ui_constructor_spec(&expected_name)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        if spec.function_id != expected_functions[index + 4] {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+        let declaration_origins = constructor_origins
+            .iter()
+            .filter(|origin| match origin.identity() {
+                DefinitionIdentity::Function(function) => function == spec.function_id,
+                DefinitionIdentity::Parameter { owner, .. } => owner == spec.function_id,
+                _ => false,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let checked = check_standard_ui_constructor(declaration, catalogue, &declaration_origins)?;
+        let checked_executable = reconcile_standard_ui_constructor_executable(
+            catalogue,
+            &declaration_origins,
+            &executables[index + 4],
+            constructors_unit,
+            declaration,
+            checked,
+            ui_schema_origin,
+        )?;
+        checked_executables.push(checked_executable);
+    }
+    if constructor_origins.len()
+        != parsed_constructors
+            .parsed()
+            .client_functions()
+            .iter()
+            .map(|declaration| declaration.parameters.len() + 1)
+            .sum::<usize>()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    Ok((families, checked_executables))
+}
+
 
 /// Reconciles the appended `std/data.orna` unit and returns its catalogue
 /// families. The table declaration is checked through the shared retained
@@ -1636,8 +1896,12 @@ fn expected_standard_terminal_executable(
     origins: &[DefinitionOrigin],
     stored_unit: &StoredSourceUnit,
 ) -> Result<StandardExecutable, StandardLibraryCheckError> {
-    let checked =
-        check_standard_terminal_present_table(declaration, catalogue, origins, STD_DATA_ROWS_TYPE_ID)?;
+    let checked = check_standard_terminal_present_table(
+        declaration,
+        catalogue,
+        origins,
+        STD_DATA_ROWS_TYPE_ID,
+    )?;
     let function_origin = origins
         .iter()
         .find(|origin| {
@@ -1754,16 +2018,16 @@ fn reconcile_standard_terminal_executable(
 ) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
     if parsed_unit.source_text() != stored_unit.content()
         || parsed_unit.source_text() != parsed_unit.syntax_text()
-        || !parsed_unit.parsed().schemas().is_empty()
+        || parsed_unit.parsed().schemas().len() != 1
         || !parsed_unit.parsed().object_types().is_empty()
         || !parsed_unit.parsed().enum_types().is_empty()
         || !parsed_unit.parsed().primitive_value_types().is_empty()
-        || !parsed_unit.parsed().opaque_value_types().is_empty()
+        || parsed_unit.parsed().opaque_value_types().len() != 1
         || !parsed_unit.parsed().record_value_types().is_empty()
         || !parsed_unit.parsed().field_renames().is_empty()
         || !parsed_unit.parsed().client_functions().is_empty()
         || parsed_unit.parsed().server_functions().len() != 1
-        || !parsed_unit.parsed().type_exports().is_empty()
+        || parsed_unit.parsed().type_exports().len() != 1
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
@@ -1810,6 +2074,22 @@ fn checked_standard_executable_from_record(
         .first()
         .copied()
         .ok_or(StandardLibraryCheckError::MissingParameter)?;
+    let parameter_origins = parameter_ids
+        .iter()
+        .map(|parameter| {
+            origins
+                .iter()
+                .find(|origin| {
+                    origin.identity()
+                        == DefinitionIdentity::Parameter {
+                            owner: function_id,
+                            parameter: *parameter,
+                        }
+                })
+                .ok_or(StandardLibraryCheckError::PresenterMissingParameterOrigin)
+                .map(DefinitionOrigin::source)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let function_origin = origins
         .iter()
         .find(|origin| origin.identity() == DefinitionIdentity::Function(function_id))
@@ -1830,6 +2110,7 @@ fn checked_standard_executable_from_record(
     Ok(CheckedStandardExecutable {
         function_id,
         parameter_id,
+
         parameter_ids,
         revision_id: revision.id(),
         revision_number: revision.revision_number(),
@@ -1840,12 +2121,112 @@ fn checked_standard_executable_from_record(
         language_version: revision.language_version().to_owned(),
         artifact: revision.artifact().clone(),
         references: record.references().to_vec(),
+        parameter_origins,
         schema_origin,
         function_origin,
         parameter_origin,
     })
 }
 
+fn reconcile_standard_ui_constructor_executable(
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored: &StandardExecutable,
+    stored_unit: &StoredSourceUnit,
+    declaration: &ClientFunctionDeclaration,
+    checked: CheckedStandardUiConstructor,
+    schema_origin: SourceOrigin,
+) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(checked.function_id())
+        })
+        .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?
+        .source();
+    let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        SourceOrigin::new(stored_unit.id(), start, end)
+            .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+    };
+    let mut references = Vec::with_capacity(declaration.parameters.len() + 1);
+    for (ordinal, parameter) in declaration.parameters.iter().enumerate() {
+        let target = resolved_standard_type_id(&parameter.type_specification, catalogue)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        references.push(DefinitionReference::new(
+            checked.function_id(),
+            checked.revision_id(),
+            ordinal as u32,
+            DefinitionReferenceTarget::ValueType(target),
+            DefinitionReferenceKind::NamedType,
+            source_origin(parameter.type_specification.span())?,
+        ));
+    }
+    let FunctionReturnType::Single(result_type) = &declaration.return_type else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    references.push(DefinitionReference::new(
+        checked.function_id(),
+        checked.revision_id(),
+        declaration.parameters.len() as u32,
+        DefinitionReferenceTarget::ValueType(STD_UI_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        source_origin(result_type.span())?,
+    ));
+    let plan = ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
+        identity: checked.runtime_contract().to_owned(),
+    });
+    let payload = plan
+        .encode()
+        .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let artifact_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        CLIENT_PLAN_FORMAT,
+        plan.format_version(),
+        payload,
+        artifact_hash,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    let function = catalogue
+        .function_by_id(checked.function_id())
+        .ok_or(StandardLibraryCheckError::MissingFunction)?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
+        &artifact,
+        &[],
+        &references,
+    )
+    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let declaration_bytes = &stored_unit.content().as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let revision = FunctionRevisionRecord::new(
+        checked.function_id(),
+        checked.revision_id(),
+        1,
+        function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
+        artifact,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let expected = StandardExecutable::new(checked.function_id(), revision, references)
+        .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    if stored != &expected {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    checked_standard_executable_from_record(&expected, catalogue, origins, schema_origin)
+}
 fn reconcile_standard_window_executable(
     catalogue: &CatalogueSnapshot,
     origins: &[DefinitionOrigin],
@@ -3313,6 +3694,231 @@ pub fn check_standard_terminal_present_table(
     })
 }
 
+#[derive(Clone, Copy)]
+struct StandardUiConstructorSpec {
+    function_id: FunctionId,
+    revision_id: FunctionRevisionId,
+    runtime_contract: &'static str,
+    parameter_ids: &'static [ParameterId],
+    parameter_names: &'static [&'static str],
+    parameter_types: &'static [TypeId],
+}
+
+fn standard_ui_constructor_spec(
+    name: &QualifiedSemanticName,
+) -> Option<StandardUiConstructorSpec> {
+    match name.parts().iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["std", "ui", "text"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_TEXT_FUNCTION_ID,
+            revision_id: STD_UI_TEXT_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_TEXT_RUNTIME_CONTRACT,
+            parameter_ids: &[STD_UI_TEXT_PARAMETER_ID],
+            parameter_names: &["text"],
+            parameter_types: &[STD_CHARACTER_LARGE_OBJECT_TYPE_ID],
+        }),
+        ["std", "ui", "button"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_BUTTON_FUNCTION_ID,
+            revision_id: STD_UI_BUTTON_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_BUTTON_RUNTIME_CONTRACT,
+            parameter_ids: &[
+                STD_UI_BUTTON_LABEL_PARAMETER_ID,
+                STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+            ],
+            parameter_names: &["label", "enabled"],
+            parameter_types: &[STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_BOOLEAN_TYPE_ID],
+        }),
+        ["std", "ui", "panel"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_PANEL_FUNCTION_ID,
+            revision_id: STD_UI_PANEL_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_PANEL_RUNTIME_CONTRACT,
+            parameter_ids: &[STD_UI_PANEL_CONTENT_PARAMETER_ID],
+            parameter_names: &["content"],
+            parameter_types: &[STD_UI_TYPE_ID],
+        }),
+        ["std", "ui", "row"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_ROW_FUNCTION_ID,
+            revision_id: STD_UI_ROW_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_ROW_RUNTIME_CONTRACT,
+            parameter_ids: &[STD_UI_ROW_CONTENT_PARAMETER_ID],
+            parameter_names: &["content"],
+            parameter_types: &[STD_UI_TYPE_ID],
+        }),
+        ["std", "ui", "column"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_COLUMN_FUNCTION_ID,
+            revision_id: STD_UI_COLUMN_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_COLUMN_RUNTIME_CONTRACT,
+            parameter_ids: &[STD_UI_COLUMN_CONTENT_PARAMETER_ID],
+            parameter_names: &["content"],
+            parameter_types: &[STD_UI_TYPE_ID],
+        }),
+        ["std", "ui", "text_input"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_TEXT_INPUT_FUNCTION_ID,
+            revision_id: STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
+            parameter_ids: &[
+                STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+                STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+                STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
+            ],
+            parameter_names: &["text", "placeholder", "enabled"],
+            parameter_types: &[
+                STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
+                STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
+                STD_BOOLEAN_TYPE_ID,
+            ],
+        }),
+        ["std", "ui", "tabs"] => Some(StandardUiConstructorSpec {
+            function_id: STD_UI_TABS_FUNCTION_ID,
+            revision_id: STD_UI_TABS_FUNCTION_REVISION_ID,
+            runtime_contract: STD_UI_TABS_RUNTIME_CONTRACT,
+            parameter_ids: &[STD_UI_TABS_CONTENT_PARAMETER_ID],
+            parameter_names: &["content"],
+            parameter_types: &[STD_UI_TYPE_ID],
+        }),
+        _ => None,
+    }
+}
+
+/// Checks one parsed declaration against the closed Work ADR 0088
+/// `std.ui.*` external CLIENT constructor shape.
+///
+/// The declaration must be one of the seven fixed constructor functions, with
+/// the exact ordered parameter identities and types, one `std.ui.UI` result,
+/// matching runtime/body contract identities, no defaults, and no
+/// capabilities. The supplied origins must contain exactly the function and
+/// parameter declarations in `std/ui_constructors.orna`.
+pub fn check_standard_ui_constructor(
+    declaration: &ClientFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<CheckedStandardUiConstructor, StandardLibraryCheckError> {
+    let expected_name = unquoted_semantic_name(&declaration.name)?;
+    let Some(spec) = standard_ui_constructor_spec(&expected_name) else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if !declaration.external
+        || !declaration.capabilities.is_empty()
+        || declaration.parameters.len() != spec.parameter_ids.len()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let Some(runtime_contract) = declaration.runtime_contract.as_ref() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if decode_string_literal(runtime_contract).as_deref() != Some(spec.runtime_contract) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let Some(body_contract) = declaration.body.as_external_contract() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if client_contract_identity(body_contract).as_deref() != Some(spec.runtime_contract) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    for (ordinal, ((parameter, _), (expected_name, expected_type))) in declaration
+        .parameters
+        .iter()
+        .zip(spec.parameter_ids)
+        .zip(spec.parameter_names.iter().zip(spec.parameter_types))
+        .enumerate()
+    {
+        if parameter.order != ordinal
+            || semantic_part(&parameter.name) != *expected_name
+            || parameter.name.text.starts_with('"')
+            || parameter.default_expression.is_some()
+            || resolved_standard_type_id(&parameter.type_specification, catalogue)
+                != Some(*expected_type)
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+
+    let FunctionReturnType::Single(result_type) = &declaration.return_type else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    let expected_ui_name =
+        QualifiedSemanticName::new(["std", "ui", "ui"]).expect("fixed UI type name is valid");
+    if !matches!(
+        result_type,
+        TypeSpecification::Named(result_name)
+            if matches_qualified_name(result_name, &expected_ui_name)
+                && resolved_standard_type_id(result_type, catalogue) == Some(STD_UI_TYPE_ID)
+    ) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let function = catalogue
+        .function_by_id(spec.function_id)
+        .ok_or(StandardLibraryCheckError::MissingFunction)?;
+    if function.name() != &expected_name
+        || function.domain() != FunctionDomain::Client
+        || function.security() != CatalogueFunctionSecurity::Invoker
+        || function.transaction().is_some()
+        || function.volatility() != CatalogueFunctionVolatility::Immutable
+        || function.current_revision() != spec.revision_id
+        || function.parameters().len() != spec.parameter_ids.len()
+        || function.return_type() != &FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID))
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    for (ordinal, ((parameter, expected_id), (expected_name, expected_type))) in function
+        .parameters()
+        .iter()
+        .zip(spec.parameter_ids)
+        .zip(spec.parameter_names.iter().zip(spec.parameter_types))
+        .enumerate()
+    {
+        if parameter.id() != *expected_id
+            || parameter.ordinal() != ordinal as u32
+            || parameter.name() != *expected_name
+            || parameter.resolved_type() != ResolvedType::value(*expected_type)
+            || parameter.default_expression().is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+
+    let mut origins_by_identity = HashMap::with_capacity(origins.len());
+    for origin in origins {
+        if !matches!(
+            origin.identity(),
+            DefinitionIdentity::Function(_) | DefinitionIdentity::Parameter { .. }
+        ) || origins_by_identity
+            .insert(origin.identity(), origin.source())
+            .is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    take_origin(
+        &mut origins_by_identity,
+        DefinitionIdentity::Function(spec.function_id),
+        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID,
+        &declaration.span,
+    )?;
+    for (parameter, expected_id) in declaration.parameters.iter().zip(spec.parameter_ids) {
+        take_origin(
+            &mut origins_by_identity,
+            DefinitionIdentity::Parameter {
+                owner: spec.function_id,
+                parameter: *expected_id,
+            },
+            STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID,
+            &parameter.span,
+        )?;
+    }
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(CheckedStandardUiConstructor {
+        function_id: spec.function_id,
+        parameter_ids: spec.parameter_ids.to_vec(),
+        revision_id: spec.revision_id,
+        runtime_contract: spec.runtime_contract,
+    })
+}
+
 /// Reconciles the retained `std/invoke.orna` unit against the snapshot
 /// catalogue, origins, and verified executable evidence.
 ///
@@ -3599,6 +4205,7 @@ fn reconcile_standard_invoke_executable(
         schema_origin,
         function_origin,
         parameter_origin,
+        parameter_origins: vec![parameter_origin],
     };
 
     let [stored_executable] = executables else {

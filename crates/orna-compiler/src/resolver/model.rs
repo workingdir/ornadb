@@ -2232,6 +2232,12 @@ pub const STANDARD_LIBRARY_V7_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed Work ADR 0087 `orna.std/8` standard-library revision identity.
 pub const STANDARD_LIBRARY_V8_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
+/// The fixed Work ADR 0088 `orna.std/9` standard-library revision identity.
+pub const STANDARD_LIBRARY_V9_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
+/// The fixed Work ADR 0088 `std/ui_constructors.orna` source-unit identity: `...0A`.
+pub const STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
 /// The fixed Work ADR 0087 `std/data.orna` source-unit identity: `...09`.
 pub const STD_DATA_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
@@ -2261,6 +2267,98 @@ pub const STD_UI_WINDOW_FUNCTION_REVISION_ID: FunctionRevisionId =
 pub const STD_UI_WINDOW_REVISION_NUMBER: u64 = 1;
 /// The fixed ADR 0019 runtime contract identity.
 pub const STD_UI_WINDOW_RUNTIME_CONTRACT: &str = "std.ui.window@1";
+/// The fixed Work ADR 0088 `std.ui.text` function identity: `...15`.
+pub const STD_UI_TEXT_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+/// The fixed Work ADR 0088 `std.ui.text.text` parameter identity: `...16`.
+pub const STD_UI_TEXT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
+/// The fixed Work ADR 0088 `std.ui.text` function-revision identity: `...15`.
+pub const STD_UI_TEXT_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+/// The fixed Work ADR 0088 `std.ui.text@1` external contract.
+pub const STD_UI_TEXT_RUNTIME_CONTRACT: &str = "std.ui.text@1";
+
+/// The fixed Work ADR 0088 `std.ui.button` function identity: `...16`.
+pub const STD_UI_BUTTON_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
+/// The fixed Work ADR 0088 `std.ui.button.label` parameter identity: `...17`.
+pub const STD_UI_BUTTON_LABEL_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17]);
+/// The fixed Work ADR 0088 `std.ui.button.enabled` parameter identity: `...18`.
+pub const STD_UI_BUTTON_ENABLED_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x18]);
+/// The fixed Work ADR 0088 `std.ui.button` function-revision identity: `...16`.
+pub const STD_UI_BUTTON_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16]);
+/// The fixed Work ADR 0088 `std.ui.button@1` external contract.
+pub const STD_UI_BUTTON_RUNTIME_CONTRACT: &str = "std.ui.button@1";
+
+/// The fixed Work ADR 0088 `std.ui.panel` function identity: `...17`.
+pub const STD_UI_PANEL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17]);
+/// The fixed Work ADR 0088 `std.ui.panel.content` parameter identity: `...19`.
+pub const STD_UI_PANEL_CONTENT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19]);
+/// The fixed Work ADR 0088 `std.ui.panel` function-revision identity: `...17`.
+pub const STD_UI_PANEL_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x17]);
+/// The fixed Work ADR 0088 `std.ui.panel@1` external contract.
+pub const STD_UI_PANEL_RUNTIME_CONTRACT: &str = "std.ui.panel@1";
+
+/// The fixed Work ADR 0088 `std.ui.row` function identity: `...18`.
+pub const STD_UI_ROW_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x18]);
+/// The fixed Work ADR 0088 `std.ui.row.content` parameter identity: `...1A`.
+pub const STD_UI_ROW_CONTENT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1A]);
+/// The fixed Work ADR 0088 `std.ui.row` function-revision identity: `...18`.
+pub const STD_UI_ROW_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x18]);
+/// The fixed Work ADR 0088 `std.ui.row@1` external contract.
+pub const STD_UI_ROW_RUNTIME_CONTRACT: &str = "std.ui.row@1";
+
+/// The fixed Work ADR 0088 `std.ui.column` function identity: `...19`.
+pub const STD_UI_COLUMN_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19]);
+/// The fixed Work ADR 0088 `std.ui.column.content` parameter identity: `...1B`.
+pub const STD_UI_COLUMN_CONTENT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1B]);
+/// The fixed Work ADR 0088 `std.ui.column` function-revision identity: `...19`.
+pub const STD_UI_COLUMN_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x19]);
+/// The fixed Work ADR 0088 `std.ui.column@1` external contract.
+pub const STD_UI_COLUMN_RUNTIME_CONTRACT: &str = "std.ui.column@1";
+
+/// The fixed Work ADR 0088 `std.ui.text_input` function identity: `...1A`.
+pub const STD_UI_TEXT_INPUT_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1A]);
+/// The fixed Work ADR 0088 `std.ui.text_input.text` parameter identity: `...1C`.
+pub const STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1C]);
+/// The fixed Work ADR 0088 `std.ui.text_input.placeholder` parameter identity: `...1D`.
+pub const STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1D]);
+/// The fixed Work ADR 0088 `std.ui.text_input.enabled` parameter identity: `...1E`.
+pub const STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1E]);
+/// The fixed Work ADR 0088 `std.ui.text_input` function-revision identity: `...1A`.
+pub const STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1A]);
+/// The fixed Work ADR 0088 `std.ui.text_input@1` external contract.
+pub const STD_UI_TEXT_INPUT_RUNTIME_CONTRACT: &str = "std.ui.text_input@1";
+
+/// The fixed Work ADR 0088 `std.ui.tabs` function identity: `...1B`.
+pub const STD_UI_TABS_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1B]);
+/// The fixed Work ADR 0088 `std.ui.tabs.content` parameter identity: `...1F`.
+pub const STD_UI_TABS_CONTENT_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1F]);
+/// The fixed Work ADR 0088 `std.ui.tabs` function-revision identity: `...1B`.
+pub const STD_UI_TABS_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1B]);
+/// The fixed Work ADR 0088 `std.ui.tabs@1` external contract.
+pub const STD_UI_TABS_RUNTIME_CONTRACT: &str = "std.ui.tabs@1";
 /// The fixed initial TEXT value-type identity used by `std.ui.window`.
 pub const STD_CHARACTER_LARGE_OBJECT_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
@@ -2489,6 +2587,41 @@ impl CheckedStandardUiWindow {
         self.revision_id
     }
 }
+/// The checked declaration facts for one Work ADR 0088 UI constructor.
+///
+/// The constructor set is closed and source-authored: each value retains the
+/// exact function, ordered parameter, revision, and external-contract facts
+/// checked against the V9 catalogue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardUiConstructor {
+    pub(super) function_id: FunctionId,
+    pub(super) parameter_ids: Vec<ParameterId>,
+    pub(super) revision_id: FunctionRevisionId,
+    pub(super) runtime_contract: &'static str,
+}
+
+impl CheckedStandardUiConstructor {
+    /// Returns the fixed constructor function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns ordered constructor parameter identities.
+    pub fn parameter_ids(&self) -> &[ParameterId] {
+        &self.parameter_ids
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
+    }
+
+    /// Returns the exact external runtime-contract identity.
+    pub const fn runtime_contract(&self) -> &'static str {
+        self.runtime_contract
+    }
+}
+
 
 /// The checked declaration facts for the one accepted ADR 0057 terminal
 /// table presenter function (`std.terminal.present_table`).
@@ -2557,6 +2690,7 @@ pub struct CheckedStandardExecutable {
     pub(super) schema_origin: SourceOrigin,
     pub(super) function_origin: SourceOrigin,
     pub(super) parameter_origin: SourceOrigin,
+    pub(super) parameter_origins: Vec<SourceOrigin>,
 }
 
 impl CheckedStandardExecutable {
@@ -2632,6 +2766,10 @@ impl CheckedStandardExecutable {
     /// Returns the checked `p_value INTEGER` parameter declaration origin.
     pub const fn parameter_origin(&self) -> SourceOrigin {
         self.parameter_origin
+    }
+    /// Returns all parameter declaration origins in declaration order.
+    pub fn parameter_origins(&self) -> &[SourceOrigin] {
+        &self.parameter_origins
     }
 }
 
