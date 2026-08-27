@@ -163,7 +163,8 @@ remain labelled, and no environment-gated proof is inferred.
   -- --check` also passed.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
   `python3 scripts/run-demos.py` passed with the unsupported generic scalar
-  fixture excluded. `just kernel-test` passed; the final matrix is
+  fixture excluded, including the new `ui-constructor-showcase` source-check
+  demo. `just kernel-test` passed; the final matrix is
   `artifact://22571`. Runtime/ABI/package/Studio smokes passed as recorded
   session evidence. Installed package selection and clean-host proof remain
   pending.
@@ -172,18 +173,19 @@ remain labelled, and no environment-gated proof is inferred.
   `c68bb0a` (variable-cell Rows validation), `b260ac5`/`50a0cfc` (generic
   CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
   `34e39f4` (safe Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local
-  authority), `767991d` (resource provenance contract), and `8d3e4cd`
-  (operator runbook). Evidence updates are recorded by `2f8509f`, `07ecc28`,
-  `880ca17`, and `ca831a5`.
+  authority), `767991d` (resource provenance contract), `8d3e4cd` (operator
+  runbook), and `33aa485` (V9 constructor showcase). Evidence updates are
+  recorded by `2f8509f`, `07ecc28`, `880ca17`, and `ca831a5`.
 - Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
   `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
   presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
   (V9 constructors and generic named arguments), `ornadb-el1.3.4.3`
-  (ADR 0090 local authority), `ornadb-el1.4.4` (SERVER dogfood), and
-  `ornadb-br0.2` (developer tools). Broad security parent
-  `ornadb-el1.3.4` remains open. Resource terminal provenance
-  `ornadb-el1.2.1.43` is closed by ADR 0078/commit `767991d`; the accepted
-  commit-receipt authority and producer evidence boundary are reconciled.
+  (ADR 0090 local authority), `ornadb-el1.4.4` (SERVER dogfood),
+  `ornadb-br0.2` (developer tools), and `ornadb-br0.4.5` (V9 constructor
+  showcase). Broad security parent `ornadb-el1.3.4` remains open. Resource
+  terminal provenance `ornadb-el1.2.1.43` is closed by ADR 0078/commit
+  `767991d`; the accepted commit-receipt authority and producer evidence
+  boundary are reconciled.
 - Generic no-FROM parameter projection (`ornadb-el1.3.14`) and scalar demo
   (`ornadb-br0.4.4`) remain blocked by ADR 0055: `NoInputParameterSelect` is
   accepted only for fixed standard `std.invoke.echo` in `orna.std/2`; the
