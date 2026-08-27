@@ -15,6 +15,7 @@ name = "scalar-server"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/scalar_server_dogfood.orna"
 description = "A parameterised SERVER function that returns an INTEGER argument."
+
 [[demos]]
 name = "client-function"
 mode = "source-check"
@@ -38,6 +39,12 @@ name = "client-state"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_state_dogfood.orna"
 description = "CLIENT LOCAL, SESSION, and USER state declarations."
+
+[[demos]]
+name = "static-ui"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/static_ui_dogfood.orna"
+description = "A static UI composed from text, panel, column, and window constructors."
 
 [[demos]]
 name = "scalar-resource"
