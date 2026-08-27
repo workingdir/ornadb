@@ -1180,6 +1180,85 @@ impl InspectTrace {
     }
 }
 
+/// The closed purpose carried by an Inspector observer context.
+///
+/// This type intentionally has no caller-provided string representation.
+/// Its only value identifies the Inspector observation path, and
+/// [`Self::as_str`] returns the stable `inspect` spelling used at boundaries.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InspectObserverPurpose {
+    /// Observation performed by `sys.inspect`.
+    Inspect,
+}
+
+impl InspectObserverPurpose {
+    /// Returns the stable boundary spelling for this closed purpose.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inspect => "inspect",
+        }
+    }
+}
+
+impl fmt::Display for InspectObserverPurpose {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Trusted execution facts identifying one Inspector observer.
+///
+/// The root and parent identities are non-zero invocation anchors supplied by
+/// protected server execution state. They are provenance facts, not caller
+/// authority: constructing this value does not grant access, delegation, or
+/// any other capability. The purpose is closed to
+/// [`InspectObserverPurpose::Inspect`]; callers cannot provide an arbitrary
+/// purpose string.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InspectObserverContext {
+    observer_root_invocation_id: InvocationId,
+    observer_parent_invocation_id: InvocationId,
+}
+
+impl InspectObserverContext {
+    /// Creates a checked Inspector observer context from trusted server facts.
+    ///
+    /// Both invocation identities must be non-zero. The identities describe
+    /// the observer lineage only; they are not caller-supplied authority.
+    pub fn new(
+        observer_root_invocation_id: InvocationId,
+        observer_parent_invocation_id: InvocationId,
+    ) -> Result<Self, InspectError> {
+        if observer_root_invocation_id.to_bytes() == [0; 16]
+            || observer_parent_invocation_id.to_bytes() == [0; 16]
+        {
+            return Err(InspectError::InvalidObserverContext {
+                root: observer_root_invocation_id,
+                parent: observer_parent_invocation_id,
+            });
+        }
+        Ok(Self {
+            observer_root_invocation_id,
+            observer_parent_invocation_id,
+        })
+    }
+
+    /// Returns the trusted observer root invocation identity.
+    pub const fn observer_root_invocation_id(&self) -> InvocationId {
+        self.observer_root_invocation_id
+    }
+
+    /// Returns the trusted observer parent invocation identity.
+    pub const fn observer_parent_invocation_id(&self) -> InvocationId {
+        self.observer_parent_invocation_id
+    }
+
+    /// Returns the closed Inspector purpose.
+    pub const fn purpose(&self) -> InspectObserverPurpose {
+        InspectObserverPurpose::Inspect
+    }
+}
+
 /// One immutable inspection epoch.
 ///
 /// The epoch is captured during a protected invocation and pinned by the
@@ -1192,10 +1271,11 @@ pub struct InspectSnapshotEpoch {
     inner: Arc<InspectSnapshotEpochData>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct InspectSnapshotEpochData {
     id: InspectEpochId,
     invocation_id: InvocationId,
+    observer_context: Option<InspectObserverContext>,
     source_revision_id: SourceRevisionId,
     catalogue_revision_id: CatalogueRevisionId,
     owner: PrincipalId,
@@ -1262,6 +1342,7 @@ impl InspectSnapshotEpoch {
             inner: Arc::new(InspectSnapshotEpochData {
                 id,
                 invocation_id,
+                observer_context: None,
                 source_revision_id,
                 catalogue_revision_id,
                 owner,
@@ -1279,6 +1360,70 @@ impl InspectSnapshotEpoch {
                 security_decisions,
             }),
         })
+    }
+    /// Clones this epoch while replacing only its optional trusted observer
+    /// context.
+    ///
+    /// The epoch identity, capture time, target invocation, pinned revisions,
+    /// outcome, summary, and every projection row are preserved. This
+    /// decode-preserving operation is useful when a trusted persistence or
+    /// carrier layer restores observer context separately. Context IDs are
+    /// server execution facts, not caller authority.
+    pub fn with_observer_context(
+        &self,
+        observer_context: Option<InspectObserverContext>,
+    ) -> Result<Self, InspectError> {
+        self.clone_with_observer_context(self.inner.id, self.inner.recorded_at, observer_context)
+    }
+
+    /// Clones this target epoch into a fresh immutable observer-bound epoch.
+    ///
+    /// The target invocation, pinned revisions, outcome, summary, and every
+    /// projection row are preserved. Only the server epoch identity, capture
+    /// time, and trusted observer context change. The original epoch remains
+    /// untouched, and the context IDs are execution facts rather than caller
+    /// authority.
+    pub fn clone_for_observer(
+        &self,
+        observer_context: InspectObserverContext,
+    ) -> Result<Self, InspectError> {
+        self.clone_with_observer_context(
+            InspectEpochId::new(),
+            SystemTime::now(),
+            Some(observer_context),
+        )
+    }
+
+    fn clone_with_observer_context(
+        &self,
+        id: InspectEpochId,
+        recorded_at: SystemTime,
+        observer_context: Option<InspectObserverContext>,
+    ) -> Result<Self, InspectError> {
+        let observer_context = observer_context
+            .map(|context| {
+                InspectObserverContext::new(
+                    context.observer_root_invocation_id,
+                    context.observer_parent_invocation_id,
+                )
+            })
+            .transpose()?;
+        let mut data = self.inner.as_ref().clone();
+        data.id = id;
+        data.recorded_at = recorded_at;
+        data.observer_context = observer_context;
+        Ok(Self {
+            inner: Arc::new(data),
+        })
+    }
+
+    /// Returns the optional trusted observer context.
+    ///
+    /// Legacy auto-captured INEP v1 epochs have no observer binding and
+    /// therefore return `None`. A request-bound epoch returns execution facts,
+    /// not caller authority.
+    pub fn observer_context(&self) -> Option<InspectObserverContext> {
+        self.inner.observer_context
     }
 
     /// Returns this immutable epoch identity.
@@ -1385,6 +1530,14 @@ pub enum InspectError {
         /// The rejected node identity.
         id: InvocationId,
     },
+    /// An observer context carries a zero identity or invalid root/parent shape.
+    InvalidObserverContext {
+        /// The rejected observer root invocation identity.
+        root: InvocationId,
+        /// The rejected observer parent invocation identity.
+        parent: InvocationId,
+    },
+
     /// A UI node row carries an empty label.
     EmptyUiNodeLabel {
         /// The empty label kind.
@@ -1444,6 +1597,12 @@ impl fmt::Display for InspectError {
                 formatter,
                 "inspection invocation node {id} violates the root/nested parent rule"
             ),
+            Self::InvalidObserverContext { root, parent } => write!(
+                formatter,
+                "inspection observer context requires non-zero root and parent invocation \
+                 identities (root {root}, parent {parent})"
+            ),
+
             Self::EmptyUiNodeLabel { what } => {
                 write!(
                     formatter,
@@ -1511,6 +1670,8 @@ mod tests {
     const SOURCE_REVISION: u8 = 0x99;
     const CATALOGUE_REVISION: u8 = 0xaa;
     const EPOCH: u8 = 0xbb;
+    const OBSERVER_ROOT: u8 = 0xcc;
+    const OBSERVER_PARENT: u8 = 0xdd;
 
     #[test]
     fn public_inspect_error_codes_normalize_aliases_and_redact_details() {
@@ -1665,6 +1826,11 @@ mod tests {
         )
     }
 
+    fn observer_context() -> InspectObserverContext {
+        InspectObserverContext::new(invocation_id(OBSERVER_ROOT), invocation_id(OBSERVER_PARENT))
+            .expect("valid observer context")
+    }
+
     fn trace_event(sequence: u64, payload: InspectTracePayload) -> InspectTraceEvent {
         InspectTraceEvent::new(
             invocation_id(INVOCATION),
@@ -1675,6 +1841,34 @@ mod tests {
             None,
         )
         .expect("a valid test trace event")
+    }
+
+    #[test]
+    fn observer_context_exposes_trusted_identities_and_closed_purpose() {
+        let context = observer_context();
+        assert_eq!(
+            context.observer_root_invocation_id(),
+            invocation_id(OBSERVER_ROOT)
+        );
+        assert_eq!(
+            context.observer_parent_invocation_id(),
+            invocation_id(OBSERVER_PARENT)
+        );
+        assert_eq!(context.purpose(), InspectObserverPurpose::Inspect);
+        assert_eq!(context.purpose().as_str(), "inspect");
+        assert_eq!(context.purpose().to_string(), "inspect");
+    }
+
+    #[test]
+    fn observer_context_rejects_zero_identities() {
+        let zero = invocation_id(0);
+        let valid = invocation_id(OBSERVER_PARENT);
+        for (root, parent) in [(zero, valid), (valid, zero), (zero, zero)] {
+            assert_eq!(
+                InspectObserverContext::new(root, parent),
+                Err(InspectError::InvalidObserverContext { root, parent })
+            );
+        }
     }
 
     #[test]
@@ -1832,6 +2026,46 @@ mod tests {
         assert_eq!(epoch.invocation_nodes(), again.invocation_nodes());
         assert_eq!(epoch.calls(), again.calls());
         assert_eq!(epoch.state_cells(), again.state_cells());
+        assert_eq!(epoch.observer_context(), None);
+    }
+
+    #[test]
+    fn observer_bound_epoch_is_fresh_and_preserves_target_facts_and_rows() {
+        let epoch = default_epoch();
+        let context = observer_context();
+        let bound = epoch
+            .clone_for_observer(context)
+            .expect("a valid observer context binds a fresh epoch");
+
+        assert_ne!(bound.id(), epoch.id());
+        assert_ne!(bound.recorded_at(), epoch.recorded_at());
+        assert_eq!(bound.invocation_id(), epoch.invocation_id());
+        assert_eq!(bound.source_revision_id(), epoch.source_revision_id());
+        assert_eq!(bound.catalogue_revision_id(), epoch.catalogue_revision_id());
+        assert_eq!(bound.owner(), epoch.owner());
+        assert_eq!(bound.root_target(), epoch.root_target());
+        assert_eq!(bound.outcome(), epoch.outcome());
+        assert_eq!(bound.summary(), epoch.summary());
+        assert_eq!(bound.observer_context(), Some(context));
+        assert_eq!(epoch.observer_context(), None);
+        let restored = epoch
+            .with_observer_context(Some(context))
+            .expect("a valid context is preserved on a decode clone");
+        assert_eq!(restored.id(), epoch.id());
+        assert_eq!(restored.recorded_at(), epoch.recorded_at());
+        assert_eq!(restored.observer_context(), Some(context));
+
+        assert_eq!(bound.invocation_nodes(), epoch.invocation_nodes());
+        assert_eq!(bound.calls(), epoch.calls());
+        assert_eq!(bound.resources(), epoch.resources());
+        assert_eq!(bound.state_cells(), epoch.state_cells());
+        assert_eq!(bound.ui_nodes(), epoch.ui_nodes());
+        assert_eq!(
+            bound.presentation_candidates(),
+            epoch.presentation_candidates()
+        );
+        assert_eq!(bound.runtime_bindings(), epoch.runtime_bindings());
+        assert_eq!(bound.security_decisions(), epoch.security_decisions());
     }
 
     #[test]
@@ -2436,6 +2670,10 @@ mod tests {
             InspectError::EmptyValueBatch,
             InspectError::InvalidInvocationNodeParent {
                 id: invocation_id(INVOCATION),
+            },
+            InspectError::InvalidObserverContext {
+                root: invocation_id(0),
+                parent: invocation_id(OBSERVER_PARENT),
             },
             InspectError::EmptyUiNodeLabel { what: "call site" },
             InspectError::EmptyCandidateLabel { what: "presenter" },
