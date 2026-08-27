@@ -14,14 +14,14 @@ does not by itself claim that the named test ran in this checkout.
   Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and remaining
   accepted contract gates remain pending or unclaimed.
   The accepted Qt v1 runtime/provider/package boundary, bounded populated
-  Inspector resource/UI/presentation/runtime projections, V8 Rows and retained
-  table presentation, and V9 structural UI constructors have implementation
-  slices and focused local evidence below. The Compose integration matrix now
-  passes the installed evaluator and Inspector-recursion paths. Installed
-  Qt package selection, clean-host proof, V8/V9 continuation-specific
-  persistence proof, reflective gateways, general Rows/object-value semantics,
-  and remote transport remain pending or deferred; no unrun environment result
-  is claimed.
+  Inspector resource/UI/presentation/runtime projections, and the new ADR 0080
+  observer-bound epoch path have implementation slices and focused local
+  evidence below. V8 Rows and retained table presentation, and V9 structural
+  UI constructors remain accepted baselines. Installed Qt package selection,
+  clean-host proof, V8/V9 continuation-specific persistence/recovery proof,
+  reflective gateways, general Rows/object-value semantics, and remote
+  transport remain pending or deferred; no unrun environment result is
+  claimed.
 
 ## Current validated focused evidence (`work/` checkout)
 
@@ -38,6 +38,22 @@ does not by itself claim that the named test ran in this checkout.
 - `cargo test -p orna-client same_revision_terminal_replacement_persists_when_later_expression_fails` — 1 test returned success.
 - `cargo check -p orna-client -p orna-compiler -p orna-lsp -p orna-postgres -p orna-protocol -p orna-server -p orna-standard -p orna-syntax` — returned success with existing dead-code warnings.
 - `cargo fmt --all -- --check` — returned success.
+- `cargo test -p orna-core --lib observer_` — 3 Inspector observer-context
+  and immutable-clone tests returned success.
+- `cargo test -p orna-client --lib` — 326 tests returned success after the
+  current-invocation executor hook and Qt fallback forwarding were added.
+- `cargo test -p orna-server --lib inspector_` — 13 Inspector binding,
+  recursion, and carrier tests returned success.
+- `cargo test -p orna-postgres --lib inspect` — 13 Inspector codec and storage
+  tests returned success with the existing two warnings.
+- `cargo test -p orna-postgres --features test-hooks --test bootstrap -- --ignored
+  --test-threads=1` — 20 migration/bootstrap tests returned success, including
+  the v45 Inspector observer-context schema.
+- With the Compose PostgreSQL service, the installed Inspector evaluator proof,
+  Inspector recursion proof, and the complete `standard_database` suite
+  returned success. The combined matrix was not claimed as a full pass because
+  an earlier run used stale migration-registry expectations before the focused
+  bootstrap correction.
 - Historical report (not current validation): a prior `cargo test --workspace --all-targets` run recorded 2545 tests, 0 failed, and 235 ignored across 40 suites; it was not rerun for this checkout, so no current workspace result is claimed.
 - Historical report (not current validation): a later proof report recorded 2578 workspace tests and 14 LSP protocol tests plus 31 accepted tree-sitter cases; these checks were not rerun for this checkout and are not claimed as current passes.
 - Historical report (not current validation): a prior `just editor-tooling-check` run recorded 14 LSP protocol tests and the 31-case tree-sitter corpus; that report was not rerun for this checkout. The current static gate result is recorded in the editor integrations row below.
@@ -223,6 +239,7 @@ deferred presenter/model semantics are intentionally outside this section's clai
 | Current accepted CLIENT USER write-context admission (ADR 0070/0077, 2026-08-25) | `crates/orna-client/src/lib.rs::ClientStateStore::set_user_state`, `ClientUserStateError::ContextMismatch` | `client_user_state_set_rejects_context_mismatch_before_lookup_or_mutation` proves root/profile/instance rejection before type lookup or map mutation, unchanged user/pending state, and matching revision-preserving update; the older 278-pass report and later 283-test source record are historical; current `cargo test -p orna-client` after V9 work passed with 326 tests and existing warnings | Authenticated USER-state live proofs remain Compose-gated `#[ignore]`; no live database result is claimed |
 | Current bounded V8 `std.data.Rows` and shape-preserving table/CSV presentation (ADR 0087, 2026-08-27) | `stdlib/std/data.orna`; `crates/orna-standard/src/lib.rs`; `crates/orna-protocol/src/lib.rs`; `crates/orna-core/src/presenter.rs`; `crates/orna-postgres/src/kernel/server_execution.rs::sealed_result_rows`, `execute_standard_terminal_table`, and `execute_standard_csv_encode` | `crates/orna-postgres/src/kernel/server_execution.rs::sealed_rows_value_preserves_complete_shape_for_table_and_csv`; `sealed_rows_zero_row_result_stays_one_value_batch_item`; selector and presenter-resolution symbols remain in `resolve_sealed_presenter_type_name` and `present_sealed_standard_output`; the 355-test `cargo test -p orna-postgres --lib` report predates selector-only changes and is historical for those changes | The bounded Rows value and retained table/CSV shape are implementation-present; V7-to-V8 install/reopen, persistence recovery, and installed presenter invocation remain Compose-gated and unrun, with no Compose result claimed. No general Rows resource, virtual model, lossless JSON, or scalar-contract expansion is claimed |
 | Current V9 standard/compiler/selector evidence (ADRs 0087-0088, 2026-08-27) | `crates/orna-standard/src/lib.rs::prepare_standard_upgrade_v7_to_v8` and `prepare_standard_upgrade_v8_to_v9`; `crates/orna-compiler/src/resolver.rs`; `crates/orna-client/src/lib.rs`; `crates/orna-postgres/src/kernel/server_execution.rs::resolve_sealed_presenter_type_name` and `present_sealed_standard_output` | `cargo test -p orna-standard --lib` passed with 88 tests after V9 work; `cargo test -p orna-compiler --lib` passed with 471 tests; `cargo test -p orna-client` passed with 326 tests with existing warnings; upgrade guards include `prepares_the_v7_to_v8_standard_upgrade_from_an_empty_v7_active_revision`, `v7_to_v8_upgrade_rejects_non_v7_parents_before_child_work`, `prepares_the_v8_to_v9_standard_upgrade_from_an_empty_v8_active_revision`, and `v8_to_v9_upgrade_rejects_non_v8_parents_before_child_work`; selector-focused targets are listed above without a post-change suite-count claim | V7-to-V8-to-V9 persistence and recovery remain Compose-gated; no Compose run or installed V9/Rows proof is claimed. V9 construction is bounded to the accepted seven UI constructors; model, action/event, gateway, and full Studio surfaces remain deferred |
+| ADR 0080 observer-bound Inspector epochs (2026-08-27) | `crates/orna-core/src/inspect.rs` typed observer context and immutable clone; `crates/orna-postgres/src/kernel/inspect.rs` INEP v1/v2 codec, active-revision lock, clone persistence, and DB/payload cross-check; migration `crates/orna-postgres/migrations/0045_inspect_snapshot_observer_context.sql`; `crates/orna-client/src/lib.rs` current-dispatch binding; `crates/orna-client/src/runtime_adapter.rs` Qt fallback forwarding; `crates/orna-server/src/invoke.rs` snapshot/projection/render binding | `cargo test -p orna-core --lib observer_` (3), `cargo test -p orna-client --lib` (326), `cargo test -p orna-server --lib inspector_` (13), and `cargo test -p orna-postgres --lib inspect` (13) passed; `inspector_rejects_forged_current_observer_root`, `inspector_projection_requires_matching_observer_context`, and the direct installed evaluator proof cover trusted roots, fresh server epochs, observer matching, and canonical carriers | Compose installed Inspector, recursion, and `standard_database` proofs passed in the server phase; the 20-test PostgreSQL bootstrap suite passed with migration 45. The combined matrix result was not claimed after an earlier stale migration-registry expectation failure. |
 | Current post-cancellation raw and resource transport guards (ADRs 0054/0078, 2026-08-25) | `crates/orna-protocol/src/frame.rs`, `crates/orna-server/src/invoke.rs` | Raw cancellation guard rejects stale non-Internal failures before state mutation; late resource Accepted/Values frames are drained before local shape checks while committed terminals remain; focused frame, broker, socket-transport, and `cargo check -p orna-protocol`/`cargo check -p orna-server` checks passed | Live resource producer and installed transport proofs remain Compose-gated; no environment result is claimed |
 
 | Current accepted-boundary hardening (2026-08-25) | `crates/orna-client/src/lib.rs::ClientStateStore::load_user_state`; `crates/orna-compiler/src/prepare.rs::CandidateBuilder::client_named_type_id`; `crates/orna-postgres/src/kernel/security.rs::validate_resource_lineage` | `client_user_state_load_rejects_wrong_instance_key_atomically`; `named_standard_resource_result_uses_catalogue_value_identity`; `resource_lineage_validation_rejects_zero_request_id_before_other_lineage_checks`; focused client/compiler/Postgres checks passed | Live PostgreSQL producer/audit persistence and Compose installed evaluator proofs remain environment-gated |
@@ -321,7 +338,7 @@ clean-host checks before extending the current validated result.
 
 | Surface | Status and evidence boundary |
 |---|---|
-| Compose/Docker integration matrix | Current `just kernel-test` run passed the ignored server and PostgreSQL library/integration suites against per-test databases and the dedicated empty `ornadb_kernel_gate`; no packaged Debian or clean-host result is claimed. |
+| Compose/Docker integration matrix | The latest observer run passed the ignored server Inspector, recursion, and `standard_database` suites; the focused PostgreSQL bootstrap suite also passed with migration 45. The combined matrix was not claimed as a full pass after its earlier PostgreSQL bootstrap phase exposed stale test-registry expectations; the prior accepted baseline is `artifact://22571`. No packaged Debian or clean-host result is claimed. |
 | Fresh network-disabled Debian 12 amd64 host or VM proof | Pending environment evidence; Docker, a host PostgreSQL installation, and a second PostgreSQL executable are explicitly disallowed. |
 | Neovim/Vim runtime checks | Pending environment evidence; `nvim` is absent and `/usr/bin/vi` is Vim 9.2 Tiny without `-syntax` or `-channel`, so its filetype-only smoke does not establish runtime parity. |
 | Live REF field-path evaluation | Pending accepted-runtime seam; the current CLIENT runtime has no trusted object-loader seam, so no live REF result is claimed. |

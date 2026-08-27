@@ -82,6 +82,23 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-client same_revision_terminal_replacement_persists_when_later_expression_fails` — 1 test returned success.
 - `cargo check -p orna-client -p orna-compiler -p orna-lsp -p orna-postgres -p orna-protocol -p orna-server -p orna-standard -p orna-syntax` — returned success with existing dead-code warnings.
 - `cargo fmt --all -- --check` — returned success.
+- `cargo test -p orna-core --lib observer_` — 3 Inspector observer-context and
+  immutable-clone tests returned success.
+- `cargo test -p orna-client --lib` — 326 tests returned success after the
+  current-invocation executor hook and Qt fallback forwarding were added.
+- `cargo test -p orna-server --lib inspector_` — 13 Inspector binding,
+  recursion, and carrier tests returned success.
+- `cargo test -p orna-postgres --lib inspect` — 13 Inspector codec and storage
+  tests returned success with the existing two warnings.
+- `cargo test -p orna-postgres --features test-hooks --test bootstrap -- --ignored
+  --test-threads=1` — 20 migration/bootstrap tests returned success, including
+  the v45 Inspector observer-context schema.
+- With the Compose PostgreSQL service, the focused installed Inspector evaluator
+  proof returned success, and the server half of the subsequent matrix passed
+  the installed Inspector, recursion, stale-session, source-apply, and
+  `standard_database` suites. The combined matrix was not claimed as a full
+  pass because its PostgreSQL phase used stale migration-registry expectations
+  before the focused bootstrap correction.
 - Historical report (not current validation): a prior `cargo test --workspace --all-targets` run recorded 2545 tests, 0 failed, and 235 ignored across 40 suites; it was not rerun for this checkout, so no current workspace result is claimed.
 - Historical report (not current validation): a later proof report recorded 2578 workspace tests and 14 LSP protocol tests plus 31 accepted tree-sitter cases; these checks were not rerun for this checkout and are not claimed as current passes.
 - Historical report (not current validation): a prior `just editor-tooling-check` run recorded 14 LSP protocol tests and the 31-case tree-sitter corpus; it was not rerun for this checkout.
@@ -152,33 +169,26 @@ The following source and contract boundaries are present in the current
 `work/` checkout. Focused results are current evidence; historical reports
 remain labelled, and no environment-gated proof is inferred.
 
-- Focused package evidence passed: `cargo test -p orna-core --lib` (542),
-  `cargo test -p orna-compiler --lib` (471), `cargo test -p orna-client --lib`
-  (326), `cargo test -p orna-server --lib` (288 with existing warnings), and
-  `cargo test -p orna-postgres --lib server_execution` (90 with existing
-  warnings). `cargo test -p orna-postgres --lib` also passed with 356 tests and
-  3 ignored after safe lint cleanup commit `34e39f4`. `cargo test -p orna-client
-  --all-targets` passed with 326 tests across 3 suites, and `cargo clippy
-  -p orna-client --all-targets -- -D warnings` passed. `cargo fmt --all
-  -- --check` also passed.
+- Accepted implementation commits include `75c5766` (ADR 0080 Inspector
+  observer-bound epochs, INEP v2, migration 45, and trusted current-dispatch
+  binding), `f55df8d` (retained V8 table executable), `fd21c1c` (Inspector
+  selected-sink carrier classification), `c68bb0a` (variable-cell Rows
+  validation), `b260ac5`/`50a0cfc` (generic CLIENT named-argument
+  order/coverage), `113012c` (client Clippy cleanup), `34e39f4` (safe
+  Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local authority), `767991d`
+  (resource provenance contract), `8d3e4cd` (operator runbook), `33aa485`
+  (V9 constructor showcase), `6e69500` (reachable text-input showcase root),
+  and `3d23e5b` (reachable button showcase root).
+  Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`, and
+  `ca831a5`.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
   `python3 scripts/run-demos.py` passed with the unsupported generic scalar
   fixture excluded, including the `ui-constructor-showcase` source-check demo
   with reachable text, button, panel, row, column, text_input, tabs, and
-  window roots. `just kernel-test` passed; the final matrix is
-  `artifact://22571`. Runtime/ABI/package/Studio smokes passed as recorded
-  session evidence. Installed package selection and clean-host proof remain
-  pending.
-- Accepted implementation commits include `f55df8d` (retained V8 table
-  executable), `fd21c1c` (Inspector selected-sink carrier classification),
-  `c68bb0a` (variable-cell Rows validation), `b260ac5`/`50a0cfc` (generic
-  CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
-  `34e39f4` (safe Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local
-  authority), `767991d` (resource provenance contract), `8d3e4cd` (operator
-  runbook), `33aa485` (V9 constructor showcase), `6e69500` (reachable
-  text-input showcase root), and `3d23e5b` (reachable button showcase root).
-  Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`, and
-  `ca831a5`.
+  window roots. The earlier accepted baseline `just kernel-test` result is
+  `artifact://22571`; the current Inspector observer evidence is listed above.
+  Runtime/ABI/package/Studio smokes passed as recorded session evidence.
+  Installed package selection and clean-host proof remain pending.
 - Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
   `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
   presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
