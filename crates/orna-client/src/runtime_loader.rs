@@ -1566,6 +1566,8 @@ pub enum RuntimeUiOperation {
 }
 
 impl RuntimeUiOperation {
+    // The constructor mirrors the eight-field ORNA-UI mount operation contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn mount_node(
         node: AbiNodeHandle,
         parent: AbiNodeHandle,
