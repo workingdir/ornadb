@@ -103,6 +103,7 @@ fn map_host_error(error: EmbeddedHostError) -> SecurityGrantError {
         EmbeddedHostError::InvalidPackageState => SecurityGrantError::PackageIncomplete,
         EmbeddedHostError::Engine(_)
         | EmbeddedHostError::InvalidEngineManifest
+        | EmbeddedHostError::MissingDistributionManifest
         | EmbeddedHostError::InvalidDistributionManifest => SecurityGrantError::EngineInvalid,
         EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
             SecurityGrantError::InstanceNotInstalled
