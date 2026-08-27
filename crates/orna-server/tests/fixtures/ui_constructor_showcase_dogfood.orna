@@ -76,3 +76,12 @@ BEGIN
         content => ui_constructor_showcase.text_input_leaf()
     );
 END;
+
+CREATE CLIENT FUNCTION ui_constructor_showcase.control_window()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Button Constructor Showcase',
+        content => ui_constructor_showcase.row_child()
+    );
+END;
