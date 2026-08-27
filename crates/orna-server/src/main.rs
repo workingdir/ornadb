@@ -1,6 +1,6 @@
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -19,7 +19,69 @@ mod package_maintenance;
 mod source_check;
 mod source_diagnostics;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+
+const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun functions, inspect invocations, manage user state, and manage an Orna server.\n\nUsage:\n  orna COMMAND [OPTIONS]\n\nCommon Commands:\n  invoke ...   Run a stored function.\n  source ...   Check, apply, or compare Orna source.\n  inspect ...  Inspect a completed invocation.\n  raw-call ... Make a low-level local call.\n\nManagement Commands:\n  server ...   Start, upgrade, or access the server.\n  state ...    Read or update user state.\n  security ... Manage users, roles, and grants.\n  runtime ...  Describe an installed runtime.\n\nOptions:\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nRun `orna COMMAND --help` for more information.\n";
+const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  upgrade        Upgrade the server while it is stopped.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
+const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
+const HELP_SERVER_UPGRADE: &str = "Upgrade the Orna server while it is stopped.\n\nUsage:\n  orna server upgrade\n\nThis command accepts no options.\n";
+const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
+const HELP_SOURCE: &str = "Work with Orna source.\n\nUsage:\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n\nCommands:\n  check  Check one source file without changing the database.\n  apply  Check and apply one source file.\n  diff   Compare one source file with the current database.\n";
+const HELP_INVOKE: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n";
+const HELP_STATE: &str = "Read or update user state.\n\nUsage:\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n\nOptions for get:\n  --profile <state-profile>\n  --instance <canonical-function-id> [--instance-key <instance-key>]\n  --expect-type <canonical-function-id> <canonical-state-slot-id> <canonical-type-id>\n\nOptions for set:\n  --function <canonical-function-id>\n  --instance-key <instance-key>\n  --slot <canonical-state-slot-id>\n  --revision <create|revision-number>\n  --type <canonical-type-id>\n  --value-file <path>\n  --profile <state-profile>\n";
+const HELP_INSPECT: &str = "Inspect a completed invocation.\n\nUsage:\n  orna inspect <invocation-id> [options]\n\nOptions:\n  --projection <name>  Select one of: invocation_nodes, calls, resources, state_cells, ui_nodes, presentation_candidates, runtime_bindings, security_decisions.\n  --trace              Include trace events.\n  --after <n>          Resume after a sequence number.\n  --include-values     Include value data where permitted.\n  --include-source     Include source provenance.\n  --include-security   Include security decisions.\n  --include-runtime    Include runtime bindings.\n  --epoch <epoch-id>   Inspect an exact epoch.\n";
+
+const HELP_RUNTIME: &str = "Describe an installed runtime.\n\nUsage:\n  orna runtime describe <runtime-shared-library>\n\nCommands:\n  describe  Show metadata for an installed runtime.\n";
+const HELP_SECURITY: &str = "Manage users, roles, and grants.\n\nUsage:\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n\nPrivilege classes:\n  execute, security_admin, inspect:own-invocation, inspect:session-invocations,\n  inspect:any-invocation, inspect:values, inspect:source,\n  inspect:security-details, inspect:runtime-internals.\n\nUse these commands to administer access and inspect the current principal.\n";
+const HELP_RAW_CALL: &str = "Make a low-level local call.\n\nUsage:\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n\nThe first form sends no arguments. The other forms read one or two complete ORV1 values from standard input.\n";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorChoice {
+    fn parse(value: &OsStr) -> Option<Self> {
+        match value.to_str()? {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    fn enabled(self, terminal: bool) -> bool {
+        match self {
+            Self::Auto => terminal,
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedInvocation {
+    color: ColorChoice,
+    command: Command,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HelpTopic {
+    TopLevel,
+    Server,
+    ServerRun,
+    ServerUpgrade,
+    ServerBackendShell,
+    Source,
+    Invoke,
+    State,
+    Inspect,
+    Runtime,
+    Security,
+    RawCall,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
@@ -54,6 +116,7 @@ struct InvokeArguments {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
+    Help(HelpTopic),
     Version,
     Run,
     BackendShell,
@@ -81,12 +144,25 @@ fn main() -> ExitCode {
             }
         };
     }
-    let Some(command) = parse_command(arguments) else {
+    let Some(parsed) = parse_invocation(arguments) else {
         write_stderr_line(USAGE);
         return ExitCode::from(2);
     };
 
+    let ParsedInvocation { color, command } = parsed;
     match command {
+        Command::Help(topic) => {
+            let stdout = io::stdout();
+            let terminal = stdout.is_terminal();
+            let mut stdout = stdout.lock();
+            match write_help(&mut stdout, topic, color, terminal) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Version => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
@@ -383,12 +459,142 @@ fn write_runtime_descriptor_json(
     output.write_all(b"\n")
 }
 
+fn help_text(topic: HelpTopic) -> &'static str {
+    match topic {
+        HelpTopic::TopLevel => HELP_TOP_LEVEL,
+        HelpTopic::Server => HELP_SERVER,
+        HelpTopic::ServerRun => HELP_SERVER_RUN,
+        HelpTopic::ServerUpgrade => HELP_SERVER_UPGRADE,
+        HelpTopic::ServerBackendShell => HELP_SERVER_BACKEND_SHELL,
+        HelpTopic::Source => HELP_SOURCE,
+        HelpTopic::Invoke => HELP_INVOKE,
+        HelpTopic::State => HELP_STATE,
+        HelpTopic::Inspect => HELP_INSPECT,
+        HelpTopic::Runtime => HELP_RUNTIME,
+        HelpTopic::Security => HELP_SECURITY,
+        HelpTopic::RawCall => HELP_RAW_CALL,
+    }
+}
+
+#[inline]
+fn is_help_heading(line: &str, line_number: usize) -> bool {
+    line_number == 0
+        || matches!(
+            line,
+            "Usage:"
+                | "Common Commands:"
+                | "Management Commands:"
+                | "Commands:"
+                | "Options:"
+                | "Topics:"
+        )
+}
+
+fn render_help(topic: HelpTopic, color: ColorChoice, terminal: bool) -> String {
+    let text = help_text(topic);
+    if !color.enabled(terminal) {
+        return text.to_owned();
+    }
+    let mut rendered = String::with_capacity(text.len() + 64);
+    for (line_number, segment) in text.split_inclusive('\n').enumerate() {
+        let (line, newline) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        if is_help_heading(line, line_number) {
+            rendered.push_str("\x1b[1;36m");
+            rendered.push_str(line);
+            rendered.push_str("\x1b[0m");
+        } else {
+            rendered.push_str(line);
+        }
+        rendered.push_str(newline);
+    }
+    rendered
+}
+
+fn write_help(
+    output: &mut impl Write,
+    topic: HelpTopic,
+    color: ColorChoice,
+    terminal: bool,
+) -> io::Result<()> {
+    output.write_all(render_help(topic, color, terminal).as_bytes())?;
+    output.flush()
+}
+
+fn parse_help_command<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let topic = match args.next().as_deref() {
+        None => HelpTopic::TopLevel,
+        Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
+            None => HelpTopic::Server,
+            Some(value) if value == OsStr::new("run") => HelpTopic::ServerRun,
+            Some(value) if value == OsStr::new("upgrade") => HelpTopic::ServerUpgrade,
+            Some(value) if value == OsStr::new("backend-shell") => HelpTopic::ServerBackendShell,
+            _ => return None,
+        },
+        Some(value) if value == OsStr::new("source") => HelpTopic::Source,
+        Some(value) if value == OsStr::new("invoke") => HelpTopic::Invoke,
+        Some(value) if value == OsStr::new("state") => HelpTopic::State,
+        Some(value) if value == OsStr::new("inspect") => HelpTopic::Inspect,
+        Some(value) if value == OsStr::new("runtime") => HelpTopic::Runtime,
+        Some(value) if value == OsStr::new("security") => HelpTopic::Security,
+        Some(value) if value == OsStr::new("raw-call") => HelpTopic::RawCall,
+        _ => return None,
+    };
+    args.next().is_none().then_some(Command::Help(topic))
+}
+
+fn parse_server_leaf<I>(args: &mut I, command: Command, topic: HelpTopic) -> Option<Command>
+where
+    I: Iterator<Item = OsString>,
+{
+    match args.next().as_deref() {
+        None => Some(command),
+        Some(value) if value == OsStr::new("--help") => {
+            args.next().is_none().then_some(Command::Help(topic))
+        }
+        _ => None,
+    }
+}
+#[cfg(test)]
 fn parse_command<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    parse_invocation(args).map(|parsed| parsed.command)
+}
+
+fn parse_invocation<I>(args: I) -> Option<ParsedInvocation>
 where
     I: IntoIterator<Item = OsString>,
 {
     let mut args = args.into_iter().peekable();
     let _argv0 = args.next();
+    let color = if args
+        .peek()
+        .is_some_and(|value| value == OsStr::new("--color"))
+    {
+        let _ = args.next();
+        ColorChoice::parse(&args.next()?)?
+    } else {
+        ColorChoice::Auto
+    };
+    let command_args = args.collect::<Vec<_>>();
+    Some(ParsedInvocation {
+        color,
+        command: parse_command_args(command_args)?,
+    })
+}
+
+fn parse_command_args<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter().peekable();
 
     // The optional global `--runtime <family>` override (ADR 0063) is
     // consumed before the command word so `orna --runtime tty invoke ...`
@@ -422,19 +628,37 @@ where
     }
 
     match args.next().as_deref() {
+        Some(value) if value == OsStr::new("--help") => args
+            .next()
+            .is_none()
+            .then_some(Command::Help(HelpTopic::TopLevel)),
+        Some(value) if value == OsStr::new("help") => parse_help_command(args),
         Some(value) if value == OsStr::new("--version") => {
             args.next().is_none().then_some(Command::Version)
         }
-        Some(value) if value == OsStr::new("server") => {
-            let command = match args.next().as_deref() {
-                Some(value) if value == OsStr::new("run") => Command::Run,
-                Some(value) if value == OsStr::new("backend-shell") => Command::BackendShell,
-                Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
-                _ => return None,
-            };
-            args.next().is_none().then_some(command)
-        }
+        Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
+            Some(value) if value == OsStr::new("--help") => args
+                .next()
+                .is_none()
+                .then_some(Command::Help(HelpTopic::Server)),
+            Some(value) if value == OsStr::new("run") => {
+                parse_server_leaf(&mut args, Command::Run, HelpTopic::ServerRun)
+            }
+            Some(value) if value == OsStr::new("backend-shell") => parse_server_leaf(
+                &mut args,
+                Command::BackendShell,
+                HelpTopic::ServerBackendShell,
+            ),
+            Some(value) if value == OsStr::new("upgrade") => {
+                parse_server_leaf(&mut args, Command::Upgrade, HelpTopic::ServerUpgrade)
+            }
+            _ => None,
+        },
         Some(value) if value == OsStr::new("runtime") => match args.next().as_deref() {
+            Some(value) if value == OsStr::new("--help") => args
+                .next()
+                .is_none()
+                .then_some(Command::Help(HelpTopic::Runtime)),
             Some(value) if value == OsStr::new("describe") => {
                 let path = PathBuf::from(args.next()?);
                 args.next()
@@ -444,6 +668,16 @@ where
             _ => None,
         },
         Some(value) if value == OsStr::new("source") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Source));
+            }
             let command = match args.next().as_deref() {
                 Some(value) if value == OsStr::new("check") => Command::SourceCheck,
                 Some(value) if value == OsStr::new("apply") => Command::SourceApply,
@@ -454,6 +688,16 @@ where
             (args.next().is_none() && valid_source_path(&path)).then(|| command(path))
         }
         Some(value) if value == OsStr::new("raw-call") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::RawCall));
+            }
             let function = args.next()?.into_string().ok()?;
             let first = match args.next() {
                 Some(parameter) => {
@@ -492,6 +736,16 @@ where
             }
         }
         Some(value) if value == OsStr::new("invoke") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Invoke));
+            }
             let mut command = parse_invoke_command(args)?;
             // The global override (when given) takes precedence over the
             // post-command form; otherwise the parser's own value stands.
@@ -500,9 +754,43 @@ where
             }
             Some(command)
         }
-        Some(value) if value == OsStr::new("state") => parse_state_command(args),
-        Some(value) if value == OsStr::new("inspect") => parse_inspect_command(args),
+        Some(value) if value == OsStr::new("state") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::State));
+            }
+            parse_state_command(args)
+        }
+        Some(value) if value == OsStr::new("inspect") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Inspect));
+            }
+            parse_inspect_command(args)
+        }
         Some(value) if value == OsStr::new("security") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Security));
+            }
             let subcommand = args.next()?.into_string().ok()?;
             match subcommand.as_str() {
                 "grant-execute" => {
@@ -529,7 +817,7 @@ where
 /// repeated `--expect-type <canonical-function-id> <canonical-state-slot-id>
 /// <canonical-type-id>` entry triples. `set` accepts exactly one root-function
 /// positional followed by `--function <canonical-function-id>`,
-/// `--slot <canonical-state-slot-id>`, `--revision <create|revision>`,
+/// `--slot <canonical-state-slot-id>`, `--revision <create|revision-number>`,
 /// `--type <canonical-type-id>`, `--value-file <path>`, the optional
 /// `--profile <state-profile>`, and the optional
 /// `--instance-key <instance-key>`. Any other shape is a usage error
@@ -903,6 +1191,7 @@ where
         let flag = flag.into_string().ok()?;
         let name = flag.strip_prefix("--")?;
         match name {
+            "help" => return None,
             "arg" => {
                 let pair = args.next()?.into_string().ok()?;
                 let (parameter, value) = pair.split_once('=')?;
@@ -1141,9 +1430,13 @@ mod tests {
     }
 
     #[test]
+    fn no_command_is_a_usage_error() {
+        assert_eq!(parse_command(arguments(&["orna"])), None);
+    }
+
+    #[test]
     fn rejects_malformed_and_extra_version_shapes() {
         for values in [
-            vec!["orna"],
             vec!["orna", "-v"],
             vec!["orna", "-version"],
             vec!["orna", "version"],
@@ -2608,10 +2901,175 @@ mod tests {
     }
 
     #[test]
-    fn usage_diagnostic_is_exact() {
+    fn accepts_top_level_and_scoped_help_topics() {
+        for (values, topic) in [
+            (vec!["orna", "--help"], HelpTopic::TopLevel),
+            (vec!["orna", "help"], HelpTopic::TopLevel),
+            (vec!["orna", "help", "server"], HelpTopic::Server),
+            (vec!["orna", "help", "server", "run"], HelpTopic::ServerRun),
+            (
+                vec!["orna", "help", "server", "upgrade"],
+                HelpTopic::ServerUpgrade,
+            ),
+            (
+                vec!["orna", "help", "server", "backend-shell"],
+                HelpTopic::ServerBackendShell,
+            ),
+            (vec!["orna", "help", "source"], HelpTopic::Source),
+            (vec!["orna", "help", "invoke"], HelpTopic::Invoke),
+            (vec!["orna", "help", "state"], HelpTopic::State),
+            (vec!["orna", "help", "inspect"], HelpTopic::Inspect),
+            (vec!["orna", "help", "runtime"], HelpTopic::Runtime),
+            (vec!["orna", "help", "security"], HelpTopic::Security),
+            (vec!["orna", "help", "raw-call"], HelpTopic::RawCall),
+            (vec!["orna", "server", "--help"], HelpTopic::Server),
+            (
+                vec!["orna", "server", "run", "--help"],
+                HelpTopic::ServerRun,
+            ),
+            (
+                vec!["orna", "server", "upgrade", "--help"],
+                HelpTopic::ServerUpgrade,
+            ),
+            (
+                vec!["orna", "server", "backend-shell", "--help"],
+                HelpTopic::ServerBackendShell,
+            ),
+            (vec!["orna", "source", "--help"], HelpTopic::Source),
+            (vec!["orna", "invoke", "--help"], HelpTopic::Invoke),
+            (vec!["orna", "state", "--help"], HelpTopic::State),
+            (vec!["orna", "inspect", "--help"], HelpTopic::Inspect),
+            (vec!["orna", "runtime", "--help"], HelpTopic::Runtime),
+            (vec!["orna", "security", "--help"], HelpTopic::Security),
+            (vec!["orna", "raw-call", "--help"], HelpTopic::RawCall),
+        ] {
+            assert_eq!(
+                parse_command(arguments(&values)),
+                Some(Command::Help(topic)),
+                "{values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_trailing_and_runtime_help_shapes() {
+        for values in [
+            vec!["orna", "--help", "server"],
+            vec!["orna", "help", "unknown"],
+            vec!["orna", "help", "server", "unknown"],
+            vec!["orna", "help", "server", "run", "extra"],
+            vec!["orna", "help", "source", "extra"],
+            vec!["orna", "server", "--help", "extra"],
+            vec!["orna", "server", "run", "--help", "extra"],
+            vec!["orna", "source", "--help", "extra"],
+            vec!["orna", "invoke", "--help", "extra"],
+            vec!["orna", "invoke", "std.invoke.echo", "--help", "value"],
+            vec!["orna", "state", "--help", "extra"],
+            vec!["orna", "inspect", "--help", "extra"],
+            vec!["orna", "runtime", "--help", "extra"],
+            vec!["orna", "security", "--help", "extra"],
+            vec!["orna", "raw-call", "--help", "extra"],
+            vec!["orna", "--runtime", "tty", "--help"],
+            vec!["orna", "--runtime", "tty", "help"],
+            vec!["orna", "--runtime", "tty", "help", "invoke"],
+            vec!["orna", "--runtime", "tty", "server", "--help"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn help_text_is_user_facing_and_names_each_command_group() {
+        let top_level = help_text(HelpTopic::TopLevel);
+        assert!(top_level.contains("Orna command line"));
+        assert!(top_level.contains("Common Commands:"));
+        assert!(top_level.contains("Management Commands:"));
+        for command in [
+            "invoke", "source", "inspect", "raw-call", "runtime", "security",
+        ] {
+            assert!(
+                top_level.contains(command),
+                "{command} is missing from top-level help"
+            );
+        }
+        assert!(help_text(HelpTopic::Invoke).contains("--runtime <family>"));
+        assert!(help_text(HelpTopic::State).contains("--value-file <path>"));
+        assert!(help_text(HelpTopic::Inspect).contains("--projection <name>"));
+        assert!(help_text(HelpTopic::Runtime).contains("runtime describe"));
+        assert!(help_text(HelpTopic::Security).contains("security grant-execute"));
+        assert!(help_text(HelpTopic::RawCall).contains("raw-call"));
+        assert!(top_level.contains("--color <auto|always|never>"));
+    }
+
+    #[test]
+    fn usage_diagnostic_keeps_the_stable_command_list() {
+        assert!(USAGE.starts_with("Usage:\n  orna --version\n"));
+        assert!(USAGE.contains("orna raw-call"));
+        assert!(!USAGE.ends_with('\n'));
+        assert_ne!(USAGE, HELP_TOP_LEVEL);
+    }
+
+    #[test]
+    fn parses_global_colour_modes_before_the_command() {
+        for (value, expected) in [
+            ("auto", ColorChoice::Auto),
+            ("always", ColorChoice::Always),
+            ("never", ColorChoice::Never),
+        ] {
+            let parsed = parse_invocation(arguments(&["orna", "--color", value, "--help"]))
+                .expect("colour mode should parse");
+            assert_eq!(parsed.color, expected);
+            assert_eq!(parsed.command, Command::Help(HelpTopic::TopLevel));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_late_colour_options() {
+        for values in [
+            vec!["orna", "--color"],
+            vec!["orna", "--color", "purple", "--help"],
+            vec!["orna", "--help", "--color", "always"],
+            vec!["orna", "help", "invoke", "--color", "never"],
+            vec!["orna", "--color", "always", "help", "invoke", "extra"],
+        ] {
+            assert_eq!(parse_invocation(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_colour_named_invoke_arguments() {
+        let parsed = parse_invocation(arguments(&[
+            "orna",
+            "invoke",
+            "demo.main",
+            "--color",
+            "red",
+        ]))
+        .expect("friendly colour argument should parse");
+        let Command::Invoke(arguments) = parsed.command else {
+            panic!("expected invoke command");
+        };
         assert_eq!(
-            USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]"
+            arguments.arguments,
+            vec![CliArgumentInput::Friendly {
+                name: "color".to_owned(),
+                value: "red".to_owned(),
+            }]
         );
+    }
+
+    #[test]
+    fn renders_plain_and_coloured_help_deterministically() {
+        let plain = render_help(HelpTopic::TopLevel, ColorChoice::Never, true);
+        assert_eq!(plain, HELP_TOP_LEVEL);
+        assert_eq!(
+            render_help(HelpTopic::TopLevel, ColorChoice::Auto, false),
+            HELP_TOP_LEVEL
+        );
+
+        let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
+        assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
+        assert!(coloured.contains("\x1b[1;36mCommon Commands:\x1b[0m"));
+        assert!(coloured.contains("Run functions, inspect invocations"));
     }
 }

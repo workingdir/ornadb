@@ -10,7 +10,7 @@ use std::{
         fd::AsRawFd,
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         },
     },
     path::{Component, Path, PathBuf},
@@ -54,6 +54,8 @@ const CONFIGURATION_PATH: &str = "/etc/orna/instances/default.toml";
 const PACKAGE_LOCK_PATH: &str = "/var/lib/orna/package.lock";
 const PACKAGE_STATE_PATH: &str = "/var/lib/orna/package-state.toml";
 const INSTANCE_PARENT: &str = "/var/lib/orna/instances";
+const DEVELOPMENT_IDENT_MAP: &str = "orna_development";
+const DEVELOPMENT_LOCK_NAME: &str = "server.lock";
 const INSTANCE_LOCK_NAME: &str = "lock";
 const INSTANCE_MANIFEST_NAME: &str = "instance.toml";
 const UPGRADE_DIRECTORY_NAME: &str = "upgrade";
@@ -92,7 +94,7 @@ impl EmbeddedEngineIdentity {
     }
 }
 
-/// The fixed paths for the first managed Orna instance.
+/// The fixed paths for one managed Orna instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmbeddedHostPaths {
     state_root: PathBuf,
@@ -108,6 +110,23 @@ impl EmbeddedHostPaths {
         let runtime_root = PathBuf::from(RUNTIME_ROOT);
         Self {
             state_root: PathBuf::from(STATE_ROOT),
+            socket_directory: runtime_root.join("postgres"),
+            support_root: runtime_root.join(SUPPORT_DIRECTORY).join(identity.as_str()),
+            runtime_root,
+        }
+    }
+
+    /// Selects user-owned paths for a local process.
+    ///
+    /// The local profile is separate from the packaged service paths. It lets
+    /// a binary start an isolated instance without changing the service
+    /// profile.
+    pub fn development() -> Self {
+        let identity = EmbeddedEngineIdentity::current();
+        let state_root = development_state_home().join("orna/instances/default");
+        let runtime_root = development_runtime_home().join("orna/default");
+        Self {
+            state_root,
             socket_directory: runtime_root.join("postgres"),
             support_root: runtime_root.join(SUPPORT_DIRECTORY).join(identity.as_str()),
             runtime_root,
@@ -140,10 +159,94 @@ impl EmbeddedHostPaths {
     }
 }
 
+/// Returns the runtime root used by the current binary's local client.
+pub(crate) fn active_runtime_root() -> PathBuf {
+    match active_host_profile() {
+        HostProfile::Production => PathBuf::from(RUNTIME_ROOT),
+        HostProfile::Development => EmbeddedHostPaths::development().runtime_root,
+    }
+}
+
+fn development_state_home() -> PathBuf {
+    absolute_environment_path("XDG_STATE_HOME")
+        .or_else(|| absolute_environment_path("HOME").map(|home| home.join(".local").join("state")))
+        .unwrap_or_else(|| development_fallback_home("state"))
+}
+
+fn development_runtime_home() -> PathBuf {
+    absolute_environment_path("XDG_RUNTIME_DIR")
+        .or_else(|| absolute_environment_path("HOME").map(|home| home.join(".local").join("run")))
+        .unwrap_or_else(|| development_fallback_home("runtime"))
+}
+
+fn absolute_environment_path(name: &str) -> Option<PathBuf> {
+    let value = env::var_os(name)?;
+    let path = PathBuf::from(value);
+    (!path.as_os_str().is_empty() && path.is_absolute()).then_some(path)
+}
+
+fn development_fallback_home(kind: &str) -> PathBuf {
+    PathBuf::from("/tmp")
+        .join(format!(".orna-{}", geteuid().as_raw()))
+        .join(kind)
+}
+
+#[derive(Clone)]
+struct HostAuthentication {
+    bootstrap_hba: Vec<u8>,
+    normal_hba: Vec<u8>,
+    ident: Vec<u8>,
+}
+
+impl HostAuthentication {
+    fn production() -> Self {
+        Self {
+            bootstrap_hba: BOOTSTRAP_HBA_BYTES.to_vec(),
+            normal_hba: NORMAL_HBA_BYTES.to_vec(),
+            ident: IDENT_BYTES.to_vec(),
+        }
+    }
+
+    fn development() -> Result<Self, EmbeddedHostError> {
+        let username = User::from_uid(geteuid())
+            .map_err(|_| EmbeddedHostError::InvalidLocalIdentity)?
+            .ok_or(EmbeddedHostError::InvalidLocalIdentity)?
+            .name;
+        if !is_safe_login_name(&username) {
+            return Err(EmbeddedHostError::InvalidLocalIdentity);
+        }
+        let map = DEVELOPMENT_IDENT_MAP;
+        Ok(Self {
+            bootstrap_hba: format!(
+                "local postgres orna_kernel peer map={map}\nlocal all all reject\n"
+            )
+            .into_bytes(),
+            normal_hba: format!("local orna orna_kernel peer map={map}\nlocal all all reject\n")
+                .into_bytes(),
+            ident: format!("{map} {username} orna_kernel\n").into_bytes(),
+        })
+    }
+}
+
+fn is_safe_login_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
 #[derive(Clone, Copy)]
 struct ServiceIdentity {
     uid: u32,
     gid: u32,
+}
+
+impl ServiceIdentity {
+    fn current() -> Self {
+        let (uid, gid) = effective_identity();
+        Self { uid, gid }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +269,7 @@ struct PreparedInstance {
     identity: EmbeddedEngineIdentity,
     service: ServiceIdentity,
     data_directory: PathBuf,
+    authentication: HostAuthentication,
     is_new: bool,
     _package_lock: fs::File,
     _instance_lock: fs::File,
@@ -201,8 +305,36 @@ impl fmt::Debug for ReadyEmbeddedHost {
     }
 }
 
+fn map_distribution_error(error: distribution::DistributionError) -> EmbeddedHostError {
+    match error {
+        distribution::DistributionError::Missing => EmbeddedHostError::MissingDistributionManifest,
+        distribution::DistributionError::Invalid => EmbeddedHostError::InvalidDistributionManifest,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostProfile {
+    Production,
+    Development,
+}
+
+fn active_host_profile() -> HostProfile {
+    if require_service_identity().is_ok() {
+        HostProfile::Production
+    } else {
+        HostProfile::Development
+    }
+}
+
 fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
-    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
+    match active_host_profile() {
+        HostProfile::Production => prepare_production_instance(),
+        HostProfile::Development => prepare_development_instance(),
+    }
+}
+
+fn prepare_production_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    verify_current_distribution().map_err(map_distribution_error)?;
     validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
     require_file_bytes(
@@ -232,6 +364,53 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
     let paths = EmbeddedHostPaths::production();
     require_directory(Path::new(INSTANCE_PARENT), service.uid, service.gid, 0o700)?;
     require_directory(paths.runtime_root(), service.uid, service.gid, 0o711)?;
+    prepare_instance_state(
+        paths,
+        service,
+        HostAuthentication::production(),
+        package_lock,
+        false,
+    )
+}
+
+fn prepare_development_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    validate_embedded_engine_manifest()?;
+    let paths = EmbeddedHostPaths::development();
+    let service = ServiceIdentity::current();
+    ensure_development_directory(
+        paths
+            .state_root()
+            .parent()
+            .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+        0o700,
+    )?;
+    ensure_development_directory(paths.runtime_root(), 0o711)?;
+    let package_lock_path = paths.runtime_root().join(DEVELOPMENT_LOCK_NAME);
+    ensure_development_lock(&package_lock_path)?;
+    let package_lock = open_verified_lock(
+        &package_lock_path,
+        service.uid,
+        service.gid,
+        0o600,
+        nix::libc::F_WRLCK as i16,
+        LockKind::Instance,
+    )?;
+    prepare_instance_state(
+        paths,
+        service,
+        HostAuthentication::development()?,
+        package_lock,
+        true,
+    )
+}
+
+fn prepare_instance_state(
+    paths: EmbeddedHostPaths,
+    service: ServiceIdentity,
+    authentication: HostAuthentication,
+    package_lock: fs::File,
+    allow_stale_socket_cleanup: bool,
+) -> Result<PreparedInstance, EmbeddedHostError> {
     let state_metadata = fs::symlink_metadata(paths.state_root());
     let is_new = match state_metadata {
         Ok(_) => {
@@ -240,7 +419,12 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             create_owned_directory(paths.state_root(), 0o700)?;
-            sync_directory(Path::new(INSTANCE_PARENT))?;
+            sync_directory(
+                paths
+                    .state_root()
+                    .parent()
+                    .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+            )?;
             true
         }
         Err(error) => return Err(error.into()),
@@ -293,7 +477,11 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
         Err(error) => return Err(error.into()),
     }
     let support = materialise_support_data(paths.support_root())?;
-    recreate_socket_directory(paths.socket_directory(), &service)?;
+    recreate_socket_directory(
+        paths.socket_directory(),
+        &service,
+        allow_stale_socket_cleanup,
+    )?;
     remove_stale_ready(paths.runtime_root().join(READY_NAME), &service)?;
 
     Ok(PreparedInstance {
@@ -301,6 +489,7 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
         identity,
         service,
         data_directory,
+        authentication,
         is_new,
         _package_lock: package_lock,
         _instance_lock: instance_lock,
@@ -541,7 +730,7 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
     if !installed.activation_committed || hex_digest(&manifest) != ready.instance_manifest_sha256 {
         return Err(EmbeddedHostError::InvalidInstanceState);
     }
-    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
+    verify_current_distribution().map_err(map_distribution_error)?;
     validate_embedded_engine_manifest()?;
     let current_engine = EmbeddedEngineIdentity::current();
     if ready.engine != current_engine.as_str()
@@ -678,6 +867,50 @@ fn create_owned_directory(path: &Path, mode: u32) -> Result<(), EmbeddedHostErro
     Ok(())
 }
 
+fn ensure_development_directory(path: &Path, mode: u32) -> Result<(), EmbeddedHostError> {
+    let identity = ServiceIdentity::current();
+    let mut missing = Vec::new();
+    let mut cursor = path.to_owned();
+    loop {
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_dir()
+                    || (metadata.uid() != 0 && metadata.uid() != identity.uid)
+                {
+                    return Err(EmbeddedHostError::InvalidInstanceState);
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(cursor.clone());
+                cursor = cursor
+                    .parent()
+                    .ok_or(EmbeddedHostError::InvalidInstanceState)?
+                    .to_owned();
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for directory in missing.iter().rev() {
+        fs::create_dir(directory)?;
+        fs::set_permissions(directory, fs::Permissions::from_mode(mode))?;
+        sync_directory(
+            directory
+                .parent()
+                .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+        )?;
+    }
+    require_directory(path, identity.uid, identity.gid, mode)
+}
+
+fn ensure_development_lock(path: &Path) -> Result<(), EmbeddedHostError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => create_lock_file(path),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn create_lock_file(path: &Path) -> Result<(), EmbeddedHostError> {
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -811,10 +1044,14 @@ fn require_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), E
 fn recreate_socket_directory(
     path: &Path,
     service: &ServiceIdentity,
+    allow_stale_socket_cleanup: bool,
 ) -> Result<(), EmbeddedHostError> {
     match fs::symlink_metadata(path) {
         Ok(_) => {
             require_directory(path, service.uid, service.gid, 0o700)?;
+            if allow_stale_socket_cleanup {
+                remove_stale_private_socket_files(path, service)?;
+            }
             fs::remove_dir(path).map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -825,6 +1062,32 @@ fn recreate_socket_directory(
         path.parent()
             .ok_or(EmbeddedHostError::InvalidInstanceState)?,
     )?;
+    Ok(())
+}
+
+fn remove_stale_private_socket_files(
+    path: &Path,
+    service: &ServiceIdentity,
+) -> Result<(), EmbeddedHostError> {
+    let socket_name = format!(".s.PGSQL.{POSTGRES_PORT}");
+    let lock_name = format!("{socket_name}.lock");
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let metadata = fs::symlink_metadata(&entry_path)?;
+        let name = entry.file_name();
+        let known_socket =
+            name == OsStr::new(socket_name.as_str()) && metadata.file_type().is_socket();
+        let known_lock = name == OsStr::new(lock_name.as_str()) && metadata.file_type().is_file();
+        if !known_socket && !known_lock
+            || metadata.uid() != service.uid
+            || metadata.gid() != service.gid
+            || metadata.nlink() != 1
+        {
+            return Err(EmbeddedHostError::InvalidInstanceState);
+        }
+        fs::remove_file(entry_path)?;
+    }
     Ok(())
 }
 
@@ -852,7 +1115,10 @@ fn instance_manifest_bytes(identity: &EmbeddedEngineIdentity, activation: bool) 
     .into_bytes()
 }
 
-/// Runs the fixed default embedded PostgreSQL instance in the foreground.
+/// Runs the default embedded PostgreSQL instance in the foreground.
+///
+/// The host profile follows the process identity: the packaged service account
+/// uses the production paths, and other users use a private local profile.
 pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
     install_child_subreaper()?;
     install_shutdown_handlers()?;
@@ -997,7 +1263,11 @@ fn first_lifecycle_error<const N: usize>(
 
 fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
     initialise_embedded_cluster(instance.paths.support_root(), &instance.data_directory)?;
-    write_authentication(&instance.data_directory, BOOTSTRAP_HBA_BYTES)?;
+    write_authentication(
+        &instance.data_directory,
+        &instance.authentication.bootstrap_hba,
+        &instance.authentication.ident,
+    )?;
     require_empty_auto_configuration(&instance.data_directory)?;
 
     let mut postmaster = start_embedded_postmaster(
@@ -1013,7 +1283,11 @@ fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHos
     })?;
     drop(runtime);
 
-    write_authentication(&instance.data_directory, NORMAL_HBA_BYTES)?;
+    write_authentication(
+        &instance.data_directory,
+        &instance.authentication.normal_hba,
+        &instance.authentication.ident,
+    )?;
     atomic_write(
         &instance.paths.state_root().join(INSTANCE_MANIFEST_NAME),
         &instance_manifest_bytes(&instance.identity, false),
@@ -1023,31 +1297,47 @@ fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHos
 }
 
 fn verify_normal_configuration(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
-    verify_normal_data_directory(&instance.data_directory)
+    verify_normal_data_directory_with_auth(
+        &instance.data_directory,
+        &instance.authentication.normal_hba,
+        &instance.authentication.ident,
+    )
 }
 
 fn verify_normal_data_directory(data_directory: &Path) -> Result<(), EmbeddedHostError> {
+    verify_normal_data_directory_with_auth(data_directory, NORMAL_HBA_BYTES, IDENT_BYTES)
+}
+
+fn verify_normal_data_directory_with_auth(
+    data_directory: &Path,
+    normal_hba: &[u8],
+    ident: &[u8],
+) -> Result<(), EmbeddedHostError> {
     let owner = effective_identity();
     require_file_bytes(
         &data_directory.join("pg_hba.conf"),
         owner.0,
         owner.1,
         0o600,
-        NORMAL_HBA_BYTES,
+        normal_hba,
     )?;
     require_file_bytes(
         &data_directory.join("pg_ident.conf"),
         owner.0,
         owner.1,
         0o600,
-        IDENT_BYTES,
+        ident,
     )?;
     require_empty_auto_configuration(data_directory)
 }
 
-fn write_authentication(data_directory: &Path, hba: &[u8]) -> Result<(), EmbeddedHostError> {
+fn write_authentication(
+    data_directory: &Path,
+    hba: &[u8],
+    ident: &[u8],
+) -> Result<(), EmbeddedHostError> {
     atomic_write(&data_directory.join("pg_hba.conf"), hba, 0o600)?;
-    atomic_write(&data_directory.join("pg_ident.conf"), IDENT_BYTES, 0o600)
+    atomic_write(&data_directory.join("pg_ident.conf"), ident, 0o600)
 }
 
 fn require_empty_auto_configuration(data_directory: &Path) -> Result<(), EmbeddedHostError> {
@@ -1293,6 +1583,8 @@ pub enum EmbeddedHostError {
     Engine(EngineError),
     /// The process does not have the exact Orna service identity.
     InvalidServiceIdentity,
+    /// The current user has no safe name for local peer authentication.
+    InvalidLocalIdentity,
     /// Package state or its lock does not match the accepted shape.
     InvalidPackageState,
     /// Instance state, readiness, or its lock does not match the accepted shape.
@@ -1301,6 +1593,8 @@ pub enum EmbeddedHostError {
     InvalidSupportManifest,
     /// The embedded engine manifest is malformed or does not bind its embedded data.
     InvalidEngineManifest,
+    /// The installed distribution manifest is absent.
+    MissingDistributionManifest,
     /// The installed distribution manifest does not bind this executable and engine.
     InvalidDistributionManifest,
     /// A support member path is not a safe relative path.
@@ -1350,6 +1644,9 @@ impl fmt::Display for EmbeddedHostError {
             Self::Database(source) => source.fmt(formatter),
             Self::Engine(source) => source.fmt(formatter),
             Self::InvalidServiceIdentity => formatter.write_str("Orna service identity is invalid"),
+            Self::InvalidLocalIdentity => {
+                formatter.write_str("local Orna user identity is invalid")
+            }
             Self::InvalidPackageState => {
                 formatter.write_str("orna: package maintenance is incomplete")
             }
@@ -1362,9 +1659,15 @@ impl fmt::Display for EmbeddedHostError {
             Self::InvalidEngineManifest => {
                 formatter.write_str("embedded PostgreSQL engine manifest is invalid")
             }
-            Self::InvalidDistributionManifest => {
-                formatter.write_str("Orna distribution manifest is invalid")
-            }
+            Self::MissingDistributionManifest => formatter.write_str(concat!(
+                "Orna distribution manifest is missing at /usr/share/orna/distribution-manifest.toml; ",
+                "install the Orna package before using `orna server run`. For a development checkout, ",
+                "build/install the Debian development package with `make --file packaging/debian/rules ",
+                "development-package`.",
+            )),
+            Self::InvalidDistributionManifest => formatter.write_str(
+                "Orna distribution manifest is invalid",
+            ),
             Self::InvalidSupportPath => {
                 formatter.write_str("embedded PostgreSQL support path is invalid")
             }
@@ -1616,6 +1919,7 @@ pub fn initialise_embedded_cluster(
         ForkResult::Child => {
             if reset_child_signals().is_err()
                 || close_inherited_descriptors().is_err()
+                || install_parent_death_signal().is_err()
                 || environment.install().is_err()
             {
                 process_exit(126);
@@ -1809,6 +2113,7 @@ pub fn start_embedded_postmaster(
         ForkResult::Child => {
             if reset_child_signals().is_err()
                 || close_inherited_descriptors().is_err()
+                || install_parent_death_signal().is_err()
                 || environment.install().is_err()
             {
                 process_exit(126);
@@ -1837,6 +2142,18 @@ fn close_inherited_descriptors() -> Result<(), EmbeddedHostError> {
     } else {
         Err(EmbeddedHostError::ProcessControl)
     }
+}
+
+fn install_parent_death_signal() -> Result<(), EmbeddedHostError> {
+    let parent = unsafe { nix::libc::getppid() };
+    // SAFETY: prctl receives a valid option and one integer signal argument.
+    if unsafe { nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGTERM) } != 0 {
+        return Err(EmbeddedHostError::ProcessControl);
+    }
+    if unsafe { nix::libc::getppid() } != parent {
+        return Err(EmbeddedHostError::ProcessControl);
+    }
+    Ok(())
 }
 
 /// Returns the private peer-authenticated connection configuration for one embedded database.
@@ -2063,6 +2380,41 @@ mod tests {
     }
 
     #[test]
+    fn selects_absolute_user_owned_development_paths() {
+        let paths = EmbeddedHostPaths::development();
+        assert!(paths.state_root().is_absolute());
+        assert!(paths.runtime_root().is_absolute());
+        assert_eq!(
+            paths.socket_directory(),
+            paths.runtime_root().join("postgres")
+        );
+        assert_eq!(
+            paths.support_root(),
+            paths
+                .runtime_root()
+                .join(SUPPORT_DIRECTORY)
+                .join(EmbeddedEngineIdentity::current().as_str())
+        );
+    }
+
+    #[test]
+    fn development_authentication_maps_the_current_login() {
+        let authentication = HostAuthentication::development().expect("current login mapping");
+        assert!(
+            authentication
+                .bootstrap_hba
+                .starts_with(b"local postgres orna_kernel peer map=orna_development\n")
+        );
+        assert!(
+            authentication
+                .normal_hba
+                .starts_with(b"local orna orna_kernel peer map=orna_development\n")
+        );
+        assert!(authentication.ident.starts_with(b"orna_development "));
+        assert!(authentication.ident.ends_with(b" orna_kernel\n"));
+    }
+
+    #[test]
     fn parses_current_and_predecessor_instance_manifests() {
         let current = EmbeddedEngineIdentity::current();
         for activation_committed in [false, true] {
@@ -2170,6 +2522,41 @@ mod tests {
         assert_eq!(parsed.postmaster_pid, 11);
         assert_eq!(parsed.generation, GENERATION_NAME);
         assert!(parse_ready_record(format!("{record}extra = true\n").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn distinguishes_missing_and_invalid_distribution_diagnostics() {
+        let missing = map_distribution_error(distribution::DistributionError::Missing);
+        assert!(matches!(
+            missing,
+            EmbeddedHostError::MissingDistributionManifest
+        ));
+        assert!(
+            missing
+                .to_string()
+                .contains("/usr/share/orna/distribution-manifest.toml")
+        );
+        assert!(
+            missing
+                .to_string()
+                .contains("install the Orna package before using `orna server run`")
+        );
+        assert!(
+            missing
+                .to_string()
+                .contains("make --file packaging/debian/rules development-package")
+        );
+
+        let invalid = map_distribution_error(distribution::DistributionError::Invalid);
+        assert!(matches!(
+            invalid,
+            EmbeddedHostError::InvalidDistributionManifest
+        ));
+        assert!(
+            invalid
+                .to_string()
+                .contains("Orna distribution manifest is invalid")
+        );
     }
 
     #[test]

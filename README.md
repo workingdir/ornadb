@@ -184,10 +184,14 @@ The package boundary is intentionally narrow:
 
 ## CLI entry points
 
-These are the closed command forms exposed by the `orna` CLI. Positional
-values are placeholders for canonical IDs, source paths, or runtime paths.
+`orna` uses one command tree for server management and database work. Start
+with `orna --help`, then use command-specific help such as
+`orna server --help` or `orna invoke --help`.
 
 ```text
+orna --help
+orna help <topic>
+orna --color <auto|always|never> --help
 orna --version
 orna server run
 orna server upgrade
@@ -197,9 +201,32 @@ orna source check <file.orna>
 orna source apply <file.orna>
 orna source diff <file.orna>
 orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]
+orna raw-call <canonical-function-id> [<canonical-parameter-id> [<canonical-parameter-id-2>]]
 orna state get <root-function-id> [options]
 orna state set <root-function-id> [options]
 orna inspect <invocation-id> [options]
+orna security grant-execute <canonical-function-id>
+orna security user create|disable <canonical-principal-id>
+orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]
+orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]
+orna security grants list <canonical-principal-id>
+orna security check can-execute <canonical-principal-id> <canonical-function-id>
+orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]
+orna security whoami
+```
+
+`--color auto` follows the terminal. Use `always` for coloured help in a
+pipeline, or `never` for plain output. JSON and command results remain plain.
+
+`orna server run` starts the server in the foreground. The command works with
+the binary from a checkout and does not require a package installation. The
+packaged `orna` service account uses the installed service paths; another user
+gets a private local instance in user-owned state and runtime directories.
+
+The same command is used by a service manager:
+
+```text
+/usr/bin/orna server run
 ```
 
 Use the source commands as separate stages:
@@ -214,13 +241,12 @@ Use the source commands as separate stages:
 
 `orna invoke` accepts `--arg <parameter>=<value>`, `--args-file <path>`,
 `--output <value>`, `--trace <value>`, `--runtime <family>`, `--explain`, and
-`--no-progress`. Ordinary runtime selection is automatic; `--runtime` is the
-advanced local-client override. `--explain` resolves and renders request facts
-without dispatching, authorising, or auditing.
+`--no-progress`. Runtime selection is automatic unless `--runtime` is used.
+`--explain` shows the request without dispatching it.
 
 `orna state get` accepts `--profile`, repeated `--instance` with optional
 `--instance-key`, and repeated `--expect-type` triples. `orna state set` accepts
-`--function`, `--slot`, `--revision <create|revision>`, `--type`,
+`--function`, `--slot`, `--revision <create|revision-number>`, `--type`,
 `--value-file`, and optional `--profile` and `--instance-key`.
 
 `orna inspect` accepts `--projection`, `--trace`, `--after`,

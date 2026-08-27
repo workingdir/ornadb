@@ -21,7 +21,12 @@ mod tests {
             check_standard_library_source(&snapshot).expect("verified V9 source must check");
         let source = SourceBundle::new([SourceUnit::new(
             "application.orna",
-            "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.ui()\nRETURNS std.ui.UI\nAS std.ui.text('Ready');",
+            "CREATE SCHEMA app;\n\
+             CREATE CLIENT FUNCTION app.ui()\n\
+             RETURNS std.ui.UI IS\n\
+             BEGIN\n\
+                 RETURN std.ui.text(text => 'Ready');\n\
+             END;",
         )])
         .expect("application source must form a bundle");
 
@@ -58,7 +63,7 @@ mod tests {
         let source = SourceBundle::new([SourceUnit::new(
             "resource.orna",
             "CREATE SCHEMA app;\n\
-             CREATE CLIENT FUNCTION app.render() RETURNS std.terminal.Document IS\n\
+             CREATE CLIENT FUNCTION app.render() RETURNS BOOLEAN IS\n\
              BEGIN\n\
                  RETURN AWAIT std.data.resource(\n\
                      target => std.terminal.present_table,\n\

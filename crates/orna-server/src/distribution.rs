@@ -14,7 +14,10 @@ const DISTRIBUTION_MANIFEST_PATH: &str = "/usr/share/orna/distribution-manifest.
 const MAXIMUM_MANIFEST_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct DistributionError;
+pub(super) enum DistributionError {
+    Missing,
+    Invalid,
+}
 
 pub(super) fn verify_current_distribution() -> Result<(), DistributionError> {
     let bytes = read_manifest(Path::new(DISTRIBUTION_MANIFEST_PATH))?;
@@ -28,8 +31,11 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, DistributionError> {
         .read(true)
         .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|_| DistributionError)?;
-    let metadata = file.metadata().map_err(|_| DistributionError)?;
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => DistributionError::Missing,
+            _ => DistributionError::Invalid,
+        })?;
+    let metadata = file.metadata().map_err(|_| DistributionError::Invalid)?;
     if !metadata.is_file()
         || metadata.uid() != 0
         || metadata.gid() != 0
@@ -37,23 +43,25 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, DistributionError> {
         || metadata.nlink() != 1
         || metadata.len() > MAXIMUM_MANIFEST_BYTES
     {
-        return Err(DistributionError);
+        return Err(DistributionError::Invalid);
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes)
-        .map_err(|_| DistributionError)?;
+        .map_err(|_| DistributionError::Invalid)?;
     if bytes.len() as u64 != metadata.len() {
-        return Err(DistributionError);
+        return Err(DistributionError::Invalid);
     }
     Ok(bytes)
 }
 
 fn digest_file(path: &Path) -> Result<String, DistributionError> {
-    let mut file = fs::File::open(path).map_err(|_| DistributionError)?;
+    let mut file = fs::File::open(path).map_err(|_| DistributionError::Invalid)?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer).map_err(|_| DistributionError)?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| DistributionError::Invalid)?;
         if read == 0 {
             break;
         }
@@ -82,8 +90,8 @@ fn validate_manifest(
     engine_sha256: &str,
     executable_sha256: &str,
 ) -> Result<(), DistributionError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| DistributionError)?;
-    let text = text.strip_suffix('\n').ok_or(DistributionError)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| DistributionError::Invalid)?;
+    let text = text.strip_suffix('\n').ok_or(DistributionError::Invalid)?;
     let lines = text.split('\n').collect::<Vec<_>>();
     if lines.len() != 11
         || lines[0] != "format = 1"
@@ -102,7 +110,7 @@ fn validate_manifest(
         || lines[9] != "supported_forward_edges = []"
         || !quoted_equals(lines[10], "executable_sha256 = ", executable_sha256)
     {
-        return Err(DistributionError);
+        return Err(DistributionError::Invalid);
     }
     Ok(())
 }
@@ -187,7 +195,7 @@ executable_sha256 = \"{EXECUTABLE}\"\n"
                 .replace(changed.0, changed.1);
             assert_eq!(
                 validate_manifest(changed.as_bytes(), ENGINE, EXECUTABLE),
-                Err(DistributionError)
+                Err(DistributionError::Invalid)
             );
         }
     }
@@ -208,16 +216,20 @@ executable_sha256 = \"{EXECUTABLE}\"\n"
         ] {
             assert_eq!(
                 validate_manifest(&bytes, ENGINE, EXECUTABLE),
-                Err(DistributionError)
+                Err(DistributionError::Invalid)
             );
         }
     }
 
     #[test]
-    fn maps_file_failures_to_one_opaque_error() {
+    fn distinguishes_missing_from_invalid_manifest_files() {
         let missing = Path::new("/definitely/not/an/orna/distribution-manifest");
-        assert_eq!(read_manifest(missing), Err(DistributionError));
-        assert_eq!(digest_file(missing), Err(DistributionError));
+        assert_eq!(read_manifest(missing), Err(DistributionError::Missing));
+        assert_eq!(
+            read_manifest(Path::new("/dev/null")),
+            Err(DistributionError::Invalid),
+        );
+        assert_eq!(digest_file(missing), Err(DistributionError::Invalid));
     }
 
     #[test]

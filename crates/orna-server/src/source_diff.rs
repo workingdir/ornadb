@@ -1068,6 +1068,7 @@ fn map_host_error(source: EmbeddedHostError) -> InstalledSourceDiffError {
         EmbeddedHostError::InvalidPackageState => InstalledSourceDiffHostFailure::PackageIncomplete,
         EmbeddedHostError::Engine(_)
         | EmbeddedHostError::InvalidEngineManifest
+        | EmbeddedHostError::MissingDistributionManifest
         | EmbeddedHostError::InvalidDistributionManifest => {
             InstalledSourceDiffHostFailure::EngineInvalid
         }
