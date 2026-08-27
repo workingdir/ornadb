@@ -23,27 +23,14 @@ pub use model::{
     CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse,
-    CheckedStandardUiConstructor,
-    ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
-    STANDARD_LIBRARY_V7_REVISION_ID, STANDARD_LIBRARY_V8_REVISION_ID, STD_ACTION_SCHEMA_ID,
-    STANDARD_LIBRARY_V9_REVISION_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
-    STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
-    STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID,
-    STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT, STD_UI_ROW_CONTENT_PARAMETER_ID,
-    STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID, STD_UI_ROW_RUNTIME_CONTRACT,
-    STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID,
-    STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
-    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
-    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
-    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID,
-    STD_UI_TEXT_RUNTIME_CONTRACT,
-    STD_ACTION_SOURCE_UNIT_ID,
-    STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
-    STD_CSV_ENCODE_FUNCTION_ID, STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
+    CheckedStandardUiConstructor, CheckedStandardUiWindow, CheckedStandardValueType,
+    CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, STANDARD_LIBRARY_V3_REVISION_ID,
+    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
+    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_SCHEMA_ID,
+    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID,
+    STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
+    STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
     STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
     STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
@@ -53,8 +40,22 @@ pub use model::{
     STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
     STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
-    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID,
-    STD_UI_TYPE_ID, STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
+    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID,
+    STD_UI_BUTTON_LABEL_PARAMETER_ID, STD_UI_BUTTON_RUNTIME_CONTRACT,
+    STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
+    STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
+    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
+    STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
+    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
+    STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID,
+    STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID,
+    STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+    STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID,
+    STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
     STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
     SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
@@ -81,9 +82,9 @@ use orna_artifact::client_plan::{
     ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
     ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
-use orna_artifact::server_terminal_table;
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
+use orna_artifact::server_terminal_table;
 use orna_core::{
     CallSiteId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceUnitId,
     StateSlotId, TypeId,
@@ -1262,7 +1263,6 @@ fn check_standard_library_source_v8_parts(
 fn check_standard_library_source_v9(
     snapshot: &VerifiedStandardLibrarySnapshot,
 ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-
     let (families, checked_executables) = check_standard_library_source_v9_parts(
         snapshot.source().units(),
         snapshot.catalogue(),
@@ -1407,7 +1407,10 @@ fn check_standard_library_source_v9_parts(
         || !parsed_constructors.parsed().schemas().is_empty()
         || !parsed_constructors.parsed().object_types().is_empty()
         || !parsed_constructors.parsed().enum_types().is_empty()
-        || !parsed_constructors.parsed().primitive_value_types().is_empty()
+        || !parsed_constructors
+            .parsed()
+            .primitive_value_types()
+            .is_empty()
         || !parsed_constructors.parsed().opaque_value_types().is_empty()
         || !parsed_constructors.parsed().record_value_types().is_empty()
         || !parsed_constructors.parsed().field_renames().is_empty()
@@ -1468,7 +1471,6 @@ fn check_standard_library_source_v9_parts(
     }
     Ok((families, checked_executables))
 }
-
 
 /// Reconciles the appended `std/data.orna` unit and returns its catalogue
 /// families. The table declaration is checked through the shared retained
@@ -1650,7 +1652,6 @@ fn reconcile_standard_data_unit(
         }],
     })
 }
-
 
 fn check_standard_library_source_v6_parts(
     source_units: &[StoredSourceUnit],
@@ -1905,7 +1906,8 @@ fn expected_standard_terminal_executable(
     let function_origin = origins
         .iter()
         .find(|origin| {
-            origin.identity() == DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            origin.identity()
+                == DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
         })
         .ok_or(StandardLibraryCheckError::PresenterMissingFunctionOrigin)?
         .source();
@@ -2034,7 +2036,8 @@ fn reconcile_standard_terminal_executable(
     let [declaration] = parsed_unit.parsed().server_functions() else {
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
-    let expected = expected_standard_terminal_executable(declaration, catalogue, origins, stored_unit)?;
+    let expected =
+        expected_standard_terminal_executable(declaration, catalogue, origins, stored_unit)?;
     if stored != &expected {
         return Err(StandardLibraryCheckError::ExecutableMismatch);
     }
@@ -2139,16 +2142,13 @@ fn reconcile_standard_ui_constructor_executable(
 ) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
     let function_origin = origins
         .iter()
-        .find(|origin| {
-            origin.identity() == DefinitionIdentity::Function(checked.function_id())
-        })
+        .find(|origin| origin.identity() == DefinitionIdentity::Function(checked.function_id()))
         .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?
         .source();
     let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
         let start =
             u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-        let end =
-            u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
         SourceOrigin::new(stored_unit.id(), start, end)
             .map_err(|_| StandardLibraryCheckError::SourceMismatch)
     };
@@ -3704,10 +3704,14 @@ struct StandardUiConstructorSpec {
     parameter_types: &'static [TypeId],
 }
 
-fn standard_ui_constructor_spec(
-    name: &QualifiedSemanticName,
-) -> Option<StandardUiConstructorSpec> {
-    match name.parts().iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+fn standard_ui_constructor_spec(name: &QualifiedSemanticName) -> Option<StandardUiConstructorSpec> {
+    match name
+        .parts()
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["std", "ui", "text"] => Some(StandardUiConstructorSpec {
             function_id: STD_UI_TEXT_FUNCTION_ID,
             revision_id: STD_UI_TEXT_FUNCTION_REVISION_ID,

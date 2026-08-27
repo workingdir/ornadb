@@ -6,9 +6,7 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{
-    retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
-};
+use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 
 #[cfg(test)]
 mod tests {

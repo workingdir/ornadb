@@ -2652,7 +2652,7 @@ impl fmt::Display for SealedPresentationError {
             Self::NoPath => formatter.write_str("no presenter accepts the canonical result type"),
             Self::Kernel(error) => write!(formatter, "{error}"),
         }
-}
+    }
 }
 
 /// The immutable sealed presenter registry (ADR 0057 step 7, ADR 0067).
@@ -10728,12 +10728,8 @@ mod tests {
             rows.columns()[0].resolved_type(),
             ResolvedType::scalar(StandardScalar::Integer)
         );
-        assert_eq!(
-            rows.rows(),
-            &[ResultRow::new([RuntimeValue::Integer(42)])]
-        );
+        assert_eq!(rows.rows(), &[ResultRow::new([RuntimeValue::Integer(42)])]);
     }
-
 
     #[test]
     fn sealed_rows_zero_row_result_stays_one_value_batch_item() {
@@ -10742,12 +10738,10 @@ mod tests {
             .expect("the V8 opaque codecs register");
         let active = presenter_active(&standard);
         let rows = ResultRows::new(
-            [ResultColumn::new(
-                "id",
-                ResolvedType::scalar(StandardScalar::Integer),
-                false,
-            )
-            .expect("the id column is valid")],
+            [
+                ResultColumn::new("id", ResolvedType::scalar(StandardScalar::Integer), false)
+                    .expect("the id column is valid"),
+            ],
             std::iter::empty::<ResultRow>(),
         )
         .expect("the zero-row result shape is valid");

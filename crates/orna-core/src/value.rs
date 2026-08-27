@@ -77,7 +77,6 @@ pub const MAX_ROWS_CELLS: usize = 1_000_000;
 /// The maximum complete payload length of one materialised Rows value.
 pub const MAX_ROWS_PAYLOAD_LENGTH: usize = MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
 
-
 /// One immutable checked-in contract for a sealed `sys.inspect` carrier.
 ///
 /// These registrations are deliberately separate from `OpaqueCodecRegistry`.
@@ -1454,7 +1453,6 @@ impl OpaqueCodecRegistration {
             contract: OpaquePayloadContract::Rows { magic },
         })
     }
-
 }
 
 /// Identifies the accepted standard terminal-document codec without changing
@@ -1722,11 +1720,7 @@ fn validate_rows_payload(
     }
 }
 
-fn take_rows_bytes<'a>(
-    payload: &'a [u8],
-    cursor: &mut usize,
-    length: usize,
-) -> Option<&'a [u8]> {
+fn take_rows_bytes<'a>(payload: &'a [u8], cursor: &mut usize, length: usize) -> Option<&'a [u8]> {
     let end = cursor.checked_add(length)?;
     let bytes = payload.get(*cursor..end)?;
     *cursor = end;
@@ -1959,7 +1953,6 @@ fn validate_rows_repeated_content(content: &[u8], depth: usize) -> Result<(), ()
     }
     (cursor == content.len()).then_some(()).ok_or(())
 }
-
 
 /// Parses and validates one canonical JSON frame, returning its body value for
 /// contracts that apply a schema-specific check after the generic framing.
@@ -9166,18 +9159,12 @@ mod tests {
         let standard = verified_standard_with_value_types_and_schemas(
             vec![
                 standard_boolean_definition(),
-                opaque_definition(
-                    ROWS_TYPE,
-                    ["std", "data", "rows"],
-                    "orna.std.value.rows@1",
-                ),
+                opaque_definition(ROWS_TYPE, ["std", "data", "rows"], "orna.std.value.rows@1"),
             ],
-            vec![
-                SchemaDefinition::new(
-                    SchemaId::from_bytes([0x8b; 16]),
-                    QualifiedSemanticName::new(["std", "data"]).unwrap(),
-                )
-            ],
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x8b; 16]),
+                QualifiedSemanticName::new(["std", "data"]).unwrap(),
+            )],
         );
         let active = active_record_revision_with_standard(RECORD_TYPE, standard);
         let standard = active.catalogue_hash_context().standard().unwrap();

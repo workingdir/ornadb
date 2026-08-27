@@ -1264,10 +1264,7 @@ fn resource_rows_from_capture(
     rows
 }
 
-fn inspect_capture_invariant(
-    invocation: InvocationId,
-    rule: &'static str,
-) -> PostgresKernelError {
+fn inspect_capture_invariant(invocation: InvocationId, rule: &'static str) -> PostgresKernelError {
     PostgresKernelError::DurableInvariant {
         relation: INSPECT_SNAPSHOT_RELATION,
         record: invocation.canonical(),
@@ -1332,11 +1329,9 @@ fn append_ui_nodes_from_payload(
             .try_into()
             .expect("the UI length prefix is exactly four bytes"),
     ) as usize;
-    let body_end = prefix_length
-        .checked_add(body_length)
-        .ok_or_else(|| {
-            inspect_capture_invariant(invocation, "captured UI value frame length overflowed")
-        })?;
+    let body_end = prefix_length.checked_add(body_length).ok_or_else(|| {
+        inspect_capture_invariant(invocation, "captured UI value frame length overflowed")
+    })?;
     if body_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || body_end != payload.len() {
         return Err(inspect_capture_invariant(
             invocation,
@@ -1430,9 +1425,9 @@ fn append_ui_nodes_from_payload(
                         )
                     })?;
                 if contract.len() != 3
-                    || contract.keys().any(|key| {
-                        !matches!(key.as_str(), "id" | "name" | "version")
-                    })
+                    || contract
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "id" | "name" | "version"))
                 {
                     return Err(inspect_capture_invariant(
                         invocation,
@@ -1486,13 +1481,12 @@ fn append_ui_nodes_from_payload(
                                 "captured UI node call-site identity is empty",
                             ));
                         }
-                        let call_site_id =
-                            CallSiteId::from_canonical(call_site).map_err(|_| {
-                                inspect_capture_invariant(
-                                    invocation,
-                                    "captured UI node call-site identity is not canonical",
-                                )
-                            })?;
+                        let call_site_id = CallSiteId::from_canonical(call_site).map_err(|_| {
+                            inspect_capture_invariant(
+                                invocation,
+                                "captured UI node call-site identity is not canonical",
+                            )
+                        })?;
                         if call_site_id.to_bytes() == [0; 16] {
                             return Err(inspect_capture_invariant(
                                 invocation,
@@ -1703,9 +1697,11 @@ fn byte_stream_media_type_opaque(value: &OpaqueValue) -> Option<&str> {
     if payload.len() < media_length_end || !payload.starts_with(magic) {
         return None;
     }
-    let media_length =
-        u32::from_be_bytes(payload[media_length_start..media_length_end].try_into().ok()?)
-            as usize;
+    let media_length = u32::from_be_bytes(
+        payload[media_length_start..media_length_end]
+            .try_into()
+            .ok()?,
+    ) as usize;
     let media_start = media_length_end;
     let media_end = media_start.checked_add(media_length)?;
     let body_length_end = media_end.checked_add(4)?;
@@ -1741,7 +1737,11 @@ fn selected_runtime_from_offer(
     sink: &TypeDescriptor,
 ) -> Option<String> {
     let mut matching = client_offer?.runtime_offers().iter().filter(|runtime| {
-        runtime.trusted() && runtime.consumed_descriptors().iter().any(|descriptor| descriptor == sink)
+        runtime.trusted()
+            && runtime
+                .consumed_descriptors()
+                .iter()
+                .any(|descriptor| descriptor == sink)
     });
     let runtime = matching.next()?;
     if matching.next().is_some() {
@@ -3432,9 +3432,10 @@ mod tests {
                 orna_core::inspect::InspectResourceKind::Runtime,
             ]
         );
-        assert!(rows.iter().all(|row| {
-            row.status() == orna_core::inspect::InspectResourceStatus::Active
-        }));
+        assert!(
+            rows.iter()
+                .all(|row| { row.status() == orna_core::inspect::InspectResourceStatus::Active })
+        );
         assert_eq!(resource_rows_from_capture(true, false, false).len(), 2);
     }
 
@@ -3487,7 +3488,11 @@ mod tests {
         let invocation = InvocationId::from_bytes([0x44; 16]);
         let body = ui_node(serde_json::Value::String("not-a-call-site".to_owned()));
         assert!(matches!(
-            ui_nodes_from_payload(invocation, FunctionId::from_bytes([0x55; 16]), &ui_frame(body)),
+            ui_nodes_from_payload(
+                invocation,
+                FunctionId::from_bytes([0x55; 16]),
+                &ui_frame(body)
+            ),
             Err(PostgresKernelError::DurableInvariant {
                 rule: "captured UI node call-site identity is not canonical",
                 ..
