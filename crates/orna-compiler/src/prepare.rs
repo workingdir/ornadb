@@ -5556,11 +5556,6 @@ impl CandidateMaterial {
         self.into_deployable_with_catalogue_hash(active, context, catalogue_hash)
     }
 
-    #[cfg(test)]
-    fn catalogue_hash(&self, context: &CatalogueHashContext) -> Result<Sha256Digest, PrepareError> {
-        self.catalogue_hash_with_parent(context, None)
-    }
-
     fn catalogue_hash_with_parent(
         &self,
         context: &CatalogueHashContext,
@@ -9269,15 +9264,15 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
 
     fn action_standard() -> VerifiedStandardLibrarySnapshot {
         let base = resource_standard();
-        const action_schema_statement: &str = "CREATE SCHEMA std.action;";
-        const action_type_statement: &str = "CREATE TYPE std.action.Action AS VALUE OPAQUE KERNEL CONTRACT 'orna.std.value.action@1' IMMUTABLE TRANSIENT;";
-        const action_binding_statement: &str = "EXPORT TYPE std.action.Action AS std.Action;";
+        const ACTION_SCHEMA_STATEMENT: &str = "CREATE SCHEMA std.action;";
+        const ACTION_TYPE_STATEMENT: &str = "CREATE TYPE std.action.Action AS VALUE OPAQUE KERNEL CONTRACT 'orna.std.value.action@1' IMMUTABLE TRANSIENT;";
+        const ACTION_BINDING_STATEMENT: &str = "EXPORT TYPE std.action.Action AS std.Action;";
         let mut source_content = base.source().units()[0].content().to_owned();
-        source_content.push_str(action_schema_statement);
+        source_content.push_str(ACTION_SCHEMA_STATEMENT);
         source_content.push('\n');
-        source_content.push_str(action_type_statement);
+        source_content.push_str(ACTION_TYPE_STATEMENT);
         source_content.push('\n');
-        source_content.push_str(action_binding_statement);
+        source_content.push_str(ACTION_BINDING_STATEMENT);
         source_content.push('\n');
 
         let unit_id = base.source().units()[0].id();
@@ -9342,15 +9337,15 @@ EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
         let mut origins = base.origins().to_vec();
         origins.push(origin(
             DefinitionIdentity::Schema(action_schema_id),
-            action_schema_statement,
+            ACTION_SCHEMA_STATEMENT,
         ));
         origins.push(origin(
             DefinitionIdentity::ValueType(action_type_id),
-            action_type_statement,
+            ACTION_TYPE_STATEMENT,
         ));
         origins.push(origin(
             DefinitionIdentity::TypeBinding(action_binding.id()),
-            action_binding_statement,
+            ACTION_BINDING_STATEMENT,
         ));
         let provisional = StandardLibrarySnapshot::new(
             base.revision(),
