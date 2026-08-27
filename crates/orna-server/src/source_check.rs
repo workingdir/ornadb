@@ -31,6 +31,24 @@ mod tests {
             .expect("application source must be checked against V9");
         assert_eq!(report.diagnostics(), &[]);
     }
+
+    #[test]
+    fn checks_static_ui_source_fixture_against_verified_v9_standard() {
+        let snapshot = retained_standard_library_v9_snapshot()
+            .and_then(verify_standard_library_v9_snapshot)
+            .expect("retained V9 standard must verify");
+        let standard =
+            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+        let source = SourceBundle::new([SourceUnit::new(
+            "static_ui_dogfood.orna",
+            include_str!("../tests/fixtures/static_ui_dogfood.orna"),
+        )])
+        .expect("static UI application source must form a bundle");
+
+        let report = check_new_application(&source, &standard)
+            .expect("static UI application source must be checked against V9");
+        assert_eq!(report.diagnostics(), &[]);
+    }
 }
 
 use crate::source_diagnostics;
