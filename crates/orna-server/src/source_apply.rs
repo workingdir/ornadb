@@ -22,14 +22,16 @@ use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID, StandardLibraryError,
-    retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
-    retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
-    retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
-    retained_standard_library_v7_snapshot, verify_standard_library_snapshot,
+    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
+    STANDARD_LIBRARY_V8_REVISION_ID, StandardLibraryError, retained_standard_library_snapshot,
+    retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
+    retained_standard_library_v4_snapshot, retained_standard_library_v5_snapshot,
+    retained_standard_library_v6_snapshot, retained_standard_library_v7_snapshot,
+    retained_standard_library_v8_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
     verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
     verify_standard_library_v6_snapshot, verify_standard_library_v7_snapshot,
+    verify_standard_library_v8_snapshot,
 };
 use serde::Serialize;
 
@@ -490,6 +492,8 @@ pub(super) fn select_accepted_standard(
                 .and_then(verify_standard_library_v6_snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => retained_standard_library_v7_snapshot()
                 .and_then(verify_standard_library_v7_snapshot),
+            STANDARD_LIBRARY_V8_REVISION_ID => retained_standard_library_v8_snapshot()
+                .and_then(verify_standard_library_v8_snapshot),
             _ => return Err(StandardSelectionError::UnknownRevision),
         };
 
@@ -744,6 +748,15 @@ mod tests {
             retained_standard_library_v7_snapshot().expect("retained V7 standard"),
         )
         .expect("verified V7 standard");
+        assert_selected_standard_matches(&installed);
+    }
+
+    #[test]
+    fn selects_the_accepted_v8_snapshot_for_a_v8_active_standard() {
+        let installed = verify_standard_library_v8_snapshot(
+            retained_standard_library_v8_snapshot().expect("retained V8 standard"),
+        )
+        .expect("verified V8 standard");
         assert_selected_standard_matches(&installed);
     }
 
