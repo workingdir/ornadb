@@ -171,6 +171,34 @@ frame. If the server observes cancellation first, it emits
 The client drops every late frame for a terminal request. A dropped frame must
 not change the resource cache, generation, model, state, or audit projection.
 
+### Internal terminal provenance
+
+The wire contract does not add a commit token. The authenticated server
+producer and both local transport adapters carry an internal terminal
+provenance fact instead:
+
+- `Uncommitted` means that the producer has not returned an authoritative
+  terminal result. It covers values, backpressure, cancellation before
+  terminal completion, and transport or producer failures before terminal
+  publication.
+- `Authenticated` means that the authenticated producer returned a terminal
+  `Completed`, `Failed`, or `Cancelled` outcome and the adapter may apply its
+  terminal ordering rule. Its `is_committed` fact lets a terminal result that
+  was published before cancellation win without a second terminal frame.
+
+The fact is created only by the authenticated server dispatch path. It is
+never decoded from request data or accepted from a client frame. The direct
+raw-socket adapter carries it on its completion record. The shared broker
+records it only while the `(stream_id, request_id)` pair is live and removes it
+after terminal handling. Both adapters use the same cancellation decision:
+cancellation wins before an authoritative terminal; an authoritative terminal
+wins after it. A late frame cannot create provenance or mutate a terminal
+request.
+
+This is an in-process authority and lifetime rule. It is not a second client
+audit authority, a persisted credential, or a change to `ORNA-RESOURCE/1`.
+
+
 ## Scheduling and transaction boundary
 
 The resource adapter creates a nested `sys.invoke` request after it validates
