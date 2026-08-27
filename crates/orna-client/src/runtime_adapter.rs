@@ -436,11 +436,14 @@ struct ParsedNode<'a> {
     content_children: Option<&'a [Value]>,
 }
 
+/// The lowered batch and callback identities are one atomic UI projection result.
+type LoweredUiContent = (RuntimeUiBatch, u64, Vec<(AbiActionHandle, String)>);
+
 fn lower_ui_content(
     content: &Value,
     title: &str,
     first_alias: u64,
-) -> Result<(RuntimeUiBatch, u64, Vec<(AbiActionHandle, String)>), AdapterInputError> {
+) -> Result<LoweredUiContent, AdapterInputError> {
     if title.len() > CLIENT_MAX_RUNTIME_TEXT_BYTES {
         return Err(AdapterInputError);
     }
@@ -631,13 +634,13 @@ fn parse_node<'a>(
             .ok_or(AdapterInputError)
             .and_then(bounded_non_empty)?
             .to_owned();
-        if let Some(debug_kind) = action.get("debug_kind") {
-            if !debug_kind.is_null() {
-                debug_kind
-                    .as_str()
-                    .ok_or(AdapterInputError)
-                    .and_then(bounded_name)?;
-            }
+        if let Some(debug_kind) = action.get("debug_kind")
+            && !debug_kind.is_null()
+        {
+            debug_kind
+                .as_str()
+                .ok_or(AdapterInputError)
+                .and_then(bounded_name)?;
         }
         lowered_actions.push(ParsedAction {
             action_id,
@@ -833,20 +836,20 @@ fn lower_boolean_bytes(type_name: &str, value: &Value) -> Result<Vec<u8>, Adapte
     if let Some(value) = value.as_bool() {
         return Ok(vec![u8::from(value)]);
     }
-    if type_name == BOOLEAN_TYPE {
-        if let Some(value) = value.as_str() {
-            return match value {
-                "00" => Ok(vec![0]),
-                "01" => Ok(vec![1]),
-                _ => Err(AdapterInputError),
-            };
-        }
+    if type_name == BOOLEAN_TYPE
+        && let Some(value) = value.as_str()
+    {
+        return match value {
+            "00" => Ok(vec![0]),
+            "01" => Ok(vec![1]),
+            _ => Err(AdapterInputError),
+        };
     }
     Err(AdapterInputError)
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
