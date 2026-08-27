@@ -1,3 +1,5 @@
+// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+#![allow(clippy::result_large_err)]
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
