@@ -1832,9 +1832,9 @@ fn validate_rows_constructed_payload(
     if descriptor_length == 0 {
         return Err(());
     }
-    let descriptor = take_rows_bytes(payload, &mut cursor, descriptor_length).ok_or(())?;
-    let (descriptor, consumed) = validate_rows_descriptor(descriptor, 0, 0)?;
-    if consumed != descriptor.len() {
+    let descriptor_bytes = take_rows_bytes(payload, &mut cursor, descriptor_length).ok_or(())?;
+    let (descriptor, consumed) = validate_rows_descriptor(descriptor_bytes, 0, 0)?;
+    if consumed != descriptor_bytes.len() {
         return Err(());
     }
     validate_rows_constructor_content(descriptor, &payload[cursor..], depth + 1)
@@ -9163,14 +9163,22 @@ mod tests {
     #[test]
     fn rows_opaque_registration_accepts_bounded_canonical_zero_row_frame() {
         const ROWS_TYPE: TypeId = TypeId::from_bytes([0x8a; 16]);
-        let standard = verified_standard_with_value_types(vec![
-            standard_boolean_definition(),
-            opaque_definition(
-                ROWS_TYPE,
-                ["std", "data", "rows"],
-                "orna.std.value.rows@1",
-            ),
-        ]);
+        let standard = verified_standard_with_value_types_and_schemas(
+            vec![
+                standard_boolean_definition(),
+                opaque_definition(
+                    ROWS_TYPE,
+                    ["std", "data", "rows"],
+                    "orna.std.value.rows@1",
+                ),
+            ],
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x8b; 16]),
+                    QualifiedSemanticName::new(["std", "data"]).unwrap(),
+                )
+            ],
+        );
         let active = active_record_revision_with_standard(RECORD_TYPE, standard);
         let standard = active.catalogue_hash_context().standard().unwrap();
         let registration = OpaqueCodecRegistration::rows(
