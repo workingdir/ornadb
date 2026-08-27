@@ -9762,7 +9762,7 @@ EXPORT TYPE std.action.Action AS std.Action;
             payload
         };
         let integer = frame(0x03, &7_i32.to_be_bytes());
-        let valid = descriptor_payload(1, &vec![([1; 16], integer.clone())]);
+        let valid = descriptor_payload(1, &[([1; 16], integer.clone())]);
         let accepted = OpaqueValue::new(&active, &registry, super::STD_ACTION_TYPE_ID, &valid)
             .expect("a canonical action descriptor is accepted");
         assert_eq!(accepted.canonical_payload(), valid.as_slice());
@@ -9787,7 +9787,7 @@ EXPORT TYPE std.action.Action AS std.Action;
         let mut bad_marker = valid.clone();
         let frame_offset = count_offset + 4 + 16 + 4;
         bad_marker[frame_offset..frame_offset + 4].copy_from_slice(b"ORV2");
-        let bad_boolean = descriptor_payload(1, &vec![([1; 16], frame(0x02, &[2]))]);
+        let bad_boolean = descriptor_payload(1, &[([1; 16], frame(0x02, &[2]))]);
         let mut trailing = valid.clone();
         trailing.push(0xaa);
         let body_length_offset = super::ACTION_MAGIC.len();
@@ -9801,11 +9801,11 @@ EXPORT TYPE std.action.Action AS std.Action;
 
         let unsorted = descriptor_payload(
             1,
-            &vec![([2; 16], integer.clone()), ([1; 16], integer.clone())],
+            &[([2; 16], integer.clone()), ([1; 16], integer.clone())],
         );
         let repeated = descriptor_payload(
             1,
-            &vec![([1; 16], integer.clone()), ([1; 16], integer.clone())],
+            &[([1; 16], integer.clone()), ([1; 16], integer.clone())],
         );
         let max_field_count_record_body = u32::try_from(MAX_RUNTIME_VALUE_NODES)
             .expect("the runtime node limit fits in u32")
@@ -9813,7 +9813,7 @@ EXPORT TYPE std.action.Action AS std.Action;
             .to_vec();
         let max_field_count_record = descriptor_payload(
             1,
-            &vec![([1; 16], frame(0x0b, &max_field_count_record_body))],
+            &[([1; 16], frame(0x0b, &max_field_count_record_body))],
         );
 
         let first_child = frame(0x07, &[0; 45]);
@@ -9823,7 +9823,7 @@ EXPORT TYPE std.action.Action AS std.Action;
         truncated_identity_record_body.extend_from_slice(&first_child);
         let truncated_identity_record = descriptor_payload(
             1,
-            &vec![([1; 16], frame(0x0b, &truncated_identity_record_body))],
+            &[([1; 16], frame(0x0b, &truncated_identity_record_body))],
         );
 
         let mut duplicate_record_body = 2_u32.to_be_bytes().to_vec();
@@ -9833,7 +9833,7 @@ EXPORT TYPE std.action.Action AS std.Action;
             duplicate_record_body.extend_from_slice(&integer);
         }
         let duplicate_record =
-            descriptor_payload(1, &vec![([1; 16], frame(0x0b, &duplicate_record_body))]);
+            descriptor_payload(1, &[([1; 16], frame(0x0b, &duplicate_record_body))]);
         for malformed in [
             invalid_domain,
             oversized_count,
