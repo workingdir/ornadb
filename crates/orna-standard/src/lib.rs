@@ -9799,22 +9799,16 @@ EXPORT TYPE std.action.Action AS std.Action;
         trailing[body_length_offset..body_length_offset + 4]
             .copy_from_slice(&(body_length + 1).to_be_bytes());
 
-        let unsorted = descriptor_payload(
-            1,
-            &[([2; 16], integer.clone()), ([1; 16], integer.clone())],
-        );
-        let repeated = descriptor_payload(
-            1,
-            &[([1; 16], integer.clone()), ([1; 16], integer.clone())],
-        );
+        let unsorted =
+            descriptor_payload(1, &[([2; 16], integer.clone()), ([1; 16], integer.clone())]);
+        let repeated =
+            descriptor_payload(1, &[([1; 16], integer.clone()), ([1; 16], integer.clone())]);
         let max_field_count_record_body = u32::try_from(MAX_RUNTIME_VALUE_NODES)
             .expect("the runtime node limit fits in u32")
             .to_be_bytes()
             .to_vec();
-        let max_field_count_record = descriptor_payload(
-            1,
-            &[([1; 16], frame(0x0b, &max_field_count_record_body))],
-        );
+        let max_field_count_record =
+            descriptor_payload(1, &[([1; 16], frame(0x0b, &max_field_count_record_body))]);
 
         let first_child = frame(0x07, &[0; 45]);
         let mut truncated_identity_record_body = 2_u32.to_be_bytes().to_vec();
