@@ -1685,11 +1685,8 @@ fn validate_rows_value(
             && active
                 .catalogue()
                 .record_value_type_by_id(type_id)
-                .is_none() =>
-        {
-            // `decode_constructed_value`/`encode_constructed_value` validates a
-            // standard enum or record against the pinned standard below.
-            if active
+                .is_none()
+            && active
                 .catalogue_hash_context()
                 .standard()
                 .is_none_or(|standard| {
@@ -1698,14 +1695,13 @@ fn validate_rows_value(
                             .catalogue()
                             .record_value_type_by_id(type_id)
                             .is_none()
-                })
-            {
-                return Err(RowsCodecError::InactiveType {
-                    column: column_index,
-                    type_form,
-                    type_id,
-                });
-            }
+                }) =>
+        {
+            return Err(RowsCodecError::InactiveType {
+                column: column_index,
+                type_form,
+                type_id,
+            });
         }
         _ => {}
     }
