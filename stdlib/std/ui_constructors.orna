@@ -1,0 +1,44 @@
+CREATE EXTERNAL CLIENT FUNCTION std.ui.text (
+    text TEXT
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.text@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.button (
+    label TEXT,
+    enabled BOOLEAN
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.button@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.panel (
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.panel@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.row (
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.row@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.column (
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.column@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.text_input (
+    text TEXT,
+    placeholder TEXT,
+    enabled BOOLEAN
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.text_input@1';
+
+CREATE EXTERNAL CLIENT FUNCTION std.ui.tabs (
+    content std.ui.UI
+)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.ui.tabs@1';
