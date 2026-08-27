@@ -3,8 +3,13 @@
 //! Each test spawns the compiled `orna-lsp` binary, drives it through a
 //! framed JSON-RPC client, and asserts the observable protocol behaviour.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+};
 
 use orna_compiler::{check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
@@ -133,6 +138,189 @@ const SOURCE_CHECK_PARITY_SOURCE: &str = concat!(
     "CREATE SCHEMA parity;\n",
     "/* 😀 ée\u{0301} */ CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n",
 );
+
+/// The accepted editor corpus is the one source of truth for this LSP gate.
+const ACCEPTED_MANIFEST: &str =
+    include_str!("../../../editors/tree-sitter-orna/test/accepted-corpus.txt");
+const CORPUS_DELIMITER: &str = "====================";
+
+#[derive(Debug)]
+struct CorpusCase {
+    source: String,
+    expected_tree: String,
+    path: PathBuf,
+}
+
+fn accepted_case_names() -> Vec<String> {
+    let names = ACCEPTED_MANIFEST
+        .lines()
+        .enumerate()
+        .map(|(line_number, line)| {
+            assert!(
+                !line.is_empty() && line == line.trim(),
+                "malformed accepted corpus manifest entry at line {}: {line:?}",
+                line_number + 1
+            );
+            line.to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        !names.is_empty(),
+        "accepted corpus manifest must enumerate at least one case"
+    );
+    let mut unique_names = names.clone();
+    unique_names.sort();
+    unique_names.dedup();
+    assert_eq!(
+        unique_names.len(),
+        names.len(),
+        "accepted corpus manifest contains duplicate case names"
+    );
+    names
+}
+
+fn corpus_directory() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editors/tree-sitter-orna/test/corpus")
+}
+
+fn lines_with_offsets(source: &str) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for line in source.split_inclusive('\n') {
+        let end = start + line.len();
+        lines.push((start, end));
+        start = end;
+    }
+    if start < source.len() {
+        lines.push((start, source.len()));
+    }
+    lines
+}
+
+fn line_body(source: &str, range: (usize, usize)) -> &str {
+    let line = &source[range.0..range.1];
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
+fn parse_corpus_file(path: &Path, contents: &str) -> Vec<(String, CorpusCase)> {
+    let lines = lines_with_offsets(contents);
+    let mut cases = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < lines.len() {
+        let body = line_body(contents, lines[cursor]);
+        if body.is_empty() {
+            cursor += 1;
+            continue;
+        }
+        assert_eq!(
+            body,
+            CORPUS_DELIMITER,
+            "expected corpus case delimiter in {} at line {}",
+            path.display(),
+            cursor + 1
+        );
+        assert!(
+            cursor + 2 < lines.len(),
+            "truncated corpus case header in {} at line {}",
+            path.display(),
+            cursor + 1
+        );
+        let name = line_body(contents, lines[cursor + 1]);
+        assert!(
+            !name.is_empty() && name == name.trim(),
+            "malformed corpus case name in {} at line {}: {name:?}",
+            path.display(),
+            cursor + 2
+        );
+        assert_eq!(
+            line_body(contents, lines[cursor + 2]),
+            CORPUS_DELIMITER,
+            "malformed corpus case header in {} at line {}",
+            path.display(),
+            cursor + 3
+        );
+
+        let mut source_line = cursor + 3;
+        // The blank line after the header is corpus framing, not source text.
+        if source_line < lines.len() && line_body(contents, lines[source_line]).is_empty() {
+            source_line += 1;
+        }
+        let separator_line = (source_line..lines.len())
+            .find(|&index| line_body(contents, lines[index]) == "---")
+            .unwrap_or_else(|| {
+                panic!(
+                    "corpus case {name:?} in {} has no `---` source separator",
+                    path.display()
+                )
+            });
+        let mut source_end = lines[separator_line].0;
+        // The blank line before `---` is also corpus framing.
+        if separator_line > source_line && line_body(contents, lines[separator_line - 1]).is_empty()
+        {
+            source_end = lines[separator_line - 1].0;
+        }
+        let source = contents[lines[source_line].0..source_end].to_owned();
+
+        let expected_tree_start = lines[separator_line].1;
+        let next_case = ((separator_line + 1)..lines.len())
+            .find(|&index| line_body(contents, lines[index]) == CORPUS_DELIMITER);
+        let expected_tree_end = next_case.map_or(contents.len(), |index| lines[index].0);
+        let expected_tree = contents[expected_tree_start..expected_tree_end].trim();
+        assert!(
+            !expected_tree.is_empty(),
+            "corpus case {name:?} in {} has no expected tree",
+            path.display()
+        );
+
+        cases.push((
+            name.to_owned(),
+            CorpusCase {
+                source,
+                expected_tree: expected_tree.to_owned(),
+                path: path.to_owned(),
+            },
+        ));
+        cursor = next_case.unwrap_or(lines.len());
+    }
+
+    cases
+}
+
+fn corpus_cases() -> BTreeMap<String, CorpusCase> {
+    let mut paths = fs::read_dir(corpus_directory())
+        .unwrap_or_else(|error| panic!("read accepted corpus directory: {error}"))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read accepted corpus directory entry: {error}"))
+                .path()
+        })
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.to_str() == Some("txt"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut cases = BTreeMap::new();
+    for path in paths {
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read corpus file {}: {error}", path.display()));
+        for (name, case) in parse_corpus_file(&path, &contents) {
+            if let Some(previous) = cases.insert(name.clone(), case) {
+                panic!(
+                    "duplicate corpus case name {name:?} in {} and {}",
+                    previous.path.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(!cases.is_empty(), "accepted corpus contains no cases");
+    cases
+}
 
 /// A framed JSON-RPC client attached to a spawned server.
 struct Client {
@@ -586,6 +774,121 @@ fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
     );
 }
 
+fn read_case_diagnostics(
+    client: &mut Client,
+    case_name: &str,
+    path: &Path,
+) -> Value {
+    let message = client.read_message();
+    assert_eq!(
+        message["method"],
+        "textDocument/publishDiagnostics",
+        "accepted corpus fixture {case_name:?} from {} expected a diagnostics notification, got {message}",
+        path.display()
+    );
+    message["params"].clone()
+}
+
+fn case_position_byte_offset(
+    source: &str,
+    position: &Value,
+    case_name: &str,
+    path: &Path,
+    diagnostic_index: usize,
+    endpoint: &str,
+) -> usize {
+    let context = format!(
+        "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} {endpoint}",
+        path.display()
+    );
+    let line = position
+        .get("line")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{context} has no unsigned line"));
+    let line = usize::try_from(line)
+        .unwrap_or_else(|_| panic!("{context} line number does not fit in usize"));
+    let character = position
+        .get("character")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{context} has no unsigned UTF-16 character"));
+    let starts = line_starts(source);
+    let line_start = *starts
+        .get(line)
+        .unwrap_or_else(|| panic!("{context} line {line} is outside the source"));
+    let line_end = line_end_byte(source, &starts, line);
+    let line_width = source[line_start..line_end]
+        .chars()
+        .map(|source_character| source_character.len_utf16() as u64)
+        .sum::<u64>();
+    assert!(
+        character <= line_width,
+        "{context} UTF-16 character {character} exceeds line width {line_width}"
+    );
+    byte_offset_from_lsp_position(source, position)
+}
+
+fn assert_case_diagnostic_ranges(
+    source: &str,
+    diagnostics: &Value,
+    case_name: &str,
+    path: &Path,
+) -> usize {
+    let items = diagnostics
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| {
+            panic!(
+                "accepted corpus fixture {case_name:?} from {} returned a diagnostics notification without an array: {diagnostics}",
+                path.display()
+            )
+        });
+    for (diagnostic_index, diagnostic) in items.iter().enumerate() {
+        let range = diagnostic
+            .get("range")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| {
+                panic!(
+                    "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} has no range: {diagnostic}",
+                    path.display()
+                )
+            });
+        let start = range.get("start").unwrap_or_else(|| {
+            panic!(
+                "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} has no range start: {diagnostic}",
+                path.display()
+            )
+        });
+        let end = range.get("end").unwrap_or_else(|| {
+            panic!(
+                "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} has no range end: {diagnostic}",
+                path.display()
+            )
+        });
+        let start_byte = case_position_byte_offset(
+            source,
+            start,
+            case_name,
+            path,
+            diagnostic_index,
+            "range start",
+        );
+        let end_byte = case_position_byte_offset(
+            source,
+            end,
+            case_name,
+            path,
+            diagnostic_index,
+            "range end",
+        );
+        assert!(
+            start_byte <= end_byte,
+            "accepted corpus fixture {case_name:?} from {} diagnostic {diagnostic_index} has a reversed UTF-16 range {start:?}..{end:?}",
+            path.display()
+        );
+    }
+    items.len()
+}
+
 fn open_clean_document(client: &mut Client, uri: &str, source: &str) {
     open_document(client, uri, source, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
@@ -606,6 +909,43 @@ fn open_clean_document(client: &mut Client, uri: &str, source: &str) {
         json!([]),
         "accepted source pull diagnostics clean"
     );
+}
+
+#[test]
+fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
+    let names = accepted_case_names();
+    let cases = corpus_cases();
+    let mut client = Client::spawn();
+    initialize(&mut client);
+
+    for (index, name) in names.iter().enumerate() {
+        let case = cases.get(name).unwrap_or_else(|| {
+            panic!(
+                "accepted corpus manifest case {name:?} has no source fixture under {}",
+                corpus_directory().display()
+            )
+        });
+        let uri = format!("file:///test/accepted-corpus/{:03}.orna", index + 1);
+        open_document(&mut client, &uri, &case.source, (index + 1) as i64);
+        let diagnostics = read_case_diagnostics(&mut client, name, &case.path);
+        assert_eq!(
+            diagnostics.get("uri").and_then(Value::as_str),
+            Some(uri.as_str()),
+            "accepted corpus fixture {name:?} from {} reported the wrong diagnostics URI: {diagnostics}",
+            case.path.display()
+        );
+        let diagnostic_count =
+            assert_case_diagnostic_ranges(&case.source, &diagnostics, name, &case.path);
+        if case.expected_tree.contains("(ERROR") {
+            assert!(
+                diagnostic_count > 0,
+                "accepted corpus fixture {name:?} from {} has an `(ERROR ...)` tree but no LSP diagnostics",
+                case.path.display()
+            );
+        }
+    }
+
+    client.shutdown();
 }
 
 fn assert_symbols_contain(client: &mut Client, uri: &str, expected: &[&str]) {
