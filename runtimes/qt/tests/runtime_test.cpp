@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QPushButton>
+#include <vector>
 
 #include <cstddef>
 #include <cstdio>
@@ -29,6 +30,7 @@ OrnaStringView view(const char *value) {
 }
 
 struct EventState {
+    std::vector<OrnaSurfaceHandle> closed_surfaces;
     std::size_t callbacks = 0;
     std::size_t surface_closed = 0;
     std::size_t actions = 0;
@@ -49,6 +51,7 @@ OrnaStatus emit_event(void *context, OrnaRuntimeHandle, const OrnaRuntimeEventV1
         ++state->callbacks;
         if (event->kind == ORNA_RUNTIME_EVENT_SURFACE_CLOSED) {
             ++state->surface_closed;
+            state->closed_surfaces.push_back(event->as.surface_closed.surface);
         } else if (event->kind == ORNA_RUNTIME_EVENT_ACTION) {
             ++state->actions;
             state->action_surface = event->as.action.surface;
@@ -419,6 +422,21 @@ int main() {
     std::string second_owned_state;
     REQUIRE(capture(api, runtime, second_surface, second_owned_state).code == ORNA_STATUS_OK);
     REQUIRE(second_owned_state != second_structure);
+    QPushButton *second_button = nullptr;
+    for (QWidget *window : QApplication::topLevelWidgets()) {
+        auto *candidate = window->findChild<QPushButton *>();
+        if (candidate != nullptr && candidate != button) {
+            second_button = candidate;
+            break;
+        }
+    }
+    REQUIRE(second_button != nullptr);
+    second_button->click();
+    REQUIRE(events.actions == 2);
+    REQUIRE(events.action_surface == second_surface);
+    REQUIRE(events.action_node == second_button_mount.node);
+    REQUIRE(events.action_handle == second_action_binding.action);
+    REQUIRE(events.action_input_type == "std.text");
     OrnaMountNodeV1 candidate_mount = text_mount;
     candidate_mount.node = 400;
     candidate_mount.parent = second_root_mount.node;
@@ -442,7 +460,7 @@ int main() {
     OrnaUiOperationV1 candidate_operation{};
     candidate_operation.kind = ORNA_UI_OP_MOUNT_NODE;
     candidate_operation.as.mount_node = candidate_mount;
-    OrnaUiBatchV1 candidate_batch{5, &candidate_operation, 1};
+    OrnaUiBatchV1 candidate_batch{4, &candidate_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &candidate_batch).code == ORNA_STATUS_OK);
     REQUIRE(capture(api, runtime, second_surface, second_owned_state).code == ORNA_STATUS_OK);
     REQUIRE(second_owned_state != after_ownership_rollback);
@@ -452,7 +470,7 @@ int main() {
     OrnaUiOperationV1 zero_node_operation{};
     zero_node_operation.kind = ORNA_UI_OP_MOUNT_NODE;
     zero_node_operation.as.mount_node = zero_node_mount;
-    OrnaUiBatchV1 zero_node_batch{6, &zero_node_operation, 1};
+    OrnaUiBatchV1 zero_node_batch{5, &zero_node_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &zero_node_batch).code
             == ORNA_STATUS_INVALID_ARGUMENT);
     std::string after_zero_node;
@@ -464,7 +482,7 @@ int main() {
     OrnaUiOperationV1 wrong_kind_node_operation{};
     wrong_kind_node_operation.kind = ORNA_UI_OP_MOUNT_NODE;
     wrong_kind_node_operation.as.mount_node = wrong_kind_node_mount;
-    OrnaUiBatchV1 wrong_kind_node_batch{6, &wrong_kind_node_operation, 1};
+    OrnaUiBatchV1 wrong_kind_node_batch{5, &wrong_kind_node_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &wrong_kind_node_batch).code
             == ORNA_STATUS_INVALID_ARGUMENT);
     std::string after_wrong_kind_node;
@@ -472,6 +490,8 @@ int main() {
     REQUIRE(after_wrong_kind_node == second_owned_state);
 
     REQUIRE(api->destroy_surface(runtime, surface).code == ORNA_STATUS_OK);
+    REQUIRE(events.closed_surfaces.size() == 1);
+    REQUIRE(events.closed_surfaces[0] == surface);
     REQUIRE(events.surface_closed == 1);
     const auto callbacks_after_first_destroy = events.callbacks;
     REQUIRE(api->poll_event_loop(runtime, 0).code == ORNA_STATUS_OK);
@@ -483,12 +503,21 @@ int main() {
     std::string destroyed_surface_state;
     REQUIRE(capture(api, runtime, surface, destroyed_surface_state).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(events.callbacks == callbacks_after_first_destroy);
+    OrnaSurfaceHandle third_surface = 0;
+    REQUIRE(api->create_surface(runtime, &surface_options, &third_surface).code == ORNA_STATUS_OK);
+    REQUIRE(third_surface != 0);
+    REQUIRE(third_surface != surface);
+    REQUIRE(third_surface != second_surface);
+    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_OK);
+    REQUIRE(events.surface_closed == 2);
+    REQUIRE(events.closed_surfaces.size() == 2);
+    REQUIRE(events.closed_surfaces[1] == third_surface);
 
     OrnaMountNodeV1 retired_node_mount = root_mount;
     OrnaUiOperationV1 retired_node_mount_operation{};
     retired_node_mount_operation.kind = ORNA_UI_OP_MOUNT_NODE;
     retired_node_mount_operation.as.mount_node = retired_node_mount;
-    OrnaUiBatchV1 retired_node_mount_batch{6, &retired_node_mount_operation, 1};
+    OrnaUiBatchV1 retired_node_mount_batch{5, &retired_node_mount_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &retired_node_mount_batch).code
             == ORNA_STATUS_INVALID_ARGUMENT);
     std::string after_retired_node_mount;
@@ -498,7 +527,7 @@ int main() {
     OrnaUiOperationV1 retired_node_unmount_operation{};
     retired_node_unmount_operation.kind = ORNA_UI_OP_UNMOUNT_NODE;
     retired_node_unmount_operation.as.unmount_node = root_mount.node;
-    OrnaUiBatchV1 retired_node_unmount_batch{6, &retired_node_unmount_operation, 1};
+    OrnaUiBatchV1 retired_node_unmount_batch{5, &retired_node_unmount_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &retired_node_unmount_batch).code
             == ORNA_STATUS_NOT_FOUND);
     std::string after_retired_node_unmount;
@@ -510,7 +539,7 @@ int main() {
     OrnaUiOperationV1 retired_action_bind_operation{};
     retired_action_bind_operation.kind = ORNA_UI_OP_BIND_ACTION;
     retired_action_bind_operation.as.bind_action = retired_action_binding;
-    OrnaUiBatchV1 retired_action_bind_batch{6, &retired_action_bind_operation, 1};
+    OrnaUiBatchV1 retired_action_bind_batch{5, &retired_action_bind_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &retired_action_bind_batch).code
             == ORNA_STATUS_INVALID_ARGUMENT);
     std::string after_retired_action_bind;
@@ -520,7 +549,7 @@ int main() {
     OrnaUiOperationV1 retired_action_unbind_operation{};
     retired_action_unbind_operation.kind = ORNA_UI_OP_UNBIND_ACTION;
     retired_action_unbind_operation.as.bind_action = retired_action_binding;
-    OrnaUiBatchV1 retired_action_unbind_batch{6, &retired_action_unbind_operation, 1};
+    OrnaUiBatchV1 retired_action_unbind_batch{5, &retired_action_unbind_operation, 1};
     REQUIRE(api->apply_ui_batch(runtime, second_surface, &retired_action_unbind_batch).code
             == ORNA_STATUS_NOT_FOUND);
     std::string after_retired_action_unbind;
@@ -529,7 +558,9 @@ int main() {
 
     const auto callbacks_before_shutdown = events.callbacks;
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_OK);
-    REQUIRE(events.surface_closed == 2);
+    REQUIRE(events.surface_closed == 3);
+    REQUIRE(events.closed_surfaces.size() == 3);
+    REQUIRE(events.closed_surfaces[2] == second_surface);
     REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_OK);
     REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
