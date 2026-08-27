@@ -15314,7 +15314,10 @@ mod tests {
         let source = "CREATE SCHEMA app; \
             CREATE CLIENT FUNCTION app.target(p_first INTEGER, p_second INTEGER) RETURNS INTEGER AS p_first; \
             CREATE CLIENT FUNCTION app.call() RETURNS INTEGER AS app.target(p_second => 22, p_first => 11);";
-        let report = check(&bundle([("client-call-reversed.orna", source)]), &empty_catalogue());
+        let report = check(
+            &bundle([("client-call-reversed.orna", source)]),
+            &empty_catalogue(),
+        );
         assert_eq!(report.diagnostics(), &[], "{:?}", report.diagnostics());
 
         let checked = report.checked_bundle().unwrap();
@@ -15340,7 +15343,10 @@ mod tests {
             panic!("application CLIENT call did not lower to a call expression");
         };
         assert_eq!(
-            arguments.iter().map(|(parameter, _)| *parameter).collect::<Vec<_>>(),
+            arguments
+                .iter()
+                .map(|(parameter, _)| *parameter)
+                .collect::<Vec<_>>(),
             target_parameter_ids
         );
         assert!(matches!(
