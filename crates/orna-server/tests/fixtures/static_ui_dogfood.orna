@@ -1,0 +1,16 @@
+CREATE SCHEMA static_ui_dogfood;
+
+CREATE CLIENT FUNCTION static_ui_dogfood.main()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Static UI Dogfood',
+        content => std.ui.column(
+            content => std.ui.panel(
+                content => std.ui.text(
+                    text => 'Ready'
+                )
+            )
+        )
+    );
+END;
