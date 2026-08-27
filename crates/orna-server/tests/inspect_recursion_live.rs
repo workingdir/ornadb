@@ -222,6 +222,9 @@ struct RecordingExecutor {
 }
 
 impl ClientResourceExecutor for RecordingExecutor {
+    fn bind_current_invocation(&mut self, invocation: InvocationId) {
+        self.inner.bind_current_invocation(invocation);
+    }
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.execute_count += 1;
         self.inner.execute(request)
@@ -389,6 +392,7 @@ async fn rejects_installed_inspector_self_and_descendant_recursion_without_execu
             inspect_count: 0,
             external_contract_count: 0,
         };
+        self_executor.bind_current_invocation(target);
         let self_result = evaluate_inspector(
             &active,
             &inspector_authorisation,
@@ -442,6 +446,7 @@ async fn rejects_installed_inspector_self_and_descendant_recursion_without_execu
         let execute_before = target_executor.execute_count;
         let inspect_before = target_executor.inspect_count;
         let external_before = target_executor.external_contract_count;
+        target_executor.bind_current_invocation(observer);
         let descendant_result = evaluate_inspector(
             &active,
             &inspector_authorisation,

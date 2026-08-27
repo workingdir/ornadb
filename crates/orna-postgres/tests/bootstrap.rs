@@ -295,6 +295,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "standard table and CSV executable formats",
         include_str!("../migrations/0044_standard_presenter_executable_formats.sql"),
     ),
+    (
+        45,
+        "inspect snapshot observer context",
+        include_str!("../migrations/0045_inspect_snapshot_observer_context.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -1012,7 +1017,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         let after = snapshot_upgrade_state(&database).await?;
         require(
             after.migrations.len() == MIGRATIONS.len() && after.migrations[..20] == before.migrations[..],
-            format!("v21-v41 changed prior migration records: {:?}", after.migrations),
+            format!("v21-v45 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -1185,7 +1190,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         }
         require(
             after.active_pair == before.active_pair,
-            "v21-v41 changed the active revision pair",
+            "v21-v45 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -1193,7 +1198,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v41 recovery does not preserve the active revision pair",
+            "v21-v45 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
@@ -1444,6 +1449,21 @@ async fn inspect_inspect_storage(database: &TestDatabase) -> TestResult<()> {
                 ("source_revision_id", "bytea", "bytea", "NO", Some("")),
                 ("catalogue_revision_id", "bytea", "bytea", "NO", Some("")),
                 ("summary_bytes", "bytea", "bytea", "NO", Some("")),
+                (
+                    "observer_root_invocation_id",
+                    "bytea",
+                    "bytea",
+                    "YES",
+                    Some(""),
+                ),
+                (
+                    "observer_parent_invocation_id",
+                    "bytea",
+                    "bytea",
+                    "YES",
+                    Some(""),
+                ),
+                ("observer_purpose", "text", "text", "YES", Some("")),
             ],
         )
         .await?;
@@ -1857,7 +1877,7 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
         let after = snapshot_upgrade_state(&database).await?;
         require(
             after.migrations.len() == MIGRATIONS.len() && after.migrations[..5] == before.migrations[..],
-            format!("v6-v37 changed prior migration records: {:?}", after.migrations),
+            format!("v6-v45 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -2634,7 +2654,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         "stream function returns".to_owned(),
                         expected_migration_checksum(33, MIGRATIONS[32].2),
                     ),
-            format!("v7-v37 upgrade produced unexpected migrations: {:?}", after.migrations),
+            format!("v7-v45 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
         require(
             after.active_pair == before.active_pair

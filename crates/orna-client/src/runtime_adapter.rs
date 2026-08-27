@@ -4,7 +4,7 @@
 //! It does not load a runtime, resolve a database path, or carry any authority;
 //! the host supplies an already-created [`RuntimeSession`].
 
-use orna_core::value::RuntimeValue;
+use orna_core::{InvocationId, value::RuntimeValue};
 use orna_standard::{
     STD_UI_TYPE_ID, STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_RUNTIME_CONTRACT,
     STD_UI_WINDOW_TITLE_PARAMETER_ID, UI_MAGIC,
@@ -189,6 +189,11 @@ impl QtRuntimeExecutor {
 }
 
 impl ClientResourceExecutor for QtRuntimeExecutor {
+    fn bind_current_invocation(&mut self, invocation: InvocationId) {
+        if let Some(fallback) = self.fallback.as_mut() {
+            fallback.bind_current_invocation(invocation);
+        }
+    }
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         match self.fallback.as_mut() {
             Some(fallback) => fallback.execute(request),

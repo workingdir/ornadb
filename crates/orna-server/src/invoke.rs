@@ -44,8 +44,8 @@ use orna_client::{
 };
 use orna_core::inspect::{
     CallRow, INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, InspectInvocationNodeKind,
-    InspectInvocationPhase, InspectOutcomeKind, InspectPrivilege, InspectResourceKind,
-    InspectResourceStatus, InspectResultSummary, InspectSecurityDecisionKind,
+    InspectInvocationPhase, InspectObserverContext, InspectOutcomeKind, InspectPrivilege,
+    InspectResourceKind, InspectResourceStatus, InspectResultSummary, InspectSecurityDecisionKind,
     InspectSecurityDecisionOutcome, InvocationNodeRow, PresentationCandidateRow, ResourceRow,
     RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow,
 };
@@ -830,6 +830,7 @@ pub struct InstalledClientResourceExecutor {
     active: ActiveDatabaseRevision,
     inspect_kernel: Option<PostgresKernel>,
     inspect_session: Option<AuthenticatedSession>,
+    current_invocation: Option<InvocationId>,
     next_stream_id: u64,
     broker: Option<SharedInvokeBroker>,
     raw_resource_authorizer: Option<SharedInvokeBroker>,
@@ -852,6 +853,7 @@ impl InstalledClientResourceExecutor {
             active,
             inspect_kernel: Some(kernel.clone()),
             inspect_session: Some(session.clone()),
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -881,6 +883,7 @@ impl InstalledClientResourceExecutor {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -931,6 +934,7 @@ impl InstalledClientResourceExecutor {
             active,
             inspect_kernel: Some(kernel),
             inspect_session: Some(session),
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker),
             raw_resource_authorizer: None,
@@ -1278,6 +1282,7 @@ async fn run_installed_external_contract(
     session: &AuthenticatedSession,
     active: &ActiveDatabaseRevision,
     request: &ClientExternalContractRequest,
+    current_invocation: Option<InvocationId>,
 ) -> Result<RuntimeValue, String> {
     if request.identity() == STD_UI_WINDOW_RUNTIME_CONTRACT {
         return run_installed_qt_external_contract(request);
@@ -1285,6 +1290,7 @@ async fn run_installed_external_contract(
     if request.identity() != INSPECT_RENDER_CONTRACT {
         return Err("inspect.runtime_unavailable".to_owned());
     }
+    require_current_observer_invocation(current_invocation, request.observer_root_invocation_id())?;
     if request.context().pair() != active.pair() {
         return Err("inspect.epoch_mismatch".to_owned());
     }
@@ -1434,15 +1440,11 @@ async fn run_installed_external_contract(
     let target_invocation_id =
         target_invocation_id.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
     let root_target = server_root_target.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-    // Carrier target IDs identify the observed invocation only; observer anchors
-    // come from the trusted CLIENT execution context. Authenticate and validate
-    // the epoch before querying protected lineage: otherwise a denied target
-    // could be distinguished by whether it is recursive.
     let observer_lineage = [
         request.observer_root_invocation_id(),
         request.observer_parent_invocation_id(),
     ];
-    authorize_inspect_target_before_recursion(
+    let loaded_snapshot = authorize_inspect_target_before_recursion(
         || async {
             let Some(snapshot) = kernel
                 .load_inspect_snapshot(session, server_epoch)
@@ -1453,7 +1455,7 @@ async fn run_installed_external_contract(
             };
             validate_epoch(&snapshot, target_invocation_id, active.pair())?;
             require_inspect_root_provenance(snapshot.root_target(), root_target)?;
-            Ok(())
+            Ok(snapshot)
         },
         target_invocation_id,
         &observer_lineage,
@@ -1465,6 +1467,11 @@ async fn run_installed_external_contract(
         },
     )
     .await?;
+    require_inspect_observer_context(
+        loaded_snapshot.observer_context(),
+        request.observer_root_invocation_id(),
+        request.context().parent_invocation_id(),
+    )?;
     let client_epoch_id = request.context().client_epoch_id().invocation_id();
     let body = serde_json::to_vec(&serde_json::json!({
         "kind": "node",
@@ -1588,12 +1595,35 @@ fn map_inspect_opaque_value_error(error: OpaqueValueError) -> String {
     }
 }
 
+fn require_current_observer_invocation(
+    current_invocation: Option<InvocationId>,
+    observer_root: InvocationId,
+) -> Result<InvocationId, String> {
+    let Some(current_invocation) = current_invocation else {
+        return Err("inspect.epoch_mismatch".to_owned());
+    };
+    if observer_root != current_invocation {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(current_invocation)
+}
+
 async fn run_installed_inspect(
     kernel: PostgresKernel,
     session: AuthenticatedSession,
     active: ActiveDatabaseRevision,
     request: ClientInspectRequest,
+    current_invocation: Option<InvocationId>,
 ) -> Result<RuntimeValue, String> {
+    let current_invocation = require_current_observer_invocation(
+        current_invocation,
+        request.observer_root_invocation_id(),
+    )?;
+    let observer_root = request.observer_root_invocation_id();
+    // The enclosing server invocation is stable across the nested CLIENT
+    // helper calls that make up one Inspector operation.
+    let observer_parent = request.context().parent_invocation_id();
+
     validate_inspect_request_context(&request, &active)?;
     let standard = active
         .catalogue_hash_context()
@@ -1648,6 +1678,20 @@ async fn run_installed_inspect(
                 },
             )
             .await?;
+            let observer_context = InspectObserverContext::new(observer_root, observer_parent)
+                .map_err(|_| "inspect.epoch_mismatch".to_owned())?;
+            let Some(loaded_snapshot) = kernel
+                .clone_inspect_snapshot_for_current_invocation(
+                    &session,
+                    loaded_snapshot.id(),
+                    observer_context,
+                    current_invocation,
+                )
+                .await
+                .map_err(inspect_kernel_error_code)?
+            else {
+                return Err(INSPECT_DENIED_CODE.to_owned());
+            };
             let payload = make_inspect_carrier(
                 &active,
                 &registry,
@@ -1721,6 +1765,11 @@ async fn run_installed_inspect(
                     };
                     validate_epoch(&loaded_snapshot, target_invocation, authorization_pair)?;
                     require_inspect_root_provenance(loaded_snapshot.root_target(), root_target)?;
+                    require_inspect_observer_context(
+                        loaded_snapshot.observer_context(),
+                        observer_root,
+                        observer_parent,
+                    )?;
                     Ok(loaded_snapshot)
                 },
                 target_invocation,
@@ -1861,6 +1910,19 @@ fn require_inspect_root_provenance(
     decoded_root: FunctionId,
 ) -> Result<(), String> {
     if snapshot_root != decoded_root {
+        return Err("inspect.epoch_mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn require_inspect_observer_context(
+    stored: Option<InspectObserverContext>,
+    observer_root: InvocationId,
+    observer_parent: InvocationId,
+) -> Result<(), String> {
+    let expected = InspectObserverContext::new(observer_root, observer_parent)
+        .map_err(|_| "inspect.epoch_mismatch".to_owned())?;
+    if stored != Some(expected) {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     Ok(())
@@ -2580,6 +2642,10 @@ fn same_resource_request_identity(
 }
 
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
+    fn bind_current_invocation(&mut self, invocation: InvocationId) {
+        self.current_invocation = Some(invocation);
+    }
+
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
             (self.inspect_kernel.clone(), self.inspect_session.clone())
@@ -2590,6 +2656,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             return Err("inspect.cancelled".to_owned());
         }
         let active = self.active.clone();
+        let current_invocation = self.current_invocation;
         let cancellation = self.cancellation.clone();
         let result = thread::Builder::new()
             .name("orna-inspect".to_owned())
@@ -2598,8 +2665,13 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     .enable_all()
                     .build()
                     .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
-                let result =
-                    runtime.block_on(run_installed_inspect(kernel, session, active, request));
+                let result = runtime.block_on(run_installed_inspect(
+                    kernel,
+                    session,
+                    active,
+                    request,
+                    current_invocation,
+                ));
                 if cancellation.is_requested() {
                     Err("inspect.cancelled".to_owned())
                 } else {
@@ -2628,6 +2700,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         }
         let active = self.active.clone();
         let cancellation = self.cancellation.clone();
+        let current_invocation = self.current_invocation;
         let result = thread::Builder::new()
             .name("orna-inspect-render".to_owned())
             .spawn(move || {
@@ -2636,7 +2709,11 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
                     .build()
                     .map_err(|_| "inspect.runtime_unavailable".to_owned())?;
                 let result = runtime.block_on(run_installed_external_contract(
-                    &kernel, &session, &active, &request,
+                    &kernel,
+                    &session,
+                    &active,
+                    &request,
+                    current_invocation,
                 ));
                 if cancellation.is_requested() {
                     Err("inspect.cancelled".to_owned())
@@ -10381,6 +10458,54 @@ mod tests {
     }
 
     #[test]
+    fn inspector_projection_requires_matching_observer_context() {
+        let root = InvocationId::from_bytes([0x61; 16]);
+        let parent = InvocationId::from_bytes([0x62; 16]);
+        let other = InvocationId::from_bytes([0x63; 16]);
+        let context = InspectObserverContext::new(root, parent).expect("observer context");
+
+        assert_eq!(
+            require_inspect_observer_context(Some(context), root, parent),
+            Ok(())
+        );
+        assert_eq!(
+            require_inspect_observer_context(Some(context), other, parent),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+        assert_eq!(
+            require_inspect_observer_context(None, root, parent),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+        assert_eq!(
+            require_inspect_observer_context(
+                Some(context),
+                InvocationId::from_bytes([0; 16]),
+                parent,
+            ),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+    }
+
+    #[test]
+    fn inspector_rejects_forged_current_observer_root() {
+        let root = InvocationId::from_bytes([0x71; 16]);
+        let other = InvocationId::from_bytes([0x72; 16]);
+
+        assert_eq!(
+            require_current_observer_invocation(Some(root), root),
+            Ok(root)
+        );
+        assert_eq!(
+            require_current_observer_invocation(Some(root), other),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+        assert_eq!(
+            require_current_observer_invocation(None, root),
+            Err("inspect.epoch_mismatch".to_owned())
+        );
+    }
+
+    #[test]
     fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
         let target = InvocationId::from_bytes([0x11; 16]);
         let other_target = InvocationId::from_bytes([0x22; 16]);
@@ -11487,6 +11612,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -11647,6 +11773,7 @@ mod tests {
             active: active.clone(),
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -11717,6 +11844,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -11776,6 +11904,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -11823,6 +11952,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -11870,6 +12000,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -11928,6 +12059,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -11988,6 +12120,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -12049,6 +12182,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -12090,6 +12224,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -12140,6 +12275,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -12199,6 +12335,7 @@ mod tests {
             active,
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: None,
             raw_resource_authorizer: None,
@@ -12461,6 +12598,7 @@ mod tests {
             active: active.clone(),
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker.clone()),
             raw_resource_authorizer: None,
@@ -12534,6 +12672,7 @@ mod tests {
             active: active.clone(),
             inspect_kernel: None,
             inspect_session: None,
+            current_invocation: None,
             next_stream_id: 1,
             broker: Some(broker),
             raw_resource_authorizer: None,

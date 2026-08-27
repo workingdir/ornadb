@@ -1470,6 +1470,11 @@ impl Error for ClientInspectError {}
 
 /// A runtime adapter that evaluates one resource request.
 pub trait ClientResourceExecutor {
+    /// Binds the kernel-generated invocation that owns the current dispatch.
+    ///
+    /// The authenticated server dispatch supplies this identity as the
+    /// current invocation anchor; it is provenance, not caller authority.
+    fn bind_current_invocation(&mut self, _invocation: InvocationId) {}
     /// Executes one request and returns its completion.
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion;
     /// Reports one completion without blocking `execute`.
