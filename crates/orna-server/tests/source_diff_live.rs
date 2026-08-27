@@ -142,9 +142,29 @@ async fn diff_run(
     Ok((outcome, bytes))
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_installed_source_diff_end_to_end() -> TestResult<()> {
+fn proves_installed_source_diff_end_to_end() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("source-diff-live".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    failure(format!("Source diff live runtime could not start: {error}"))
+                })?;
+            runtime.block_on(proves_installed_source_diff_end_to_end_inner())
+        })
+        .map_err(|error| failure(format!("Source diff live thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("Source diff live thread panicked")),
+    }
+}
+
+async fn proves_installed_source_diff_end_to_end_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         install_base(&database).await?;
 
