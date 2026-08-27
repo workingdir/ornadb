@@ -2,8 +2,8 @@
 
 use std::{error::Error, fmt};
 
-use orna_artifact::server_terminal_table;
 use orna_artifact::client_plan::{ClientExpressionNode, ExpressionClientPlan};
+use orna_artifact::server_terminal_table;
 use orna_compiler::{
     CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
     StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
@@ -54,15 +54,15 @@ pub use orna_compiler::{
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID,
-    STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT, STD_UI_ROW_CONTENT_PARAMETER_ID,
-    STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID, STD_UI_ROW_RUNTIME_CONTRACT,
-    STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID,
-    STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
-    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
-    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
-    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID,
-    STD_UI_TEXT_RUNTIME_CONTRACT,
+    STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
+    STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
+    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
+    STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
+    STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID,
+    STD_UI_TEXT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_ID, STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID, STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
+    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
     STD_UI_WINDOW_RUNTIME_CONTRACT, STD_UI_WINDOW_TITLE_PARAMETER_ID, STD_WINDOW_SOURCE_UNIT_ID,
@@ -1828,12 +1828,13 @@ pub fn standard_library_v8_manifest()
     let mut type_bindings = version_seven.catalogue().type_bindings().to_vec();
     let rows_binding_name = semantic_name(STD_DATA_ROWS_EXPORT_NAME, ["std", "rows"])?;
     let rows_binding_lookup = TypeLookupName::qualified(rows_binding_name.clone());
-    let rows_binding = TypeBinding::qualified(rows_binding_name, STD_DATA_ROWS_TYPE_ID).map_err(
-        |source| StandardLibraryManifestError::TypeBinding {
-            name: rows_binding_lookup.clone(),
-            source,
-        },
-    )?;
+    let rows_binding =
+        TypeBinding::qualified(rows_binding_name, STD_DATA_ROWS_TYPE_ID).map_err(|source| {
+            StandardLibraryManifestError::TypeBinding {
+                name: rows_binding_lookup.clone(),
+                source,
+            }
+        })?;
     if rows_binding.id() != STD_DATA_ROWS_TYPE_BINDING_ID {
         return Err(StandardLibraryManifestError::TypeBindingIdentityMismatch {
             name: rows_binding_lookup,
@@ -2144,7 +2145,6 @@ pub fn standard_library_v9_manifest()
     .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
     Ok(StandardLibraryV9Manifest { catalogue })
 }
-
 
 fn build_type_bindings(
     expected_ids: &[[u8; 16]],
@@ -2709,7 +2709,6 @@ pub fn prepare_standard_upgrade_v8_to_v9(
         prepare_checked_standard_upgrade,
     )
 }
-
 
 fn require_standard_upgrade_parent(
     active: &ActiveDatabaseRevision,
@@ -3378,7 +3377,6 @@ pub fn verify_standard_library_v9_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
-
 fn retained_standard_library_v6_snapshot_from_source(
     types_source: &str,
     invoke_source: &str,
@@ -3851,7 +3849,12 @@ fn retained_standard_library_v8_snapshot_from_source(
         retained_source,
         LANGUAGE_VERSION_IDENTITY,
         catalogue.clone(),
-        vec![executable, json_executable, table_executable, window_executable],
+        vec![
+            executable,
+            json_executable,
+            table_executable,
+            window_executable,
+        ],
         origins,
         ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
     )
@@ -3899,10 +3902,8 @@ fn retained_standard_library_v9_snapshot_from_source(
     origins.extend(window_origins.iter().cloned());
     let data_origins = reconcile_retained_data_source(data_source, catalogue)?;
     origins.extend(data_origins.iter().cloned());
-    let constructor_origins = reconcile_retained_ui_constructors_source(
-        constructors_source,
-        catalogue,
-    )?;
+    let constructor_origins =
+        reconcile_retained_ui_constructors_source(constructors_source, catalogue)?;
     origins.extend(constructor_origins.iter().cloned());
 
     let types_content_hash = source_unit_content_digest(types_source)
@@ -4051,7 +4052,12 @@ fn retained_standard_library_v9_snapshot_from_source(
         LANGUAGE_VERSION_IDENTITY,
         catalogue.clone(),
         [
-            vec![executable, json_executable, table_executable, window_executable],
+            vec![
+                executable,
+                json_executable,
+                table_executable,
+                window_executable,
+            ],
             constructor_executables,
         ]
         .concat(),
@@ -4331,13 +4337,12 @@ fn reconcile_retained_ui_constructors_source(
         if function.parameters.len() != expected_parameters[index].len() {
             return Err(StandardLibraryError::RetainedSourceMismatch);
         }
-        let function_origin =
-            origin(&function.span, DefinitionIdentity::Function(expected_functions[index]))?;
+        let function_origin = origin(
+            &function.span,
+            DefinitionIdentity::Function(expected_functions[index]),
+        )?;
         let mut group = vec![function_origin.clone()];
-        for (parameter, parameter_id) in function
-            .parameters
-            .iter()
-            .zip(expected_parameters[index])
+        for (parameter, parameter_id) in function.parameters.iter().zip(expected_parameters[index])
         {
             group.push(origin(
                 &parameter.span,
@@ -5966,7 +5971,8 @@ fn retained_terminal_table_executable(
     let function_origin = data_origins
         .iter()
         .find(|origin| {
-            origin.identity() == DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            origin.identity()
+                == DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
         })
         .ok_or(StandardLibraryError::RetainedSourceMismatch)?
         .source();
@@ -6131,9 +6137,7 @@ fn retained_ui_constructor_executable(
 ) -> Result<StandardExecutable, StandardLibraryError> {
     let function_origin = origins
         .iter()
-        .find(|origin| {
-            origin.identity() == DefinitionIdentity::Function(checked.function_id())
-        })
+        .find(|origin| origin.identity() == DefinitionIdentity::Function(checked.function_id()))
         .ok_or(StandardLibraryError::RetainedSourceMismatch)?
         .source();
     let source_origin = |span: &orna_syntax::SourceSpan| {
@@ -6223,8 +6227,8 @@ fn retained_ui_constructor_executable(
     if semantic_hash != expected_semantic_hashes[index] {
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
-    let declaration_bytes =
-        &source.as_bytes()[function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_bytes = &source.as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
     let declaration_content_hash = function_declaration_digest(declaration_bytes)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
     let revision = FunctionRevisionRecord::new(
@@ -12553,8 +12557,8 @@ EXPORT TYPE std.action.Action AS std.Action;
 
     #[test]
     fn v8_rows_snapshot_retains_canonical_source_and_digests() {
-        let snapshot =
-            super::retained_standard_library_v8_snapshot().expect("the retained V8 source is valid");
+        let snapshot = super::retained_standard_library_v8_snapshot()
+            .expect("the retained V8 source is valid");
         let units = snapshot.source().units();
         assert_eq!(units.len(), 8);
         assert_eq!(
@@ -12618,8 +12622,7 @@ EXPORT TYPE std.action.Action AS std.Action;
 
         let verified =
             super::verify_standard_library_v8_snapshot(snapshot).expect("the V8 snapshot verifies");
-        let registry = super::registered_opaque_codecs(&verified)
-            .expect("the V8 codecs register");
+        let registry = super::registered_opaque_codecs(&verified).expect("the V8 codecs register");
         let active = empty_version_two_active_revision(&verified);
         let mut payload = b"ORNA-ROWS/1 ".to_vec();
         payload.extend_from_slice(&1_u16.to_be_bytes());
@@ -12631,19 +12634,14 @@ EXPORT TYPE std.action.Action AS std.Action;
         payload.push(0x02);
         payload.push(0);
         payload.extend_from_slice(&0_u32.to_be_bytes());
-        let value = OpaqueValue::new(
-            &active,
-            &registry,
-            super::STD_DATA_ROWS_TYPE_ID,
-            &payload,
-        )
-        .expect("the V8 registry admits the canonical zero-row Rows frame");
+        let value = OpaqueValue::new(&active, &registry, super::STD_DATA_ROWS_TYPE_ID, &payload)
+            .expect("the V8 registry admits the canonical zero-row Rows frame");
         assert_eq!(value.canonical_payload(), payload);
     }
     #[test]
     fn v9_ui_constructors_snapshot_retains_source_digests_and_codecs() {
-        let snapshot =
-            super::retained_standard_library_v9_snapshot().expect("the retained V9 source is valid");
+        let snapshot = super::retained_standard_library_v9_snapshot()
+            .expect("the retained V9 source is valid");
         let units = snapshot.source().units();
         assert_eq!(units.len(), 9);
         assert_eq!(
@@ -12679,7 +12677,8 @@ EXPORT TYPE std.action.Action AS std.Action;
             snapshot.source().revision_hash()
         );
         assert_eq!(
-            calculate_standard_library_digest(&snapshot).expect("the V9 standard digest recomputes"),
+            calculate_standard_library_digest(&snapshot)
+                .expect("the V9 standard digest recomputes"),
             snapshot.digest()
         );
         let expected_functions = vec![
@@ -12715,13 +12714,14 @@ EXPORT TYPE std.action.Action AS std.Action;
 
         let verified =
             super::verify_standard_library_v9_snapshot(snapshot).expect("the V9 snapshot verifies");
-        let registry = super::registered_opaque_codecs(&verified)
-            .expect("the V9 codecs register");
+        let registry = super::registered_opaque_codecs(&verified).expect("the V9 codecs register");
         let active = empty_version_two_active_revision(&verified);
         let checked =
             orna_compiler::check_standard_library_source(&verified).expect("the V9 source checks");
-        assert_eq!(checked.checked_executables().len(), expected_functions.len());
-
+        assert_eq!(
+            checked.checked_executables().len(),
+            expected_functions.len()
+        );
 
         let mut rows_payload = b"ORNA-ROWS/1 ".to_vec();
         rows_payload.extend_from_slice(&1_u16.to_be_bytes());

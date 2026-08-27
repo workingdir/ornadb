@@ -4,8 +4,8 @@ use orna_protocol::{
     ClientFrame, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS, MAX_RESOURCE_TOTAL_ITEMS,
     decode_active_value, decode_constructed_value, encode_active_client_frame, encode_active_value,
 };
-use sha2::{Digest, Sha256};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     error::Error,
@@ -98,21 +98,21 @@ impl ClientExecutionFuel {
 }
 
 use orna_standard::{
-    ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError, STD_ACTION_TYPE_ID,
+    ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
+    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
     STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
-    STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID,
-    STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
-    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
-    STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID,
-    STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID,
-    STD_UI_TEXT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID,
-    STD_UI_TEXT_INPUT_FUNCTION_ID, STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID,
-    STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID, STD_UI_TEXT_INPUT_RUNTIME_CONTRACT,
-    STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID, STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT,
-    STD_UI_TYPE_ID, STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, UI_MAGIC,
+    STD_UI_PANEL_CONTENT_PARAMETER_ID, STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID,
+    STD_UI_PANEL_RUNTIME_CONTRACT, STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID,
+    STD_UI_ROW_FUNCTION_REVISION_ID, STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_TABS_CONTENT_PARAMETER_ID,
+    STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID, STD_UI_TABS_RUNTIME_CONTRACT,
+    STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
+    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
+    STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
+    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
+    STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID, UI_MAGIC,
     registered_opaque_codecs,
 };
 
@@ -8294,25 +8294,40 @@ struct StandardUiConstructorSpec {
 }
 
 const STD_UI_TEXT_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
-    &[(STD_UI_TEXT_PARAMETER_ID, StandardUiConstructorParameterKind::Text)];
-const STD_UI_BUTTON_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] = &[
-    (
-        STD_UI_BUTTON_LABEL_PARAMETER_ID,
+    &[(
+        STD_UI_TEXT_PARAMETER_ID,
         StandardUiConstructorParameterKind::Text,
-    ),
-    (
-        STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-        StandardUiConstructorParameterKind::Boolean,
-    ),
-];
-const STD_UI_PANEL_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
-    &[(STD_UI_PANEL_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
-const STD_UI_ROW_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
-    &[(STD_UI_ROW_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
-const STD_UI_COLUMN_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
-    &[(STD_UI_COLUMN_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
-const STD_UI_TEXT_INPUT_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    )];
+const STD_UI_BUTTON_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
     &[
+        (
+            STD_UI_BUTTON_LABEL_PARAMETER_ID,
+            StandardUiConstructorParameterKind::Text,
+        ),
+        (
+            STD_UI_BUTTON_ENABLED_PARAMETER_ID,
+            StandardUiConstructorParameterKind::Boolean,
+        ),
+    ];
+const STD_UI_PANEL_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(
+        STD_UI_PANEL_CONTENT_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Content,
+    )];
+const STD_UI_ROW_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(
+        STD_UI_ROW_CONTENT_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Content,
+    )];
+const STD_UI_COLUMN_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
+    &[(
+        STD_UI_COLUMN_CONTENT_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Content,
+    )];
+const STD_UI_TEXT_INPUT_CONSTRUCTOR_PARAMETERS: &[(
+    ParameterId,
+    StandardUiConstructorParameterKind,
+)] = &[
     (
         STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
         StandardUiConstructorParameterKind::Text,
@@ -8327,7 +8342,10 @@ const STD_UI_TEXT_INPUT_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstr
     ),
 ];
 const STD_UI_TABS_CONSTRUCTOR_PARAMETERS: &[(ParameterId, StandardUiConstructorParameterKind)] =
-    &[(STD_UI_TABS_CONTENT_PARAMETER_ID, StandardUiConstructorParameterKind::Content)];
+    &[(
+        STD_UI_TABS_CONTENT_PARAMETER_ID,
+        StandardUiConstructorParameterKind::Content,
+    )];
 
 const STD_UI_TEXT_CONSTRUCTOR: StandardUiConstructorSpec = StandardUiConstructorSpec {
     function: STD_UI_TEXT_FUNCTION_ID,
@@ -8395,7 +8413,10 @@ fn standard_ui_constructor_spec(
     // happens to spell a standard contract must remain a generic external
     // contract, even if it reuses one of the reserved identities.
     if context.pair() != active.pair()
-        || active.catalogue().function_by_id(context.function()).is_some()
+        || active
+            .catalogue()
+            .function_by_id(context.function())
+            .is_some()
     {
         return None;
     }
@@ -8450,7 +8471,10 @@ fn ui_constructor_parameter_matches(
 
 fn ui_constructor_text_property(value: &str) -> Value {
     let mut property = Map::new();
-    property.insert("type".to_owned(), Value::String("std.types.text".to_owned()));
+    property.insert(
+        "type".to_owned(),
+        Value::String("std.types.text".to_owned()),
+    );
     property.insert("value".to_owned(), Value::String(value.to_owned()));
     Value::Object(property)
 }
@@ -8492,13 +8516,13 @@ fn decode_ui_constructor_body(payload: &[u8]) -> Result<Value, OpaqueValueError>
     .map_err(|_| OpaqueValueError::InvalidFrameLength {
         opaque_type: STD_UI_TYPE_ID,
     })?;
-    let body_end = prefix_length
-        .checked_add(body_length)
-        .ok_or(OpaqueValueError::InvalidFrameLength {
-            opaque_type: STD_UI_TYPE_ID,
-        })?;
-    if body_length > orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH
-        || body_end != payload.len()
+    let body_end =
+        prefix_length
+            .checked_add(body_length)
+            .ok_or(OpaqueValueError::InvalidFrameLength {
+                opaque_type: STD_UI_TYPE_ID,
+            })?;
+    if body_length > orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH || body_end != payload.len()
     {
         return Err(OpaqueValueError::InvalidFrameLength {
             opaque_type: STD_UI_TYPE_ID,
@@ -8563,15 +8587,19 @@ fn evaluate_standard_ui_constructor(
             ClientExpressionError::TypeMismatch,
         )));
     }
-    if arguments.iter().zip(spec.parameters).any(|((_, value), (_, kind))| {
-        matches!(
-            (kind, value),
-            (
-                StandardUiConstructorParameterKind::Text,
-                RuntimeValue::Text(text)
-            ) if text.len() > runtime_loader::CLIENT_MAX_RUNTIME_TEXT_BYTES
-        )
-    }) {
+    if arguments
+        .iter()
+        .zip(spec.parameters)
+        .any(|((_, value), (_, kind))| {
+            matches!(
+                (kind, value),
+                (
+                    StandardUiConstructorParameterKind::Text,
+                    RuntimeValue::Text(text)
+                ) if text.len() > runtime_loader::CLIENT_MAX_RUNTIME_TEXT_BYTES
+            )
+        })
+    {
         return Err(invalid_ui_constructor_value(
             context,
             OpaqueValueError::InvalidFrameLength {
@@ -12246,13 +12274,7 @@ mod tests {
             })
         );
 
-        for (
-            function,
-            revision,
-            identity,
-            parameter,
-            contract,
-        ) in [
+        for (function, revision, identity, parameter, contract) in [
             (
                 super::STD_UI_PANEL_FUNCTION_ID,
                 super::STD_UI_PANEL_FUNCTION_REVISION_ID,
@@ -12301,7 +12323,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn standard_ui_constructor_dispatches_without_an_executor() {
         let standard = standard_v9();
@@ -12342,7 +12363,9 @@ mod tests {
             &mut fuel,
         )
         .expect("constructor expressions do not require a runtime executor");
-        assert!(matches!(value, RuntimeValue::Opaque(value) if value.opaque_type() == super::STD_UI_TYPE_ID));
+        assert!(
+            matches!(value, RuntimeValue::Opaque(value) if value.opaque_type() == super::STD_UI_TYPE_ID)
+        );
     }
 
     #[test]
@@ -12425,12 +12448,7 @@ mod tests {
         malformed.extend_from_slice(&1_u32.to_be_bytes());
         malformed.push(b' ');
         assert!(matches!(
-            OpaqueValue::new(
-                &active,
-                &registry,
-                super::STD_UI_TYPE_ID,
-                malformed.clone()
-            ),
+            OpaqueValue::new(&active, &registry, super::STD_UI_TYPE_ID, malformed.clone()),
             Err(super::OpaqueValueError::InvalidJsonBody { .. })
         ));
         assert!(matches!(
@@ -12462,9 +12480,7 @@ mod tests {
             spec,
             &[(
                 super::STD_UI_TEXT_PARAMETER_ID,
-                RuntimeValue::Text(
-                    "x".repeat(super::CLIENT_MAX_RUNTIME_TEXT_BYTES + 1),
-                ),
+                RuntimeValue::Text("x".repeat(super::CLIENT_MAX_RUNTIME_TEXT_BYTES + 1)),
             )],
         )
         .unwrap_err();
@@ -12514,7 +12530,6 @@ mod tests {
             }
         ));
     }
-
 
     #[test]
     fn same_string_application_function_remains_generic_external_contract() {

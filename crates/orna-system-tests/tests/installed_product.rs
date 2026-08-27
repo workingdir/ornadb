@@ -11837,8 +11837,12 @@ fn installed_scalar_server_invoke_returns_named_integer_as_json() {
     let parameter_id = document
         .parameter_id(&["scalar_server_dogfood", "echo"], "p_value")
         .expect("source apply must report the p_value parameter");
-    assert_canonical_identity(parameter_id, "parameter:", "scalar_server_dogfood.echo.p_value")
-        .expect("source apply must return a canonical parameter identity");
+    assert_canonical_identity(
+        parameter_id,
+        "parameter:",
+        "scalar_server_dogfood.echo.p_value",
+    )
+    .expect("source apply must return a canonical parameter identity");
 
     let granted = machine
         .run_as_orna(&["security", "grant-execute", function_id.as_str()])
@@ -11857,9 +11861,8 @@ fn installed_scalar_server_invoke_returns_named_integer_as_json() {
             "--no-progress",
         ])
         .expect("run installed scalar SERVER invoke");
-    let invoked =
-        require_success("orna invoke scalar_server_dogfood.echo", invoked)
-            .expect("scalar SERVER invoke must succeed");
+    let invoked = require_success("orna invoke scalar_server_dogfood.echo", invoked)
+        .expect("scalar SERVER invoke must succeed");
     assert_eq!(
         invoked.stdout, b"41",
         "JSON output must be exactly the invoked INTEGER scalar"

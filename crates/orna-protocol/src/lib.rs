@@ -60,8 +60,8 @@ use orna_core::{
     value::{
         CollectionValueError, CollectionValuePathSegment, ConstructedValueKind, EnumValue,
         EnumValueError, MAX_ROWS_CELLS, MAX_ROWS_COLUMNS, MAX_ROWS_PAYLOAD_LENGTH, MAX_ROWS_ROWS,
-        MAX_RUNTIME_VALUE_NODES, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, ResultColumn,
-        ResultRow, ResultRows, ResultRowsError, RecordValue, RuntimeFloat, RuntimeType,
+        MAX_RUNTIME_VALUE_NODES, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RecordValue,
+        ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeFloat, RuntimeType,
         RuntimeValue,
     },
 };
@@ -868,7 +868,9 @@ impl fmt::Display for RowsCodecError {
             Self::ColumnCountExceeded { .. } => {
                 formatter.write_str("Rows column count exceeds its bound")
             }
-            Self::RowCountExceeded { .. } => formatter.write_str("Rows row count exceeds its bound"),
+            Self::RowCountExceeded { .. } => {
+                formatter.write_str("Rows row count exceeds its bound")
+            }
             Self::CellCountExceeded { .. } => {
                 formatter.write_str("Rows cell count exceeds its bound")
             }
@@ -908,7 +910,6 @@ impl Error for RowsCodecError {
         }
     }
 }
-
 
 /// Encodes one runtime value as canonical version-1 bytes.
 ///
@@ -1241,26 +1242,31 @@ pub fn encode_rows(
     let mut writer = RowsWriter::new();
     writer.bytes(orna_core::value::ROWS_MAGIC)?;
     writer.u16(orna_core::value::ROWS_FRAME_VERSION)?;
-    writer.u32(u32::try_from(columns.len()).map_err(|_| RowsCodecError::ColumnCountExceeded {
-        actual: columns.len(),
-        maximum: MAX_ROWS_COLUMNS,
+    writer.u32(u32::try_from(columns.len()).map_err(|_| {
+        RowsCodecError::ColumnCountExceeded {
+            actual: columns.len(),
+            maximum: MAX_ROWS_COLUMNS,
+        }
     })?)?;
     for (column_index, column) in columns.iter().enumerate() {
         let name = column.name().as_bytes();
-        writer.u32(u32::try_from(name.len()).map_err(|_| RowsCodecError::PayloadTooLarge {
-            actual: name.len(),
-            maximum: MAX_ROWS_PAYLOAD_LENGTH,
-        })?)?;
+        writer.u32(
+            u32::try_from(name.len()).map_err(|_| RowsCodecError::PayloadTooLarge {
+                actual: name.len(),
+                maximum: MAX_ROWS_PAYLOAD_LENGTH,
+            })?,
+        )?;
         writer.bytes(name)?;
-        let (type_form, type_id) =
-            rows_type_wire(active, column.resolved_type(), column_index)?;
+        let (type_form, type_id) = rows_type_wire(active, column.resolved_type(), column_index)?;
         writer.byte(type_form)?;
         writer.bytes(&type_id.to_bytes())?;
         writer.byte(u8::from(column.nullable()))?;
     }
-    writer.u32(u32::try_from(row_values.len()).map_err(|_| RowsCodecError::RowCountExceeded {
-        actual: row_values.len(),
-        maximum: MAX_ROWS_ROWS,
+    writer.u32(u32::try_from(row_values.len()).map_err(|_| {
+        RowsCodecError::RowCountExceeded {
+            actual: row_values.len(),
+            maximum: MAX_ROWS_ROWS,
+        }
     })?)?;
 
     for (row_index, row) in row_values.iter().enumerate() {
@@ -1361,8 +1367,8 @@ pub fn decode_rows(
     for column_index in 0..column_count {
         let name_length = reader.usize_u32()?;
         let name_bytes = reader.take(name_length)?;
-        let name = std::str::from_utf8(name_bytes)
-            .map_err(|_| RowsCodecError::InvalidColumnNameUtf8 {
+        let name =
+            std::str::from_utf8(name_bytes).map_err(|_| RowsCodecError::InvalidColumnNameUtf8 {
                 column: column_index,
             })?;
         if name.is_empty() {
@@ -1442,13 +1448,14 @@ pub fn decode_rows(
                     source,
                 }
             })?;
-            let canonical = encode_constructed_value(active, registry, &value).map_err(|source| {
-                RowsCodecError::CellValue {
-                    row: row_index,
-                    column: column_index,
-                    source,
-                }
-            })?;
+            let canonical =
+                encode_constructed_value(active, registry, &value).map_err(|source| {
+                    RowsCodecError::CellValue {
+                        row: row_index,
+                        column: column_index,
+                        source,
+                    }
+                })?;
             if canonical != cell {
                 return Err(RowsCodecError::NonCanonicalCell {
                     row: row_index,
@@ -1461,8 +1468,8 @@ pub fn decode_rows(
     }
     reader.require_finished()?;
 
-    let result = ResultRows::new(columns, rows)
-        .map_err(|source| RowsCodecError::ResultRows { source })?;
+    let result =
+        ResultRows::new(columns, rows).map_err(|source| RowsCodecError::ResultRows { source })?;
     OpaqueValue::new(active, registry, STD_DATA_ROWS_TYPE_ID, encoded)
         .map_err(|source| RowsCodecError::OpaqueValue { source })?;
     Ok(result)
@@ -1556,13 +1563,19 @@ fn validate_rows_declared_type(
         }
         0x02 => {
             let active_named = active.catalogue().enum_type_by_id(type_id).is_some()
-                || active.catalogue().record_value_type_by_id(type_id).is_some()
+                || active
+                    .catalogue()
+                    .record_value_type_by_id(type_id)
+                    .is_some()
                 || active
                     .catalogue_hash_context()
                     .standard()
                     .is_some_and(|standard| {
                         standard.catalogue().enum_type_by_id(type_id).is_some()
-                            || standard.catalogue().record_value_type_by_id(type_id).is_some()
+                            || standard
+                                .catalogue()
+                                .record_value_type_by_id(type_id)
+                                .is_some()
                     });
             if !active_named {
                 return Err(RowsCodecError::InactiveType {
@@ -1577,7 +1590,9 @@ fn validate_rows_declared_type(
                 || active
                     .catalogue_hash_context()
                     .standard()
-                    .is_some_and(|standard| standard.catalogue().object_type_by_id(type_id).is_some());
+                    .is_some_and(|standard| {
+                        standard.catalogue().object_type_by_id(type_id).is_some()
+                    });
             if !active_reference {
                 return Err(RowsCodecError::InactiveType {
                     column,
@@ -1587,15 +1602,12 @@ fn validate_rows_declared_type(
             }
         }
         0x04 => {
-            let definition = active
-                .catalogue()
-                .value_type_by_id(type_id)
-                .or_else(|| {
-                    active
-                        .catalogue_hash_context()
-                        .standard()
-                        .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
-                });
+            let definition = active.catalogue().value_type_by_id(type_id).or_else(|| {
+                active
+                    .catalogue_hash_context()
+                    .standard()
+                    .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+            });
             let Some(definition) = definition else {
                 return Err(RowsCodecError::InactiveType {
                     column,
@@ -1667,11 +1679,13 @@ fn validate_rows_value(
             },
         });
     }
-    let (type_form, type_id) =
-        rows_type_wire(active, column.resolved_type(), column_index)?;
+    let (type_form, type_id) = rows_type_wire(active, column.resolved_type(), column_index)?;
     match type_form {
         0x02 if active.catalogue().enum_type_by_id(type_id).is_none()
-            && active.catalogue().record_value_type_by_id(type_id).is_none() =>
+            && active
+                .catalogue()
+                .record_value_type_by_id(type_id)
+                .is_none() =>
         {
             // `decode_constructed_value`/`encode_constructed_value` validates a
             // standard enum or record against the pinned standard below.
@@ -1680,7 +1694,10 @@ fn validate_rows_value(
                 .standard()
                 .is_none_or(|standard| {
                     standard.catalogue().enum_type_by_id(type_id).is_none()
-                        && standard.catalogue().record_value_type_by_id(type_id).is_none()
+                        && standard
+                            .catalogue()
+                            .record_value_type_by_id(type_id)
+                            .is_none()
                 })
             {
                 return Err(RowsCodecError::InactiveType {
@@ -1709,14 +1726,14 @@ impl RowsWriter {
     }
 
     fn bytes(&mut self, value: &[u8]) -> Result<(), RowsCodecError> {
-        let next = self
-            .bytes
-            .len()
-            .checked_add(value.len())
-            .ok_or(RowsCodecError::PayloadTooLarge {
-                actual: usize::MAX,
-                maximum: MAX_ROWS_PAYLOAD_LENGTH,
-            })?;
+        let next =
+            self.bytes
+                .len()
+                .checked_add(value.len())
+                .ok_or(RowsCodecError::PayloadTooLarge {
+                    actual: usize::MAX,
+                    maximum: MAX_ROWS_PAYLOAD_LENGTH,
+                })?;
         if next > MAX_ROWS_PAYLOAD_LENGTH {
             return Err(RowsCodecError::PayloadTooLarge {
                 actual: next,
@@ -1793,7 +1810,6 @@ impl<'a> RowsReader<'a> {
         }
     }
 }
-
 
 fn encode_orv5_value(
     active: &ActiveDatabaseRevision,
