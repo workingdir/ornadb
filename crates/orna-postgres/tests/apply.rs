@@ -9203,10 +9203,15 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
             "the loaded epoch did not retain the root call row",
         )?;
 
+        let resources = kernel.inspect_resources(&loaded, InspectPrivilege::OwnInvocation).await?;
         require(
-            kernel
-                .inspect_resources(&loaded, InspectPrivilege::OwnInvocation).await?
-                .is_empty()
+            resources.len() == 3
+                && resources[0].kind() == orna_core::inspect::InspectResourceKind::State
+                && resources[0].status() == orna_core::inspect::InspectResourceStatus::Active
+                && resources[1].kind() == orna_core::inspect::InspectResourceKind::Catalog
+                && resources[1].status() == orna_core::inspect::InspectResourceStatus::Active
+                && resources[2].kind() == orna_core::inspect::InspectResourceKind::Standard
+                && resources[2].status() == orna_core::inspect::InspectResourceStatus::Active
                 && kernel
                     .inspect_ui_nodes(&loaded, InspectPrivilege::OwnInvocation).await?
                     .is_empty()
@@ -9216,7 +9221,7 @@ async fn proves_inspect_capture_and_projections_after_sealed_echo_inner() -> Tes
                 && kernel
                     .inspect_runtime_bindings(&loaded, InspectPrivilege::OwnInvocation).await?
                     .is_empty(),
-            "the v1-empty projections returned non-empty rows",
+            "the populated projections returned unexpected rows",
         )?;
         let denied_audits_before = inspect_denied_audit_rows(&database).await?.len();
         let denied = kernel
