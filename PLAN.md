@@ -162,7 +162,7 @@ remain labelled, and no environment-gated proof is inferred.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
   `python3 scripts/run-demos.py` passed with the unsupported generic scalar
   fixture excluded. `just kernel-test` passed; the final matrix is
-  `artifact://22027`. Runtime/ABI/package/Studio smokes passed as recorded
+  `artifact://22571`. Runtime/ABI/package/Studio smokes passed as recorded
   session evidence. Installed package selection and clean-host proof remain
   pending.
 - Accepted implementation commits include `f55df8d` (retained V8 table
