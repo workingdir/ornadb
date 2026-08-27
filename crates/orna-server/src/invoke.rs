@@ -2118,6 +2118,67 @@ fn encode_classified_optional_text(
     Ok(())
 }
 
+/// Encodes an optional descriptor with the persisted projection convention.
+///
+/// A denied classified field gets the same marker used by the other optional
+/// classified fields, with no presence bit or descriptor bytes. When the
+/// classifier is granted, the field uses the persisted TypeDescriptor tags so
+/// the selected sink remains a complete canonical descriptor.
+fn encode_classified_optional_descriptor(
+    bytes: &mut Vec<u8>,
+    value: Option<&TypeDescriptor>,
+    granted: bool,
+) -> Result<(), String> {
+    if !granted {
+        bytes.push(INSPECT_REDACTED_FIELD_TAG);
+        return Ok(());
+    }
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            encode_type_descriptor(bytes, value)?;
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+/// Encodes a TypeDescriptor using the canonical persisted projection tags.
+fn encode_type_descriptor(bytes: &mut Vec<u8>, descriptor: &TypeDescriptor) -> Result<(), String> {
+    match descriptor.kind() {
+        TypeDescriptorKind::Named(type_id) => {
+            bytes.push(0);
+            id(bytes, &type_id.to_bytes());
+        }
+        TypeDescriptorKind::Reference(type_id) => {
+            bytes.push(1);
+            id(bytes, &type_id.to_bytes());
+        }
+        TypeDescriptorKind::List(element) => {
+            bytes.push(2);
+            encode_type_descriptor(bytes, element)?;
+        }
+        TypeDescriptorKind::Set(element) => {
+            bytes.push(3);
+            encode_type_descriptor(bytes, element)?;
+        }
+        TypeDescriptorKind::Map { key, value } => {
+            bytes.push(4);
+            encode_type_descriptor(bytes, key)?;
+            encode_type_descriptor(bytes, value)?;
+        }
+        TypeDescriptorKind::Option(value) => {
+            bytes.push(5);
+            encode_type_descriptor(bytes, value)?;
+        }
+        TypeDescriptorKind::Stream(element) => {
+            bytes.push(6);
+            encode_type_descriptor(bytes, element)?;
+        }
+    }
+    Ok(())
+}
+
 fn id(bytes: &mut Vec<u8>, value: &[u8]) {
     bytes.extend_from_slice(value);
 }
@@ -2424,7 +2485,11 @@ fn encode_presentation_candidates(
             encode_classified_text(&mut bytes, value.presenter(), runtime_internals_granted)?;
             bytes.push(u8::from(value.accepted()));
             encode_classified_text(&mut bytes, value.reason(), runtime_internals_granted)?;
-            bytes.push(u8::from(value.selected_sink().is_some()));
+            encode_classified_optional_descriptor(
+                &mut bytes,
+                value.selected_sink(),
+                runtime_internals_granted,
+            )?;
             encode_classified_optional_text(
                 &mut bytes,
                 value.runtime(),
@@ -10464,11 +10529,18 @@ mod tests {
             "ui-runtime-contract-secret".to_owned(),
         )
         .expect("UI fixture must validate");
+        let selected_sink = TypeDescriptor::map(
+            TypeDescriptor::list(TypeDescriptor::named(TypeId::from_bytes([0xa6; 16])))
+                .expect("selected sink list must validate"),
+            TypeDescriptor::option(TypeDescriptor::reference(TypeId::from_bytes([0xa7; 16])))
+                .expect("selected sink option must validate"),
+        )
+        .expect("selected sink map must validate");
         let presentation = PresentationCandidateRow::new(
             "presenter-secret".to_owned(),
             true,
             "platform-reason-secret".to_owned(),
-            None,
+            Some(selected_sink),
             Some("presentation-runtime-secret".to_owned()),
         )
         .expect("presentation fixture must validate");
@@ -10529,14 +10601,16 @@ mod tests {
             0,
         )
         .expect("unarmed UI carrier encodes");
+        let unarmed_presentation_rows =
+            encode_presentation_candidates(std::slice::from_ref(&presentation), false)
+                .expect("unarmed presentation rows encode");
         let presentation_payload = make_inspect_carrier(
             &active,
             &registry,
             InspectCarrierKind::PresentationCandidates,
             &epoch,
             target,
-            encode_presentation_candidates(std::slice::from_ref(&presentation), false)
-                .expect("unarmed presentation rows encode"),
+            unarmed_presentation_rows.clone(),
             0,
         )
         .expect("unarmed presentation carrier encodes");
@@ -10564,6 +10638,25 @@ mod tests {
         assert!(!contains(&security_payload, denial_reason.as_bytes()));
         assert!(!contains(&security_payload, &audit_reference.to_bytes()));
         assert!(!contains(&security_payload, &[0x33; 16]));
+        let mut expected_unarmed_presentation_row = row(7, 0);
+        expected_unarmed_presentation_row.extend_from_slice(&u32::MAX.to_be_bytes());
+        expected_unarmed_presentation_row.push(1);
+        expected_unarmed_presentation_row.extend_from_slice(&u32::MAX.to_be_bytes());
+        expected_unarmed_presentation_row.push(INSPECT_REDACTED_FIELD_TAG);
+        expected_unarmed_presentation_row.push(INSPECT_REDACTED_FIELD_TAG);
+        assert_eq!(
+            unarmed_presentation_rows,
+            vec![expected_unarmed_presentation_row],
+            "denied selected sinks encode only redaction markers",
+        );
+        let mut selected_descriptor_bytes = vec![4, 2, 0];
+        selected_descriptor_bytes.extend_from_slice(&[0xa6; 16]);
+        selected_descriptor_bytes.extend_from_slice(&[5, 1]);
+        selected_descriptor_bytes.extend_from_slice(&[0xa7; 16]);
+        assert!(!contains_row(
+            &unarmed_presentation_rows,
+            &selected_descriptor_bytes,
+        ));
         for secret in [
             b"runtime-secret".as_slice(),
             b"platform-secret".as_slice(),
@@ -10599,11 +10692,41 @@ mod tests {
             &encode_ui_nodes(std::slice::from_ref(&ui), true, true).expect("armed UI rows encode"),
             b"ui-runtime-contract-secret",
         ));
+        let armed_presentation_rows =
+            encode_presentation_candidates(std::slice::from_ref(&presentation), true)
+                .expect("armed presentation rows encode");
         assert!(contains_row(
-            &encode_presentation_candidates(std::slice::from_ref(&presentation), true)
-                .expect("armed presentation rows encode"),
+            &armed_presentation_rows,
             b"presentation-runtime-secret",
         ));
+        let armed_presentation_payload = make_inspect_carrier(
+            &active,
+            &registry,
+            InspectCarrierKind::PresentationCandidates,
+            &epoch,
+            target,
+            armed_presentation_rows.clone(),
+            0,
+        )
+        .expect("armed presentation carrier encodes");
+        let armed_carrier =
+            InspectCarrierEnvelope::decode(&armed_presentation_payload).expect("carrier decodes");
+        assert_eq!(
+            armed_carrier.carrier_kind(),
+            InspectCarrierKind::PresentationCandidates
+        );
+        orna_core::inspect_carrier::validate_inspect_rows(armed_carrier.rows())
+            .expect("armed carrier rows remain valid");
+        assert!(contains(
+            &armed_presentation_payload,
+            &selected_descriptor_bytes
+        ));
+        let armed_presentation_row = &armed_presentation_rows[0];
+        let descriptor_offset = armed_presentation_row
+            .windows(selected_descriptor_bytes.len())
+            .position(|window| window == selected_descriptor_bytes.as_slice())
+            .expect("granted carrier preserves selected sink descriptor");
+        assert_eq!(armed_presentation_row[descriptor_offset - 1], 1);
         assert!(!inspect_classifier_granted(
             &unarmed,
             InspectPrivilege::SecurityDetails
