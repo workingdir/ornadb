@@ -5846,13 +5846,15 @@ fn installed_tty_runtime_offers() -> Vec<InvocationRuntimeOffer> {
 }
 
 /// Builds one pathless offer from the validated installed Qt descriptor.
+fn map_qt_runtime_load_error(_error: orna_client::RuntimeLoadError) -> InstalledInvokeError {
+    InstalledInvokeError::new(
+        InstalledInvokeErrorKind::Presentation,
+        "the installed Qt runtime is unavailable".to_owned(),
+    )
+}
+
 fn installed_qt_runtime_offer() -> Result<InvocationRuntimeOffer, InstalledInvokeError> {
-    let library = RuntimeLibrary::load_installed_qt().map_err(|_| {
-        InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "the installed Qt runtime is unavailable".to_owned(),
-        )
-    })?;
+    let library = RuntimeLibrary::load_installed_qt().map_err(map_qt_runtime_load_error)?;
     let descriptor = library.descriptor();
     let consumed_descriptors = descriptor
         .sinks
@@ -9496,6 +9498,31 @@ mod tests {
             .expect_err("a not-installed family is rejected");
         assert_eq!(error.kind(), InstalledInvokeErrorKind::Usage);
         assert!(error.message().contains("not-installed"));
+    }
+    #[test]
+    fn qt_loader_failures_are_presentation_errors() {
+        for error in [
+            orna_client::RuntimeLoadError::UnsupportedPlatform,
+            orna_client::RuntimeLoadError::LibraryUnavailable,
+            orna_client::RuntimeLoadError::QuerySymbolUnavailable,
+            orna_client::RuntimeLoadError::NullApi,
+            orna_client::RuntimeLoadError::ApiAbiMismatch,
+            orna_client::RuntimeLoadError::MissingApiFunction,
+            orna_client::RuntimeLoadError::NullDescriptor,
+            orna_client::RuntimeLoadError::MalformedDescriptor,
+            orna_client::RuntimeLoadError::DescriptorAbiMismatch,
+            orna_client::RuntimeLoadError::DescriptorIdentityMismatch,
+            orna_client::RuntimeLoadError::DescriptorPlatformMismatch,
+            orna_client::RuntimeLoadError::DescriptorThreadModelMismatch,
+            orna_client::RuntimeLoadError::DescriptorFeatureMismatch,
+            orna_client::RuntimeLoadError::DescriptorSinkOffersMismatch,
+            orna_client::RuntimeLoadError::DescriptorContractOffersMismatch,
+            orna_client::RuntimeLoadError::DescriptorLimitExceeded,
+        ] {
+            let mapped = map_qt_runtime_load_error(error);
+            assert_eq!(mapped.kind(), InstalledInvokeErrorKind::Presentation);
+            assert_eq!(mapped.message(), "the installed Qt runtime is unavailable");
+        }
     }
 
     #[test]
