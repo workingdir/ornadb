@@ -36,6 +36,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0082 | First production Qt non-TTY runtime boundary, provider, loader, and session bridge | Browser runtime, second toolkit/platform, production CLIENT VM, populated Inspector projections, Studio database operations, and gateways remain separately gated. |
 | 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, populated Inspector rows, launch metadata, gateways, and broader UI transport remain deferred. |
 | 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
+| 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
 
 ## Current work ADRs
 
@@ -192,3 +193,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Programmable CLIENT Plans and Shared Runtime Hosts](0084-client-control-flow.md)
 * **work ADR 0086:**
   [Populate Existing Inspector Projection Rows](0086-populated-inspector-projections.md)
+* **work ADR 0087:**
+  [Bounded `std.data.Rows` and Retained Table Presenter](0087-std-data-rows.md)
