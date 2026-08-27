@@ -156,9 +156,11 @@ remain labelled, and no environment-gated proof is inferred.
   `cargo test -p orna-compiler --lib` (471), `cargo test -p orna-client --lib`
   (326), `cargo test -p orna-server --lib` (288 with existing warnings), and
   `cargo test -p orna-postgres --lib server_execution` (90 with existing
-  warnings). `cargo test -p orna-client --all-targets` passed with 326 tests
-  across 3 suites, and `cargo clippy -p orna-client --all-targets -- -D warnings`
-  passed. `cargo fmt --all -- --check` also passed.
+  warnings). `cargo test -p orna-postgres --lib` also passed with 356 tests and
+  3 ignored after safe lint cleanup commit `34e39f4`. `cargo test -p orna-client
+  --all-targets` passed with 326 tests across 3 suites, and `cargo clippy
+  -p orna-client --all-targets -- -D warnings` passed. `cargo fmt --all
+  -- --check` also passed.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
   `python3 scripts/run-demos.py` passed with the unsupported generic scalar
   fixture excluded. `just kernel-test` passed; the final matrix is
@@ -169,9 +171,10 @@ remain labelled, and no environment-gated proof is inferred.
   executable), `fd21c1c` (Inspector selected-sink carrier classification),
   `c68bb0a` (variable-cell Rows validation), `b260ac5`/`50a0cfc` (generic
   CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
-  `57c0bf9` (ADR 0090 local authority), and `767991d` (resource provenance
-  contract). Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`,
-  and `ca831a5`.
+  `34e39f4` (safe Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local
+  authority), `767991d` (resource provenance contract), and `8d3e4cd`
+  (operator runbook). Evidence updates are recorded by `2f8509f`, `07ecc28`,
+  `880ca17`, and `ca831a5`.
 - Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
   `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
   presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
