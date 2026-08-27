@@ -267,43 +267,47 @@ impl QtRuntimeExecutor {
         if content.opaque_type() != STD_UI_TYPE_ID {
             return Err(ADAPTER_FAILURE.to_owned());
         }
-        let body =
-            decode_ui_frame(content.canonical_payload()).map_err(|_| ADAPTER_FAILURE.to_owned())?;
-        let (batch, next_alias, action_bindings) = lower_ui_content(&body, title, self.next_alias)
+        self.show_window(title, content.canonical_payload())
             .map_err(|_| ADAPTER_FAILURE.to_owned())?;
-        // Aliases are never reused, including when a later native operation
-        // fails. This matters because a provider may retain a retired alias.
+
+        // Preserve the caller's typed UI value, including its exact owned
+        // canonical frame, rather than returning a reconstructed projection.
+        Ok(arguments[1].1.clone())
+    }
+
+    /// Lowers one canonical UI frame and displays it as a new surface.
+    ///
+    /// The frame is the `ORNA-UI/1` value returned by a CLIENT function. The
+    /// host receives the surface handle so it can pump, inspect, and retire
+    /// the surface without constructing ABI batches itself.
+    pub fn show_window(
+        &mut self,
+        title: &str,
+        canonical_ui_frame: &[u8],
+    ) -> Result<AbiSurfaceHandle, RuntimeSessionError> {
+        let body = decode_ui_frame(canonical_ui_frame)
+            .map_err(|_| RuntimeSessionError::InvalidArgument)?;
+        let (batch, next_alias, action_bindings) = lower_ui_content(&body, title, self.next_alias)
+            .map_err(|_| RuntimeSessionError::InvalidArgument)?;
         self.next_alias = next_alias;
 
-        let surface = self
-            .session
-            .create_surface(title)
-            .map_err(|_| ADAPTER_FAILURE.to_owned())?;
-        let applied = (|| {
-            self.session.apply_batch(surface, &batch).map_err(|_| ())?;
-            self.session
-                .set_surface_visible(surface, true)
-                .map_err(|_| ())?;
-            Ok::<(), ()>(())
-        })();
-        if applied.is_err() {
-            // Destruction is best effort: the original failure remains the
-            // only externally visible result and contains no native detail.
+        let surface = self.session.create_surface(title)?;
+        if let Err(error) = self.session.apply_batch(surface, &batch) {
             let _ = self.session.destroy_surface(surface);
-            return Err(ADAPTER_FAILURE.to_owned());
+            return Err(error);
+        }
+        if let Err(error) = self.session.set_surface_visible(surface, true) {
+            let _ = self.session.destroy_surface(surface);
+            return Err(error);
         }
         self.active_surfaces.insert(surface);
         for (action, action_id) in action_bindings {
             self.action_bindings
                 .insert(action, RuntimeActionBinding { surface, action_id });
         }
-
-        // Preserve the caller's typed UI value, including its exact owned
-        // canonical frame, rather than returning a reconstructed projection.
-        Ok(arguments[1].1.clone())
+        Ok(surface)
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AdapterInputError;
 
