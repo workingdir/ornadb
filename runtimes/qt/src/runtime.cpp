@@ -629,7 +629,9 @@ bool validate_batch(const Runtime &runtime,
             node.parent = mount.parent;
             node.contract = contract;
             node.slot = slot;
-            node.has_explicit_key = mount.explicit_key.handle != 0;
+            node.has_explicit_key = !(mount.explicit_key.handle == 0
+                                      && mount.explicit_key.type_name.len == 0
+                                      && mount.explicit_key.canonical_encoding.len == 0);
             node.explicit_key_type = read_string(mount.explicit_key.type_name);
             node.explicit_key_bytes = read_bytes(mount.explicit_key.canonical_encoding);
             nodes.emplace(mount.node, std::move(node));

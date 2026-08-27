@@ -1,9 +1,11 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, ClientAssignmentStatement, ClientCallArgument, ClientExpression,
-    ClientFunctionBody, ClientFunctionDeclaration, ClientLetStatement, ClientLocalBinding,
-    ClientProceduralStatement, ClientStateBlockBody, DeleteStatement, Diagnostic,
+    CapabilitySpecification, ClientAssignmentStatement, ClientBinaryExpression,
+    ClientBinaryOperator, ClientCallArgument, ClientExpression, ClientFunctionBody,
+    ClientFunctionDeclaration, ClientIfBranch, ClientIfStatement, ClientLetStatement,
+    ClientLocalBinding, ClientProceduralStatement, ClientReturnStatement, ClientStateBlockBody,
+    ClientUnaryExpression, ClientUnaryOperator, ClientWhileStatement, DeleteStatement, Diagnostic,
     EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
     NamePart, NoInputParameterSelectBody, NullOrdering, ObjectFieldDeclaration, ObjectSource,
@@ -80,6 +82,20 @@ pub(crate) enum SyntaxKind {
     ClientProceduralLetStatement,
     ClientAssignmentStatement,
     StreamReturnType,
+    /// A unary CLIENT expression.
+    ClientUnaryExpression,
+    /// A binary CLIENT expression.
+    ClientBinaryExpression,
+    /// A parenthesized CLIENT expression.
+    ClientParenthesizedExpression,
+    /// A CLIENT `IF` statement.
+    ClientIfStatement,
+    /// One CLIENT `IF`/`ELSIF` branch.
+    ClientIfBranch,
+    /// A CLIENT `WHILE` statement.
+    ClientWhileStatement,
+    /// A CLIENT `RETURN` statement.
+    ClientReturnStatement,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -154,6 +170,13 @@ impl Language for OrnaLanguage {
             55 => SyntaxKind::ClientProceduralLetStatement,
             56 => SyntaxKind::ClientAssignmentStatement,
             57 => SyntaxKind::StreamReturnType,
+            58 => SyntaxKind::ClientUnaryExpression,
+            59 => SyntaxKind::ClientBinaryExpression,
+            60 => SyntaxKind::ClientParenthesizedExpression,
+            61 => SyntaxKind::ClientIfStatement,
+            62 => SyntaxKind::ClientIfBranch,
+            63 => SyntaxKind::ClientWhileStatement,
+            64 => SyntaxKind::ClientReturnStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -859,43 +882,183 @@ impl<'source> Parser<'source> {
         }
     }
 
-    /// Parses the non-suspending closed CLIENT expression surface (ADR 0068).
-    ///
-    /// The expression surface is a call, a string/integer/Boolean literal, a
-    /// parameter read, a field path from a parameter, and left-associative `||`
-    /// concatenation. `AWAIT` is intentionally excluded; callers that represent
-    /// procedural suspension points use [`Self::parse_client_suspending_expression`].
+    /// Parses the typed CLIENT expression surface with conventional
+    /// precedence. Binary operators are left-associative and parentheses are
+    /// represented explicitly so every expression keeps an exact source span.
     fn parse_client_expression(&mut self) -> Option<ClientExpression> {
-        let mut left = self.parse_client_primary_expression()?;
+        self.parse_client_binary_expression(1)
+    }
+
+    fn parse_client_binary_expression(
+        &mut self,
+        minimum_precedence: u8,
+    ) -> Option<ClientExpression> {
+        let mut left = self.parse_client_unary_expression()?;
         loop {
             self.skip_trivia();
-            if self.current().is_none_or(|token| token.text != "||") {
+            if self.current().is_some_and(|token| token.text == "||") {
+                if minimum_precedence > 4 {
+                    break;
+                }
+                self.bump();
+                self.skip_trivia();
+                let right = self.parse_client_binary_expression(5)?;
+                let span = SourceSpan {
+                    start: left.span().start,
+                    end: right.span().end,
+                };
+                left = ClientExpression::Concat {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    span,
+                };
+                continue;
+            }
+            let Some((operator, precedence, width)) = self.client_binary_operator() else {
+                break;
+            };
+            if precedence < minimum_precedence {
                 break;
             }
-            self.bump();
+            self.consume_client_binary_operator(width);
             self.skip_trivia();
-            let right = self.parse_client_primary_expression()?;
+            let right = self.parse_client_binary_expression(precedence + 1)?;
             let span = SourceSpan {
                 start: left.span().start,
                 end: right.span().end,
             };
-            left = ClientExpression::Concat {
+            left = ClientExpression::Binary(ClientBinaryExpression {
                 left: Box::new(left),
+                operator,
                 right: Box::new(right),
                 span,
-            };
+            });
         }
         Some(left)
     }
 
+    fn parse_client_unary_expression(&mut self) -> Option<ClientExpression> {
+        self.skip_trivia();
+        let Some(token) = self.current().cloned() else {
+            self.error_current("ORNA0001", "expected a CLIENT expression");
+            return None;
+        };
+        let operator = if token.text == "+" {
+            Some(ClientUnaryOperator::Plus)
+        } else if token.text == "-" {
+            Some(ClientUnaryOperator::Minus)
+        } else if token.is_word("NOT") {
+            Some(ClientUnaryOperator::Not)
+        } else {
+            None
+        };
+        let Some(operator) = operator else {
+            return self.parse_client_primary_expression();
+        };
+        let start = token.range.start;
+        self.builder
+            .start_node(SyntaxKind::ClientUnaryExpression.into());
+        self.bump();
+        self.skip_trivia();
+        let expression = self.parse_client_unary_expression();
+        let result = expression.map(|expression| {
+            let span = SourceSpan {
+                start,
+                end: expression.span().end,
+            };
+            ClientExpression::Unary(ClientUnaryExpression {
+                operator,
+                expression: Box::new(expression),
+                span,
+            })
+        });
+        self.builder.finish_node();
+        result
+    }
+
+    fn client_binary_operator(&self) -> Option<(ClientBinaryOperator, u8, usize)> {
+        let token = self.current()?;
+        let next = self.tokens.get(self.index + 1);
+        let adjacent_next = next.is_some_and(|next| next.range.start == token.range.end);
+        let result = if token.is_word("OR") {
+            Some((ClientBinaryOperator::Or, 1, 1))
+        } else if token.is_word("AND") {
+            Some((ClientBinaryOperator::And, 2, 1))
+        } else if token.text == "=" {
+            Some((ClientBinaryOperator::Equal, 3, 1))
+        } else if token.text == "!" && adjacent_next && next.is_some_and(|next| next.text == "=") {
+            Some((ClientBinaryOperator::NotEqual, 3, 2))
+        } else if token.text == "<" && adjacent_next && next.is_some_and(|next| next.text == ">") {
+            Some((ClientBinaryOperator::NotEqual, 3, 2))
+        } else if token.text == "<" && adjacent_next && next.is_some_and(|next| next.text == "=") {
+            Some((ClientBinaryOperator::LessThanOrEqual, 3, 2))
+        } else if token.text == ">" && adjacent_next && next.is_some_and(|next| next.text == "=") {
+            Some((ClientBinaryOperator::GreaterThanOrEqual, 3, 2))
+        } else if token.text == "<" {
+            Some((ClientBinaryOperator::LessThan, 3, 1))
+        } else if token.text == ">" {
+            Some((ClientBinaryOperator::GreaterThan, 3, 1))
+        } else if token.text == "+" {
+            Some((ClientBinaryOperator::Add, 5, 1))
+        } else if token.text == "-" {
+            Some((ClientBinaryOperator::Subtract, 5, 1))
+        } else if token.text == "*" {
+            Some((ClientBinaryOperator::Multiply, 6, 1))
+        } else if token.text == "/" {
+            Some((ClientBinaryOperator::Divide, 6, 1))
+        } else if token.text == "%" {
+            Some((ClientBinaryOperator::Modulo, 6, 1))
+        } else {
+            None
+        };
+        result
+    }
+
+    fn consume_client_binary_operator(&mut self, width: usize) {
+        self.bump();
+        if width == 2 {
+            self.bump();
+        }
+    }
     fn parse_client_primary_expression(&mut self) -> Option<ClientExpression> {
         let Some(token) = self.current().cloned() else {
             self.error_current("ORNA0001", "expected a CLIENT expression");
             return None;
         };
+        if token.is_word("FOR") {
+            self.error_current(
+                "ORNA0001",
+                "CLIENT FOR loops are deferred until their collection/range contract exists",
+            );
+            return None;
+        }
         if token.is_word("AWAIT") {
             self.error_current("ORNA0001", "expected a CLIENT expression");
             return None;
+        }
+        if token.kind == TokenKind::LeftParenthesis {
+            let start = token.range.start;
+            self.builder
+                .start_node(SyntaxKind::ClientParenthesizedExpression.into());
+            self.bump();
+            self.skip_trivia();
+            let expression = self.parse_client_expression();
+            self.skip_trivia();
+            let end = self
+                .expect_kind(
+                    TokenKind::RightParenthesis,
+                    "expected ')' to close the CLIENT expression",
+                )
+                .map(|span| span.end);
+            let result = match (expression, end) {
+                (Some(expression), Some(end)) => Some(ClientExpression::Parenthesized {
+                    expression: Box::new(expression),
+                    span: SourceSpan { start, end },
+                }),
+                _ => None,
+            };
+            self.builder.finish_node();
+            return result;
         }
         if token.kind == TokenKind::StringLiteral {
             self.bump();
@@ -909,13 +1072,18 @@ impl<'source> Parser<'source> {
         }
         if token.kind == TokenKind::NumberLiteral {
             self.bump();
-            let value = token.text.parse::<i64>().ok().or_else(|| {
-                self.error_current(
-                    "ORNA0001",
-                    "CLIENT integer literals must fit in a signed 64-bit value",
-                );
-                None
-            })?;
+            let value = match token.text.parse::<i64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    self.diagnostics.push(Diagnostic {
+                        code: "ORNA0001",
+                        message: "CLIENT integer literals must fit in a signed 64-bit value"
+                            .to_owned(),
+                        span: token.span(),
+                    });
+                    return None;
+                }
+            };
             return Some(ClientExpression::IntegerLiteral {
                 value,
                 source: SourceSlice {
@@ -934,7 +1102,7 @@ impl<'source> Parser<'source> {
                 },
             });
         }
-        if !token.is_identifier() {
+        if Self::is_client_expression_keyword(&token) || !token.is_identifier() {
             self.error_current("ORNA0001", "expected a CLIENT expression");
             return None;
         }
@@ -1000,7 +1168,7 @@ impl<'source> Parser<'source> {
             return self.parse_client_call(parts, root_start, end);
         }
         // Emit the collected name tokens for the non-call form.
-        for part in &parts {
+        for _part in &parts {
             self.skip_trivia();
             self.bump();
             self.skip_trivia();
@@ -1011,7 +1179,6 @@ impl<'source> Parser<'source> {
                 self.bump();
                 self.skip_trivia();
             }
-            let _ = part;
         }
         if parts.len() == 1 {
             let parameter = parts
@@ -1029,6 +1196,24 @@ impl<'source> Parser<'source> {
                 end,
             },
         })
+    }
+
+    fn is_client_expression_keyword(token: &Token<'_>) -> bool {
+        token.is_word("AND")
+            || token.is_word("OR")
+            || token.is_word("NOT")
+            || token.is_word("THEN")
+            || token.is_word("LOOP")
+            || token.is_word("ELSIF")
+            || token.is_word("ELSE")
+            || token.is_word("END")
+            || token.is_word("IF")
+            || token.is_word("WHILE")
+            || token.is_word("RETURN")
+            || token.is_word("LET")
+            || token.is_word("STATE")
+            || token.is_word("BEGIN")
+            || token.is_word("FOR")
     }
 
     fn parse_client_await_expression(&mut self) -> Option<ClientExpression> {
@@ -1202,36 +1387,19 @@ impl<'source> Parser<'source> {
         argument
     }
 
-    /// Parses one closed CLIENT state block body (work ADR 0069).
+    /// Parses one CLIENT state/procedural block body.
     ///
-    /// The accepted shape is exactly:
-    ///
-    /// ```text
-    /// IS
-    ///     { STATE identifier type_spec [SCOPE (LOCAL | SESSION | USER)]
-    ///       [DEFAULT expression] ; }
-    /// BEGIN
-    ///     { LET identifier [type_spec] := expression ; }
-    ///     { identifier := expression ; }
-    ///     RETURN [ expression ] ;
-    /// END
-    /// ```
-    ///
-    /// The subset is deliberately closed: a state-bearing block admits only
-    /// `STATE` declarations before `BEGIN`, while a no-state block may use
-    /// `LET` local bindings there; after `BEGIN`, `LET` and simple-name
-    /// assignments are retained before exactly one `RETURN`. Every other
-    /// procedural statement is rejected with a closed diagnostic. On failure
-    /// the caller recovers to the statement terminator.
+    /// Existing simple blocks retain their final top-level `RETURN` in
+    /// `return_expression`. Control-flow statements retain nested and early
+    /// returns in `ClientProceduralStatement::Return`.
     fn parse_client_state_block(&mut self) -> Option<ClientFunctionBody> {
         self.builder
             .start_node(SyntaxKind::ClientStateBlockBody.into());
         let result = (|| {
             let block_start = self.current().expect("IS token exists").range.start;
-            self.bump();
+            self.bump(); // IS
             let mut states = Vec::new();
             let mut locals = Vec::new();
-            let mut statements = Vec::new();
             loop {
                 self.skip_trivia();
                 if self.current().is_some_and(|token| token.is_word("BEGIN")) {
@@ -1245,8 +1413,7 @@ impl<'source> Parser<'source> {
                         );
                         return None;
                     }
-                    let state = self.parse_client_state_declaration()?;
-                    states.push(state);
+                    states.push(self.parse_client_state_declaration()?);
                     continue;
                 }
                 if self.current().is_some_and(|token| token.is_word("LET")) {
@@ -1257,16 +1424,8 @@ impl<'source> Parser<'source> {
                         );
                         return None;
                     }
-                    let local = self.parse_client_local_binding()?;
-                    locals.push(local);
+                    locals.push(self.parse_client_local_binding()?);
                     continue;
-                }
-                if self.current().is_none() {
-                    self.error_current(
-                        "ORNA0001",
-                        "expected BEGIN after CLIENT block declarations",
-                    );
-                    return None;
                 }
                 self.error_current(
                     "ORNA0001",
@@ -1275,73 +1434,68 @@ impl<'source> Parser<'source> {
                 return None;
             }
             self.bump(); // BEGIN
-            let mut local_names = locals
+
+            let visible_locals = locals
                 .iter()
                 .map(|local| local.name.clone())
                 .collect::<Vec<_>>();
-            if states.is_empty() {
-                loop {
-                    self.skip_trivia();
-                    if self.current().is_some_and(|token| token.is_word("RETURN")) {
-                        break;
-                    }
-                    let Some(token) = self.current() else {
-                        self.error_current(
-                            "ORNA0001",
-                            "CLIENT blocks require exactly one RETURN statement",
-                        );
-                        return None;
-                    };
-                    if token.is_word("LET") {
-                        let mut statement = self.parse_client_let_statement()?;
-                        statement.expression = rewrite_client_local_name_references(
-                            statement.expression,
-                            &local_names,
-                        );
-                        local_names.push(statement.name.clone());
-                        statements.push(ClientProceduralStatement::Let(statement));
-                        continue;
-                    }
-                    if token.is_identifier()
-                        && self
-                            .peek_significant(1)
-                            .is_some_and(|next| next.text == ":")
-                    {
-                        let mut statement = self.parse_client_assignment_statement()?;
-                        statement.expression = rewrite_client_local_name_references(
-                            statement.expression,
-                            &local_names,
-                        );
-                        statements.push(ClientProceduralStatement::Assignment(statement));
-                        continue;
-                    }
-                    self.error_current(
-                        "ORNA0001",
-                        "CLIENT blocks accept only a single RETURN statement",
-                    );
-                    return None;
-                }
-            } else {
-                self.skip_trivia();
-                if !self.current().is_some_and(|token| token.is_word("RETURN")) {
-                    self.error_current(
-                        "ORNA0001",
-                        "CLIENT state blocks accept only a single RETURN statement",
-                    );
-                    return None;
-                }
-            }
-            let return_expression = self.parse_client_state_return(states.is_empty())?;
-            let return_expression = return_expression
-                .map(|expression| rewrite_client_local_name_references(expression, &local_names));
-            self.skip_trivia();
-            if self.current().is_some_and(|token| token.is_word("RETURN")) {
+            let mut statements =
+                self.parse_client_statement_block(&visible_locals, &["END"], states.is_empty())?;
+            if !states.is_empty()
+                && (statements.is_empty()
+                    || statements.iter().any(|statement| {
+                        !matches!(statement, ClientProceduralStatement::Return(_))
+                    }))
+            {
                 self.error_current(
                     "ORNA0001",
-                    "CLIENT blocks accept only a single RETURN statement",
+                    "CLIENT state blocks accept only a single RETURN statement",
                 );
                 return None;
             }
+            if !states.is_empty()
+                && statements
+                    .get(..statements.len().saturating_sub(1))
+                    .is_some_and(|prefix| {
+                        prefix.iter().any(|statement| {
+                            matches!(statement, ClientProceduralStatement::Return(_))
+                        })
+                    })
+            {
+                let span = statements
+                    .iter()
+                    .rev()
+                    .find_map(|statement| match statement {
+                        ClientProceduralStatement::Return(return_statement) => {
+                            let start = return_statement.span.start;
+                            Some(SourceSpan {
+                                start,
+                                end: start + "RETURN".len(),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        self.current().map(Token::span).unwrap_or(SourceSpan {
+                            start: block_start,
+                            end: block_start,
+                        })
+                    });
+                self.diagnostics.push(Diagnostic {
+                    code: "ORNA0001",
+                    message: "CLIENT blocks accept only a single RETURN statement".to_owned(),
+                    span,
+                });
+                return None;
+            }
+            let return_expression = match statements.last() {
+                Some(ClientProceduralStatement::Return(return_statement)) => {
+                    let return_expression = return_statement.expression.clone();
+                    statements.pop();
+                    return_expression
+                }
+                _ => None,
+            };
             let end_token = self.expect_word_token("END")?;
             Some(ClientFunctionBody::StateBlock(ClientStateBlockBody {
                 states,
@@ -1353,6 +1507,234 @@ impl<'source> Parser<'source> {
                     end: end_token.range.end,
                 },
             }))
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses procedural statements until one of the supplied word terminators.
+    fn parse_client_statement_block(
+        &mut self,
+        outer_locals: &[NamePart],
+        terminators: &[&str],
+        allow_await: bool,
+    ) -> Option<Vec<ClientProceduralStatement>> {
+        let mut local_names = outer_locals.to_vec();
+        let mut statements = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| terminators.iter().any(|word| token.is_word(word)))
+            {
+                return Some(statements);
+            }
+            let Some(token) = self.current().cloned() else {
+                self.error_current("ORNA0001", "expected a CLIENT block terminator");
+                return None;
+            };
+            if token.is_word("EXCEPTION") && terminators.contains(&"END") {
+                return Some(statements);
+            }
+            if token.is_word("LET") {
+                let mut statement = self.parse_client_let_statement()?;
+                statement.expression =
+                    rewrite_client_local_name_references(statement.expression, &local_names);
+                local_names.push(statement.name.clone());
+                statements.push(ClientProceduralStatement::Let(statement));
+                continue;
+            }
+            if token.is_word("RETURN") {
+                let mut return_statement = self.parse_client_return_statement(allow_await)?;
+                return_statement.expression = return_statement.expression.map(|expression| {
+                    rewrite_client_local_name_references(expression, &local_names)
+                });
+                statements.push(ClientProceduralStatement::Return(return_statement));
+                continue;
+            }
+            if token.is_word("IF") {
+                statements.push(ClientProceduralStatement::If(
+                    self.parse_client_if_statement(&local_names, allow_await)?,
+                ));
+                continue;
+            }
+            if token.is_word("WHILE") {
+                statements.push(ClientProceduralStatement::While(
+                    self.parse_client_while_statement(&local_names, allow_await)?,
+                ));
+                continue;
+            }
+            if token.is_identifier()
+                && self
+                    .peek_significant(1)
+                    .is_some_and(|next| next.text == ":")
+            {
+                let mut statement = self.parse_client_assignment_statement()?;
+                statement.expression =
+                    rewrite_client_local_name_references(statement.expression, &local_names);
+                statements.push(ClientProceduralStatement::Assignment(statement));
+                continue;
+            }
+            self.error_current(
+                "ORNA0001",
+                "CLIENT blocks accept LET, assignment, IF, WHILE, or RETURN statements",
+            );
+            return None;
+        }
+    }
+
+    fn parse_client_return_statement(
+        &mut self,
+        allow_await: bool,
+    ) -> Option<ClientReturnStatement> {
+        self.builder
+            .start_node(SyntaxKind::ClientReturnStatement.into());
+        let result = (|| {
+            let return_token = self.current().cloned()?;
+            self.bump(); // RETURN
+            self.skip_trivia();
+            if !allow_await && self.current().is_some_and(|token| token.is_word("AWAIT")) {
+                self.error_current("ORNA0001", "expected a CLIENT expression");
+                return None;
+            }
+            let expression = if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                None
+            } else {
+                Some(self.parse_client_suspending_expression()?)
+            };
+            self.skip_trivia();
+            let semicolon =
+                self.expect_kind(TokenKind::Semicolon, "expected ';' after CLIENT RETURN")?;
+            Some(ClientReturnStatement {
+                expression,
+                span: SourceSpan {
+                    start: return_token.range.start,
+                    end: semicolon.end,
+                },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+    /// Parses one nested CLIENT `IF` statement and its branch bodies.
+    fn parse_client_if_statement(
+        &mut self,
+        outer_locals: &[NamePart],
+        allow_await: bool,
+    ) -> Option<ClientIfStatement> {
+        self.builder
+            .start_node(SyntaxKind::ClientIfStatement.into());
+        let result = (|| {
+            let if_token = self.current().cloned()?;
+            self.bump(); // IF
+            self.skip_trivia();
+            let condition =
+                rewrite_client_local_name_references(self.parse_client_expression()?, outer_locals);
+            self.skip_trivia();
+            self.expect_word_token("THEN")?;
+            let then_statements = self.parse_client_statement_block(
+                outer_locals,
+                &["ELSIF", "ELSE", "END"],
+                allow_await,
+            )?;
+            let mut elsif_branches = Vec::new();
+            while self.current().is_some_and(|token| token.is_word("ELSIF")) {
+                self.builder.start_node(SyntaxKind::ClientIfBranch.into());
+                let branch = (|| {
+                    let branch_start = self.current().expect("ELSIF token exists").range.start;
+                    self.bump(); // ELSIF
+                    self.skip_trivia();
+                    let condition = rewrite_client_local_name_references(
+                        self.parse_client_expression()?,
+                        outer_locals,
+                    );
+                    self.skip_trivia();
+                    self.expect_word_token("THEN")?;
+                    let statements = self.parse_client_statement_block(
+                        outer_locals,
+                        &["ELSIF", "ELSE", "END"],
+                        allow_await,
+                    )?;
+                    let end = self.previous_significant_end(condition.span().end);
+                    Some(ClientIfBranch {
+                        condition,
+                        statements,
+                        span: SourceSpan {
+                            start: branch_start,
+                            end,
+                        },
+                    })
+                })();
+                self.builder.finish_node();
+                elsif_branches.push(branch?);
+            }
+            let else_statements = if self.current().is_some_and(|token| token.is_word("ELSE")) {
+                self.bump();
+                Some(self.parse_client_statement_block(outer_locals, &["END"], allow_await)?)
+            } else {
+                None
+            };
+            let end_token = self.expect_word_token("END")?;
+            self.skip_trivia();
+            if self.take_word("IF").is_none() {
+                self.diagnostics.push(Diagnostic {
+                    code: "ORNA0001",
+                    message: "expected keyword IF".to_owned(),
+                    span: end_token.span(),
+                });
+                return None;
+            }
+            self.skip_trivia();
+            let semicolon = self.expect_kind(TokenKind::Semicolon, "expected ';' after END IF")?;
+            Some(ClientIfStatement {
+                condition,
+                then_statements,
+                elsif_branches,
+                else_statements,
+                span: SourceSpan {
+                    start: if_token.range.start,
+                    end: semicolon.end.max(end_token.range.end),
+                },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    /// Parses one nested CLIENT `WHILE` statement and its body.
+    fn parse_client_while_statement(
+        &mut self,
+        outer_locals: &[NamePart],
+        allow_await: bool,
+    ) -> Option<ClientWhileStatement> {
+        self.builder
+            .start_node(SyntaxKind::ClientWhileStatement.into());
+        let result = (|| {
+            let while_token = self.current().cloned()?;
+            self.bump(); // WHILE
+            self.skip_trivia();
+            let condition =
+                rewrite_client_local_name_references(self.parse_client_expression()?, outer_locals);
+            self.skip_trivia();
+            self.expect_word_token("LOOP")?;
+            let body = self.parse_client_statement_block(outer_locals, &["END"], allow_await)?;
+            let end_token = self.expect_word_token("END")?;
+            self.skip_trivia();
+            self.expect_word_token("LOOP")?;
+            self.skip_trivia();
+            let semicolon =
+                self.expect_kind(TokenKind::Semicolon, "expected ';' after END LOOP")?;
+            Some(ClientWhileStatement {
+                condition,
+                body,
+                span: SourceSpan {
+                    start: while_token.range.start,
+                    end: semicolon.end.max(end_token.range.end),
+                },
+            })
         })();
         self.builder.finish_node();
         result
@@ -1625,41 +2007,6 @@ impl<'source> Parser<'source> {
                     end: semicolon.range.end,
                 },
             })
-        })();
-        self.builder.finish_node();
-        result
-    }
-
-    /// Parses the single `RETURN [ expression ] ;` statement of a state
-    /// block.
-    ///
-    /// The caller has verified that the current token is `RETURN`. The
-    /// result is the parsed return expression, or `None` when the statement
-    /// names no expression.
-    fn parse_client_state_return(&mut self, allow_await: bool) -> Option<Option<ClientExpression>> {
-        self.builder
-            .start_node(SyntaxKind::ClientStateReturnStatement.into());
-        let result = (|| {
-            self.bump(); // RETURN
-            self.skip_trivia();
-            if self
-                .current()
-                .is_some_and(|token| token.kind == TokenKind::Semicolon)
-            {
-                self.bump();
-                return Some(None);
-            }
-            let expression = if allow_await {
-                self.parse_client_suspending_expression()?
-            } else {
-                self.parse_client_expression()?
-            };
-            self.skip_trivia();
-            self.expect_kind(
-                TokenKind::Semicolon,
-                "expected ';' after the CLIENT state block RETURN statement",
-            )?;
-            Some(Some(expression))
         })();
         self.builder.finish_node();
         result
@@ -3551,6 +3898,19 @@ impl<'source> Parser<'source> {
         }
     }
 
+    fn previous_significant_end(&self, fallback: usize) -> usize {
+        self.tokens
+            .get(..self.index)
+            .and_then(|tokens| {
+                tokens
+                    .iter()
+                    .rev()
+                    .find(|token| !token.kind.is_trivia())
+                    .map(|token| token.range.end)
+            })
+            .unwrap_or(fallback)
+    }
+
     fn skip_trivia(&mut self) {
         while self.current().is_some_and(|token| token.kind.is_trivia()) {
             self.bump();
@@ -3678,6 +4038,22 @@ fn rewrite_client_local_name_references(
         ClientExpression::Concat { left, right, span } => ClientExpression::Concat {
             left: Box::new(rewrite_client_local_name_references(*left, locals)),
             right: Box::new(rewrite_client_local_name_references(*right, locals)),
+            span,
+        },
+        ClientExpression::Unary(mut unary) => {
+            unary.expression = Box::new(rewrite_client_local_name_references(
+                *unary.expression,
+                locals,
+            ));
+            ClientExpression::Unary(unary)
+        }
+        ClientExpression::Binary(mut binary) => {
+            binary.left = Box::new(rewrite_client_local_name_references(*binary.left, locals));
+            binary.right = Box::new(rewrite_client_local_name_references(*binary.right, locals));
+            ClientExpression::Binary(binary)
+        }
+        ClientExpression::Parenthesized { expression, span } => ClientExpression::Parenthesized {
+            expression: Box::new(rewrite_client_local_name_references(*expression, locals)),
             span,
         },
         other => other,
