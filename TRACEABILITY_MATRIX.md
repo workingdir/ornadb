@@ -126,17 +126,19 @@ remain pending or unclaimed in `../TODO.md` and `PLAN.md`.
   runtime/provider/package, bounded populated Inspector rows (including
   selected-sink carrier redaction), retained V8 Rows/table routing, V9
   structural UI constructors, generic CLIENT named-argument ordering, variable
-  Rows-cell validation, and local principal/session authority.
+  Rows-cell validation, local principal/session authority, and the registered
+  V9 constructor showcase demo.
 - Recent commits `f55df8d`, `fd21c1c`, `c68bb0a`, `b260ac5`, `50a0cfc`,
-  `113012c`, `767991d`, and `57c0bf9` record the accepted implementation and
-  client quality slices; `2f8509f`, `07ecc28`, `880ca17`, and `ca831a5`
-  record evidence/boundary updates.
+  `113012c`, `767991d`, `57c0bf9`, and `33aa485` record the accepted
+  implementation and client quality/demo slices; `2f8509f`, `07ecc28`,
+  `880ca17`, and `ca831a5` record evidence/boundary updates.
 - Closed Beads boundaries are `ornadb-el1.3.2.1.1`,
   `ornadb-el1.5.13.9`, `ornadb-el1.5.14.2`, `ornadb-el1.5.14.7`,
-  `ornadb-el1.3.4.3`, `ornadb-el1.4.4`, and `ornadb-br0.2`; broad security
-  parent `ornadb-el1.3.4` remains open. Resource terminal provenance
-  `ornadb-el1.2.1.43` is closed by ADR 0078/commit `767991d`; authenticated
-  commit-receipt authority and producer evidence are reconciled.
+  `ornadb-el1.3.4.3`, `ornadb-el1.4.4`, `ornadb-br0.2`, and
+  `ornadb-br0.4.5`; broad security parent `ornadb-el1.3.4` remains open.
+  Resource terminal provenance `ornadb-el1.2.1.43` is closed by ADR 0078/commit
+  `767991d`; authenticated commit-receipt authority and producer evidence are
+  reconciled.
 - Generic no-FROM parameter projection `ornadb-el1.3.14` and scalar demo
   `ornadb-br0.4.4` remain blocked by ADR 0055: the closed
   `NoInputParameterSelect` AST/body is accepted only for fixed standard
