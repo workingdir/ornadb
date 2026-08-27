@@ -47,6 +47,35 @@ mod tests {
             .expect("static UI application source must be checked against V9");
         assert_eq!(report.diagnostics(), &[]);
     }
+
+    #[test]
+    fn rejects_retained_table_presenter_as_a_client_resource_target() {
+        let snapshot = retained_standard_library_v9_snapshot()
+            .and_then(verify_standard_library_v9_snapshot)
+            .expect("retained V9 standard must verify");
+        let standard =
+            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+        let source = SourceBundle::new([SourceUnit::new(
+            "resource.orna",
+            "CREATE SCHEMA app;\n\
+             CREATE CLIENT FUNCTION app.render() RETURNS std.terminal.Document IS\n\
+             BEGIN\n\
+                 RETURN AWAIT std.data.resource(\n\
+                     target => std.terminal.present_table,\n\
+                     arguments => std.call.args()\n\
+                 );\n\
+             END;",
+        )])
+        .expect("resource source must form a bundle");
+
+        let report =
+            check_new_application(&source, &standard).expect("resource source must be checked");
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "unknown SERVER resource target std.terminal.present_table"
+        );
+    }
 }
 
 use crate::source_diagnostics;
