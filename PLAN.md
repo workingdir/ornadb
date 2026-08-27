@@ -163,8 +163,9 @@ remain labelled, and no environment-gated proof is inferred.
   -- --check` also passed.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
   `python3 scripts/run-demos.py` passed with the unsupported generic scalar
-  fixture excluded, including the new `ui-constructor-showcase` source-check
-  demo. `just kernel-test` passed; the final matrix is
+  fixture excluded, including the `ui-constructor-showcase` source-check demo
+  with reachable text, button, panel, row, column, text_input, tabs, and
+  window roots. `just kernel-test` passed; the final matrix is
   `artifact://22571`. Runtime/ABI/package/Studio smokes passed as recorded
   session evidence. Installed package selection and clean-host proof remain
   pending.
@@ -174,8 +175,9 @@ remain labelled, and no environment-gated proof is inferred.
   CLIENT named-argument order/coverage), `113012c` (client Clippy cleanup),
   `34e39f4` (safe Postgres Clippy cleanup), `57c0bf9` (ADR 0090 local
   authority), `767991d` (resource provenance contract), `8d3e4cd` (operator
-  runbook), and `33aa485` (V9 constructor showcase). Evidence updates are
-  recorded by `2f8509f`, `07ecc28`, `880ca17`, and `ca831a5`.
+  runbook), `33aa485` (V9 constructor showcase), and `6e69500` (reachable
+  text-input showcase root). Evidence updates are recorded by `2f8509f`,
+  `07ecc28`, `880ca17`, and `ca831a5`.
 - Closed issue boundaries include `ornadb-el1.3.2.1.1` (Rows/table),
   `ornadb-el1.5.13.7`/`ornadb-el1.5.13.9` (retained V8 presenter and
   presenter-only resource admission), `ornadb-el1.5.14.2`/`ornadb-el1.5.14.7`
