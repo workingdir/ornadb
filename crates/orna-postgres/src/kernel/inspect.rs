@@ -24,11 +24,11 @@ use orna_core::{
     SecurityAuditEventId, SourceRevisionId, StateSlotId, TypeId,
     inspect::{
         CallRow, InspectClassifier, InspectInvocationNodeKind, InspectInvocationPhase,
-        InspectOutcomeKind, InspectPrivilege, InspectResultSummary, InspectSecurityDecisionKind,
-        InspectSecurityDecisionOutcome, InspectSnapshotEpoch, InspectSnapshotOptions,
-        InspectSnapshotSummary, InspectTraceEvent, InspectTracePayload, InvocationNodeRow,
-        PresentationCandidateRow, ResourceRow, RuntimeBindingRow, SecurityDecisionRow,
-        StateCellRow, UiNodeRow,
+        InspectObserverContext, InspectObserverPurpose, InspectOutcomeKind, InspectPrivilege,
+        InspectResultSummary, InspectSecurityDecisionKind, InspectSecurityDecisionOutcome,
+        InspectSnapshotEpoch, InspectSnapshotOptions, InspectSnapshotSummary, InspectTraceEvent,
+        InspectTracePayload, InvocationNodeRow, PresentationCandidateRow, ResourceRow,
+        RuntimeBindingRow, SecurityDecisionRow, StateCellRow, UiNodeRow,
     },
     inspect_carrier::MAX_INSPECT_CARRIER_ROWS,
     invocation::{
@@ -66,6 +66,17 @@ use crate::{
 const INSPECT_SNAPSHOT_RELATION: &str = "_orna_kernel.inspect_snapshots";
 const INSPECT_TRACE_RELATION: &str = "_orna_kernel.inspect_trace_events";
 
+const INSPECT_SNAPSHOT_SELECT: &str = "SELECT epoch_id, invocation_id, recorded_at,
+        owner_principal_id, source_revision_id, catalogue_revision_id, summary_bytes,
+        observer_root_invocation_id, observer_parent_invocation_id, observer_purpose
+ FROM _orna_kernel.inspect_snapshots
+ WHERE epoch_id = $1";
+const INSPECT_SNAPSHOT_INSERT: &str = "INSERT INTO _orna_kernel.inspect_snapshots
+    (epoch_id, invocation_id, recorded_at, owner_principal_id,
+     source_revision_id, catalogue_revision_id, summary_bytes,
+     observer_root_invocation_id, observer_parent_invocation_id, observer_purpose)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+
 /// The closed durable stream-kind set admitted by migration 0027.
 const INSPECT_TRACE_KINDS: &[&str] = &[
     "started",
@@ -80,7 +91,10 @@ const INSPECT_TRACE_KINDS: &[&str] = &[
 
 /// The closed envelope magic and version of the canonical epoch payload.
 const INSPECT_EPOCH_MAGIC: &[u8; 4] = b"INEP";
-const INSPECT_EPOCH_VERSION: u8 = 1;
+const INSPECT_EPOCH_VERSION_V1: u8 = 1;
+const INSPECT_EPOCH_VERSION_V2: u8 = 2;
+const INSPECT_OBSERVER_CONTEXT_PRESENT: u8 = 1;
+const INSPECT_OBSERVER_PURPOSE_INSPECT: u8 = 1;
 
 const PAYLOAD_ID_BYTES: usize = 16;
 const PAYLOAD_U64_BYTES: usize = 8;
@@ -171,10 +185,109 @@ impl AuthenticatedInspectSnapshot {
         self.epoch.summary()
     }
 
+    /// Returns the optional trusted observer context carried by this epoch.
+    pub fn observer_context(&self) -> Option<InspectObserverContext> {
+        self.epoch.observer_context()
+    }
+
     /// Returns the effective INSPECT privileges captured with the epoch.
     pub fn granted(&self) -> &[InspectPrivilege] {
         &self.granted
     }
+}
+async fn lock_current_active_revision(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let row = transaction
+        .query_opt(
+            "SELECT singleton
+             FROM _orna_kernel.active_revision
+             WHERE singleton = true
+             FOR UPDATE",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if row.is_none() {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.active_revision",
+            record: "singleton".to_owned(),
+            rule: "the active revision row must exist before an Inspector clone",
+        });
+    }
+    Ok(())
+}
+
+async fn persist_inspect_snapshot_clone(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    target: InspectSnapshotEpoch,
+    observer_context: InspectObserverContext,
+    session: AuthenticatedSession,
+    granted: Vec<InspectPrivilege>,
+) -> Result<AuthenticatedInspectSnapshot, PostgresKernelError> {
+    if target.source_revision_id() != active.pair().source()
+        || target.catalogue_revision_id() != active.pair().catalogue()
+    {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: INSPECT_SNAPSHOT_RELATION,
+            record: target.id().canonical(),
+            rule: "observer clone target must match the active revision pair",
+        });
+    }
+    let epoch = target
+        .clone_for_observer(observer_context)
+        .map_err(PostgresKernelError::Inspect)?;
+    let epoch_id = epoch.id();
+    let recorded_at = epoch.recorded_at();
+    let payload = encode_epoch_payload(active, registry, &epoch)?;
+    let summary_bytes = encode_constructed_value(active, registry, &RuntimeValue::Bytes(payload))
+        .map_err(PostgresKernelError::InspectValueCodec)?;
+    let observer_context =
+        epoch
+            .observer_context()
+            .ok_or_else(|| PostgresKernelError::DurableInvariant {
+                relation: INSPECT_SNAPSHOT_RELATION,
+                record: epoch_id.canonical(),
+                rule: "observer clone must carry a trusted observer context",
+            })?;
+    let observer_root = observer_context
+        .observer_root_invocation_id()
+        .to_bytes()
+        .to_vec();
+    let observer_parent = observer_context
+        .observer_parent_invocation_id()
+        .to_bytes()
+        .to_vec();
+    let invocation_id = epoch.invocation_id().to_bytes().to_vec();
+    let owner = epoch.owner().to_bytes().to_vec();
+    let source_revision_id = epoch.source_revision_id().to_bytes().to_vec();
+    let catalogue_revision_id = epoch.catalogue_revision_id().to_bytes().to_vec();
+    let observer_purpose = observer_context.purpose().as_str();
+    transaction
+        .execute(
+            INSPECT_SNAPSHOT_INSERT,
+            &[
+                &epoch_id.to_bytes().to_vec(),
+                &invocation_id,
+                &recorded_at,
+                &owner,
+                &source_revision_id,
+                &catalogue_revision_id,
+                &summary_bytes,
+                &observer_root,
+                &observer_parent,
+                &observer_purpose,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(AuthenticatedInspectSnapshot {
+        epoch,
+        session,
+        granted,
+    })
 }
 
 impl PostgresKernel {
@@ -246,14 +359,7 @@ impl PostgresKernel {
             granted.extend(inspect_privileges_for_session(&security, &bound_session));
             let registry = inspect_value_registry(&active)?;
             let row = transaction
-                .query_opt(
-                    "SELECT epoch_id, invocation_id, recorded_at,
-                            owner_principal_id, source_revision_id,
-                            catalogue_revision_id, summary_bytes
-                     FROM _orna_kernel.inspect_snapshots
-                     WHERE epoch_id = $1",
-                    &[&epoch_id.to_bytes().to_vec()],
-                )
+                .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
                 .await
                 .map_err(PostgresKernelError::Database)?;
             let Some(row) = row else {
@@ -285,6 +391,182 @@ impl PostgresKernel {
                 session: bound_session,
                 granted,
             }))
+        })
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
+    /// Clones an authorised inspection epoch for one trusted observer context.
+    ///
+    /// The clone is persisted in the same protected transaction that loads and
+    /// authorises the target. It receives a fresh epoch identity and capture
+    /// time, while preserving the target invocation, owner, revisions, outcome,
+    /// summary, and immutable projection rows. No trace row is emitted.
+    pub async fn clone_inspect_snapshot_for_observer(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        epoch_id: InspectEpochId,
+        observer_context: InspectObserverContext,
+    ) -> Result<Option<AuthenticatedInspectSnapshot>, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = Box::pin(async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(false)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            lock_current_active_revision(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
+            let observer_root = observer_context
+                .observer_root_invocation_id()
+                .to_bytes()
+                .to_vec();
+            let observer_principal = bound_session.principal().to_bytes().to_vec();
+            let observer_root_owned = transaction
+                .query_opt(
+                    "SELECT 1
+                     FROM _orna_kernel.invocation_audit_events
+                     WHERE invocation_id = $1
+                       AND session_principal_id = $2
+                       AND outcome = 'allowed'",
+                    &[&observer_root, &observer_principal],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?
+                .is_some();
+            if !observer_root_owned {
+                drop(transaction);
+                return Ok(None);
+            }
+            let mut granted = vec![InspectPrivilege::OwnInvocation];
+            granted.extend(inspect_privileges_for_session(&security, &bound_session));
+            let registry = inspect_value_registry(&active)?;
+            let row = transaction
+                .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let Some(row) = row else {
+                drop(transaction);
+                self.append_inspect_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingEpoch,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingEpoch,
+                });
+            };
+            let owner = PrincipalId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "owner_principal_id",
+            )?);
+            require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
+            let target = decode_inspect_snapshot_row(&row, &active, &registry)?;
+            let snapshot = persist_inspect_snapshot_clone(
+                &transaction,
+                &active,
+                &registry,
+                target,
+                observer_context,
+                bound_session,
+                granted,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(Some(snapshot))
+        })
+        .await;
+        finish_inspect_session(operation, database_session.shutdown().await)
+    }
+
+    /// Clones an inspection epoch for the kernel-generated current invocation.
+    ///
+    /// This internal server bridge requires the observer root to match the
+    /// dispatch invocation already authenticated by the caller. Unlike the
+    /// external observer path, it does not query invocation audit ownership:
+    /// the dispatch has already bound that root before entering CLIENT.
+    #[doc(hidden)]
+    pub async fn clone_inspect_snapshot_for_current_invocation(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        epoch_id: InspectEpochId,
+        observer_context: InspectObserverContext,
+        current_invocation: InvocationId,
+    ) -> Result<Option<AuthenticatedInspectSnapshot>, PostgresKernelError> {
+        if observer_context.observer_root_invocation_id() != current_invocation {
+            return Ok(None);
+        }
+        let mut database_session = self.open().await?;
+        let operation = Box::pin(async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(false)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            lock_current_active_revision(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let bound_session =
+                rebind_inspect_session(self, &security, authenticated_session).await?;
+            let mut granted = vec![InspectPrivilege::OwnInvocation];
+            granted.extend(inspect_privileges_for_session(&security, &bound_session));
+            let registry = inspect_value_registry(&active)?;
+            let row = transaction
+                .query_opt(INSPECT_SNAPSHOT_SELECT, &[&epoch_id.to_bytes().to_vec()])
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let Some(row) = row else {
+                drop(transaction);
+                self.append_inspect_denial_audit(
+                    authenticated_session,
+                    None,
+                    InspectDenial::MissingEpoch,
+                )
+                .await?;
+                return Err(PostgresKernelError::InspectDenied {
+                    reason: InspectDenial::MissingEpoch,
+                });
+            };
+            let owner = PrincipalId::from_bytes(inspect_id(
+                INSPECT_SNAPSHOT_RELATION,
+                &row,
+                epoch_id.canonical().as_str(),
+                "owner_principal_id",
+            )?);
+            require_inspect_epoch_access(self, &bound_session, owner, &granted).await?;
+            let target = decode_inspect_snapshot_row(&row, &active, &registry)?;
+            let snapshot = persist_inspect_snapshot_clone(
+                &transaction,
+                &active,
+                &registry,
+                target,
+                observer_context,
+                bound_session,
+                granted,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(Some(snapshot))
         })
         .await;
         finish_inspect_session(operation, database_session.shutdown().await)
@@ -863,12 +1145,15 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
     let summary_bytes = encode_constructed_value(active, registry, &RuntimeValue::Bytes(payload))
         .map_err(PostgresKernelError::InspectValueCodec)?;
     let invocation_id = invocation.to_bytes().to_vec();
+    let observer_context = epoch.observer_context();
+    let observer_root =
+        observer_context.map(|context| context.observer_root_invocation_id().to_bytes().to_vec());
+    let observer_parent =
+        observer_context.map(|context| context.observer_parent_invocation_id().to_bytes().to_vec());
+    let observer_purpose = observer_context.map(|context| context.purpose().as_str().to_owned());
     transaction
         .execute(
-            "INSERT INTO _orna_kernel.inspect_snapshots
-                 (epoch_id, invocation_id, recorded_at, owner_principal_id,
-                  source_revision_id, catalogue_revision_id, summary_bytes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            INSPECT_SNAPSHOT_INSERT,
             &[
                 &epoch_id.to_bytes().to_vec(),
                 &invocation_id,
@@ -877,6 +1162,9 @@ pub(crate) async fn capture_inspect_snapshot_in_transaction(
                 &epoch.source_revision_id().to_bytes().to_vec(),
                 &epoch.catalogue_revision_id().to_bytes().to_vec(),
                 &summary_bytes,
+                &observer_root,
+                &observer_parent,
+                &observer_purpose,
             ],
         )
         .await
@@ -1049,7 +1337,9 @@ pub(crate) async fn recover_inspect_relations(
         .query(
             "SELECT epoch_id, invocation_id, recorded_at,
                     owner_principal_id, source_revision_id,
-                    catalogue_revision_id, summary_bytes
+                    catalogue_revision_id, summary_bytes,
+                            observer_root_invocation_id, observer_parent_invocation_id,
+                            observer_purpose
              FROM _orna_kernel.inspect_snapshots
              ORDER BY epoch_id",
             &[],
@@ -1970,6 +2260,55 @@ fn decode_inspect_snapshot_row(
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "recorded_at")?;
     let summary_bytes: Vec<u8> =
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "summary_bytes")?;
+    let observer_root = inspect_optional_id(
+        INSPECT_SNAPSHOT_RELATION,
+        row,
+        &record,
+        "observer_root_invocation_id",
+    )?;
+    let observer_parent = inspect_optional_id(
+        INSPECT_SNAPSHOT_RELATION,
+        row,
+        &record,
+        "observer_parent_invocation_id",
+    )?;
+    let observer_purpose: Option<String> =
+        inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "observer_purpose")?;
+    let column_observer_context = match (observer_root, observer_parent, observer_purpose) {
+        (None, None, None) => None,
+        (Some(root), Some(parent), Some(purpose)) => {
+            if purpose != InspectObserverPurpose::Inspect.as_str() {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: INSPECT_SNAPSHOT_RELATION,
+                    record: record.clone(),
+                    rule: "observer purpose must be the closed inspect purpose",
+                });
+            }
+            let root = InvocationId::from_bytes(root);
+            let parent = InvocationId::from_bytes(parent);
+            if root.to_bytes() == [0; 16] || parent.to_bytes() == [0; 16] {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: INSPECT_SNAPSHOT_RELATION,
+                    record: record.clone(),
+                    rule: "observer context identities must be non-zero",
+                });
+            }
+            Some(InspectObserverContext::new(root, parent).map_err(|_| {
+                PostgresKernelError::DurableInvariant {
+                    relation: INSPECT_SNAPSHOT_RELATION,
+                    record: record.clone(),
+                    rule: "observer context identities must be valid",
+                }
+            })?)
+        }
+        _ => {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: INSPECT_SNAPSHOT_RELATION,
+                record: record.clone(),
+                rule: "observer context columns must be all NULL or all populated",
+            });
+        }
+    };
     let RuntimeValue::Bytes(payload) = decode_constructed_value(active, registry, &summary_bytes)
         .map_err(PostgresKernelError::InspectValueCodec)?
     else {
@@ -1985,6 +2324,7 @@ fn decode_inspect_snapshot_row(
         || epoch.source_revision_id() != source_revision_id
         || epoch.catalogue_revision_id() != catalogue_revision_id
         || epoch.owner() != owner
+        || epoch.observer_context() != column_observer_context
     {
         return Err(PostgresKernelError::DurableInvariant {
             relation: INSPECT_SNAPSHOT_RELATION,
@@ -2323,6 +2663,9 @@ async fn require_inspect_relation_columns(
         "source_revision_id",
         "catalogue_revision_id",
         "summary_bytes",
+        "observer_root_invocation_id",
+        "observer_parent_invocation_id",
+        "observer_purpose",
     ];
     if snapshot != expected_snapshot {
         return Err(PostgresKernelError::DurableInvariant {
@@ -2453,7 +2796,18 @@ fn encode_epoch_payload(
 ) -> Result<Vec<u8>, PostgresKernelError> {
     let mut writer = PayloadWriter::new();
     writer.bytes.extend_from_slice(INSPECT_EPOCH_MAGIC);
-    writer.push_u8(INSPECT_EPOCH_VERSION);
+    let observer_context = epoch.observer_context();
+    writer.push_u8(if observer_context.is_some() {
+        INSPECT_EPOCH_VERSION_V2
+    } else {
+        INSPECT_EPOCH_VERSION_V1
+    });
+    if let Some(context) = observer_context {
+        writer.push_u8(INSPECT_OBSERVER_CONTEXT_PRESENT);
+        writer.push_id(&context.observer_root_invocation_id().to_bytes());
+        writer.push_id(&context.observer_parent_invocation_id().to_bytes());
+        writer.push_u8(INSPECT_OBSERVER_PURPOSE_INSPECT);
+    }
     writer.push_id(&epoch.id().to_bytes());
     writer.push_id(&epoch.invocation_id().to_bytes());
     writer.push_id(&epoch.source_revision_id().to_bytes());
@@ -2489,9 +2843,31 @@ fn decode_epoch_payload(
     }
     reader.position = INSPECT_EPOCH_MAGIC.len();
     let version = reader.take_u8("epoch payload version")?;
-    if version != INSPECT_EPOCH_VERSION {
-        return Err(reader.invalid("epoch payload version is unsupported"));
-    }
+    let observer_context = match version {
+        INSPECT_EPOCH_VERSION_V1 => None,
+        INSPECT_EPOCH_VERSION_V2 => {
+            if reader.take_u8("observer context presence flag")? != INSPECT_OBSERVER_CONTEXT_PRESENT
+            {
+                return Err(reader.invalid("observer context presence flag is not canonical"));
+            }
+            let root = reader.take_id("observer root invocation identity")?;
+            let parent = reader.take_id("observer parent invocation identity")?;
+            let purpose = reader.take_u8("observer purpose tag")?;
+            if root == [0; 16] || parent == [0; 16] {
+                return Err(reader.invalid("observer context identities must be non-zero"));
+            }
+            if purpose != INSPECT_OBSERVER_PURPOSE_INSPECT {
+                return Err(reader.invalid("observer purpose tag is outside the closed set"));
+            }
+            let root = InvocationId::from_bytes(root);
+            let parent = InvocationId::from_bytes(parent);
+            Some(
+                InspectObserverContext::new(root, parent)
+                    .map_err(|_| reader.invalid("observer context identities must be valid"))?,
+            )
+        }
+        _ => return Err(reader.invalid("epoch payload version is unsupported")),
+    };
     let id = InspectEpochId::from_bytes(reader.take_id("epoch identity")?);
     let invocation_id = InvocationId::from_bytes(reader.take_id("invocation identity")?);
     let source_revision_id =
@@ -2514,7 +2890,7 @@ fn decode_epoch_payload(
     if reader.remaining() != 0 {
         return Err(reader.invalid("epoch payload carries trailing bytes"));
     }
-    InspectSnapshotEpoch::new(
+    let epoch = InspectSnapshotEpoch::new(
         id,
         invocation_id,
         source_revision_id,
@@ -2534,7 +2910,10 @@ fn decode_epoch_payload(
         runtime_bindings,
         security_decisions,
     )
-    .map_err(PostgresKernelError::Inspect)
+    .map_err(PostgresKernelError::Inspect)?;
+    epoch
+        .with_observer_context(observer_context)
+        .map_err(PostgresKernelError::Inspect)
 }
 
 struct PayloadWriter {

@@ -2716,6 +2716,7 @@ impl PostgresKernel {
                                     let execution = if let Some(executor) =
                                         resource_executor.as_deref_mut()
                                     {
+                                        executor.bind_current_invocation(invocation);
                                         evaluate_authorised_client_function_with_state_context_and_arguments_and_executor(
                                             &active,
                                             &authorisation,

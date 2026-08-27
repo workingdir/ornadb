@@ -184,6 +184,9 @@ impl RecordingInstalledResourceExecutor {
 
 #[cfg(feature = "test-hooks")]
 impl ClientResourceExecutor for RecordingInstalledResourceExecutor {
+    fn bind_current_invocation(&mut self, invocation: InvocationId) {
+        self.inner.bind_current_invocation(invocation);
+    }
     fn execute(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
         self.execute_count += 1;
         let expected_type = request.expected_type();
@@ -17181,10 +17184,12 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             poll_count: 0,
             completed_values: Vec::new(),
         };
-        // Reuse one enclosing invocation identity so the two runs exercise the same client epoch.
+        // Reuse one enclosing invocation identity so the two runs share a client
+        // epoch while each snapshot request receives a fresh server epoch.
         let deterministic_parent = InvocationId::from_bytes([0x58; 16]);
         let grants = LocalCapabilityGrantSet::new();
         let mut state = ClientStateStore::new();
+        executor.bind_current_invocation(deterministic_parent);
         let result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorisation,
@@ -17437,6 +17442,7 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             completed_values: Vec::new(),
         };
         let mut second_state = ClientStateStore::new();
+        second_executor.bind_current_invocation(deterministic_parent);
         let second_result = evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &active,
             &authorisation,
@@ -17451,26 +17457,84 @@ async fn proves_ordinary_client_inspector_through_installed_evaluator() -> TestR
             return Err(failure("ordinary Inspector repeat did not return an opaque std.ui.UI value"));
         };
         require(
-            second_ui.opaque_type() == orna_standard::STD_UI_TYPE_ID
-                && second_ui.canonical_payload() == payload.as_slice(),
-            "ordinary Inspector ORNA-UI/1 payload bytes were not deterministic for the same carrier set",
+            second_ui.opaque_type() == orna_standard::STD_UI_TYPE_ID,
+            "ordinary Inspector repeat did not return an opaque std.ui.UI value",
         )?;
         require(
-            first_carriers.len() == second_executor.completed_values.len()
-                && first_carriers
-                    .iter()
-                    .zip(second_executor.completed_values.iter())
-                    .all(|((first_type, first_value), (second_type, second_value))| {
-                        first_type == second_type
-                            && match (first_value, second_value) {
-                                (RuntimeValue::Opaque(first), RuntimeValue::Opaque(second)) => {
-                                    first.opaque_type() == second.opaque_type()
-                                        && first.canonical_payload() == second.canonical_payload()
-                                }
-                                _ => false,
-                            }
-                    }),
-            "ordinary Inspector repeat did not evaluate the same ordered carrier bytes",
+            second_executor.completed_values.len() == expected_carrier_kinds.len(),
+            "ordinary Inspector repeat did not deliver the complete carrier set",
+        )?;
+        let mut second_server_epoch = None;
+        for (((expected_type, value), expected_kind), expected_rows) in second_executor
+            .completed_values
+            .iter()
+            .zip(expected_carrier_kinds.iter())
+            .zip(expected_row_counts)
+        {
+            require(
+                *expected_type == ResolvedType::Value(expected_kind.type_id()),
+                "ordinary Inspector repeat carrier type drifted from its sealed identity",
+            )?;
+            let RuntimeValue::Opaque(value) = value else {
+                return Err(failure("ordinary Inspector repeat carrier was not opaque"));
+            };
+            let envelope = InspectCarrierEnvelope::decode(value.canonical_payload())
+                .map_err(|error| {
+                    failure(format!(
+                        "ordinary Inspector repeat carrier envelope was invalid: {error}"
+                    ))
+                })?;
+            require(
+                envelope.carrier_kind() == *expected_kind
+                    && envelope.source_revision_id() == active.pair().source()
+                    && envelope.catalogue_revision_id() == active.pair().catalogue()
+                    && envelope.rows().len() == expected_rows,
+                "ordinary Inspector repeat carrier lost its kind, revisions, or row count",
+            )?;
+            if let Some(expected_epoch) = second_server_epoch {
+                require(
+                    envelope.server_epoch_id() == expected_epoch,
+                    "ordinary Inspector repeat carriers did not share one server epoch",
+                )?;
+            } else {
+                second_server_epoch = Some(envelope.server_epoch_id());
+            }
+        }
+        let second_server_epoch =
+            second_server_epoch.ok_or_else(|| failure("ordinary Inspector repeat had no epoch"))?;
+        require(
+            second_server_epoch != shared_server_epoch,
+            "repeated Inspector snapshots reused the previous immutable server epoch",
+        )?;
+        let second_payload = second_ui.canonical_payload();
+        let second_prefix_length = orna_standard::UI_MAGIC.len() + 4;
+        require(
+            second_payload.len() >= second_prefix_length,
+            "ordinary Inspector repeat UI length prefix was truncated",
+        )?;
+        let second_body_length = u32::from_be_bytes(
+            second_payload[orna_standard::UI_MAGIC.len()..second_prefix_length]
+                .try_into()
+                .map_err(|_| failure("ordinary Inspector repeat UI length was truncated"))?,
+        ) as usize;
+        require(
+            second_payload.len() == second_prefix_length + second_body_length,
+            "ordinary Inspector repeat UI framing was not exact",
+        )?;
+        let second_json: serde_json::Value =
+            serde_json::from_slice(&second_payload[second_prefix_length..])
+                .map_err(|error| failure(format!("ordinary Inspector repeat UI was not JSON: {error}")))?;
+        let second_ui_server_epoch = second_json
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("server_epoch"))
+            .and_then(|property| property.get("value"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| failure("ordinary Inspector repeat server_epoch property was missing"))?;
+        require(
+            second_ui_server_epoch == second_server_epoch.to_string()
+                && second_ui_server_epoch != ui_server_epoch,
+            "ordinary Inspector repeat UI did not expose its fresh server epoch",
         )?;
 
         let unavailable = evaluate_client_function_with_arguments(
