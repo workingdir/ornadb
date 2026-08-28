@@ -151,15 +151,17 @@ just client-artifact-demo
 It rejects a server-domain artifact and a payload digest mismatch. It does
 not claim production provenance, signatures, or sandbox mediation.
 
-The client capability demo exercises component-boundary matching:
+The client capability demo exercises local declaration and component-boundary
+matching:
 
 ```text
 just client-capability-demo
 ```
 
-It proves that a child path is allowed while a similarly named sibling path
-is denied. It covers local grant matching only, not configuration loading or
-production sandbox mediation.
+It proves that literal and resolved parameter paths are allowed, an unresolved
+parameter is denied, and a similarly named sibling path is denied. It covers
+local grant matching only, not configuration loading or production sandbox
+mediation.
 
 The Qt recipes are separate from the server package:
 
