@@ -235,7 +235,10 @@ The same command is used by a service manager:
 /usr/bin/orna server run
 ```
 
-Use the source commands as separate stages:
+The local profile supports `invoke`, `state`, and `inspect` through the same
+peer-authenticated server. `server backend-shell`, `source apply`, `source
+diff`, security administration, grants, and `server upgrade` remain service
+operations and require the packaged Orna service account.
 
 - `orna source check <file.orna>` checks one regular UTF-8 source file offline;
   it does not require PostgreSQL, network access, configuration, or writes.

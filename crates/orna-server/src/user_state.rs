@@ -1,20 +1,19 @@
-//! Installed `orna state` access to the durable USER state service.
+//! Active `orna state` access to the durable USER state service.
 //!
-//! This module runs one closed `orna state get|set` command against the fixed
-//! private instance with the same host inspection and kernel access as
-//! `orna invoke` and `orna security grant-execute` (work ADR 0061 step 5).
-//! The server derives the principal from the authenticated session — the
-//! local peer UID authenticated through [`PostgresKernel::authenticate_local_peer`]
-//! — and a request never carries a principal identity.
+//! This module runs one closed `orna state get|set` command against the
+//! selected local or packaged instance. The host derives the principal from
+//! the authenticated session: the local peer UID authenticated through
+//! [`PostgresKernel::authenticate_local_peer`]. A request never carries a
+//! principal identity.
 //!
 //! `orna state get` plans one `load_user_state` call: the root function and
 //! state profile scope the load, optional instance requests filter the
 //! returned cells, and optional expected-type entries arm the load-time
-//! ORNA0901 check. `orna state set` plans one typed `write_user_state`
-//! change carrying its expected revision; a conflict is a per-change closed
-//! result (ORNA0902), never a transport failure. Every cell and write
-//! result is rendered to `stdout` as one JSON record per line, with typed
-//! values in their canonical ORV5 hex form.
+//! ORNA0901 check. `orna state set` plans one typed `write_user_state` change
+//! carrying its expected revision; a conflict is a per-change closed result
+//! (ORNA0902), never a transport failure. Every cell and write result is
+//! rendered to `stdout` as one JSON record per line, with typed values in
+//! their canonical ORV5 hex form.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,7 +33,7 @@ use orna_postgres::{PostgresKernel, PostgresKernelError, UserStateInstanceReques
 use orna_protocol::{decode_constructed_value, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{EmbeddedHostError, inspect_current_embedded_host};
 
 /// One complete installed `orna state` command request (ADR 0061 step 5).
 ///
@@ -208,10 +207,10 @@ impl std::error::Error for InstalledUserStateError {}
 
 /// Runs one installed `orna state` command in-process.
 ///
-/// The host inspection retains the package and instance guards for the
-/// complete authentication, load, write, and rendering operation. All result
-/// records are written to `stdout` as JSON lines; failures are returned to
-/// the CLI, which writes them to `stderr`.
+/// The host inspection retains the selected host locks for the complete
+/// authentication, load, write, and rendering operation. All result records
+/// are written to `stdout` as JSON lines; failures are returned to the CLI,
+/// which writes them to `stderr`.
 ///
 /// # Errors
 ///
@@ -222,7 +221,7 @@ pub fn run_installed_user_state(
     request: InstalledUserStateRequest,
     stdout: &mut impl Write,
 ) -> Result<InstalledUserStateOutcome, InstalledUserStateError> {
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -637,7 +636,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 fn map_host_error(error: EmbeddedHostError) -> InstalledUserStateError {
     InstalledUserStateError::new(
         InstalledUserStateErrorKind::Internal,
-        format!("the installed Orna instance is not available: {error}"),
+        format!("the Orna instance is not available: {error}"),
     )
 }
 
