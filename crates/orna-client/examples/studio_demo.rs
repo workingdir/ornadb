@@ -49,7 +49,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let surface_closed = if arguments.smoke {
         host.poll_runtime(1)?;
-        let closed = has_surface_closed_event(host.drain_runtime_events(), surface);
+        let events = host.drain_runtime_events();
+        let closed = consume_runtime_events(&host, events, surface);
         println!("studio_demo: smoke poll complete");
         closed
     } else {
@@ -57,7 +58,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         let mut closed = false;
         while !closed {
             host.poll_runtime(50)?;
-            closed = has_surface_closed_event(host.drain_runtime_events(), surface);
+            let events = host.drain_runtime_events();
+            closed = consume_runtime_events(&host, events, surface);
         }
         println!("studio_demo: received RuntimeSurfaceClosed");
         closed
@@ -183,11 +185,31 @@ fn ui_node(contract: &str, properties: Value, children: Vec<Value>, actions: Val
     })
 }
 
-fn has_surface_closed_event(events: Vec<RuntimeEventSnapshot>, surface: AbiSurfaceHandle) -> bool {
-    events.into_iter().any(|event| {
-        matches!(
-            event,
-            RuntimeEventSnapshot::SurfaceClosed(closed) if closed.surface == surface
-        )
-    })
+fn consume_runtime_events(
+    host: &QtRuntimeExecutor,
+    events: Vec<RuntimeEventSnapshot>,
+    surface: AbiSurfaceHandle,
+) -> bool {
+    let mut surface_closed = false;
+    for event in events {
+        match event {
+            RuntimeEventSnapshot::Action(action) if action.surface == surface => {
+                if let Some(binding) = host.action_binding(action.action) {
+                    println!("studio_demo: action requested {}", binding.action_id());
+                } else {
+                    println!(
+                        "studio_demo: action handle {} was not registered",
+                        action.action
+                    );
+                }
+            }
+            RuntimeEventSnapshot::SurfaceClosed(closed) if closed.surface == surface => {
+                surface_closed = true;
+            }
+            RuntimeEventSnapshot::Action(_)
+            | RuntimeEventSnapshot::SurfaceClosed(_)
+            | RuntimeEventSnapshot::Diagnostic(_) => {}
+        }
+    }
+    surface_closed
 }
