@@ -4502,6 +4502,29 @@ impl fmt::Display for ClientStateError {
 
 impl Error for ClientStateError {}
 
+/// A failure while checking the execution domain and payload digest of a CLIENT artifact.
+///
+/// This local check provides payload integrity only. It does not authenticate
+/// an artifact's provenance, signature, sandbox policy, or host capabilities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientArtifactIntegrityError {
+    /// The artifact is not marked for client execution.
+    WrongExecutionDomain,
+    /// The canonical payload digest could not be computed or did not match.
+    PayloadDigest,
+}
+
+impl fmt::Display for ClientArtifactIntegrityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::WrongExecutionDomain => "client artifact has the wrong execution domain",
+            Self::PayloadDigest => "client artifact payload digest is invalid",
+        })
+    }
+}
+
+impl Error for ClientArtifactIntegrityError {}
+
 /// An error returned by the closed local CLIENT evaluator.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11888,24 +11911,31 @@ fn validate_artifact(
     Ok(())
 }
 
-/// Validates the saved CLIENT artefact identity and exact payload digest before
-/// any plan decoder or evaluation side effect. Integrity failures deliberately
-/// use the existing redacted invalid-artifact contract.
-// ClientExecutionError retains its full public execution context and source error.
+/// Validates a CLIENT artifact's execution domain and canonical payload digest.
+///
+/// This check runs before plan decoding or evaluation. It proves payload
+/// integrity only; provenance, signatures, sandbox policy, and host
+/// capabilities remain separate contract surfaces.
+pub fn validate_client_artifact_integrity(
+    artifact: &orna_core::revision::ExecutableArtifact,
+) -> Result<(), ClientArtifactIntegrityError> {
+    if artifact.kind() != ExecutableArtifactKind::Client {
+        return Err(ClientArtifactIntegrityError::WrongExecutionDomain);
+    }
+    let digest = artifact_payload_digest(artifact.payload())
+        .map_err(|_| ClientArtifactIntegrityError::PayloadDigest)?;
+    if digest != artifact.content_hash() {
+        return Err(ClientArtifactIntegrityError::PayloadDigest);
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_artifact_identity(
     artifact: &orna_core::revision::ExecutableArtifact,
     context: ClientExecutionContext,
 ) -> Result<(), ClientExecutionError> {
-    if artifact.kind() != ExecutableArtifactKind::Client {
-        return Err(invalid_artifact(context));
-    }
-    let digest =
-        artifact_payload_digest(artifact.payload()).map_err(|_| invalid_artifact(context))?;
-    if digest != artifact.content_hash() {
-        return Err(invalid_artifact(context));
-    }
-    Ok(())
+    validate_client_artifact_integrity(artifact).map_err(|_| invalid_artifact(context))
 }
 
 fn invalid_artifact(context: ClientExecutionContext) -> ClientExecutionError {
@@ -28103,6 +28133,46 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             orna_standard::INTEGER_TYPE_ID,
         );
         assert!(encode_action_payload(&active, &descriptor).is_err());
+    }
+    #[test]
+    fn client_artifact_integrity_checks_domain_and_payload_digest() {
+        let payload = b"client-artifact-demo".to_vec();
+        let digest = artifact_payload_digest(&payload).expect("demo payload digest");
+        let valid = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "demo.client-artifact",
+            1,
+            payload.clone(),
+            digest,
+        )
+        .expect("valid client artifact");
+        assert_eq!(super::validate_client_artifact_integrity(&valid), Ok(()));
+
+        let wrong_kind = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "demo.client-artifact",
+            1,
+            payload.clone(),
+            digest,
+        )
+        .expect("wrong-domain artifact");
+        assert_eq!(
+            super::validate_client_artifact_integrity(&wrong_kind),
+            Err(super::ClientArtifactIntegrityError::WrongExecutionDomain)
+        );
+
+        let wrong_digest = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "demo.client-artifact",
+            1,
+            payload,
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .expect("wrong-digest artifact");
+        assert_eq!(
+            super::validate_client_artifact_integrity(&wrong_digest),
+            Err(super::ClientArtifactIntegrityError::PayloadDigest)
+        );
     }
 }
 

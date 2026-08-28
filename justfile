@@ -17,6 +17,11 @@ runtime-tty-demo:
 local-cli-demo:
     bash scripts/local-cli-demo.sh
 
+
+# Exercise CLIENT artifact kind and payload-digest validation.
+client-artifact-demo:
+    cargo run --locked -p orna-client --example client_artifact_demo
+
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
