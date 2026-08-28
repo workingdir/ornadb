@@ -28,6 +28,9 @@ namespace {
 OrnaStringView view(const char *value) {
     return OrnaStringView{value, std::strlen(value)};
 }
+std::string string_value(OrnaStringView value) {
+    return std::string(value.data == nullptr ? "" : value.data, value.len);
+}
 
 struct EventState {
     std::vector<OrnaSurfaceHandle> closed_surfaces;
@@ -108,9 +111,33 @@ int main() {
     REQUIRE(descriptor->thread_model == ORNA_THREAD_MODEL_CALLER_PUMPS);
     REQUIRE(descriptor->sink_count == 1);
     REQUIRE(descriptor->contract_count == 8);
-    REQUIRE(std::string(descriptor->contracts[0].name.data, descriptor->contracts[0].name.len) == "std.ui.window");
-    REQUIRE(descriptor->contracts[0].major == 1);
-    REQUIRE(descriptor->contracts[0].minor == 0);
+    REQUIRE(string_value(descriptor->runtime_name) == "orna-runtime-qt");
+    REQUIRE(string_value(descriptor->runtime_version) == "1.0.0");
+    REQUIRE(string_value(descriptor->build_id) == "orna-runtime-qt-linux-x86_64");
+    REQUIRE(string_value(descriptor->platform) == "linux-x86_64");
+    REQUIRE(descriptor->features == ORNA_RUNTIME_FEATURE_MULTIPLE_WINDOWS);
+    REQUIRE(descriptor->sinks != nullptr);
+    REQUIRE(string_value(descriptor->sinks[0].type_name) == "std.ui.UI");
+    REQUIRE(descriptor->sinks[0].media_type_count == 0);
+    REQUIRE(descriptor->sinks[0].supports_streaming == 0);
+    REQUIRE(descriptor->sinks[0].preference_rank == 0);
+    REQUIRE(descriptor->contracts != nullptr);
+    constexpr const char *expected_contracts[] = {
+        "std.ui.window",
+        "std.ui.text",
+        "std.ui.button",
+        "std.ui.panel",
+        "std.ui.row",
+        "std.ui.column",
+        "std.ui.text_input",
+        "std.ui.tabs",
+    };
+    for (std::size_t index = 0; index < descriptor->contract_count; ++index) {
+        REQUIRE(string_value(descriptor->contracts[index].name) == expected_contracts[index]);
+        REQUIRE(descriptor->contracts[index].major == 1);
+        REQUIRE(descriptor->contracts[index].minor == 0);
+        REQUIRE(descriptor->contracts[index].feature_count == 0);
+    }
 
     EventState events;
     OrnaClientApiV1 client{
