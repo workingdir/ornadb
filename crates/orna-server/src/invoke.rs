@@ -102,7 +102,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 use crate::{
-    EmbeddedHostError, LocalRawSocketResources, inspect_ready_embedded_host,
+    EmbeddedHostError, LocalRawSocketResources, inspect_current_embedded_host,
     raw_socket::serve_local_raw_stream_with_broker,
 };
 
@@ -5588,7 +5588,7 @@ pub fn run_installed_invoke(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

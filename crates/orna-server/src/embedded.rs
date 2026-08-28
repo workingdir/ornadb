@@ -270,6 +270,7 @@ struct PreparedInstance {
     service: ServiceIdentity,
     data_directory: PathBuf,
     authentication: HostAuthentication,
+    local_profile: bool,
     is_new: bool,
     _package_lock: fs::File,
     _instance_lock: fs::File,
@@ -319,11 +320,15 @@ enum HostProfile {
 }
 
 fn active_host_profile() -> HostProfile {
-    if require_service_identity().is_ok() {
+    if is_packaged_executable() || require_service_identity().is_ok() {
         HostProfile::Production
     } else {
         HostProfile::Development
     }
+}
+
+fn is_packaged_executable() -> bool {
+    fs::read_link("/proc/self/exe").is_ok_and(|path| path == Path::new("/usr/bin/orna"))
 }
 
 fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
@@ -370,6 +375,7 @@ fn prepare_production_instance() -> Result<PreparedInstance, EmbeddedHostError> 
         HostAuthentication::production(),
         package_lock,
         false,
+        false,
     )
 }
 
@@ -401,6 +407,7 @@ fn prepare_development_instance() -> Result<PreparedInstance, EmbeddedHostError>
         HostAuthentication::development()?,
         package_lock,
         true,
+        true,
     )
 }
 
@@ -410,6 +417,7 @@ fn prepare_instance_state(
     authentication: HostAuthentication,
     package_lock: fs::File,
     allow_stale_socket_cleanup: bool,
+    local_profile: bool,
 ) -> Result<PreparedInstance, EmbeddedHostError> {
     let state_metadata = fs::symlink_metadata(paths.state_root());
     let is_new = match state_metadata {
@@ -490,6 +498,7 @@ fn prepare_instance_state(
         service,
         data_directory,
         authentication,
+        local_profile,
         is_new,
         _package_lock: package_lock,
         _instance_lock: instance_lock,
@@ -693,7 +702,35 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
         CONFIGURATION_BYTES,
     )?;
 
-    let paths = EmbeddedHostPaths::production();
+    inspect_ready_instance(
+        EmbeddedHostPaths::production(),
+        service,
+        package_lock,
+        HostProfile::Production,
+    )
+}
+
+/// Verifies and retains the user-owned local host for a private client.
+pub fn inspect_development_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    let service = ServiceIdentity::current();
+    let paths = EmbeddedHostPaths::development();
+    let host_lock = open_verified_file(
+        &paths.runtime_root().join(DEVELOPMENT_LOCK_NAME),
+        service.uid,
+        service.gid,
+        0o600,
+        false,
+        LockKind::Instance,
+    )?;
+    inspect_ready_instance(paths, service, host_lock, HostProfile::Development)
+}
+
+fn inspect_ready_instance(
+    paths: EmbeddedHostPaths,
+    service: ServiceIdentity,
+    host_lock: fs::File,
+    profile: HostProfile,
+) -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
     require_directory(paths.state_root(), service.uid, service.gid, 0o700)?;
     require_directory(paths.runtime_root(), service.uid, service.gid, 0o711)?;
     require_directory(paths.socket_directory(), service.uid, service.gid, 0o700)?;
@@ -702,7 +739,7 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
         service.uid,
         service.gid,
         0o600,
-        true,
+        profile == HostProfile::Production,
         LockKind::Instance,
     )?;
     let ready = read_regular_file(
@@ -718,6 +755,9 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
     {
         return Err(EmbeddedHostError::InvalidInstanceState);
     }
+    if profile == HostProfile::Development {
+        require_lock_holder(&host_lock, ready.server_pid)?;
+    }
     require_lock_holder(&instance_lock, ready.server_pid)?;
     let manifest = read_regular_file(
         &paths.state_root().join(INSTANCE_MANIFEST_NAME),
@@ -730,21 +770,30 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
     if !installed.activation_committed || hex_digest(&manifest) != ready.instance_manifest_sha256 {
         return Err(EmbeddedHostError::InvalidInstanceState);
     }
-    verify_current_distribution().map_err(map_distribution_error)?;
     validate_embedded_engine_manifest()?;
     let current_engine = EmbeddedEngineIdentity::current();
-    if ready.engine != current_engine.as_str()
-        || installed.engine != current_engine.as_str()
-        || ready.executable_sha256 != hex_digest(&fs::read("/proc/self/exe")?)
+    if ready.engine != current_engine.as_str() || installed.engine != current_engine.as_str() {
+        return Err(EmbeddedHostError::InvalidEngineManifest);
+    }
+    if profile == HostProfile::Production
+        && ready.executable_sha256 != hex_digest(&fs::read("/proc/self/exe")?)
     {
         return Err(EmbeddedHostError::InvalidEngineManifest);
     }
 
     Ok(ReadyEmbeddedHost {
         config: private_database_config(paths.socket_directory(), "orna"),
-        _package_lock: package_lock,
+        _package_lock: host_lock,
         _instance_lock: instance_lock,
     })
+}
+
+/// Verifies the host selected by this binary and retains its private client locks.
+pub fn inspect_current_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    match active_host_profile() {
+        HostProfile::Production => inspect_ready_embedded_host(),
+        HostProfile::Development => inspect_development_embedded_host(),
+    }
 }
 
 struct ReadyRecord<'a> {
@@ -1192,12 +1241,16 @@ fn prepare_running_kernel(
         let kernel = open_standard_database(kernel)
             .await
             .map_err(EmbeddedHostError::from)?;
-        kernel
-            .install_catalogue_health_service(instance.service.uid)
-            .await
-            .map_err(|source| {
-                EmbeddedHostError::from(OpenStandardDatabaseError::Kernel { source })
-            })?;
+        let setup = if instance.local_profile {
+            kernel.provision_local_user(instance.service.uid).await
+        } else {
+            kernel
+                .install_catalogue_health_service(instance.service.uid)
+                .await
+        };
+        setup.map_err(|source| {
+            EmbeddedHostError::from(OpenStandardDatabaseError::Kernel { source })
+        })?;
         Ok(kernel)
     })
 }
