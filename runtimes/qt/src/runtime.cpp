@@ -1476,7 +1476,7 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
                 return status;
             }
             const auto found = runtime->surfaces.find(surface_handle);
-            if (found == runtime->surfaces.end()) {
+            if (found == runtime->surfaces.end() || found->second.native_closed) {
                 return not_found();
             }
             destroy_surface_widgets(runtime, found->second);
@@ -1494,7 +1494,7 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
                 return invalid();
             }
             const auto found = runtime->surfaces.find(surface_handle);
-            if (found == runtime->surfaces.end()) {
+            if (found == runtime->surfaces.end() || found->second.native_closed) {
                 return not_found();
             }
             if (batch->semantic_revision <= found->second.semantic_revision) {
@@ -1642,7 +1642,7 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
                 return invalid();
             }
             const auto found = runtime->surfaces.find(surface_handle);
-            if (found == runtime->surfaces.end()) {
+            if (found == runtime->surfaces.end() || found->second.native_closed) {
                 return not_found();
             }
             found->second.visible = visible != 0;
@@ -1658,7 +1658,7 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
                 return status;
             }
             const auto found = runtime->surfaces.find(surface_handle);
-            if (found == runtime->surfaces.end()) {
+            if (found == runtime->surfaces.end() || found->second.native_closed) {
                 return not_found();
             }
             try {
@@ -1668,15 +1668,17 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
             }
         },
         [](OrnaRuntimeHandle handle, OrnaSurfaceHandle surface_handle, OrnaOwnedBytes *output) {
+            (void)output;
             auto *runtime = runtime_from_handle(handle);
             const auto status = operational(runtime);
             if (status.code != ORNA_STATUS_OK) {
                 return status;
             }
-            if (runtime->surfaces.find(surface_handle) == runtime->surfaces.end()) {
+            const auto found = runtime->surfaces.find(surface_handle);
+            if (found == runtime->surfaces.end() || found->second.native_closed) {
                 return not_found();
             }
-            return owned_bytes(QByteArray{}, output);
+            return unsupported();
         },
         [](OrnaRuntimeHandle handle, OrnaRequestHandle, OrnaValueRefV1) {
             auto *runtime = runtime_from_handle(handle);

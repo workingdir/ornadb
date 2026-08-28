@@ -230,6 +230,10 @@ int main() {
     REQUIRE(state.find("48656c6c6f2066726f6d205174") != std::string::npos);
     REQUIRE(state.find("\"key\":{\"type\":\"std.json.Value\",\"value\":\"6669727374\"}") != std::string::npos);
 
+    OrnaOwnedBytes opaque_state{nullptr, 0, nullptr, release_owned};
+    REQUIRE(api->capture_opaque_state(runtime, surface, &opaque_state).code == ORNA_STATUS_UNSUPPORTED);
+    REQUIRE(opaque_state.data == nullptr);
+    REQUIRE(opaque_state.len == 0);
     OrnaUiBatchV1 stale{1, operations, 0};
     REQUIRE(api->apply_ui_batch(runtime, surface, &stale).code == ORNA_STATUS_STALE_REVISION);
 
@@ -503,15 +507,44 @@ int main() {
     std::string destroyed_surface_state;
     REQUIRE(capture(api, runtime, surface, destroyed_surface_state).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(events.callbacks == callbacks_after_first_destroy);
+    const char native_close_title[] = "Native close";
+    auto native_surface_options = surface_options;
+    native_surface_options.title = view(native_close_title);
     OrnaSurfaceHandle third_surface = 0;
-    REQUIRE(api->create_surface(runtime, &surface_options, &third_surface).code == ORNA_STATUS_OK);
+    REQUIRE(api->create_surface(runtime, &native_surface_options, &third_surface).code == ORNA_STATUS_OK);
     REQUIRE(third_surface != 0);
     REQUIRE(third_surface != surface);
     REQUIRE(third_surface != second_surface);
-    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_OK);
+    QWidget *native_window = nullptr;
+    for (QWidget *window : QApplication::topLevelWidgets()) {
+        if (window->windowTitle() == QString::fromUtf8(native_close_title)) {
+            native_window = window;
+            break;
+        }
+    }
+    REQUIRE(native_window != nullptr);
+    REQUIRE(native_window->close());
     REQUIRE(events.surface_closed == 2);
     REQUIRE(events.closed_surfaces.size() == 2);
     REQUIRE(events.closed_surfaces[1] == third_surface);
+    const auto callbacks_after_native_close = events.callbacks;
+    REQUIRE(api->set_surface_visible(runtime, third_surface, 1).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(api->apply_ui_batch(runtime, third_surface, &empty_batch).code == ORNA_STATUS_NOT_FOUND);
+    std::string native_closed_state;
+    REQUIRE(capture(api, runtime, third_surface, native_closed_state).code == ORNA_STATUS_NOT_FOUND);
+    OrnaOwnedBytes native_opaque_state{nullptr, 0, nullptr, release_owned};
+    REQUIRE(api->capture_opaque_state(runtime, third_surface, &native_opaque_state).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(native_opaque_state.data == nullptr);
+    REQUIRE(native_opaque_state.len == 0);
+    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(events.callbacks == callbacks_after_native_close);
+    REQUIRE(api->poll_event_loop(runtime, 0).code == ORNA_STATUS_OK);
+    REQUIRE(events.callbacks == callbacks_after_native_close);
+    REQUIRE(api->set_surface_visible(runtime, third_surface, 1).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(api->apply_ui_batch(runtime, third_surface, &empty_batch).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(capture(api, runtime, third_surface, native_closed_state).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(api->capture_opaque_state(runtime, third_surface, &native_opaque_state).code == ORNA_STATUS_NOT_FOUND);
+    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_NOT_FOUND);
 
     OrnaMountNodeV1 retired_node_mount = root_mount;
     OrnaUiOperationV1 retired_node_mount_operation{};
