@@ -8,7 +8,7 @@ description: Principals, sessions, grants, capabilities, USER state segregation,
 Security is a first-class subsystem, not a footnote used only for UI state. Authorised users can inspect its structure and decisions through typed catalog relations and functions. Credentials and classified values remain protected or redacted.
 
 :::warning Development status
-The trust model is LOCKED. The security catalog schema is CURRENT PROPOSAL. OrnaDB is under active development; there is no released executable yet.
+The trust model is LOCKED. The local `std.security` administration-function boundary and bounded headless Inspector v1 are accepted slices. The security catalog schema and full security/DBA console are CURRENT PROPOSAL (CONCEPTUAL); policy, definer, and delegation semantics remain OPEN. OrnaDB is under active development; there is no released executable yet.
 :::
 
 ## Principals
@@ -56,7 +56,9 @@ p_principal REF sys.security.principal
 
 ## DDL sugar
 
-Familiar statements lower to protected `sys.security.*` operations:
+Familiar statements are CURRENT PROPOSAL (CONCEPTUAL) sugar that would lower to protected `sys.security.*` operations:
+> **CURRENT PROPOSAL (CONCEPTUAL):** `CREATE USER`, `CREATE ROLE`, and `GRANT` syntax is unresolved DDL sugar, not a released parser contract. The accepted local administrative boundary is ordinary `std.security` administration functions; enforcement remains in the protected `sys.security.*` kernel/trusted path.
+
 
 ```sql
 CREATE USER bob;
@@ -71,6 +73,9 @@ REVOKE EXECUTE
     ON FUNCTION tasks.overdue
     FROM developer;
 ```
+
+The accepted local `std.security` administration functions remain available as the narrow administration boundary; this conceptual DDL does not turn the unresolved security console or catalog schema into a released feature.
+
 
 ## Credential enrolment
 
@@ -88,7 +93,7 @@ printf '%s' "$PASSWORD" | orna user credential add bob --password-stdin
 
 ## Function security mode
 
-The default is `SECURITY INVOKER`. A privileged wrapper declares `SECURITY DEFINER`:
+The accepted default is `SECURITY INVOKER`. `SECURITY DEFINER` and its policy/delegation semantics remain CURRENT PROPOSAL/OPEN; the following shows only the conceptual shape.
 
 ```sql
 CREATE SERVER FUNCTION security.rotate_key(...)
@@ -154,7 +159,7 @@ inspection of protected values
 
 ## The Inspector
 
-The official Inspector is an ordinary CLIENT function returning `std.ui.UI`:
+The accepted headless Inspector v1 is an ordinary CLIENT function returning `std.ui.UI`:
 
 ```sql
 CREATE CLIENT FUNCTION devtools.inspector (
@@ -200,9 +205,11 @@ Access is privilege-controlled. Values are redacted by classification.
 ## Self-inspection
 
 Every Inspector is just another invocation:
+The first target in the example may be a conceptual `studio.main()`; the recursive Inspector behavior is the accepted boundary:
+
 
 ```text
-inv:100  studio.main()
+inv:100  studio.main()              (CONCEPTUAL full Studio target)
 inv:101  devtools.inspector(p_target => inv:100)
 inv:102  devtools.inspector(p_target => inv:101)
 inv:103  devtools.inspector(p_target => inv:102)

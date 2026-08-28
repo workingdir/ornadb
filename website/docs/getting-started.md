@@ -68,7 +68,8 @@ The target function does not change. Presentation is planned separately from exe
 
 ## Step 4. Return a UI value
 
-A CLIENT function can return `std.ui.UI`, a standard-library value type. The local client selects an installed runtime to materialise it:
+A CLIENT function can return `std.ui.UI`, a standard-library value type. The
+local client selects an installed runtime to materialise it:
 
 ```sql
 CREATE CLIENT FUNCTION tasks.overdue_window()
@@ -76,8 +77,8 @@ RETURNS std.ui.UI
 AS
     std.ui.window(
         title   => 'Overdue Tasks',
-        content => std.ui.data_grid(
-            source => std.data.resource(tasks.overdue)
+        content => std.ui.text(
+            text => 'Review overdue tasks'
         )
     );
 ```
@@ -86,7 +87,10 @@ AS
 orna invoke tasks.overdue_window
 ```
 
-The same data function now reaches a native window. See [UI and runtimes](/ui-and-runtimes/).
+This static UI constructor path is accepted. Scalar and `STREAM<T>` resources
+are also accepted with explicit `AWAIT`; `TABLE`/`ROWS` resource transport and
+the virtual model APIs remain deferred. See [UI and runtimes](/ui-and-runtimes/)
+for the bounded runtime profile.
 
 ## What runs where
 
