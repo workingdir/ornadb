@@ -79,7 +79,7 @@ test:
 editor-tooling-check:
     python3 scripts/check-editor-tooling.py
 
-# Run every accepted offline source-check demo in manifest order.
+# Run every runnable accepted source-check/offline demo in manifest order.
 demo-check:
     python3 scripts/run-demos.py
 

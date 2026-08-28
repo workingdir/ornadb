@@ -43,7 +43,8 @@ description = "A static UI composed from text, panel, column, and window constru
 
 [[demos]]
 name = "ui-constructor-showcase"
-mode = "source-check"
+mode = "offline-test"
+test = "checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline"
 source = "crates/orna-server/tests/fixtures/ui_constructor_showcase_dogfood.orna"
 description = "A source-authored static UI showcase covering all V9 constructors and std.ui.window."
 
