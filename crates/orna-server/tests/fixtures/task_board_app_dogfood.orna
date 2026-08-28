@@ -1,0 +1,39 @@
+CREATE SCHEMA task_board_app;
+
+CREATE TYPE task_board_app.task AS OBJECT (
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    assignee TEXT,
+    details TEXT
+);
+
+CREATE SERVER FUNCTION task_board_app.list_tasks()
+RETURNS ROWS (
+    title TEXT,
+    status TEXT,
+    priority INTEGER,
+    assignee TEXT
+)
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT task.title, task.status, task.priority, task.assignee
+    FROM task_board_app.task task;
+
+CREATE CLIENT FUNCTION task_board_app.main()
+RETURNS std.ui.UI IS
+    STATE selected_status TEXT SCOPE USER;
+BEGIN
+    RETURN std.ui.window(
+        title => 'Task Board',
+        content => std.ui.column(
+            content => std.ui.panel(
+                content => std.ui.text(
+                    text => 'Plan, prioritize, and complete work'
+                )
+            )
+        )
+    );
+END;
