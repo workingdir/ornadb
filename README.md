@@ -69,8 +69,8 @@ just demo-check
 workspace targets. `just lint` runs workspace Clippy with warnings denied.
 `just test` runs workspace tests except tests marked `#[ignore]`.
 `just editor-tooling-check` is a static gate; it does not install or launch
-editor runtimes. `just demo-check` runs the accepted offline source-check demos
-in manifest order.
+editor runtimes. `just demo-check` runs the accepted source-check and offline
+demos in manifest order and skips compose-only entries.
 
 `just check` is deliberately broader than package-specific Clippy. It includes
 workspace Clippy and may remain blocked by the tracked PostgreSQL lint issue.
