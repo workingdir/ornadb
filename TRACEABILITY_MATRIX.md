@@ -6,11 +6,9 @@ does not by itself claim that the named test ran in this checkout.
 
 - **Current validated focused evidence:** the `work/` checkout records the
   protocol, sealed-server, LSP UTF-16, no-`STATE` dogfood, resource-span,
-  buffered-preflight, V3/V5 upgrade, same-revision replacement, selected-package
-  check and formatter commands listed below; prior workspace-unit reports remain
-  historical and were not rerun, while the current static editor-tooling gate is
-  recorded below. The current static editor-tooling and Compose integration
-  gates are recorded below. Clean-host, Neovim/Vim host sessions, manual
+  buffered-preflight, V3/V5 upgrade, same-revision replacement, Stage 1 CLIENT
+  VM, expanded demo registry, selected-package check, formatter, and current
+  workspace commands listed below. Clean-host, Neovim/Vim host sessions, manual
   Zed/VSIX runtime parity, live REF, same-major PostgreSQL, and remaining
   accepted contract gates remain pending or unclaimed.
   The accepted Qt v1 runtime/provider/package boundary, bounded populated
@@ -30,7 +28,16 @@ does not by itself claim that the named test ran in this checkout.
 - `cargo test -p orna-lsp --test lsp_e2e serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges` — 1 test returned success after correcting the expected UTF-16 token range.
 - `cargo test -p orna-server --test standard_database checks_and_evaluates_accepted_client_local_assignment_fixture_offline` — 1 test returned success after correcting the fixture test's durable function-identity conversion.
 - `cargo test --locked -p orna-server --test standard_database checks_and_evaluates_accepted_client_control_flow_fixture_offline -- --exact` — 1 test returned success; the accepted bounded CLIENT control-flow fixture checks, prepares, authorises, and evaluates to INTEGER 5.
-- `just demo-check` — all 11 runnable accepted source-check/offline demos returned success; the compose-only Inspector entry was skipped by design.
+- `CARGO_NET_OFFLINE=true just demo-check` — 13 runnable accepted source-check/
+  offline demos returned success; the compose-only Inspector entry was skipped
+  by design.
+- `CARGO_NET_OFFLINE=true cargo test --locked -p orna-client` — 359 tests
+  returned success, including the Stage 1 VM admission, identity registry,
+  runtime-witness, lease, host-fence, and binding coverage.
+- `CARGO_NET_OFFLINE=true cargo test --locked --workspace` — 2,901 tests
+  returned success across 58 suites; 252 tests were ignored.
+- `CARGO_NET_OFFLINE=true cargo check --locked --workspace` — returned success
+  with existing warnings outside the Stage 1 client changes.
 - `cargo test -p orna-compiler accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance` — 1 test returned success.
 - `cargo test -p orna-compiler discovers_stream_resource_target_with_resolved_element_type` — 1 test returned success.
 - `cargo test -p orna-server buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes` — 1 test returned success.
@@ -139,7 +146,7 @@ the same-major PostgreSQL predecessor transition, and accepted contract gates
 remain pending or unclaimed in `../TODO.md` and `PLAN.md`.
 
 
-## Current accepted implementation boundaries (2026-08-27)
+## Current accepted implementation boundaries (2026-08-28)
 
 - ADRs 0082-0088 and 0090 are reflected in current source: Qt v1
   runtime/provider/package, bounded populated Inspector rows (including
@@ -152,6 +159,8 @@ remain pending or unclaimed in `../TODO.md` and `PLAN.md`.
   `6e69500`, and `3d23e5b` record the accepted implementation, quality,
   contract, runbook, and demo slices; `2f8509f`, `07ecc28`, `880ca17`, and
   `ca831a5` record evidence/boundary updates.
+- Stage 1 CLIENT VM control-plane implementation is present in `crates/orna-client/src/vm.rs` and its four support modules. Commits `5c7e654`, `c592113`, and `90a9456` add active-revision admission, bounded one-pass decoding, full capability tuple checks, runtime-offer witnesses, process-wide identity allocation, root/security binding, live policy/cancellation fences, and an ephemeral lease state machine. The boundary has no production sandbox, protected audit exchange, signature verification, host-effect backend, or process isolation.
+- Commits `964df03` add the source-check-only `contact_app_dogfood.orna` and `issue_tracker_app_dogfood.orna` application fixtures and register them in the accepted demo manifest; current `just demo-check` evidence covers 13 runnable entries and skips only the Compose-only Inspector entry.
 - Closed Beads boundaries are `ornadb-el1.3.2.1.1`,
   `ornadb-el1.5.13.9`, `ornadb-el1.5.14.2`, `ornadb-el1.5.14.7`,
   `ornadb-el1.3.4.3`, `ornadb-el1.4.4`, `ornadb-br0.2`, and `ornadb-br0.4.5`
@@ -173,6 +182,7 @@ remain pending or unclaimed in `../TODO.md` and `PLAN.md`.
 |---|---|---|---|
 | SERVER query and mutation functions | `crates/orna-syntax`, `crates/orna-compiler`, `crates/orna-postgres` | Resolver and relational/mutation checker tests, including `accepts_a_checked_server_function_with_a_relational_plan` and `checks_server_insert_with_exact_body_identities_and_evidence`; historical provenance `1aeef47`: `crates/orna-server/tests/standard_database.rs::checks_and_prepares_server_function_dogfood_fixture_offline` checks four accepted SERVER functions, prepares against the offline base pair, and materialises the offline candidate active pair | `crates/orna-postgres/tests/server_execution.rs` and `server_mutation_execution.rs` are Compose-gated `#[ignore]` tests; no local installed proof is claimed |
 | CLIENT Boolean, expression, state, resource, action, Inspector, and programmable control-flow forms (ADR 0084) | `crates/orna-syntax`, `crates/orna-compiler`, `crates/orna-artifact`, `crates/orna-client` | Syntax fixtures and parser tests; client-plan versions 3 through 9 retain their historical compatibility and rejection coverage, while accepted programmable CLIENT plans use V10 (`crates/orna-artifact/src/client_plan.rs::CONTROL_FLOW_FORMAT_VERSION`); `crates/orna-compiler/src/resolver.rs::tests::lowers_ordinary_client_call_with_canonical_target_identities_and_reference`, `crates/orna-compiler/src/resolver.rs::tests::lowers_client_ref_field_path_concat_with_stable_identities_and_spans`, `crates/orna-client/src/lib.rs::client_expression_call_depth_is_bounded_by_artifact_limit`, `crates/orna-compiler/src/resolver.rs::tests::accepts_external_client_parameters_and_capabilities`, and `crates/orna-compiler/src/prepare.rs::tests::accepted_client_action_preparation_preserves_durable_operation_identity_and_arguments` retain the prior focused evidence; V10 implementation is exercised by the accepted `client_control_flow_dogfood.orna` source-check demo and the current package-suite reports below; historical provenance `6e61996`: `crates/orna-compiler/src/resolver.rs::rejects_v1_source_unit_identity_mutations` | Installed evaluator tests in `crates/orna-server/tests/standard_database.rs` are Compose-gated `#[ignore]` tests; live REF field-path evaluation remains blocked by the missing trusted object-loader seam, and no local Compose or live REF result is claimed |
+| Stage 1 CLIENT VM structural admission and in-memory host-control seam | `crates/orna-client/src/vm.rs`, `admission.rs`, `identity.rs`, `lease.rs`, and `runtime_witness.rs` | `CARGO_NET_OFFLINE=true cargo test --locked -p orna-client` returned 359 successes, including active-revision admission, one-pass decode, capability argument binding, runtime witness, identity registry, root binding, live fences, cancellation, and lease-state tests | Production sandbox, protected audit, signed trust, concrete capability backends, and process isolation remain proposal- and contract-gated |
 | Declaration-selected execution domain; no `RUNS ON` syntax | `crates/orna-syntax`, `../spec/docs/02-status-decisions.md` | Syntax diagnostics and resolver domain checks | No separate installed proof is claimed |
 | Stable definition and subobject identities | `crates/orna-core/src/lib.rs`, `catalogue.rs`, `revision.rs` | Core identity, revision, and deterministic catalogue tests | Installed storage/recovery tests are Compose-gated where marked `#[ignore]` |
 | SQL AST and domain checker | `crates/orna-compiler/src/relational.rs`, `mutation.rs`, `resolver.rs` | Relational, mutation, and resolver checker tests | Installed execution tests are Compose-gated `#[ignore]` tests |
@@ -224,6 +234,7 @@ deferred presenter/model semantics are intentionally outside this section's clai
 | Accepted slice | Implementation evidence | Focused local evidence | Installed or environment-gated proof |
 |---|---|---|---|
 | `orna` CLI and offline source checking | `crates/orna-server/src/main.rs`, source-check command | `source_check.rs` and command-boundary tests without PostgreSQL, network, configuration, or writes | No database-backed installed proof is required for the offline check; other installed commands remain separately gated |
+| Source-check example applications | `crates/orna-server/tests/fixtures/contact_app_dogfood.orna`, `issue_tracker_app_dogfood.orna`, and `examples/accepted-demos.toml` | `CARGO_NET_OFFLINE=true just demo-check` returned success for 13 runnable entries, including both application fixtures; the Compose-only Inspector entry was skipped by design | Source compatibility only; no production gateway, launch, CLIENT VM sandbox, or graphical runtime proof is claimed |
 | Automatic runtime selection and TTY output presenters | `crates/orna-server/src/invoke.rs`, `crates/orna-runtime-tty`, `crates/orna-core/src/presenter.rs` | `crates/orna-server/src/invoke.rs::selection_policy_defaults_to_tty_and_rejects_unknown_families`, `the_client_offer_names_the_tty_runtime`, and `tty_default_selection_maps_document_and_byte_stream`; runtime presenter and output codec tests | `crates/orna-server/tests/standard_database.rs::proves_installed_orna_invoke_end_to_end_against_postgres` and `proves_output_through_orna_invoke_against_postgres` are Compose-gated `#[ignore]`; no local Compose result is claimed. Qt v1 is accepted in the separate runtime row; second toolkit/browser and installed/native proof remain deferred |
 | Accepted Qt v1 runtime ABI/provider and installed package boundary (ADRs 0082, 0085) | `runtimes/qt/CMakeLists.txt`, `runtimes/qt/src/runtime.cpp`, `runtimes/qt/tests/runtime_test.cpp`, `crates/orna-client/src/runtime_loader.rs`, `crates/orna-client/src/runtime_adapter.rs`, `crates/orna-server/src/invoke.rs`, `packaging/debian/control`, and `packaging/debian/rules`; canonical ABI input remains external `../spec/spec/orna_runtime_abi_v1.h` | `just runtime-qt-test` passed (CMake build and ctest 1/1); `just runtime-qt-rust-smoke target/runtime-qt/liborna-runtime-qt.so` passed with canonical state 1191 bytes; `just studio-qt-smoke target/runtime-qt/liborna-runtime-qt.so` passed with displayed canonical UI and shutdown; `just runtime-abi-header-check && just runtime-abi-parity` passed | The Linux x86_64 Qt v1 ABI/provider, pathless offer, fixed package path, and loader boundary are accepted implementation slices. Installed runtime package, clean-host, and installed UI proof remain pending; no Compose/Docker or installed-runtime result is claimed |
 | CLIENT expression bodies and external `RUNTIME CONTRACT` clauses (ADR 0068) | `crates/orna-syntax`, `crates/orna-compiler`, `crates/orna-artifact` | `parses_client_expression_bodies_and_external_contracts_with_exact_spans`; expression-plan version-three round trips/rejection tests; resolver contract tests; `6e40b72`: `crates/orna-server/tests/standard_database.rs::checks_accepted_expression_client_fixture_offline` | `crates/orna-server/tests/standard_database.rs::proves_expression_client_functions_through_installed_invoke` is Compose-gated `#[ignore]`; no local Compose result is claimed; pending |
