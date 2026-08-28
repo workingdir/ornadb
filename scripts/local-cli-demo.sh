@@ -9,26 +9,35 @@ state_home="${scratch}/state"
 runtime_home="${scratch}/runtime"
 server_log="${scratch}/server.log"
 server_pid=""
+ready_file=""
+
+server_is_running() {
+    [[ -n "${server_pid}" ]] || return 1
+    kill -0 "${server_pid}" 2>/dev/null || return 1
+    local state
+    state=$(ps -o stat= -p "${server_pid}" 2>/dev/null || true)
+    [[ -n "${state}" && "${state}" != Z* ]]
+}
 
 stop_server() {
-    if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
+    if server_is_running; then
         kill -INT "${server_pid}" 2>/dev/null || true
         for ((attempt = 0; attempt < 50; attempt += 1)); do
-            if ! kill -0 "${server_pid}" 2>/dev/null; then
+            if ! server_is_running; then
                 break
             fi
             sleep 0.1
         done
-        if kill -0 "${server_pid}" 2>/dev/null; then
+        if server_is_running; then
             kill -TERM "${server_pid}" 2>/dev/null || true
             for ((attempt = 0; attempt < 50; attempt += 1)); do
-                if ! kill -0 "${server_pid}" 2>/dev/null; then
+                if ! server_is_running; then
                     break
                 fi
                 sleep 0.1
             done
         fi
-        if kill -0 "${server_pid}" 2>/dev/null; then
+        if server_is_running; then
             kill -KILL "${server_pid}" 2>/dev/null || true
         fi
     fi
@@ -41,6 +50,10 @@ cleanup() {
     local status=$?
     trap - EXIT INT TERM
     stop_server
+    if [[ -n "${runtime_home}" ]] && pgrep -af -- "${runtime_home}/orna/default" >/dev/null 2>&1; then
+        printf '%s\n' '[local-cli-demo] a server child process remains after shutdown' >&2
+        status=1
+    fi
     rm -rf -- "${scratch}"
     exit "${status}"
 }
@@ -60,7 +73,7 @@ for ((attempt = 0; attempt < 600; attempt += 1)); do
     if [[ -f "${ready_file}" ]]; then
         break
     fi
-    if ! kill -0 "${server_pid}" 2>/dev/null; then
+    if ! server_is_running; then
         printf '%s\n' '[local-cli-demo] server exited before readiness' >&2
         cat "${server_log}" >&2
         exit 1
