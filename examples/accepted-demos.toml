@@ -68,6 +68,12 @@ source = "crates/orna-server/tests/fixtures/static_ui_dogfood.orna"
 description = "A static UI composed from text, panel, column, and window constructors."
 
 [[demos]]
+name = "studio-static-app"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/studio_static_app_dogfood.orna"
+description = "A static, source-authored-only Studio shell built from accepted V9 std.ui constructors."
+
+[[demos]]
 name = "ui-constructor-showcase"
 mode = "offline-test"
 test = "checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline"
