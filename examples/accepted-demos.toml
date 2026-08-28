@@ -30,6 +30,13 @@ source = "crates/orna-server/tests/fixtures/client_control_flow_dogfood.orna"
 description = "A bounded console-style CLIENT counter with mutable state and control flow."
 
 [[demos]]
+name = "expression-client"
+mode = "offline-test"
+test = "checks_accepted_expression_client_fixture_offline"
+source = "crates/orna-server/tests/fixtures/expression_client_dogfood.orna"
+description = "CLIENT expression evaluation, REF field paths, parameters, and external contracts."
+
+[[demos]]
 name = "client-state"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_state_dogfood.orna"
