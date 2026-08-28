@@ -102,6 +102,6 @@ description = "Opaque std.Action values and action calls."
 
 [[demos]]
 name = "client-inspector"
-mode = "compose-only"
+mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_inspector_dogfood.orna"
-description = "Headless Inspector snapshot projection and renderer."
+description = "Bounded headless Inspector snapshot and eight projection carriers via std.inspect.render@1."
