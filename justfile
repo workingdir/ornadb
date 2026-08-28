@@ -35,6 +35,11 @@ runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
     cmake --build target/runtime-qt --parallel
 
+
+# Build the Qt runtime and run the static Studio shell smoke.
+studio-qt-demo: runtime-qt-build
+    just studio-qt-smoke target/runtime-qt/liborna-runtime-qt.so
+
 # Run the Qt runtime contract smoke test with an offscreen platform.
 runtime-qt-test:
     cmake -S runtimes/qt -B target/runtime-qt
