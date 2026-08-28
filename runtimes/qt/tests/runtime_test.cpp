@@ -36,6 +36,8 @@ struct EventState {
     std::vector<OrnaSurfaceHandle> closed_surfaces;
     std::size_t callbacks = 0;
     std::size_t surface_closed = 0;
+    std::size_t surface_close_attempts = 0;
+    bool reject_surface_closed = false;
     std::size_t actions = 0;
     std::string action_input_type;
     OrnaSurfaceHandle action_surface = 0;
@@ -53,6 +55,10 @@ OrnaStatus emit_event(void *context, OrnaRuntimeHandle, const OrnaRuntimeEventV1
     if (state != nullptr && event != nullptr) {
         ++state->callbacks;
         if (event->kind == ORNA_RUNTIME_EVENT_SURFACE_CLOSED) {
+            ++state->surface_close_attempts;
+            if (state->reject_surface_closed) {
+                return OrnaStatus{ORNA_STATUS_INTERNAL, view("test callback rejected close")};
+            }
             ++state->surface_closed;
             state->closed_surfaces.push_back(event->as.surface_closed.surface);
         } else if (event->kind == ORNA_RUNTIME_EVENT_ACTION) {
@@ -170,6 +176,7 @@ int main() {
     OrnaRuntimeHandle runtime = 0;
     REQUIRE(api->create(&create_options, &runtime).code == ORNA_STATUS_OK);
     REQUIRE(runtime != 0);
+    REQUIRE(api->cancel_request(runtime, 1).code == ORNA_STATUS_UNSUPPORTED);
 
     OrnaSurfaceCreateOptionsV1 surface_options{
         view("window"),
@@ -550,11 +557,13 @@ int main() {
         }
     }
     REQUIRE(native_window != nullptr);
+    events.reject_surface_closed = true;
+    const auto attempts_before_native_close = events.surface_close_attempts;
     REQUIRE(native_window->close());
-    REQUIRE(events.surface_closed == 2);
-    REQUIRE(events.closed_surfaces.size() == 2);
-    REQUIRE(events.closed_surfaces[1] == third_surface);
-    const auto callbacks_after_native_close = events.callbacks;
+    REQUIRE(events.surface_close_attempts == attempts_before_native_close + 1);
+    REQUIRE(events.surface_closed == 1);
+    REQUIRE(events.closed_surfaces.size() == 1);
+    const auto callbacks_after_rejected_close = events.callbacks;
     REQUIRE(api->set_surface_visible(runtime, third_surface, 1).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(api->apply_ui_batch(runtime, third_surface, &empty_batch).code == ORNA_STATUS_NOT_FOUND);
     std::string native_closed_state;
@@ -563,10 +572,16 @@ int main() {
     REQUIRE(api->capture_opaque_state(runtime, third_surface, &native_opaque_state).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(native_opaque_state.data == nullptr);
     REQUIRE(native_opaque_state.len == 0);
-    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_NOT_FOUND);
-    REQUIRE(events.callbacks == callbacks_after_native_close);
+    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_INTERNAL);
+    REQUIRE(events.surface_close_attempts == attempts_before_native_close + 2);
+    REQUIRE(events.callbacks == callbacks_after_rejected_close + 1);
+
+    events.reject_surface_closed = false;
     REQUIRE(api->poll_event_loop(runtime, 0).code == ORNA_STATUS_OK);
-    REQUIRE(events.callbacks == callbacks_after_native_close);
+    REQUIRE(events.surface_closed == 2);
+    REQUIRE(events.closed_surfaces.size() == 2);
+    REQUIRE(events.closed_surfaces[1] == third_surface);
+    REQUIRE(api->destroy_surface(runtime, third_surface).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(api->set_surface_visible(runtime, third_surface, 1).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(api->apply_ui_batch(runtime, third_surface, &empty_batch).code == ORNA_STATUS_NOT_FOUND);
     REQUIRE(capture(api, runtime, third_surface, native_closed_state).code == ORNA_STATUS_NOT_FOUND);
