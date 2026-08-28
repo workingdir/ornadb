@@ -1,7 +1,8 @@
 use std::error::Error;
 
 use orna_client::capability::{
-    LocalCapabilityGrant, LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
+    LocalCapabilityArgumentSource, LocalCapabilityDeclaration, LocalCapabilityGrant,
+    LocalCapabilityGrantSet, LocalCapabilityName, LocalCapabilityScope,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -28,6 +29,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         !sibling_allowed,
         "a component-boundary sibling path must not satisfy the project grant"
     );
+
+    let literal_declaration = LocalCapabilityDeclaration::new(
+        LocalCapabilityName::StdFsRead,
+        LocalCapabilityArgumentSource::Text(CHILD_SOURCE.to_owned()),
+    );
+    assert!(
+        grants.satisfies_declaration(&literal_declaration, |_| None),
+        "a literal capability declaration should use its declared path"
+    );
+
+    let parameter_declaration = LocalCapabilityDeclaration::new(
+        LocalCapabilityName::StdFsRead,
+        LocalCapabilityArgumentSource::Parameter("source".to_owned()),
+    );
+    assert!(
+        grants.satisfies_declaration(&parameter_declaration, |parameter| {
+            (parameter == "source").then(|| CHILD_SOURCE.to_owned())
+        }),
+        "a bound capability parameter should use its invocation path"
+    );
+    assert!(
+        !grants.satisfies_declaration(&parameter_declaration, |_| None),
+        "an unresolved capability parameter must fail closed"
+    );
+
+    println!("local grant matching: literal declaration allowed");
+    println!("local grant matching: parameter declaration allowed");
+    println!("local grant matching: unresolved parameter denied");
 
     println!("local grant matching: child path allowed ({CHILD_SOURCE})");
     println!("local grant matching: sibling path denied ({SIBLING_SOURCE})");
