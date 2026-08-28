@@ -27,6 +27,9 @@ client-artifact-demo:
 client-capability-demo:
     cargo run --locked -p orna-client --example client_capability_demo
 
+# Run the accepted offline demo registry and standalone local demos.
+demo-suite: demo-check runtime-tty-demo client-artifact-demo client-capability-demo
+
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
