@@ -163,13 +163,14 @@ impl QtRuntimeExecutor {
         surface: AbiSurfaceHandle,
     ) -> Result<(), RuntimeSessionError> {
         let result = self.session.destroy_surface(surface);
-        self.active_surfaces.remove(&surface);
-        self.surface_revisions.remove(&surface);
-        self.surface_roots.remove(&surface);
-
-        self.action_bindings
-            .retain(|_, binding| binding.surface != surface);
-        result
+        finish_surface_destroy(
+            result,
+            surface,
+            &mut self.active_surfaces,
+            &mut self.surface_revisions,
+            &mut self.surface_roots,
+            &mut self.action_bindings,
+        )
     }
 
     /// Captures the provider's canonical semantic state for one surface.
@@ -433,6 +434,39 @@ fn commit_surface_update(
     Ok(())
 }
 
+fn retire_surface_bookkeeping(
+    active_surfaces: &mut HashSet<AbiSurfaceHandle>,
+    surface_revisions: &mut HashMap<AbiSurfaceHandle, u64>,
+    surface_roots: &mut HashMap<AbiSurfaceHandle, AbiNodeHandle>,
+    action_bindings: &mut HashMap<AbiActionHandle, RuntimeActionBinding>,
+    surface: AbiSurfaceHandle,
+) {
+    active_surfaces.remove(&surface);
+    surface_revisions.remove(&surface);
+    surface_roots.remove(&surface);
+    action_bindings.retain(|_, binding| binding.surface != surface);
+}
+
+fn finish_surface_destroy(
+    result: Result<(), RuntimeSessionError>,
+    surface: AbiSurfaceHandle,
+    active_surfaces: &mut HashSet<AbiSurfaceHandle>,
+    surface_revisions: &mut HashMap<AbiSurfaceHandle, u64>,
+    surface_roots: &mut HashMap<AbiSurfaceHandle, AbiNodeHandle>,
+    action_bindings: &mut HashMap<AbiActionHandle, RuntimeActionBinding>,
+) -> Result<(), RuntimeSessionError> {
+    if result.is_ok() {
+        retire_surface_bookkeeping(
+            active_surfaces,
+            surface_revisions,
+            surface_roots,
+            action_bindings,
+            surface,
+        );
+    }
+    result
+}
+
 fn reconcile_surface_events(
     active_surfaces: &mut HashSet<AbiSurfaceHandle>,
     surface_revisions: &mut HashMap<AbiSurfaceHandle, u64>,
@@ -442,10 +476,13 @@ fn reconcile_surface_events(
 ) {
     for event in events {
         if let RuntimeEventSnapshot::SurfaceClosed(closed) = event {
-            active_surfaces.remove(&closed.surface);
-            surface_revisions.remove(&closed.surface);
-            surface_roots.remove(&closed.surface);
-            action_bindings.retain(|_, binding| binding.surface != closed.surface);
+            retire_surface_bookkeeping(
+                active_surfaces,
+                surface_revisions,
+                surface_roots,
+                action_bindings,
+                closed.surface,
+            );
         }
     }
 }
@@ -1315,6 +1352,50 @@ mod tests {
         assert!(parse_version("1.00").is_err());
         assert!(parse_version("+1.0").is_err());
     }
+    #[test]
+    fn failed_surface_destroy_preserves_bookkeeping() {
+        let surface = 7;
+        let action = 11;
+        let mut active_surfaces = HashSet::from([surface]);
+        let mut surface_revisions = HashMap::from([(surface, 1)]);
+        let mut surface_roots = HashMap::from([(surface, 3)]);
+        let mut action_bindings = HashMap::from([(
+            action,
+            RuntimeActionBinding {
+                surface,
+                action_id: "run".to_owned(),
+            },
+        )]);
+
+        let result = finish_surface_destroy(
+            Err(RuntimeSessionError::Failed),
+            surface,
+            &mut active_surfaces,
+            &mut surface_revisions,
+            &mut surface_roots,
+            &mut action_bindings,
+        );
+        assert!(matches!(result, Err(RuntimeSessionError::Failed)));
+        assert!(active_surfaces.contains(&surface));
+        assert_eq!(surface_revisions.get(&surface), Some(&1));
+        assert_eq!(surface_roots.get(&surface), Some(&3));
+        assert!(action_bindings.contains_key(&action));
+
+        finish_surface_destroy(
+            Ok(()),
+            surface,
+            &mut active_surfaces,
+            &mut surface_revisions,
+            &mut surface_roots,
+            &mut action_bindings,
+        )
+        .expect("successful destroy retires bookkeeping");
+        assert!(active_surfaces.is_empty());
+        assert!(surface_revisions.is_empty());
+        assert!(surface_roots.is_empty());
+        assert!(action_bindings.is_empty());
+    }
+
     #[test]
     fn reconciles_surface_closed_events_for_adapter_bookkeeping() {
         let closed_surface = 7;
