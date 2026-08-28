@@ -146,6 +146,17 @@ impl QtRuntimeExecutor {
         self.action_bindings.get(&action)
     }
 
+    /// Resolves one declared action identity to its current runtime handle.
+    pub fn action_handle_for_surface(
+        &self,
+        surface: AbiSurfaceHandle,
+        action_id: &str,
+    ) -> Option<AbiActionHandle> {
+        self.action_bindings.iter().find_map(|(handle, binding)| {
+            (binding.surface == surface && binding.action_id() == action_id).then_some(*handle)
+        })
+    }
+
     /// Destroys one surface and retires its callback bindings.
     pub fn destroy_surface(
         &mut self,
