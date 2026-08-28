@@ -181,7 +181,7 @@ The fields mean:
 | `inner_version?` | The effective inner plan version for the version-five capability envelope. Version five therefore compares both its outer envelope version and its inner plan version; other plans use no inner version. |
 | `language` | The function revision language version matched to the locally supported CLIENT language/VM version. A database cannot raise or substitute the supported version. |
 | `digest` | The canonical payload digest, currently represented by `content_hash` and recomputed with `artifact_payload_digest`. A mismatch is a denial. |
-| `declared_capabilities/contracts` | Requirements are derived from checked revision evidence and the decoded plan. A version-five envelope carries its requirements in the envelope; its canonical tuple encoding sorts requirement name and argument-source pairs and rejects duplicates. Legacy plans without a revision-carried manifest remain on the compatibility façade until a production admission manifest is defined; caller declarations cannot add authority to the new path. Runtime contracts are the exact closed references retained by the checked plan and active revision. |
+| `declared_capabilities/contracts` | Requirements are derived from checked revision evidence and the decoded plan. A version-five envelope carries its requirements in the envelope; its canonical tuple encoding sorts requirement name and argument-source pairs and rejects duplicates. The new path admits legacy plans only when their checked operation graph has no capability or runtime-contract requirements; legacy plans with caller-supplied declarations remain on the compatibility façade until a production admission manifest is defined. Caller declarations cannot add authority to the new path. Runtime contracts are the exact closed references retained by the checked plan and active revision. |
 | `artifact_declared_limits` | Limits encoded by the plan format and any future artifact-declared maxima: encoded size, decoded nodes/bodies/arguments, nesting, and declared operation budgets. Host ceilings, deadlines, and cancellation are policy context, not artifact identity. |
 
 For current plan versions, the artifact-declared limit class is the fixed
@@ -244,20 +244,50 @@ A local child receives a fresh identity from the allocator; a nested
 `ORNA-RESOURCE/1` request keeps its separate request/stream identity and
 generation. These identities are correlation and lifecycle evidence, not caller
 authority, and are never reused after release.
-The allocator is a private host object bound to one VM. It stores the root
-identity and a set or monotonic sequence of issued child identities. Allocation
-rejects zero, overflow, and an already issued identity; failure to allocate
-fails the child before admission. Release records the identity as closed and
-never returns it to the allocator. The VM root identity, local child identity,
+
+The uniqueness domain is one VM root and its lifetime for child identities. A
+host-wide root registry reserves each non-zero root identity before VM
+construction and retains a closed-root tombstone until process shutdown.
+Concurrent root creation and release use the same linearizable registry
+operation; a live or closed identity is never overwritten or reused. Root
+zero, root-source exhaustion, child overflow, and duplicate allocation are
+closed failures. Child allocation reserves its identity before returning it,
+and release records it as closed. The VM root identity, local child identity,
 and resource request/stream identity therefore have separate owners and
 lifetimes.
-The uniqueness domain is one VM root and its lifetime, while the host registry
-must ensure that the root identity does not collide with another live root.
-Allocation and release are linearizable operations on the private allocator:
-the identity is reserved before it is returned, concurrent child creation
-cannot receive the same value, and allocator exhaustion is a closed failure.
-Closed identities remain recorded until the VM is destroyed and are never
-reused during that VM lifetime.
+Stage 1 keeps this registry in memory and uses it only for deterministic
+control-plane tests. Before Stage 2 can recover an effect or audit terminal
+across process restart, the authenticated host/kernel boundary registers a
+non-reused `HostIncarnationId` and monotonically increasing fence epoch for one
+host instance. The kernel-owned operation ledger durably records the
+incarnation, fence epoch, and operation identity.
+`HostIncarnationId` is a kernel-generated opaque 16-byte value and `fence_epoch`
+is a persisted non-zero `u64`; neither is accepted from artifact bytes or an
+ordinary request field. A registration transaction returns the pair only after
+binding it to the authenticated host instance. Registering a new pair atomically
+changes the previous pair for that instance from `Registered` to `Fenced` and
+marks the new pair `Registered`. Retirement then changes it to `Retired` in the
+same ledger. Recovery examines abandoned operations only after the fence
+transition commits, and every old-host request fails the ledger epoch check
+before idempotency or backend-start handling.
+
+Registration has explicit liveness states: `Registered`, `Fenced`, and
+`Retired`. A new registration for the same host instance atomically fences the
+previous live incarnation before the recovery worker examines its intents.
+Every VM, audit, lease, and backend-ledger request carries the registered
+incarnation and fence epoch; the kernel rejects requests from a fenced or
+retired incarnation, including a paused old host that resumes after recovery.
+The recovery worker owns terminal-only closure of abandoned operations and
+cannot create a lease, change principal authority, or start a new effect.
+
+A Stage 2 operation identity is exactly the tuple
+`(HostIncarnationId, fence epoch, root InvocationId, operation sequence,
+DecisionId)`. The ledger rejects zero, stale, or unregistered identities and
+duplicates with different artifact tuple digests, operation arguments, resolved
+scope, runtime offer, host limits, security context, capability, operation, or
+session binding. A new host receives a new incarnation and must start a new
+root invocation after recovery; it cannot claim another host's operation by
+reusing an invocation or session binding.
 
 ### Admitted plan input and decode boundary
 
@@ -341,8 +371,8 @@ from the host, not an authority-bearing request field.
 A successful broker admission returns an opaque `CapabilityLease`. A lease is:
 
 - bound to the issuing `InvocationId`, its root invocation and lineage, the
-  admitted `FunctionId`/`FunctionRevisionId`/`RevisionPair`, and the relevant
-  security-context digest and grant-policy epoch;
+  admitted `FunctionId`/`FunctionRevisionId`/`RevisionPair`, canonical artifact
+  tuple digest, and the relevant security-context digest and grant-policy epoch;
 - bound to one closed capability name, resolved scope, operation kind, runtime
   offer identity, and host limit/cancellation epoch;
 - owned by the host and invalidated on cancellation, deadline, invocation
@@ -374,6 +404,15 @@ DNS or endpoint changes cannot silently retarget an existing lease. Secret use
 remains a broker policy operation; secret IDs and secret bytes never become
 audit or lease authority. No backend may fall back to ambient environment,
 working-directory state, or unrestricted global handles.
+Scope attenuation is structural. A path scope is the ordered, lexically
+normalised absolute component list already defined by the local capability
+model; a child scope is narrower only when the parent components are an exact
+prefix of the child components. Host and secret scopes require exact equality,
+and operation kinds may not widen. The lease stores the normalised scope and a
+scope digest; changing the operation argument, scope, or kind requires fresh
+admission. Lexical normalisation never resolves symlinks. The Stage 2 backend
+must apply the descriptor/handle race rules above before it treats a path scope
+as an OS authority.
 
 The next capability implementation is limited to the closed vocabulary already
 accepted by work ADR 0060: `std.fs.read(path-scope)`,
@@ -382,6 +421,7 @@ accepted by work ADR 0060: `std.fs.read(path-scope)`,
 canonical possibilities remain outside this ADR unless a later work decision
 accepts them. A database cannot add a capability by changing a request frame or
 runtime offer.
+
 ### Deny-before-side-effect ordering
 
 For every root or nested CLIENT operation, the host follows this ordering:
@@ -471,35 +511,80 @@ an old façade call.
 Each lease has host-owned atomic states:
 
 ```text
-Active -> InUse -> Committed -> Released
-Active -> Revoking -> Revoked -> Released
-InUse  -> Revoking -> Revoked -> Released
-Active -> Released
+Active         -> InUse -> EffectInFlight -> EffectStarted -> Committed -> Released
+Active         -> Revoking -> Revoked -> Released
+InUse          -> Revoking -> Revoked -> Released
+EffectInFlight -> Revoking -> Revoked -> Released
+EffectStarted  -> Revoked -> Released
+EffectStarted  -> Committed -> Released
+EffectStarted  -> EffectUnknown -> Released
 ```
 
 `begin_effect` may move `Active` to `InUse` only when the invocation, policy
 epoch, operation, scope, runtime offer, and cancellation epoch still match.
-Grant-policy, runtime-offer, revision, session, or host-ceiling changes
-advance the policy epoch and atomically mark every affected `Active` or `InUse`
-lease as `Revoking` before it can commit.
+The kernel-owned audit transaction must already have reserved the operation
+identity and lease intent; the host does not reserve them in a second store. It
+must receive the durable commit acknowledgement before entering the effect
+sequence. The single-writer broker commits the durable `effect_in_flight`
+marker; `EffectInFlight` is exposed in memory only after that commit.
+The broker then runs one ledger-controlled start
+transaction that rechecks the registered host incarnation, fence epoch, tuple
+fingerprint, policy epoch, and lease state. It atomically consumes a one-shot
+start grant and appends `effect_started`, with a durable acknowledgement. Only
+the broker may start the backend call after that transaction commits.
 
-The host's effect linearization point is an atomic operation that rechecks the
-lease state and policy epoch while transitioning `InUse` to `Committed`.
-Cancellation or policy revocation that wins before that transition prevents
-the effect and moves the lease through `Revoking` to `Revoked`. If the host
-cannot provide this revocation fence, the operation fails closed without an
-effect. A committed effect wins over later cancellation or policy revocation
-and must be reported as committed; cancellation must not claim to undo an
-irreversible operation. Each operation declares whether its committed effect
-is retry-safe.
+The Stage 2 VM never performs a filesystem, network, or secret syscall itself.
+It submits the operation to the same trusted, single-writer host-effect broker.
+The broker owns the descriptor/connection/secret handle and is the sole writer
+through the kernel-owned durable operation ledger; it does not maintain a
+second operation store. A registration fence invalidates every unconsumed start
+grant before recovery examines its intents. A fenced host's start request or
+grant-consumption attempt is rejected before the backend call. Registration
+fencing, audit reservation, effect markers, grant consumption, and recovery use
+the same ledger owner, so a recovery worker cannot terminalise a started
+operation while an old host still has a valid start grant.
 
-`release` is an idempotent host operation. It moves an unused `Active` lease or
-any terminal `Committed` or `Revoked` lease to `Released`. `InUse` and
-`Revoking` must first resolve through their state machine. A `Released` lease
+The effect fence is the committed `effect_started` marker and the broker's
+single-writer start decision. A cancellation or policy revocation linearised
+before that fence wins, moves the lease through `Revoking` to `Revoked`, and
+prevents the backend call. A cancellation or policy revocation linearised after
+the fence cannot revoke the in-flight operation; it records a pending
+revocation. The broker retains ownership across the backend call and outcome
+transition, so no competing host request can report a revoked lease while the
+call is in flight.
+Any cancellation or policy revocation observed after `effect_started` is stored
+as an idempotent pending-revocation marker in the operation ledger. It cannot
+change the terminal classification or authorise a retry. The single-writer
+broker clears the marker only when it appends the terminal record.
+
+The backend call is not assumed to be atomically coupled to in-memory state.
+Each Stage 2 backend must provide a reservation/commit protocol or an
+operation-idempotency and outcome-classification protocol. After the call, the
+host moves the lease to `Revoked` only when the backend proves that no effect
+occurred, to `Committed` when the effect occurred, or to `EffectUnknown` when
+a crash or backend error leaves the effect uncertain. `EffectUnknown` is
+terminal and cannot be retried automatically. A process restart recovers a
+durable `effect_in_flight` intent without an `effect_started` marker as
+no-effect `Revoked`; it recovers an `effect_started` marker as terminal
+`EffectUnknown`. A backend reconciliation, if available, appends a separate
+non-authorising resolution record and never mutates that terminal state. If a
+backend cannot provide this ledger, recovery, and no-retry rule, the operation
+is unavailable and fails closed before entering `EffectInFlight`.
+
+`release` is an idempotent host operation. In Stage 2, release of an `Active`
+lease first appends its one no-effect terminal (`aborted_before_lease` or
+`aborted_before_effect`) and moves the lease through `Revoking` to `Revoked`,
+then to `Released`, in the same ledger-owned operation. Stage 1 may release an
+ephemeral in-memory lease directly because it has no audit record or host
+effect.
+
+`InUse`, `Revoking`, `EffectInFlight`, and `EffectStarted` must first resolve
+through their state machine and durable operation ledger. A `Released` lease
 rejects all use, cannot be reacquired, and is never reused for another
 invocation. A late completion, callback, or lease use observes `Revoking`,
-`Revoked`, or `Released` and cannot perform an effect, recreate a lease, or
-mutate terminal state, resource cache, USER state, or audit projection.
+`Revoked`, `EffectUnknown`, or `Released` and cannot perform an effect,
+recreate a lease, or mutate terminal state, resource cache, USER state, or
+audit projection.
 
 Invocation completion, runtime shutdown, connection close, session loss,
 deadline, and host failure revoke or release each lease exactly once and cancel
@@ -508,36 +593,20 @@ a stale lease.
 
 ### Audit and redaction
 
-The broker is not a second security authority. The kernel remains the owner of
-the protected audit record. Every capability admission and operation decision
-is audit-required and has one immutable decision record plus, when an operation
-is admitted, one linked terminal record.
+The broker is not a second security authority. The kernel owns the protected
+audit record and the Stage 2 audit exchange described below. Every capability
+admission and operation decision is audit-required. Stage 1 uses only an
+in-memory recorder and has no production audit call or host effect.
 
-For a Stage 2 production host operation, the VM host sends one typed, bounded,
-redacted pre-effect decision request to the kernel-owned audit path and waits for
-its commit acknowledgement before issuing or using a lease. The request
-carries the authenticated session binding, target and revision identities,
+Audit identity may include target and revision identities, artifact tuple digest,
 root/current invocation identities, lineage correlation, closed capability
-name, operation kind, policy epoch, and allow/deny decision. A missing,
-malformed, stale, or persistence-failing acknowledgement denies the operation.
-A disconnected host cannot perform a production capability operation.
-
-Once the effect linearization point commits, or an issued lease reaches a
-terminal state without an effect, the host sends one linked terminal record with
-the actual committed, failed, cancelled, or revoked outcome. The terminal
-record cannot authorise a new operation. If it cannot be persisted, the host
-reports the audit failure and the actual effect outcome; it does not replay or
-pretend to undo an irreversible effect. Stage 1 deterministic adapters may use
-an in-memory recorder to prove this ordering, but that recorder is a test seam
-and is not protected audit evidence.
-
-Audit identity must not include raw source or artifact bytes, payloads or
-signatures, function arguments, result bytes, USER state values, credentials,
-secret values, grant contents, path/host/secret scope values, opaque lease
-contents, arbitrary environment text, or unbounded provider errors. A future
-attestation gate may record a non-secret signer key identity and stable
-verification outcome, but it must not turn signatures or keyring material into
-runtime-visible values.
+name, operation kind, policy epoch, allow/deny decision, and terminal outcome.
+It must not include raw source or artifact bytes, payloads or signatures,
+function arguments, result bytes, USER state values, credentials, secret values,
+grant contents, path/host/secret scope values, opaque lease contents, arbitrary
+environment text, or unbounded provider errors. A future attestation gate may
+record a non-secret signer key identity and stable verification outcome, but it
+must not turn signatures or keyring material into runtime-visible values.
 
 Broker logs and runtime diagnostics apply the same redaction and do not become
 an alternate audit stream that can grant authority.
@@ -554,14 +623,27 @@ post-effect record cardinality, schema migration, disconnect handling, and
 stable error mapping. That contract may extend the protected audit schema; this
 ADR does not silently change it.
 
-The exchange uses a non-zero host-owned `DecisionId` and an operation identity
-unique within the root invocation:
+The Stage 2 audit transaction owns one operation reservation. It appends the
+pre-effect decision, reserves the operation identity and lease intent, and
+returns an acknowledgement only after that transaction commits. The host does
+not reserve the same operation identity in a second store. The exchange uses a
+non-zero host-owned `DecisionId` and an operation identity unique across
+restarts:
 
 ```text
 CapabilityAuditExchange {
     decision_id,
+    host_incarnation_id,
+    fence_epoch,
     operation_id,
-    phase: pre_effect | post_effect,
+    operation_sequence,
+    artifact_tuple_digest,
+    operation_arguments_digest,
+    resolved_scope_digest,
+    runtime_offer_identity,
+    host_limit_ceiling,
+    cancellation_epoch,
+    phase: pre_effect | effect_in_flight | effect_started | terminal_pending | post_effect,
     authenticated_session_binding,
     security_context_digest,
     target_and_revision,
@@ -574,13 +656,56 @@ CapabilityAuditExchange {
 }
 ```
 
+The host allocator issues `DecisionId` and `operation_sequence` under the root
+lock. The kernel ledger keys idempotency by the complete operation identity
+`(HostIncarnationId, fence epoch, root InvocationId, operation sequence,
+DecisionId)` and stores the complete fingerprint alongside it. The fingerprint
+includes the current invocation, artifact tuple digest, operation-arguments
+digest, resolved-scope digest, runtime-offer identity, host-limit ceiling,
+cancellation epoch, security context, session binding, capability, operation
+kind, and policy epoch.
+`operation_sequence` and `DecisionId` are non-zero fixed-width `u64` values
+starting at one for each root. The host allocator increments both with checked
+arithmetic while holding the root lock; overflow, zero, or reuse is a closed
+failure. Stage 2 persists the allocation in the same kernel-owned ledger
+transaction as the operation reservation, so restart recovery cannot allocate
+the same pair. Stage 1 uses the equivalent in-memory rule for tests.
+
+Only a request with the same complete identity and identical fingerprint
+returns the recorded state. A reused identity with any changed field is
+rejected. A different operation identity is a new operation even when its
+fingerprint matches another operation. Host-incarnation fencing runs before
+idempotency lookup, so a stale host cannot replay an old request as a match.
+
 The kernel appends exactly one immutable `pre_effect` decision for each
-admission and exactly one linked `post_effect` terminal record for each issued
-lease. A repeated pre-effect request returns the original acknowledgement
-without issuing another lease; a repeated post-effect request returns the
-original terminal result without replaying the operation. The acknowledgement
-means the owning transaction has committed the corresponding record. A
-decision or terminal record never grants authority by itself.
+admission. A denied decision has no lease and no terminal effect record. An
+allowed decision requires exactly one linked `post_effect` terminal record,
+even when lease issuance fails, no effect starts, or recovery classifies the
+result as `EffectUnknown`. If an operation reaches `EffectInFlight`, the
+single-writer broker appends one durable `effect_in_flight` intent and waits for
+its commit acknowledgement. If it reaches the effect fence, the same broker
+transaction validates the live host fence, appends one `effect_started` marker,
+and waits for its commit acknowledgement before the backend call; both records
+are followed by the same terminal record.
+
+A crash before lease issuance produces `aborted_before_lease`. A crash after
+`effect_in_flight` but before `effect_started` produces no-effect `Revoked`.
+A crash after `effect_started` produces terminal `EffectUnknown`; recovery does
+not mutate that terminal state after the fact. A backend reconciliation, if
+available, appends a separate non-authorising resolution record linked to the
+same operation; it never rewrites or reuses the terminal record. Recovery is
+kernel-owned and terminal-only; it appends the missing terminal record before
+any retry, rejects stale host-incarnation replay, and never starts a new
+effect. Repeated pre-effect, in-flight, or post-effect requests return the
+recorded state without issuing another lease or replaying an operation. The
+acknowledgement means that the owning transaction committed the corresponding
+record. No audit record grants authority by itself.
+If a terminal append fails, the single ledger records `terminal_pending` with
+the already classified outcome and retains the complete operation identity.
+The recovery worker retries only the terminal append by that identity. It never
+reissues the backend call, allocates a new lease, or treats a pending terminal
+as permission to retry. A successful retry changes the ledger to
+`post_effect`; repeated retries return the same terminal record.
 
 ### Cache and replay
 
@@ -638,6 +763,13 @@ policy/audit admission, and lease issuance before reserving capability-backed
 resource state. Ordinary SERVER-resource requests retain the existing resource
 generation, transport, and cancellation semantics. A compatibility executor
 cannot bypass the private broker adapter.
+The private adapter exposes only a lease-bearing operation method whose input
+contains the opaque lease, complete operation identity, normalized scope
+digest, bounded operation arguments, and cancellation epoch. It returns a
+bounded `EffectOutcome` and never returns the lease, raw handle, secret, or
+provider error to CLIENT code. It performs the ledger fence and backend call
+through the single-writer broker. This method is private to the VM host and is
+not added to `ClientResourceExecutor`.
 
 Inspector and external runtime-contract calls use typed requests and provider
 offers. They do not receive leases or local authority. If a future provider
@@ -658,17 +790,45 @@ the next structural slice.
 The selected runtime offer is represented by a private immutable host snapshot,
 not by a mutable `RuntimeDescriptor` or an untrusted request. The snapshot
 includes ABI major/minor, runtime name/version/build identity, platform, thread
-model, feature flags, and the complete sink and contract offers. Sink offers
-are ordered by type name, media types, streaming flag, and preference rank;
-contract offers are ordered by name, major/minor version, and feature list.
-The host encodes this normalised snapshot with the
-`orna.runtime-offer.witness/1` domain separator. The witness digest uses
-SHA-256 over that separator and canonical bytes. Integers use unsigned
-big-endian encoding, booleans use `0`/`1`, and strings use a four-byte
-byte-length followed by UTF-8 bytes. Collections carry a four-byte count, are
-sorted by the keys above, and reject duplicate entries; the `features` bitset
-is encoded as one fixed-width big-endian `u64`. Unknown fields and unsupported
-ABI or thread values reject the snapshot. The digest is a host policy witness,
+model, feature flags, and the complete sink and contract offers. The v1
+canonical field order is:
+
+```text
+abi_major:u32, abi_minor:u32,
+runtime_name:text, runtime_version:text, build_id:text, platform:text,
+thread_model:i32, features:u64,
+sinks:count<sink>,
+contracts:count<contract>,
+```
+
+Each sink encodes `type_name:text`, `media_types:count<text>`,
+`supports_streaming:u8`, and `preference_rank:i32`. Each contract encodes
+`name:text`, `major:u32`, `minor:u32`, and `features:count<text>`. Identity
+text is non-empty, contains no NUL, and uses the exact UTF-8 byte sequence with
+a four-byte big-endian length and no normalisation. Media-type and feature
+text is also NUL-free; empty entries and duplicate entries are rejected.
+`u32` and `u64` use fixed-width big-endian encoding, `i32` uses its
+two's-complement four-byte big-endian representation, and `u8` uses one byte.
+Every count is a four-byte big-endian `u32` with maxima `sinks <= 1`,
+`contracts <= 8`, `media_types <= 16`, and `features <= 16`; each text value
+is at most 4096 bytes and the complete canonical witness is at most 16 MiB.
+Media-type lists and feature lists are sorted lexicographically. Sink offers
+are sorted by type name, media types, streaming flag, and rank; contracts are
+sorted by name, major, minor, and features. `supports_streaming` must be `0` or
+`1`, and feature bits must be within the accepted mask for the ABI/runtime.
+Exact duplicate sinks or contracts, unknown fields, and unsupported ABI or
+thread values reject the snapshot.
+For the current Qt v1 provider, `thread_model` is the fixed
+`ORNA_THREAD_MODEL_CALLER_PUMPS` value `3`, and `features` must equal the
+accepted `RUNTIME_FEATURE_MULTIPLE_WINDOWS` bit `1 << 0`. A future runtime or
+ABI version must declare its own accepted thread values and feature mask before
+its witness can be used.
+
+The host computes SHA-256 over the ASCII
+`orna.runtime-offer.witness/1` domain separator followed by these canonical
+bytes. Descriptor limits are not present in the current ABI snapshot; host
+limit ceilings remain in `HostAdmissionContext`. A future descriptor limit
+field requires a versioned witness update. The digest is a host policy witness,
 not a wire identity. Runtime replacement or shutdown creates a new witness,
 advances the mutable host policy epoch, and invalidates affected admissions and
 leases.
@@ -861,18 +1021,51 @@ already pass.
    inputs fail before attacker-controlled counts can cause unbounded allocation.
 4. Existing `evaluate_client_function*` façade calls retain their signatures and
    accepted evaluator behaviour. The additive host path reaches the same
-   evaluator semantics for expression, control-flow, state, resource, action,
-   and Inspector plans rather than routing to a replacement evaluator.
+   evaluator semantics for capability-free legacy Boolean and Opaque plans,
+   and for versioned plans whose requirements are carried by the admission
+   manifest, including expression, state, procedural/control-flow, resource,
+   action, and Inspector plans rather than routing to a replacement evaluator.
 5. An instrumented evaluator proves that no database, protocol, filesystem,
    process, environment, network, or runtime-library operation occurs inside
    the evaluator; all host effects go through the broker or existing executor
    seam.
+
+Stage 1 also tests one bounded decode of the selected outer and inner plan,
+payload non-reread, immutable retention, and independent child admission and
+decode. It must distinguish the V5 envelope decode from the independently
+admitted child decode.
+
+Stage 1 runtime-witness tests cover the golden SHA-256 bytes, reordered
+collection invariance, duplicate/unknown/empty/NUL/unsupported-field rejection,
+`supports_streaming` values outside `0`/`1`, feature-bit policy, count and
+aggregate byte limits, and mutation after snapshot creation.
+
+Stage 1 also tests concurrent root reservation and release, root collision,
+root zero/exhaustion, concurrent child allocation, child overflow, zero
+rejection, release recording, and no identity reuse. These tests exercise the
+in-memory allocator and do not claim a production invocation service.
 
 ### Broker, leases, and side effects
 
 Tests 6-11 are Stage 2 broker tests. Stage 1 may exercise the same state
 machine with an in-memory recorder, but it must not issue a production lease,
 contact the kernel audit path, or perform a host effect.
+The Stage 1 negative proof injects production-effect, kernel-audit, and
+lease-export hooks and asserts that none is reachable from the ephemeral
+admission/state-machine path.
+
+Stage 2 adapter tests prove that the private lease-bearing `ClientVmHost`
+path is the only path that can reach a capability-backed host operation. The
+public compatibility executor receives no lease and cannot reserve
+capability-backed state before broker admission; ordinary SERVER-resource
+requests remain on their existing path.
+
+Stage 2 ledger tests cover the complete identity matrix: an identical operation
+identity and fingerprint returns the recorded state; reuse with any changed
+fingerprint is rejected; and a distinct operation identity with the same
+fingerprint starts a new operation. They also cover concurrent
+`DecisionId`/`operation_sequence` allocation, overflow, restart non-reuse,
+host-incarnation fencing, and stale-host rejection.
 
 6. A permitted capability operation receives an opaque, invocation-scoped lease
    with the declared atomic state transitions; attempts to encode it as a
@@ -887,10 +1080,12 @@ contact the kernel audit path, or perform a host effect.
    before opening, writing, connecting, or resolving anything.
    `std.process.spawn` remains rejected in the closed Stage 2 vocabulary.
 9. For a Stage 2 production operation, a deny-before-side-effect test records
-   admission, mandatory protected audit acknowledgement, lease issuance, the
-   effect linearization point, and the terminal outcome. It proves no effect
-   when cancellation or denial wins before commit, and reports a committed
-   effect truthfully when the effect wins first.
+   admission, mandatory protected audit acknowledgement, lease reservation,
+   durable `effect_in_flight` intent, live fence validation, `effect_started`
+   marker, the broker backend call, and the terminal outcome. It proves no
+   effect when cancellation or denial wins before `effect_started`, and reports
+   `Revoked` for a backend-proven no-effect result, `Committed` for a proven
+   effect, or `EffectUnknown` after a crash or uncertain backend result.
 10. Nested calls receive fresh child admission and, where permitted, fresh
     child leases only after child `EXECUTE`/policy authorization and grant
     attenuation. A parent lease cannot be passed, cloned, serialised, or used
@@ -898,8 +1093,22 @@ contact the kernel audit path, or perform a host effect.
 11. Root and child cancellation is idempotent, revokes leases through the
     declared state machine, prevents new effects, cancels pending
     resource/runtime work, rejects late completions, and preserves the
-    committed-terminal-wins race rule. Shutdown, disconnect, and deadline
-    cleanup release every lease exactly once.
+    committed-terminal-wins race rule. Cancellation and policy revocation
+    during `EffectInFlight` wait for outcome classification; concurrent host
+    registration fences the old incarnation before recovery, and an old host
+    cannot submit a terminal or effect request after retirement. Restart
+    recovery distinguishes `effect_in_flight` without `effect_started` as
+    no-effect `Revoked`, and `effect_started` as terminal `EffectUnknown`.
+    Backend reconciliation is a separate non-authorising record. A forced
+    terminal-write failure is recovered idempotently without a duplicate
+    terminal or repeated effect. Shutdown, disconnect, and deadline cleanup
+    release every lease exactly once.
+The Stage 2 audit test asserts that a denied `pre_effect` has no terminal
+record, an allowed lease-issuance failure produces one
+`aborted_before_lease` terminal, and every allowed operation has exactly one
+linked `post_effect` terminal. A forced terminal-write failure leaves the
+operation ledger pending; recovery retries the same terminal append by complete
+identity and never repeats the backend effect.
 
 ### Audit, cache, replay, and runtime separation
 
