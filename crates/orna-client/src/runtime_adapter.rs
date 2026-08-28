@@ -124,13 +124,7 @@ impl QtRuntimeExecutor {
     }
 
     fn note_surface_events(&mut self, events: &[RuntimeEventSnapshot]) {
-        for event in events {
-            if let RuntimeEventSnapshot::SurfaceClosed(closed) = event {
-                self.active_surfaces.remove(&closed.surface);
-                self.action_bindings
-                    .retain(|_, binding| binding.surface != closed.surface);
-            }
-        }
+        reconcile_surface_events(&mut self.active_surfaces, &mut self.action_bindings, events);
     }
 
     /// Resolves a runtime callback handle to its declared CLIENT action.
@@ -184,7 +178,11 @@ impl QtRuntimeExecutor {
 
     /// Requests terminal runtime shutdown through the supplied session.
     pub fn shutdown(&mut self) -> Result<(), RuntimeSessionError> {
-        self.session.shutdown()
+        self.session.shutdown()?;
+        let events = self.session.drain_events();
+        self.note_surface_events(&events);
+        self.pending_events.extend(events);
+        Ok(())
     }
 }
 
@@ -311,6 +309,18 @@ impl QtRuntimeExecutor {
                 .insert(action, RuntimeActionBinding { surface, action_id });
         }
         Ok(surface)
+    }
+}
+fn reconcile_surface_events(
+    active_surfaces: &mut HashSet<AbiSurfaceHandle>,
+    action_bindings: &mut HashMap<AbiActionHandle, RuntimeActionBinding>,
+    events: &[RuntimeEventSnapshot],
+) {
+    for event in events {
+        if let RuntimeEventSnapshot::SurfaceClosed(closed) = event {
+            active_surfaces.remove(&closed.surface);
+            action_bindings.retain(|_, binding| binding.surface != closed.surface);
+        }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1114,5 +1124,41 @@ mod tests {
         assert!(parse_version("01.0").is_err());
         assert!(parse_version("1.00").is_err());
         assert!(parse_version("+1.0").is_err());
+    }
+    #[test]
+    fn reconciles_surface_closed_events_for_adapter_bookkeeping() {
+        let closed_surface = 7;
+        let retained_surface = 8;
+        let closed_action = 11;
+        let retained_action = 12;
+        let mut active_surfaces = HashSet::from([closed_surface, retained_surface]);
+        let mut action_bindings = HashMap::from([
+            (
+                closed_action,
+                RuntimeActionBinding {
+                    surface: closed_surface,
+                    action_id: "closed".to_owned(),
+                },
+            ),
+            (
+                retained_action,
+                RuntimeActionBinding {
+                    surface: retained_surface,
+                    action_id: "retained".to_owned(),
+                },
+            ),
+        ]);
+        let events = [RuntimeEventSnapshot::SurfaceClosed(
+            crate::runtime_loader::RuntimeSurfaceClosedEventSnapshot {
+                surface: closed_surface,
+            },
+        )];
+
+        reconcile_surface_events(&mut active_surfaces, &mut action_bindings, &events);
+
+        assert_eq!(active_surfaces, HashSet::from([retained_surface]));
+        assert!(!action_bindings.contains_key(&closed_action));
+        assert!(action_bindings.contains_key(&retained_action));
+        assert_eq!(events.len(), 1);
     }
 }
