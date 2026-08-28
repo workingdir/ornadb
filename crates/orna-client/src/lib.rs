@@ -121,6 +121,7 @@ pub mod inspect_lifecycle;
 pub mod inspect_session;
 pub mod runtime_adapter;
 pub mod runtime_loader;
+pub mod vm;
 
 pub use runtime_adapter::{QtRuntimeExecutor, RuntimeActionBinding};
 
@@ -14020,6 +14021,148 @@ mod tests {
         function: FunctionId,
     ) -> Result<super::ClientExecutionResult, super::ClientExecutionError> {
         super::evaluate_client_function(active, &authorise(active.pair(), function))
+    }
+
+    #[test]
+    fn vm_admission_resolves_and_decodes_an_authorised_client_revision() {
+        let (active, function, pair, _) = version_one_active(true);
+        let authorisation = authorise(pair, function);
+        let limits =
+            super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+        let runtime_offer = super::vm::RuntimeOfferWitness::from_parts(
+            1,
+            0,
+            "orna-runtime-test",
+            "0.1.0",
+            "test-build",
+            "linux-x86_64",
+            3,
+            1,
+            &[],
+            &[],
+        )
+        .expect("valid runtime offer");
+        let registry = super::vm::ClientVmInvocationRegistry::new();
+        let mut host = super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+            .expect("valid VM host");
+
+        let admission =
+            super::vm::admit_client_function(&active, &authorisation, &mut host, limits, &[], &[])
+                .expect("authorised client revision should be admitted");
+
+        assert!(matches!(
+            admission.plan(),
+            super::vm::ClientVmDecodedPlan::Boolean(_)
+        ));
+        assert_eq!(admission.identity().function(), function.to_bytes());
+        assert_eq!(
+            admission.identity().function_revision(),
+            active.function_revisions()[0].id().to_bytes()
+        );
+        assert_eq!(
+            admission.host().security_context_digest(),
+            authorisation.security_context_digest().to_bytes()
+        );
+        assert!(host.admission_is_current(&admission));
+        host.advance_policy_epoch().expect("policy epoch");
+        assert!(!host.admission_is_current(&admission));
+    }
+
+    #[test]
+    fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters() {
+        let capability_payload = |argument| {
+            orna_artifact::client_plan::CapabilityClientPlan::new(
+                orna_artifact::client_plan::InnerClientPlan::Boolean(
+                    orna_artifact::client_plan::ClientPlan::return_boolean(true),
+                ),
+                vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                    "std.fs.read",
+                    argument,
+                )],
+            )
+            .encode()
+            .expect("capability payload")
+        };
+        let (active, function, pair, _) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            capability_payload(orna_artifact::client_plan::CapabilityArgumentSource::Text(
+                "scope".to_owned(),
+            )),
+        );
+        let authorisation = authorise(pair, function);
+        let limits =
+            super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+        let runtime_offer = || {
+            super::vm::RuntimeOfferWitness::from_parts(
+                1,
+                0,
+                "orna-runtime-test",
+                "0.1.0",
+                "test-build",
+                "linux-x86_64",
+                3,
+                1,
+                &[],
+                &[],
+            )
+            .expect("valid runtime offer")
+        };
+        let registry = super::vm::ClientVmInvocationRegistry::new();
+        let mut host = super::vm::ClientVmHostContext::new(&registry, runtime_offer(), limits)
+            .expect("valid VM host");
+        let declarations = [super::vm::ClientVmCapabilityDeclaration::new(
+            "std.fs.read",
+            super::vm::ClientVmCapabilityArgument::Text("scope".to_owned()),
+        )];
+        let admission = super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &declarations,
+            &[],
+        )
+        .expect("text capability argument should be admitted");
+        assert!(matches!(
+            admission.plan(),
+            super::vm::ClientVmDecodedPlan::Capability(_)
+        ));
+
+        let (missing_active, _, missing_pair, _) = version_two_active_with_artifact(
+            standard_v6(),
+            orna_standard::BOOLEAN_TYPE_ID,
+            DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+            DefinitionReferenceKind::NamedType,
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            capability_payload(
+                orna_artifact::client_plan::CapabilityArgumentSource::Parameter(
+                    "missing".to_owned(),
+                ),
+            ),
+        );
+        let missing_authorisation = authorise(missing_pair, function);
+        let mut missing_host =
+            super::vm::ClientVmHostContext::new(&registry, runtime_offer(), limits)
+                .expect("valid second VM host");
+        let missing_declarations = [super::vm::ClientVmCapabilityDeclaration::new(
+            "std.fs.read",
+            super::vm::ClientVmCapabilityArgument::Parameter("missing".to_owned()),
+        )];
+        assert!(matches!(
+            super::vm::admit_client_function(
+                &missing_active,
+                &missing_authorisation,
+                &mut missing_host,
+                limits,
+                &missing_declarations,
+                &[],
+            ),
+            Err(super::vm::ClientVmAdmissionError::SemanticRejected)
+        ));
     }
 
     #[test]
