@@ -78,6 +78,9 @@ pub struct QtRuntimeExecutor {
     fallback: Option<Box<dyn ClientResourceExecutor>>,
     next_alias: u64,
     active_surfaces: HashSet<AbiSurfaceHandle>,
+    surface_revisions: HashMap<AbiSurfaceHandle, u64>,
+    surface_roots: HashMap<AbiSurfaceHandle, AbiNodeHandle>,
+
     pending_events: Vec<RuntimeEventSnapshot>,
     action_bindings: HashMap<AbiActionHandle, RuntimeActionBinding>,
 }
@@ -88,6 +91,9 @@ impl QtRuntimeExecutor {
         Self {
             session,
             fallback: None,
+            surface_revisions: HashMap::new(),
+            surface_roots: HashMap::new(),
+
             next_alias: 1,
             active_surfaces: HashSet::new(),
             pending_events: Vec::new(),
@@ -104,6 +110,8 @@ impl QtRuntimeExecutor {
             session,
             fallback: Some(Box::new(fallback)),
             next_alias: 1,
+            surface_revisions: HashMap::new(),
+            surface_roots: HashMap::new(),
             active_surfaces: HashSet::new(),
             pending_events: Vec::new(),
             action_bindings: HashMap::new(),
@@ -124,7 +132,13 @@ impl QtRuntimeExecutor {
     }
 
     fn note_surface_events(&mut self, events: &[RuntimeEventSnapshot]) {
-        reconcile_surface_events(&mut self.active_surfaces, &mut self.action_bindings, events);
+        reconcile_surface_events(
+            &mut self.active_surfaces,
+            &mut self.surface_revisions,
+            &mut self.surface_roots,
+            &mut self.action_bindings,
+            events,
+        );
     }
 
     /// Resolves a runtime callback handle to its declared CLIENT action.
@@ -139,6 +153,9 @@ impl QtRuntimeExecutor {
     ) -> Result<(), RuntimeSessionError> {
         let result = self.session.destroy_surface(surface);
         self.active_surfaces.remove(&surface);
+        self.surface_revisions.remove(&surface);
+        self.surface_roots.remove(&surface);
+
         self.action_bindings
             .retain(|_, binding| binding.surface != surface);
         result
@@ -288,6 +305,8 @@ impl QtRuntimeExecutor {
         title: &str,
         canonical_ui_frame: &[u8],
     ) -> Result<AbiSurfaceHandle, RuntimeSessionError> {
+        let root_alias = self.next_alias;
+
         let body = decode_ui_frame(canonical_ui_frame)
             .map_err(|_| RuntimeSessionError::InvalidArgument)?;
         let (batch, next_alias, action_bindings) = lower_ui_content(&body, title, self.next_alias)
@@ -304,21 +323,79 @@ impl QtRuntimeExecutor {
             return Err(error);
         }
         self.active_surfaces.insert(surface);
+        self.surface_revisions.insert(surface, UI_SEMANTIC_REVISION);
+        self.surface_roots.insert(surface, root_alias);
+
         for (action, action_id) in action_bindings {
             self.action_bindings
                 .insert(action, RuntimeActionBinding { surface, action_id });
         }
         Ok(surface)
     }
+
+    /// Applies a new canonical UI frame to an existing surface.
+    ///
+    /// The update receives a strictly greater semantic revision than the
+    /// previous successful frame. Lowering and provider application happen
+    /// before adapter bookkeeping changes, so a rejected update leaves the
+    /// previous surface and action bindings intact.
+    pub fn update_window(
+        &mut self,
+        surface: AbiSurfaceHandle,
+        title: &str,
+        canonical_ui_frame: &[u8],
+    ) -> Result<(), RuntimeSessionError> {
+        let previous_revision = *self
+            .surface_revisions
+            .get(&surface)
+            .ok_or(RuntimeSessionError::NotFound)?;
+        let previous_root = *self
+            .surface_roots
+            .get(&surface)
+            .ok_or(RuntimeSessionError::NotFound)?;
+        let next_root = self.next_alias;
+
+        let semantic_revision = previous_revision
+            .checked_add(1)
+            .ok_or(RuntimeSessionError::Internal)?;
+        let body = decode_ui_frame(canonical_ui_frame)
+            .map_err(|_| RuntimeSessionError::InvalidArgument)?;
+        let (mut batch, next_alias, action_bindings) =
+            lower_ui_content_at_revision(&body, title, self.next_alias, semantic_revision)
+                .map_err(|_| RuntimeSessionError::InvalidArgument)?;
+        if batch.operations.len() >= CLIENT_MAX_RUNTIME_BATCH_OPERATIONS {
+            return Err(RuntimeSessionError::InvalidArgument);
+        }
+        batch
+            .operations
+            .insert(0, RuntimeUiOperation::unmount_node(previous_root));
+
+        self.session.apply_batch(surface, &batch)?;
+        self.next_alias = next_alias;
+        self.surface_revisions.insert(surface, semantic_revision);
+        self.surface_roots.insert(surface, next_root);
+        self.action_bindings
+            .retain(|_, binding| binding.surface != surface);
+        for (action, action_id) in action_bindings {
+            self.action_bindings
+                .insert(action, RuntimeActionBinding { surface, action_id });
+        }
+        Ok(())
+    }
 }
+
 fn reconcile_surface_events(
     active_surfaces: &mut HashSet<AbiSurfaceHandle>,
+    surface_revisions: &mut HashMap<AbiSurfaceHandle, u64>,
+    surface_roots: &mut HashMap<AbiSurfaceHandle, AbiNodeHandle>,
     action_bindings: &mut HashMap<AbiActionHandle, RuntimeActionBinding>,
     events: &[RuntimeEventSnapshot],
 ) {
     for event in events {
         if let RuntimeEventSnapshot::SurfaceClosed(closed) = event {
             active_surfaces.remove(&closed.surface);
+            surface_revisions.remove(&closed.surface);
+            surface_roots.remove(&closed.surface);
             action_bindings.retain(|_, binding| binding.surface != closed.surface);
         }
     }
@@ -459,12 +536,21 @@ fn lower_ui_content(
     title: &str,
     first_alias: u64,
 ) -> Result<LoweredUiContent, AdapterInputError> {
+    lower_ui_content_at_revision(content, title, first_alias, UI_SEMANTIC_REVISION)
+}
+
+fn lower_ui_content_at_revision(
+    content: &Value,
+    title: &str,
+    first_alias: u64,
+    semantic_revision: u64,
+) -> Result<LoweredUiContent, AdapterInputError> {
     if title.len() > CLIENT_MAX_RUNTIME_TEXT_BYTES {
         return Err(AdapterInputError);
     }
     let mut state = LoweringState::new(first_alias)?;
     let root = state.next_alias()?;
-    let mut batch = RuntimeUiBatch::new(UI_SEMANTIC_REVISION);
+    let mut batch = RuntimeUiBatch::new(semantic_revision);
     push_operation(
         &mut batch,
         RuntimeUiOperation::mount_node(
@@ -1051,6 +1137,17 @@ mod tests {
     }
 
     #[test]
+    fn lowers_updates_at_the_requested_semantic_revision() {
+        let content = serde_json::json!({"kind": "empty"});
+        let (batch, next_alias, action_bindings) =
+            lower_ui_content_at_revision(&content, "Title", 1, 7).expect("lowered update UI");
+
+        assert_eq!(batch.semantic_revision, 7);
+        assert_eq!(next_alias, 2);
+        assert!(action_bindings.is_empty());
+    }
+
+    #[test]
     fn lowers_schema_keys_and_runtime_canonical_values() {
         let content = serde_json::json!({
             "kind": "node",
@@ -1132,6 +1229,9 @@ mod tests {
         let closed_action = 11;
         let retained_action = 12;
         let mut active_surfaces = HashSet::from([closed_surface, retained_surface]);
+        let mut surface_revisions = HashMap::from([(closed_surface, 1), (retained_surface, 1)]);
+        let mut surface_roots = HashMap::from([(closed_surface, 100), (retained_surface, 200)]);
+
         let mut action_bindings = HashMap::from([
             (
                 closed_action,
@@ -1154,9 +1254,17 @@ mod tests {
             },
         )];
 
-        reconcile_surface_events(&mut active_surfaces, &mut action_bindings, &events);
+        reconcile_surface_events(
+            &mut active_surfaces,
+            &mut surface_revisions,
+            &mut surface_roots,
+            &mut action_bindings,
+            &events,
+        );
 
         assert_eq!(active_surfaces, HashSet::from([retained_surface]));
+        assert_eq!(surface_revisions, HashMap::from([(retained_surface, 1)]));
+        assert_eq!(surface_roots, HashMap::from([(retained_surface, 200)]));
         assert!(!action_bindings.contains_key(&closed_action));
         assert!(action_bindings.contains_key(&retained_action));
         assert_eq!(events.len(), 1);
