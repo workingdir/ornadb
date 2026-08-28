@@ -10,7 +10,7 @@ fmt:
 
 # Run the accepted TTY renderer demo for terminal documents and byte streams.
 runtime-tty-demo:
-    cargo run -p orna-runtime-tty --example runtime_demo
+    cargo run --locked -p orna-runtime-tty --example runtime_demo
 
 
 # Build the binary, start a temporary local server, and invoke std.invoke.echo.
