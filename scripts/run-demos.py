@@ -195,6 +195,7 @@ def run_demo(demo: Demo) -> bool:
             cwd=REPOSITORY_ROOT,
             check=False,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=CARGO_TIMEOUT_SECONDS,
         )
