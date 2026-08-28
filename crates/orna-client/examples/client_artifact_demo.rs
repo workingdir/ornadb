@@ -1,5 +1,6 @@
 use std::{error::Error, process};
 
+use orna_artifact::client_plan::{ClientPlan, FORMAT_IDENTITY, FORMAT_VERSION};
 use orna_client::{ClientArtifactIntegrityError, validate_client_artifact_integrity};
 use orna_core::{
     canonical_hash::artifact_payload_digest,
@@ -14,17 +15,21 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let payload = b"client-artifact-demo".to_vec();
+    let payload = ClientPlan::return_boolean(true).encode();
     let digest = artifact_payload_digest(&payload)?;
     let valid = ExecutableArtifact::new(
         ExecutableArtifactKind::Client,
-        orna_artifact::client_plan::FORMAT_IDENTITY,
-        orna_artifact::client_plan::FORMAT_VERSION,
+        FORMAT_IDENTITY,
+        FORMAT_VERSION,
         payload.clone(),
         digest,
     )?;
     validate_client_artifact_integrity(&valid)?;
-    println!("client artifact integrity: valid CLIENT payload accepted");
+    let plan = ClientPlan::decode(valid.payload())?;
+    if !plan.returned_boolean() {
+        return Err("verified client plan returned the wrong value".into());
+    }
+    println!("client artifact integrity: valid CLIENT plan accepted and decoded");
 
     let wrong_kind = ExecutableArtifact::new(
         ExecutableArtifactKind::Server,
