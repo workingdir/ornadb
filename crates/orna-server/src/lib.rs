@@ -19,8 +19,9 @@ pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
     EmbeddedEngineIdentity, EmbeddedHostError, EmbeddedHostPaths, EmbeddedPostmaster,
     MaterialisedSupport, ReadyEmbeddedHost, initialise_embedded_cluster,
-    inspect_ready_embedded_host, materialise_support_data, private_database_config,
-    run_embedded_server, start_embedded_postmaster,
+    inspect_current_embedded_host, inspect_development_embedded_host, inspect_ready_embedded_host,
+    materialise_support_data, private_database_config, run_embedded_server,
+    start_embedded_postmaster,
 };
 pub use inspect::{
     InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
