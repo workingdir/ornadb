@@ -240,6 +240,15 @@ peer-authenticated server. `server backend-shell`, `source apply`, `source
 diff`, security administration, grants, and `server upgrade` remain service
 operations and require the packaged Orna service account.
 
+Run the complete local binary demo with:
+
+```text
+just local-cli-demo
+```
+
+The demo builds the binary, starts a temporary user-owned server, waits for
+readiness, invokes `std.invoke.echo`, and removes its temporary state.
+
 - `orna source check <file.orna>` checks one regular UTF-8 source file offline;
   it does not require PostgreSQL, network access, configuration, or writes.
 - `orna source diff <file.orna>` reaches the installed source/revision diff
