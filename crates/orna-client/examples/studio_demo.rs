@@ -1,7 +1,8 @@
-use std::{env, error::Error, io, path::PathBuf, process};
+use std::{env, error::Error, fmt::Write as _, io, path::PathBuf, process};
 
 use orna_client::{
-    AbiSurfaceHandle, QtRuntimeExecutor, RuntimeEventSnapshot, RuntimeLibrary, RuntimeSession,
+    AbiSurfaceHandle, QtRuntimeExecutor, RuntimeActionEvent, RuntimeEventSnapshot, RuntimeLibrary,
+    RuntimeSession, RuntimeValueSnapshot,
 };
 use orna_standard::UI_MAGIC;
 use serde_json::{Value, json};
@@ -11,6 +12,7 @@ const STUDIO_TITLE: &str = "Orna Studio - Qt shell";
 struct Arguments {
     runtime_path: PathBuf,
     smoke: bool,
+    action_smoke: bool,
 }
 
 fn main() {
@@ -50,13 +52,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         canonical_state.len()
     );
 
-    let surface_closed = if arguments.smoke {
+    let surface_closed = if arguments.action_smoke {
+        run_action_smoke(&mut host, surface, &canonical_state)?;
+        false
+    } else if arguments.smoke {
         host.poll_runtime(1)?;
         let events = host.drain_runtime_events();
         let (closed, action_id) = consume_runtime_events(&host, events, surface);
         if !closed {
             if let Some(action_id) = action_id.as_deref() {
-                apply_action_feedback(&mut host, surface, action_id)?;
+                let _ = apply_action_feedback(&mut host, surface, action_id)?;
             }
         }
         println!("studio_demo: smoke poll complete");
@@ -70,7 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let (next_closed, action_id) = consume_runtime_events(&host, events, surface);
             if !next_closed {
                 if let Some(action_id) = action_id.as_deref() {
-                    apply_action_feedback(&mut host, surface, action_id)?;
+                    let _ = apply_action_feedback(&mut host, surface, action_id)?;
                 }
             }
             closed = next_closed;
@@ -87,15 +92,73 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_action_smoke(
+    host: &mut QtRuntimeExecutor,
+    surface: AbiSurfaceHandle,
+    previous_state: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    host.poll_runtime(1)?;
+    let action = host
+        .action_handle_for_surface(surface, "studio.run")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Studio action smoke could not resolve studio.run",
+            )
+        })?;
+    let event = RuntimeEventSnapshot::Action(RuntimeActionEvent {
+        surface,
+        node: 0,
+        action,
+        payload: RuntimeValueSnapshot {
+            handle: 0,
+            type_name: "std.text".to_owned(),
+            canonical_encoding: Vec::new(),
+        },
+    });
+    let (closed, action_id) = consume_runtime_events(host, vec![event], surface);
+    if closed {
+        return Err(io::Error::other("Studio action smoke received an early close").into());
+    }
+    let action_id = action_id.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Studio action smoke did not resolve a registered action",
+        )
+    })?;
+    let feedback = apply_action_feedback(host, surface, &action_id)?;
+    let updated_state = host.capture_semantic_state(surface)?;
+    if updated_state == previous_state || !contains_text_hex(&updated_state, &feedback) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Studio action smoke did not capture the feedback update",
+        )
+        .into());
+    }
+    println!("studio_demo: action smoke feedback verified");
+    Ok(())
+}
+
 fn parse_arguments() -> Result<Arguments, io::Error> {
     let mut runtime_path = None;
     let mut smoke = false;
+    let mut action_smoke = false;
     for argument in env::args_os().skip(1) {
-        if argument == "--smoke" {
-            if smoke {
+        if argument == "--smoke-action" {
+            if smoke || action_smoke {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "duplicate --smoke; usage: studio_demo <runtime-shared-library> [--smoke]",
+                    "duplicate smoke mode; usage: studio_demo <runtime-shared-library> [--smoke|--smoke-action]",
+                ));
+            }
+            action_smoke = true;
+            continue;
+        }
+        if argument == "--smoke" {
+            if smoke || action_smoke {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate smoke mode; usage: studio_demo <runtime-shared-library> [--smoke|--smoke-action]",
                 ));
             }
             smoke = true;
@@ -104,7 +167,7 @@ fn parse_arguments() -> Result<Arguments, io::Error> {
         if runtime_path.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "expected one runtime path and optional --smoke; usage: studio_demo <runtime-shared-library> [--smoke]",
+                "expected one runtime path and optional smoke mode; usage: studio_demo <runtime-shared-library> [--smoke|--smoke-action]",
             ));
         }
         runtime_path = Some(PathBuf::from(argument));
@@ -112,12 +175,13 @@ fn parse_arguments() -> Result<Arguments, io::Error> {
     let runtime_path = runtime_path.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "missing runtime path; usage: studio_demo <runtime-shared-library> [--smoke]",
+            "missing runtime path; usage: studio_demo <runtime-shared-library> [--smoke|--smoke-action]",
         )
     })?;
     Ok(Arguments {
         runtime_path,
         smoke,
+        action_smoke,
     })
 }
 
@@ -203,12 +267,22 @@ fn apply_action_feedback(
     host: &mut QtRuntimeExecutor,
     surface: AbiSurfaceHandle,
     action_id: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<String, Box<dyn Error>> {
     let feedback = format!("Action requested: {action_id}");
     let frame = studio_ui_frame(&feedback)?;
     host.update_window(surface, STUDIO_TITLE, &frame)?;
     println!("studio_demo: applied action feedback for {action_id}");
-    Ok(())
+    Ok(feedback)
+}
+
+fn contains_text_hex(bytes: &[u8], text: &str) -> bool {
+    let mut encoded = String::with_capacity(text.len() * 2);
+    for byte in text.bytes() {
+        write!(&mut encoded, "{byte:02x}").expect("writing hexadecimal text to String cannot fail");
+    }
+    bytes
+        .windows(encoded.len())
+        .any(|window| window == encoded.as_bytes())
 }
 
 fn consume_runtime_events(
