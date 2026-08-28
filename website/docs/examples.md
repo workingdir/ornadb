@@ -26,6 +26,25 @@ These examples are ILLUSTRATIVE CURRENT PROPOSAL. They show the intended languag
 | `09_presenters.orna` | JSON, TTY, and UI presentation functions |
 | `10_launch_entries.orna` | dogfooded launcher metadata and UI |
 
+## Runnable repository applications
+
+The repository also contains compact applications that use implemented syntax
+and run through the source checker:
+
+| File | Covers |
+|---|---|
+| `crates/orna-server/tests/fixtures/contact_app_dogfood.orna` | constrained contacts, typed directory rows, and a client UI entry |
+| `crates/orna-server/tests/fixtures/issue_tracker_app_dogfood.orna` | constrained issues, typed listing rows, and a client UI entry |
+
+Run the complete local registry with:
+
+```bash
+just demo-check
+```
+
+These checks prove source compatibility only. They do not claim a production
+gateway, launch system, CLIENT VM sandbox, or graphical application runtime.
+
 ## Trace 1. A table in the terminal
 
 ```bash

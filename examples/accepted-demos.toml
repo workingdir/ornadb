@@ -16,6 +16,19 @@ mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_function_dogfood.orna"
 description = "A minimal Boolean CLIENT function."
 
+
+[[demos]]
+name = "contact-app"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/contact_app_dogfood.orna"
+description = "A typed contact directory with a client UI entry."
+
+[[demos]]
+name = "issue-tracker-app"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/issue_tracker_app_dogfood.orna"
+description = "A typed issue tracker with a client UI entry."
+
 [[demos]]
 name = "client-local-assignment"
 mode = "source-check"
