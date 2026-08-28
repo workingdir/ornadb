@@ -130,6 +130,7 @@ def cargo_command(demo: Demo, source_path: Path) -> list[str]:
     if demo.mode == "source-check":
         return [
             "cargo",
+            "--locked",
             "run",
             "-p",
             "orna-server",
@@ -142,6 +143,7 @@ def cargo_command(demo: Demo, source_path: Path) -> list[str]:
         # Focused offline proofs are exact test names; no Compose service is needed.
         return [
             "cargo",
+            "--locked",
             "test",
             "-p",
             "orna-server",
