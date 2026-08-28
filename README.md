@@ -170,13 +170,16 @@ just runtime-qt-build
 just runtime-qt-test
 just runtime-qt-package
 just runtime-qt-rust-smoke <runtime-shared-library>
+just studio-qt-demo
 just studio-qt-smoke <runtime-shared-library>
 ```
 
+`studio-qt-demo` builds the runtime in `target/runtime-qt` and runs the
+existing Studio shell smoke against `target/runtime-qt/liborna-runtime-qt.so`.
 The `runtime-qt-rust-smoke` and `studio-qt-smoke` forms require an explicit
-shared-library path. `studio-qt-smoke` is a one-shot shell smoke command; it is
-not full Studio proof. All Qt build/test/package paths use the canonical
-external ABI input described above. The ABI checks are:
+shared-library path. `studio-qt-smoke` and `studio-qt-demo` are one-shot shell
+smoke commands; they are not full Studio proof. All Qt build/test/package paths
+use the canonical external ABI input described above. The ABI checks are:
 
 ```text
 just runtime-abi-header-check
