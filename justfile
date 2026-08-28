@@ -12,6 +12,11 @@ fmt:
 runtime-tty-demo:
     cargo run -p orna-runtime-tty --example runtime_demo
 
+
+# Build the binary, start a temporary local server, and invoke std.invoke.echo.
+local-cli-demo:
+    bash scripts/local-cli-demo.sh
+
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
