@@ -72,6 +72,11 @@ workspace targets. `just lint` runs workspace Clippy with warnings denied.
 editor runtimes. `just demo-check` runs the accepted source-check and offline
 demos in manifest order and skips compose-only entries.
 
+`just demo-suite` runs `demo-check`, the TTY renderer demo, the CLIENT
+artifact-integrity demo, and the local capability-matching demo in one
+environment-independent command. It does not run the local PostgreSQL CLI
+demo or the Qt/Studio smoke commands, which require separate runtime inputs.
+
 `just check` is deliberately broader than package-specific Clippy. It includes
 workspace Clippy and may remain blocked by the tracked PostgreSQL lint issue.
 The package-specific command below is a separate focused check, and the current
