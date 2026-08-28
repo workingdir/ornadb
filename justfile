@@ -22,6 +22,11 @@ local-cli-demo:
 client-artifact-demo:
     cargo run --locked -p orna-client --example client_artifact_demo
 
+
+# Exercise component-boundary matching for a local filesystem grant.
+client-capability-demo:
+    cargo run --locked -p orna-client --example client_capability_demo
+
 # Build the first production Qt runtime against the canonical ABI header.
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
