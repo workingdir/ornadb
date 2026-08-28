@@ -16147,6 +16147,78 @@ fn checks_and_evaluates_accepted_client_local_assignment_fixture_offline() -> Te
         "offline CLIENT local assignment evaluation returned the wrong value",
     )
 }
+
+#[test]
+fn checks_and_evaluates_accepted_client_control_flow_fixture_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/client_control_flow_dogfood.orna",
+        include_str!("fixtures/client_control_flow_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "accepted CLIENT control-flow fixture did not check: {:?}",
+            report.diagnostics(),
+        )));
+    }
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    let active = offline_active_from_prepared(&prepared)?;
+    let checked = report.checked_bundle().ok_or_else(|| {
+        failure("accepted CLIENT control-flow fixture produced no checked bundle")
+    })?;
+    let function = checked
+        .client_functions()
+        .find(|function| function.name().parts() == ["console_demo", "bounded_counter"])
+        .ok_or_else(|| {
+            failure("accepted CLIENT control-flow fixture is missing console_demo.bounded_counter")
+        })?;
+    let function_id = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name() == function.name())
+        .map(FunctionDefinition::id)
+        .ok_or_else(|| {
+            failure("prepared CLIENT control-flow fixture is missing its function definition")
+        })?;
+    let functions = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(FunctionDefinition::id)
+        .collect::<Vec<_>>();
+    let security = SecuritySnapshot::new(
+        active.pair(),
+        functions,
+        vec![Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![ExecuteGrant::new(RAW_CLIENT_USER, function_id)],
+    )?;
+    let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+    let authorisation = match security
+        .authorise_execute(&session, InvocationTarget::new(function_id, active.pair()))
+    {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "offline CLIENT control-flow authorisation was denied: {reason:?}"
+            )));
+        }
+    };
+    let result = evaluate_client_function(&active, &authorisation)?;
+    require(
+        result.value() == &RuntimeValue::Integer(5),
+        "offline CLIENT control-flow evaluation returned the wrong value",
+    )
+}
 #[test]
 fn checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)?;
