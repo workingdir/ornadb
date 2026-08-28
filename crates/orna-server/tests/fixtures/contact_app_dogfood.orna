@@ -1,0 +1,33 @@
+CREATE SCHEMA contact_app;
+
+CREATE TYPE contact_app.contact AS OBJECT (
+    name TEXT NOT NULL,
+    email TEXT UNIQUE,
+    phone TEXT
+);
+
+CREATE SERVER FUNCTION contact_app.directory()
+RETURNS ROWS (contact REF contact_app.contact, name TEXT, email TEXT, phone TEXT)
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT REF(contact), contact.name, contact.email, contact.phone
+    FROM contact_app.contact contact;
+
+CREATE CLIENT FUNCTION contact_app.main()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Contacts',
+        content => std.ui.column(
+            content => std.ui.panel(
+                content => std.ui.row(
+                    content => std.ui.text(
+                        text => 'Contact directory'
+                    )
+                )
+            )
+        )
+    );
+END;

@@ -1,0 +1,34 @@
+CREATE SCHEMA issue_tracker_app;
+
+CREATE TYPE issue_tracker_app.issue AS OBJECT (
+    issue_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    details TEXT
+);
+
+CREATE SERVER FUNCTION issue_tracker_app.list_issues()
+RETURNS ROWS (
+    issue_key TEXT,
+    summary TEXT,
+    status TEXT,
+    priority INTEGER
+)
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT issue.issue_key, issue.summary, issue.status, issue.priority
+    FROM issue_tracker_app.issue issue;
+
+CREATE CLIENT FUNCTION issue_tracker_app.entry()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Issue Tracker',
+        content => std.ui.text(
+            text => 'Track and triage open issues'
+        )
+    );
+END;
