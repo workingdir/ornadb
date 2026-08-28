@@ -45,8 +45,10 @@ Read `PRODUCT.md` and `DESIGN.md` before changing the interface or copy. Keep th
 
 - `IMPLEMENTED`: present in the working repository;
 - `LOCKED`: accepted conceptual design;
-- `CURRENT PROPOSAL`: the current experiment target;
+- `CURRENT PROPOSAL (conceptual)`: the current unresolved experiment target; never a released feature;
 - `OPEN`: unresolved;
 - `FUTURE`: intentionally outside the first implementation.
 
-Do not present design examples as released features. The implementation checklist in `../TODO.md` remains the source for current repository status.
+Use `CURRENT PROPOSAL (conceptual)` for full Studio/security-console dogfooding, reflective JSON-RPC/MCP gateways, and `CREATE USER`/`ROLE`/`GRANT` DDL sugar until canonical status accepts them. The accepted local `std.security` administration functions and bounded Inspector remain narrower boundaries.
+
+Do not present design examples as released features. The implementation checklist in `../../TODO.md` remains the source for current repository status.

@@ -8,7 +8,7 @@ description: How orna invoke reaches sys.invoke, how results are presented, and 
 Every external program begins with one operation: invoke a function stored in OrnaDB under the current authenticated session and deliver its result to this client.
 
 :::warning Development status
-The `sys.invoke` concept is LOCKED. The request and event types are CURRENT PROPOSAL. OrnaDB is under active development; there is no released executable yet.
+The `sys.invoke` concept and raw typed call boundary are LOCKED. Request and event details and broader presenter/runtime extensions are CURRENT PROPOSAL. The accepted production graphical profile is Qt v1 on Linux x86_64; full Studio and reflective JSON-RPC/MCP gateways are CURRENT PROPOSAL (CONCEPTUAL), not released features. OrnaDB is under active development; there is no released executable yet.
 :::
 
 ## The universal entrypoint
@@ -18,6 +18,8 @@ orna invoke <qualified-function-name> [arguments]
 ```
 
 The CLI does not special-case every function, output encoding, UI runtime, or protocol. It constructs a typed request and uses a raw bootstrap call to the mandatory system function `sys.invoke`.
+A `studio.main` target below is only a CURRENT PROPOSAL (CONCEPTUAL) full-Studio example; it does not claim a released Studio.
+
 
 ```text
 orna client
@@ -49,7 +51,7 @@ orna invoke tasks.overdue --before 2026-08-01
 orna invoke tasks.overdue --output json
 orna invoke tasks.overdue --output csv > overdue.csv
 orna invoke tasks.overdue --explain
-orna invoke studio.main
+orna invoke studio.main  # conceptual full Studio target (CURRENT PROPOSAL)
 ```
 
 `--output` sets an explicit output requirement. `--output json` asks `sys.invoke` to find a JSON presentation path. The target function is unchanged.
@@ -63,7 +65,9 @@ Parameter flags are sugar for typed arguments. The parameter `p_before` maps to 
 1. Resolve the target name or ID and pin a function revision.
 2. Bind supplied arguments to stable parameter IDs and evaluate defaults.
 3. Authorise the session principal and check `EXECUTE` privilege.
-4. Execute the target. SERVER targets run on the server. CLIENT targets run in the local VM.
+4. Execute the target. SERVER targets run on the server. CLIENT targets run in
+   the local `orna` process through the accepted evaluator and Stage 1
+   control-plane boundary; the full production VM sandbox remains a proposal.
 5. Obtain the canonical typed result. No presentation has occurred yet.
 6. Plan presentation from the result type to a client-offered sink.
 7. Run presenter functions.
@@ -107,11 +111,16 @@ Presenter selection is a typed graph search, not a single switch statement. Rank
 | interactive TTY | table | none | terminal presenter to TTY runtime |
 | interactive TTY | table | `json` | JSON encoder to stdout |
 | pipe or CI | table | `json` | JSON encoder to stdout |
-| desktop launcher | table | none | generic UI table presenter to a graphical runtime |
-| CLI | `std.ui.UI` | none | direct UI sink to an automatically selected runtime |
+| desktop launcher | table | none | conceptual UI-table plan; accepted graphical v1 is the Qt runtime profile |
+| CLI | `std.ui.UI` | none | direct UI sink to an automatically selected installed runtime |
 | CLI | `std.ui.UI` | `json` | reject unless an explicit debug presenter exists |
-| JSON-RPC gateway | any supported | protocol JSON | protocol presenter to response bytes |
+| JSON-RPC/MCP gateway (CONCEPTUAL) | any supported | protocol JSON | CURRENT PROPOSAL reflective protocol presenter; no released gateway |
 | CLIENT function | typed value | none | direct typed value, no root presentation |
+
+### Reflective gateways (conceptual)
+
+A JSON-RPC or MCP gateway is modeled as a reflective CLIENT program with explicit exposure metadata. This is CURRENT PROPOSAL (CONCEPTUAL), not universal automatic exposure or a released transport. Gateway identity comes from configured service or delegated authentication; request data cannot select an OrnaDB principal.
+
 
 ## Explainability
 
@@ -119,7 +128,7 @@ Presenter selection is a typed graph search, not a single switch statement. Rank
 orna invoke tasks.overdue --explain
 ```
 
-displays the same plan the Inspector can show graphically:
+displays the same plan the accepted bounded Inspector can expose through its projections:
 
 ```text
 TARGET
