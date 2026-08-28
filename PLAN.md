@@ -57,15 +57,14 @@ plan is the current implementation projection. Accepted ADRs and
 
 ## Evidence status (2026-08-28)
 
-- **Current validated focused evidence:** the `work/` checkout records the
-  focused package, protocol, compiler, LSP, no-`STATE` dogfood, resource-span,
-  buffered-preflight, standard-upgrade, runtime-handle, editor-tooling,
-  demo-runner, Compose, Qt runtime/ABI/package, and Studio smoke evidence
-  below. Workspace reports remain historical and were not rerun. Installed Qt
-  package selection, clean-host, Neovim/Vim host sessions, manual Zed/VSIX
-  runtime parity, live REF, same-major PostgreSQL, and remaining contract
-  gates remain pending or unclaimed; resource-terminal provenance is closed by
-  ADR 0078/commit `767991d`.
+- **Current validated focused evidence:** the `work/` checkout records focused
+  package, protocol, compiler, LSP, editor-tooling, demo, Qt runtime/ABI/package,
+  Studio smoke, and Stage 1 CLIENT VM control-plane evidence below. The current
+  workspace test result is also recorded below. Installed Qt package selection,
+  clean-host, Neovim/Vim host sessions, manual Zed/VSIX runtime parity, live REF,
+  same-major PostgreSQL, and remaining contract gates remain pending or
+  unclaimed; resource-terminal provenance is closed by ADR 0078/commit
+  `767991d`.
 
 ## Current validated focused evidence (`work/` checkout)
 
@@ -74,7 +73,16 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-lsp --test lsp_e2e serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges` — 1 test returned success after correcting the expected UTF-16 token range.
 - `cargo test -p orna-server --test standard_database checks_and_evaluates_accepted_client_local_assignment_fixture_offline` — 1 test returned success after correcting the fixture test's durable function-identity conversion.
 - `cargo test --locked -p orna-server --test standard_database checks_and_evaluates_accepted_client_control_flow_fixture_offline -- --exact` — 1 test returned success; the accepted bounded CLIENT control-flow fixture checks, prepares, authorises, and evaluates to INTEGER 5.
-- `just demo-check` — all 11 runnable accepted source-check/offline demos returned success; the compose-only Inspector entry was skipped by design.
+- `CARGO_NET_OFFLINE=true just demo-check` — 13 runnable accepted source-check/
+  offline demos returned success; the compose-only Inspector entry was skipped
+  by design.
+- `CARGO_NET_OFFLINE=true cargo test --locked -p orna-client` — 359 tests
+  returned success, including Stage 1 admission, identity, runtime-witness,
+  lease, and host-fence coverage.
+- `CARGO_NET_OFFLINE=true cargo test --locked --workspace` — 2,901 tests
+  returned success across 58 suites; 252 tests were ignored.
+- `CARGO_NET_OFFLINE=true cargo check --locked --workspace` — returned success
+  with existing warnings outside the Stage 1 client changes.
 - `cargo test -p orna-compiler accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance` — 1 test returned success.
 - `cargo test -p orna-compiler discovers_stream_resource_target_with_resolved_element_type` — 1 test returned success.
 - `cargo test -p orna-server buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes` — 1 test returned success.
@@ -86,10 +94,9 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo fmt --all -- --check` — returned success.
 - `cargo test -p orna-core --lib observer_` — 3 Inspector observer-context and
   immutable-clone tests returned success.
-- `cargo test -p orna-client --lib` — 326 tests returned success after the
-  current-invocation executor hook and Qt fallback forwarding were added.
-- `cargo test -p orna-server --lib inspector_` — 13 Inspector binding,
-  recursion, and carrier tests returned success.
+- Historical report (not current validation): an earlier
+  `cargo test -p orna-client --lib` run recorded 326 tests before the Stage 1
+  VM boundary and admission additions.
 - `cargo test -p orna-postgres --lib inspect` — 13 Inspector codec and storage
   tests returned success with the existing two warnings.
 - `cargo test -p orna-postgres --features test-hooks --test bootstrap -- --ignored
@@ -165,7 +172,7 @@ unclaimed.
 
 
 
-## Current accepted implementation slices (2026-08-27)
+## Current accepted implementation slices (2026-08-28)
 
 The following source and contract boundaries are present in the current
 `work/` checkout. Focused results are current evidence; historical reports
@@ -183,11 +190,19 @@ remain labelled, and no environment-gated proof is inferred.
   and `3d23e5b` (reachable button showcase root).
   Evidence updates are recorded by `2f8509f`, `07ecc28`, `880ca17`, and
   `ca831a5`.
+- Stage 1 CLIENT VM control-plane implementation is recorded by `5c7e654`
+  (admission, identity registry, runtime witness, host context, and lease
+  state machine), `c592113` (hard payload ceilings), and `90a9456` (trust
+  contract clarification). It preserves the existing evaluator APIs and makes
+  no production sandbox, audit, signature, or host-effect claim.
+- The accepted demo applications `contact_app_dogfood.orna` and
+  `issue_tracker_app_dogfood.orna` are registered by `964df03` and remain
+  source-check-only examples.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
-  `python3 scripts/run-demos.py` passed with the unsupported generic scalar
-  fixture excluded, including the `ui-constructor-showcase` source-check demo
-  with reachable text, button, panel, row, column, text_input, tabs, and
-  window roots. The earlier accepted baseline `just kernel-test` result is
+  `CARGO_NET_OFFLINE=true just demo-check` passed 13 runnable source-check/
+  offline demos, including the two application fixtures and the
+  `ui-constructor-showcase`; the compose-only Inspector entry was skipped by
+  design. The earlier accepted baseline `just kernel-test` result is
   `artifact://22571`; the current Inspector observer evidence is listed above.
   Runtime/ABI/package/Studio smokes passed as recorded session evidence.
   Installed package selection and clean-host proof remain pending.
