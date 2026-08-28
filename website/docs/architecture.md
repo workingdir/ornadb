@@ -8,7 +8,7 @@ description: The process topology, bootstrap rings, trust boundaries, compiler p
 OrnaDB is one database that stores data, object types, function definitions, source, revisions, grants, program state, and the tools used to inspect those things.
 
 :::warning Development status
-The process boundaries and the bootstrap ring model are LOCKED. The runtime ABI and compiler internals are CURRENT PROPOSAL. OrnaDB is under active development; there is no released executable yet.
+The process boundaries and bootstrap ring model are LOCKED. The accepted local Inspector boundary and the Qt v1 runtime profile are bounded implementation slices. The runtime ABI and compiler internals remain CURRENT PROPOSAL. Full Studio, the security/DBA console, and reflective JSON-RPC/MCP gateways are CURRENT PROPOSAL (CONCEPTUAL), not released features. OrnaDB is under active development; there is no released executable yet.
 :::
 
 ## Process topology
@@ -22,10 +22,9 @@ Client machine
         automatic runtime manager
             orna-runtime-tty
             orna-runtime-qt
-            orna-runtime-gtk
-            orna-runtime-swiftui
-            orna-runtime-imgui
-            orna-runtime-web
+                accepted v1: Linux x86_64, Qt 6 Widgets, ABI v1.0
+            other runtime families
+                CURRENT PROPOSAL or FUTURE
             |
             | typed protocol over TCP/TLS, Unix socket, or named pipe
             v
@@ -40,6 +39,8 @@ OrnaDB server
 ```
 
 Local and remote databases use the same semantic model. Convenience may discover or start a local daemon:
+The examples use `studio.main` as a CURRENT PROPOSAL (CONCEPTUAL) full-Studio target; they do not claim a released Studio. The accepted narrower dogfooding boundary is the ordinary CLIENT Inspector.
+
 
 ```bash
 orna --db ./workspace invoke studio.main
@@ -68,10 +69,14 @@ Ring 2   standard library
         std.ui, std.terminal, std.json, std.csv, std.xml,
         std.data, std.present, std.launch, std.service, std.protocol
 
-Ring 3   dogfooded tools
-        Orna Studio, Devtools Inspector, DBA console,
+Ring 3   dogfooded/client tools
+        headless Inspector v1 (accepted bounded boundary)
+        Orna Studio and security/DBA console
+            CURRENT PROPOSAL (CONCEPTUAL)
         state inspector, launcher, test runner
+            CURRENT PROPOSAL (CONCEPTUAL)
 ```
+Ring 3 is a model boundary, not a release inventory. The accepted slice is the headless Inspector v1. Full Studio and security/DBA-console dogfooding remain conceptual/current proposals and are not released.
 
 Ring 3 tools are ordinary OrnaDB programs. Native code is reserved for trust, performance, and bootstrap boundaries, not convenience.
 
@@ -144,7 +149,9 @@ Any failure rolls back the whole apply. A hot reload can patch a compatible inst
 
 ## Dogfooding
 
-The official Inspector is an ordinary CLIENT function returning `std.ui.UI`. It inspects another Inspector and itself using snapshot epochs. Orna Studio is a database-resident program. The security console is a database-resident program. This is the main test of the model: the tools use the same VM, contracts, state service, and invocation mechanism they inspect.
+The accepted Inspector is an ordinary CLIENT function returning `std.ui.UI`. It uses public introspection APIs and bounded snapshot epochs to inspect another invocation and itself. Orna Studio and the security console are database-resident shapes under CURRENT PROPOSAL (CONCEPTUAL); their full dogfooding is not released. The narrower local `std.security` administration-function boundary remains distinct from that unresolved console.
+
+The Inspector and runtime boundaries therefore test the model without implying that the full Studio, security console, or reflective gateway surfaces already exist.
 
 ## Next steps
 

@@ -1,6 +1,6 @@
 ---
 title: Status
-description: Implemented repository work, locked decisions, current proposals, open questions, and future work.
+description: Implemented repository work, accepted bounded slices, locked decisions, deferred proposals, open questions, and future work.
 ---
 
 # Status
@@ -32,14 +32,31 @@ working repository:
 
 These are contract and design slices in the repository. They do not yet form a usable product.
 
+## Accepted bounded slices
+
+The following source and contract slices are accepted, but do not imply a public
+release. Environment-gated proofs remain deferred.
+
+- **Qt v1 runtime/provider/package — ACCEPTED (BOUNDED).** The first production non-TTY provider is `orna-runtime-qt` on Linux x86_64: Qt 6 Widgets, ABI v1.0, and caller-pumps. It is a separately installed package with the fixed `/usr/lib/orna/liborna-runtime-qt.so` path and Debian repository authentication; the local `orna` client selects an installed offer. A test-only headless fixture shares the ABI v1 semantic contract.
+- **TTY/presenter/output — ACCEPTED (BOUNDED).** `orna-runtime-tty` is the accepted terminal renderer. Typed presenter planning and optional `--output` (for example, `--output json`) are accepted; TTY is a runtime, while JSON, CSV, and XML are encoded outputs. Installed evaluator proof and the production TTY ABI remain deferred.
+- **Scalar and `STREAM<T>` resources — ACCEPTED (BOUNDED).** Explicit typed resource construction is executable for scalar targets and, through `std.data.stream_resource`, `STREAM<T>` targets. `AWAIT` yields typed non-empty batches and then terminal `None`; `TABLE`/`ROWS` resource transport is deferred.
+- **`std.json`/UI/action — ACCEPTED (BOUNDED).** `std.json.Value` is the immutable transient JSON value; `std.ui.UI` and `std.ui.window@1` are transient UI contracts; executable actions are bounded to `std.action.call`. `std.action.sequence` and `std.action.parallel` remain deferred.
+- **V8 Rows/table presentation — ACCEPTED (BOUNDED).** `std.data.Rows` V8 codecs and retained table/CSV presentation are accepted. General Rows/object-value semantics remain deferred.
+- **Bounded populated Inspector slices — ACCEPTED (BOUNDED).** Headless Inspector v1 includes populated resource, UI, presentation, and runtime projections with bounded row, redaction, and epoch contracts. Installed evaluation remains environment-gated and deferred.
+
 ## Not yet implemented
 
-| Area | Item |
-|---|---|
-| Protocol | invocation, authorisation, and public protocol slices |
-| Types | enum, record, and opaque value types beyond the standard primitives |
-
-| CLIENT VM | Production sandbox, protected audit, concrete host capabilities, and process isolation |
+| Area | Item | Status |
+|---|---|---|
+| Protocol | Public protocol, authorisation, and exposure slices | DEFERRED |
+| Types | Enum, record, and opaque value types beyond standard primitives; general `VALUE` semantics | DEFERRED |
+| CLIENT VM | Full production CLIENT VM/sandbox, concrete host capabilities, and process isolation | DEFERRED |
+| Security | Protected audit path and its production/integration proof | DEFERRED |
+| Gateways | Reflective JSON-RPC/MCP gateway implementation and exposure dispatch | DEFERRED |
+| Launch | `std.launch` and launch/application execution | DEFERRED |
+| Data | Virtual models and `TABLE`/`ROWS` resource transport | DEFERRED |
+| Dogfooding | Full Studio and security/DBA UI | DEFERRED |
+| Proof | Environment-gated Compose, installed-runtime, and clean-host proofs | DEFERRED |
 
 ## Locked design decisions
 
@@ -50,36 +67,40 @@ These are contract and design slices in the repository. They do not yet form a u
 | Domains | `CREATE SERVER FUNCTION` and `CREATE CLIENT FUNCTION`; one domain per function |
 | Applications | running program is a rooted function invocation graph; no `CREATE APPLICATION` |
 | UI type | `std.ui.UI`, a standard-library transient value type |
+| UI entry | `std.ui.window(title TEXT, content std.ui.UI)` as `std.ui.window@1` |
+| JSON value | immutable transient `std.json.Value` with the `orna.std.value.json@1` codec contract |
 | Invocation | root calls go through inspectable `sys.invoke` |
-| Runtime | selected automatically by the local `orna` client |
-| Output | optional `--output` requirement; normal invocation is automatic |
+| Runtime | local `orna` selects an installed runtime offer; the first production non-TTY provider is bounded `orna-runtime-qt` on Linux x86_64 |
+| Output | optional `--output` requirement; normal invocation is automatic; TTY and encoded outputs remain distinct |
 | Identity | `sys.security.session_principal()` and related functions; no `CURRENT_USER` keyword |
 | State | durable `USER` state keyed by authenticated principal |
+| Resources | typed `std.data.Resource<T>` and `std.data.StreamResource<T>` with explicit `AWAIT`; scalar and `STREAM<T>` forms are accepted |
+| Actions | executable v1 action is `std.action.call`; sequence and parallel remain deferred |
 | Inspector | an ordinary CLIENT function using public introspection APIs |
-| Errors | expected outcomes are values; no PL/SQL-style `EXCEPTION` tail |
-| Source | human source plus a resolved stable-ID semantic graph |
 | Security | principals are first-class catalog data with kernel enforcement |
-| Gateways | JSON-RPC and MCP are reflective CLIENT programs |
+| Gateways | reflective CLIENT direction with explicit exposure metadata; implementation deferred |
 | Runtimes | explicitly installed client libraries; server never selects native code |
 
 ## Current proposals
 
-These are the strongest concrete designs for implementation experiments. They are not released:
+These are the strongest concrete designs for implementation experiments. They are
+not released and remain outside the accepted bounded slices:
 
-- exact value-type DDL and nullability syntax;
 - the full production CLIENT VM, capability sandbox, and host-effect broker;
-- presenter registry and ranking algorithm;
-- runtime ABI v1 and threading details;
-- async syntax: resources, streams, and `AWAIT`;
-- the security catalog schema and DBA tooling;
-- module and package distribution format.
+- the protected audit path and full security/DBA application;
+- reflective JSON-RPC/MCP gateways and `std.launch`;
+- virtual `TableModel`/`TreeModel` models and `TABLE`/`ROWS` resource transport;
+- general `VALUE` and object-value semantics beyond the accepted Rows contract;
+- presenter registry/ranking and runtime ABI/toolkit extensions beyond Qt v1;
+- module and package distribution beyond the fixed Qt runtime package.
 
 ## Open questions
 
 - exact `AS VALUE` DDL and `OPTION<T>` versus nullability;
 - CLIENT VM bytecode versus WASM versus custom IR;
-- presenter scoring and tie-breaking;
-- the first graphical runtime;
+- presenter scoring and tie-breaking beyond the bounded presenter path;
+- graphical runtime extensions beyond accepted Qt v1;
+- Qt list/table model construction and completion semantics;
 - cleanup and defer semantics;
 - module registry and dependency resolution;
 - physical storage layout;
