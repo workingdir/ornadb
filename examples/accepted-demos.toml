@@ -30,6 +30,12 @@ source = "crates/orna-server/tests/fixtures/issue_tracker_app_dogfood.orna"
 description = "A typed issue tracker with a client UI entry."
 
 [[demos]]
+name = "task-board-app"
+mode = "source-check"
+source = "crates/orna-server/tests/fixtures/task_board_app_dogfood.orna"
+description = "A typed task board with USER state and a client UI entry."
+
+[[demos]]
 name = "client-local-assignment"
 mode = "source-check"
 source = "crates/orna-server/tests/fixtures/client_local_assignment_dogfood.orna"
