@@ -82,4 +82,25 @@ if(BUILD_TESTING)
     set_tests_properties(orna-runtime-qt-contract PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
+    add_executable(orna-runtime-qt-visual
+        tests/runtime_visual_test.cpp
+    )
+    target_compile_features(orna-runtime-qt-visual PRIVATE cxx_std_17)
+    target_include_directories(orna-runtime-qt-visual PRIVATE "${ORNA_RUNTIME_ABI_INCLUDE_DIR}")
+    target_link_libraries(orna-runtime-qt-visual PRIVATE
+        orna-runtime-qt
+        Qt6::Core
+        Qt6::Widgets
+    )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(orna-runtime-qt-visual PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(
+        NAME orna-runtime-qt-visual
+        COMMAND orna-runtime-qt-visual "${CMAKE_BINARY_DIR}/orna-runtime-qt-visual.png"
+    )
+    set_tests_properties(orna-runtime-qt-visual PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
 endif()

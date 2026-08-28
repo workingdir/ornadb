@@ -36,6 +36,10 @@ runtime-qt-build:
     cmake --build target/runtime-qt --parallel
 
 
+# Build and run the Qt runtime demo against a real display.
+runtime-qt-demo: runtime-qt-build
+    target/runtime-qt/orna-runtime-qt-demo
+
 # Build the Qt runtime and run the static Studio shell smoke.
 studio-qt-demo: runtime-qt-build
     just studio-qt-smoke target/runtime-qt/liborna-runtime-qt.so
@@ -45,6 +49,10 @@ runtime-qt-test:
     cmake -S runtimes/qt -B target/runtime-qt
     cmake --build target/runtime-qt --parallel
     ctest --test-dir target/runtime-qt --output-on-failure
+
+# Run only the Qt visual smoke and leave its PNG in the build directory.
+runtime-qt-visual: runtime-qt-build
+    ctest --test-dir target/runtime-qt -R orna-runtime-qt-visual --output-on-failure
 
 # Build the separate Debian package for the fixed Qt runtime path.
 runtime-qt-package:
