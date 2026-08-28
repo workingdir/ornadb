@@ -75,7 +75,7 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-lsp --test lsp_e2e serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges` — 1 test returned success after correcting the expected UTF-16 token range.
 - `cargo test -p orna-server --test standard_database checks_and_evaluates_accepted_client_local_assignment_fixture_offline` — 1 test returned success after correcting the fixture test's durable function-identity conversion.
 - `cargo test --locked -p orna-server --test standard_database checks_and_evaluates_accepted_client_control_flow_fixture_offline -- --exact` — 1 test returned success; the accepted bounded CLIENT control-flow fixture checks, prepares, authorises, and evaluates to INTEGER 5.
-- `just demo-check` — all 10 runnable accepted source-check/offline demos returned success; the compose-only Inspector entry was skipped by design.
+- `just demo-check` — all 11 runnable accepted source-check/offline demos returned success; the compose-only Inspector entry was skipped by design.
 - `cargo test -p orna-compiler accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance` — 1 test returned success.
 - `cargo test -p orna-compiler discovers_stream_resource_target_with_resolved_element_type` — 1 test returned success.
 - `cargo test -p orna-server buffered_sealed_cancel_prevents_acceptance_for_all_preflight_outcomes` — 1 test returned success.
