@@ -73,6 +73,11 @@ studio-qt-display: runtime-qt-build
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "studio-qt-display: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
     env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so
 
+# Run the Rust Studio shell once against a display server and exit.
+studio-qt-display-smoke: runtime-qt-build
+    test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "studio-qt-display-smoke: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so --smoke
+
 # Exercise the accepted TTY and Qt runtime smoke paths without a display server.
 runtime-suite: runtime-qt-test
     cargo run --locked -p orna-runtime-tty --example runtime_demo > target/runtime-tty-demo-output.bin
