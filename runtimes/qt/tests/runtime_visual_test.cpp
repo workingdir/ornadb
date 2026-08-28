@@ -2,12 +2,14 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QFrame>
 #include <QImage>
-
 #include <QLabel>
 #include <QLineEdit>
 #include <QPixmap>
+#include <QPoint>
 #include <QPushButton>
+#include <QRect>
 #include <QString>
 #include <QWidget>
 
@@ -37,6 +39,10 @@ struct VisualAssertionFailure {
 
 OrnaStringView view(const char *value) {
     return OrnaStringView{value, std::strlen(value)};
+}
+
+QRect widget_rect_in_window(QWidget *widget, QWidget *window) {
+    return QRect(widget->mapTo(window, QPoint(0, 0)), widget->size());
 }
 
 OrnaStatus emit_event(void *, OrnaRuntimeHandle, const OrnaRuntimeEventV1 *) {
@@ -129,9 +135,39 @@ int main(int argc, char **argv) {
             0,
             no_key,
         };
-        OrnaMountNodeV1 label_mount{
+        OrnaMountNodeV1 column_mount{
             101,
             100,
+            view("content"),
+            0,
+            view("std.ui.column"),
+            1,
+            0,
+            no_key,
+        };
+        OrnaMountNodeV1 panel_mount{
+            102,
+            101,
+            view("content"),
+            0,
+            view("std.ui.panel"),
+            1,
+            0,
+            no_key,
+        };
+        OrnaMountNodeV1 row_mount{
+            103,
+            102,
+            view("content"),
+            0,
+            view("std.ui.row"),
+            1,
+            0,
+            no_key,
+        };
+        OrnaMountNodeV1 label_mount{
+            104,
+            103,
             view("content"),
             0,
             view("std.ui.text"),
@@ -140,8 +176,8 @@ int main(int argc, char **argv) {
             no_key,
         };
         OrnaMountNodeV1 input_mount{
-            102,
-            100,
+            105,
+            103,
             view("content"),
             1,
             view("std.ui.text_input"),
@@ -149,11 +185,21 @@ int main(int argc, char **argv) {
             0,
             no_key,
         };
-        OrnaMountNodeV1 button_mount{
-            103,
-            100,
+        OrnaMountNodeV1 tabs_mount{
+            106,
+            102,
             view("content"),
-            2,
+            1,
+            view("std.ui.tabs"),
+            1,
+            0,
+            no_key,
+        };
+        OrnaMountNodeV1 button_mount{
+            107,
+            106,
+            view("content"),
+            0,
             view("std.ui.button"),
             1,
             0,
@@ -173,7 +219,7 @@ int main(int argc, char **argv) {
             },
         };
         OrnaSetPropertyV1 label_text_property{
-            101,
+            104,
             view("text"),
             OrnaValueRefV1{
                 0,
@@ -182,7 +228,7 @@ int main(int argc, char **argv) {
             },
         };
         OrnaSetPropertyV1 input_placeholder_property{
-            102,
+            105,
             view("placeholder"),
             OrnaValueRefV1{
                 0,
@@ -192,7 +238,7 @@ int main(int argc, char **argv) {
             },
         };
         OrnaSetPropertyV1 button_label_property{
-            103,
+            107,
             view("label"),
             OrnaValueRefV1{
                 0,
@@ -201,24 +247,33 @@ int main(int argc, char **argv) {
             },
         };
 
-        OrnaUiOperationV1 operations[8]{};
+        OrnaUiOperationV1 operations[12]{};
         operations[0].kind = ORNA_UI_OP_MOUNT_NODE;
         operations[0].as.mount_node = root_mount;
-        operations[1].kind = ORNA_UI_OP_SET_PROPERTY;
-        operations[1].as.set_property = root_title_property;
+        operations[1].kind = ORNA_UI_OP_MOUNT_NODE;
+        operations[1].as.mount_node = column_mount;
         operations[2].kind = ORNA_UI_OP_MOUNT_NODE;
-        operations[2].as.mount_node = label_mount;
-        operations[3].kind = ORNA_UI_OP_SET_PROPERTY;
-        operations[3].as.set_property = label_text_property;
+        operations[2].as.mount_node = panel_mount;
+        operations[3].kind = ORNA_UI_OP_MOUNT_NODE;
+        operations[3].as.mount_node = row_mount;
         operations[4].kind = ORNA_UI_OP_MOUNT_NODE;
-        operations[4].as.mount_node = input_mount;
-        operations[5].kind = ORNA_UI_OP_SET_PROPERTY;
-        operations[5].as.set_property = input_placeholder_property;
+        operations[4].as.mount_node = label_mount;
+        operations[5].kind = ORNA_UI_OP_MOUNT_NODE;
+        operations[5].as.mount_node = input_mount;
         operations[6].kind = ORNA_UI_OP_MOUNT_NODE;
-        operations[6].as.mount_node = button_mount;
-        operations[7].kind = ORNA_UI_OP_SET_PROPERTY;
-        operations[7].as.set_property = button_label_property;
+        operations[6].as.mount_node = tabs_mount;
+        operations[7].kind = ORNA_UI_OP_MOUNT_NODE;
+        operations[7].as.mount_node = button_mount;
+        operations[8].kind = ORNA_UI_OP_SET_PROPERTY;
+        operations[8].as.set_property = root_title_property;
+        operations[9].kind = ORNA_UI_OP_SET_PROPERTY;
+        operations[9].as.set_property = label_text_property;
+        operations[10].kind = ORNA_UI_OP_SET_PROPERTY;
+        operations[10].as.set_property = input_placeholder_property;
+        operations[11].kind = ORNA_UI_OP_SET_PROPERTY;
+        operations[11].as.set_property = button_label_property;
         OrnaUiBatchV1 batch{1, operations, sizeof(operations) / sizeof(operations[0])};
+
         const auto batch_status = api->apply_ui_batch(runtime, surface, &batch);
         REQUIRE_VISUAL(batch_status.code == ORNA_STATUS_OK);
 
@@ -241,6 +296,7 @@ int main(int argc, char **argv) {
         auto *label = window->findChild<QLabel *>();
         auto *input = window->findChild<QLineEdit *>();
         auto *button = window->findChild<QPushButton *>();
+        const auto containers = window->findChildren<QFrame *>();
         REQUIRE_VISUAL(label != nullptr);
         REQUIRE_VISUAL(input != nullptr);
         REQUIRE_VISUAL(button != nullptr);
@@ -250,13 +306,25 @@ int main(int argc, char **argv) {
 
         REQUIRE_VISUAL(label->isVisible());
         REQUIRE_VISUAL(label->width() > 0 && label->height() > 0);
-        REQUIRE_VISUAL(window->rect().intersects(label->geometry()));
+        REQUIRE_VISUAL(window->rect().intersects(widget_rect_in_window(label, window)));
         REQUIRE_VISUAL(input->isVisible());
         REQUIRE_VISUAL(input->width() > 0 && input->height() > 0);
-        REQUIRE_VISUAL(window->rect().intersects(input->geometry()));
+        REQUIRE_VISUAL(window->rect().intersects(widget_rect_in_window(input, window)));
         REQUIRE_VISUAL(button->isVisible());
         REQUIRE_VISUAL(button->width() > 0 && button->height() > 0);
-        REQUIRE_VISUAL(window->rect().intersects(button->geometry()));
+        REQUIRE_VISUAL(window->rect().intersects(widget_rect_in_window(button, window)));
+        std::size_t structural_containers = 0;
+
+        for (QFrame *container : containers) {
+            if (std::strcmp(container->metaObject()->className(), "QFrame") != 0) {
+                continue;
+            }
+            ++structural_containers;
+            REQUIRE_VISUAL(container->isVisible());
+            REQUIRE_VISUAL(container->width() > 0 && container->height() > 0);
+            REQUIRE_VISUAL(window->rect().intersects(widget_rect_in_window(container, window)));
+        }
+        REQUIRE_VISUAL(structural_containers == 4);
 
         const QPixmap capture = window->grab();
         REQUIRE_VISUAL(!capture.isNull());
