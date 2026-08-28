@@ -28,6 +28,7 @@ working repository:
 | Orna-owned instance, initialisation, private socket, and foreground supervision | IMPLEMENTED |
 | Native `orna server backend-shell` | IMPLEMENTED |
 | One-executable Debian package with embedded PostgreSQL | IMPLEMENTED |
+| Stage 1 CLIENT VM structural admission and in-memory host-control boundary (no production host effects) | IMPLEMENTED |
 
 These are contract and design slices in the repository. They do not yet form a usable product.
 
@@ -37,6 +38,8 @@ These are contract and design slices in the repository. They do not yet form a u
 |---|---|
 | Protocol | invocation, authorisation, and public protocol slices |
 | Types | enum, record, and opaque value types beyond the standard primitives |
+
+| CLIENT VM | Production sandbox, protected audit, concrete host capabilities, and process isolation |
 
 ## Locked design decisions
 
@@ -64,7 +67,7 @@ These are contract and design slices in the repository. They do not yet form a u
 These are the strongest concrete designs for implementation experiments. They are not released:
 
 - exact value-type DDL and nullability syntax;
-- the CLIENT VM and capability sandbox;
+- the full production CLIENT VM, capability sandbox, and host-effect broker;
 - presenter registry and ranking algorithm;
 - runtime ABI v1 and threading details;
 - async syntax: resources, streams, and `AWAIT`;
