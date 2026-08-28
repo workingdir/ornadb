@@ -802,4 +802,48 @@ mod tests {
         assert_eq!(error, ClientVmAdmissionError::DigestMismatch);
         assert_eq!(decode_count.get(), 0);
     }
+
+    #[test]
+    fn host_payload_ceiling_rejects_before_digest_decode() {
+        let payload = vec![7; 1025];
+        let artifact_limits = ClientVmArtifactLimits::new(2048, 32, 100).expect("artifact limits");
+        let host_limits = ClientVmArtifactLimits::new(1024, 32, 100).expect("host limits");
+        let expected = ClientVmArtifactIdentity::new(
+            [1; 16],
+            [2; 16],
+            [[3; 16], [4; 16]],
+            ClientVmArtifactKind::Client,
+            "format",
+            3,
+            None,
+            "language",
+            digest(&payload),
+            std::iter::empty::<ClientVmCapabilityDeclaration>(),
+            std::iter::empty::<String>(),
+            artifact_limits,
+        )
+        .expect("identity");
+        let decode_count = Cell::new(0);
+        let error = ClientVmAdmission::<u8>::admit(
+            &expected,
+            expected.clone(),
+            &payload,
+            ClientVmHostAdmissionContext::new(7, [8; 32], host_limits, 9),
+            |_| {
+                decode_count.set(decode_count.get() + 1);
+                Ok(1)
+            },
+            |_| Ok(()),
+        )
+        .expect_err("host payload ceiling");
+
+        assert_eq!(
+            error,
+            ClientVmAdmissionError::PayloadTooLarge {
+                bytes: 1025,
+                maximum: 1024
+            }
+        );
+        assert_eq!(decode_count.get(), 0);
+    }
 }
