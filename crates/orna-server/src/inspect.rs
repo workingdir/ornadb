@@ -37,7 +37,7 @@ use orna_postgres::{AuthenticatedInspectSnapshot, PostgresKernel, PostgresKernel
 use orna_protocol::{ValueCodecError, encode_constructed_value};
 use orna_standard::registered_opaque_codecs;
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{EmbeddedHostError, inspect_current_embedded_host};
 
 /// One complete installed `orna inspect` command request (ADR 0064 wave 3).
 ///
@@ -242,7 +242,7 @@ pub fn run_installed_inspect(
     request: InstalledInspectRequest,
     stdout: &mut impl Write,
 ) -> Result<InstalledInspectOutcome, InstalledInspectError> {
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

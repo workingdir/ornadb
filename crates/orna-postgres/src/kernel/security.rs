@@ -14,6 +14,9 @@ const RESOURCE_CANCELLATION_ACCEPTANCE_COMMIT_STARTED: u8 = 4;
 const RESOURCE_CANCELLATION_ACCEPTANCE_CANCEL_REQUESTED: u8 = 5;
 const MAX_RESOURCE_CREDIT: u64 = 1024 * 1024 * 1024;
 
+const LOCAL_USER_PRINCIPAL_DOMAIN: &[u8] = b"ornadb.local-user.v1\0";
+const LOCAL_HEALTH_UID: u32 = u32::MAX;
+
 /// Coordinates cancellation with resource acceptance and terminal commits.
 ///
 /// Each commit-start transition is a cancellation linearisation point:
@@ -206,6 +209,7 @@ use orna_standard::{
     STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
 };
+use sha2::{Digest, Sha256};
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use super::PostgresSession;
@@ -3633,6 +3637,67 @@ impl PostgresKernel {
         finish_security_session(operation, session.shutdown().await)
     }
 
+    /// Provisions the deterministic local USER authority for one operating-system UID.
+    ///
+    /// This path is for the user-owned local server profile. It retains the
+    /// production catalogue-health identity, but does not grant the local user
+    /// security administration or alter the packaged service path.
+    pub async fn provision_local_user(
+        &self,
+        uid: u32,
+    ) -> Result<SecuritySnapshot, PostgresKernelError> {
+        if uid == LOCAL_HEALTH_UID {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_local_peer_credentials",
+                record: uid.to_string(),
+                rule: "the local USER UID is reserved for the catalogue-health migration slot",
+            });
+        }
+        let principal = local_user_principal_id(uid);
+        if principal == PrincipalId::from_bytes([0; 16])
+            || principal == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
+        {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_principals",
+                record: principal.canonical(),
+                rule: "the deterministic local USER identity is reserved or empty",
+            });
+        }
+
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::Serializable)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            lock_catalogue_health_identity(&transaction).await?;
+            let current = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let candidate = local_user_security_snapshot(&current, &active, uid, principal)?;
+            require_complete_function_set(&active, &candidate)?;
+            replace_security_rows(&transaction, &candidate).await?;
+            let recovered = recover_security_snapshot_for_active(&transaction, &active).await?;
+            if !security_snapshots_match(&candidate, &recovered) {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_privilege_grants",
+                    record: principal.canonical(),
+                    rule: "recovered local USER authority does not match the persisted security snapshot",
+                });
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(recovered)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
     /// Installs the fixed local service identity used by catalogue health.
     ///
     /// Repeating the exact UID is idempotent. A partial or conflicting durable
@@ -3820,6 +3885,158 @@ impl PostgresKernel {
         }
         .await;
         finish_security_session(operation, session.shutdown().await)
+    }
+}
+
+fn local_user_principal_id(uid: u32) -> PrincipalId {
+    let mut digest = Sha256::new();
+    digest.update(LOCAL_USER_PRINCIPAL_DOMAIN);
+    digest.update(uid.to_be_bytes());
+    let digest = digest.finalize();
+    PrincipalId::from_bytes(
+        digest[..16]
+            .try_into()
+            .expect("SHA-256 always provides sixteen bytes"),
+    )
+}
+
+fn local_user_security_snapshot(
+    current: &SecuritySnapshot,
+    active: &ActiveDatabaseRevision,
+    uid: u32,
+    principal: PrincipalId,
+) -> Result<SecuritySnapshot, PostgresKernelError> {
+    let current_uid_credential = current
+        .local_peer_credentials()
+        .find(|credential| credential.uid() == uid);
+    if let Some(credential) = current_uid_credential
+        && credential.principal() != principal
+        && credential.principal() != CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
+    {
+        return Err(local_user_invariant(
+            "_orna_kernel.security_local_peer_credentials",
+            uid.to_string(),
+            "the local USER UID already selects another principal",
+        ));
+    }
+    if let Some(credential) = current
+        .local_peer_credentials()
+        .find(|credential| credential.principal() == principal)
+        && credential.uid() != uid
+    {
+        return Err(local_user_invariant(
+            "_orna_kernel.security_local_peer_credentials",
+            principal.canonical(),
+            "the deterministic local USER identity already selects another UID",
+        ));
+    }
+    if let Some(credential) = current
+        .local_peer_credentials()
+        .find(|credential| credential.uid() == LOCAL_HEALTH_UID)
+        && credential.principal() != CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
+    {
+        return Err(local_user_invariant(
+            "_orna_kernel.security_local_peer_credentials",
+            LOCAL_HEALTH_UID.to_string(),
+            "the reserved local health UID selects another principal",
+        ));
+    }
+
+    let health_uid = catalogue_health_service_uid(current)?;
+    let mut principals = current.principals().collect::<Vec<_>>();
+    if health_uid.is_none() {
+        principals.push(Principal::new(
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            PrincipalKind::Service,
+            PrincipalStatus::Active,
+        ));
+    }
+    if let Some(stored) = current.principals().find(|stored| stored.id() == principal) {
+        if stored.kind() != PrincipalKind::User || stored.status() != PrincipalStatus::Active {
+            return Err(local_user_invariant(
+                "_orna_kernel.security_principals",
+                principal.canonical(),
+                "the deterministic local USER identity must be active and user-kind",
+            ));
+        }
+    } else {
+        principals.push(Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        ));
+    }
+
+    let memberships = current
+        .memberships()
+        .filter(|membership| membership.role() != principal && membership.member() != principal)
+        .collect::<Vec<_>>();
+    let execute_grants = current
+        .execute_grants()
+        .filter(|grant| grant.grantee() != principal)
+        .collect::<Vec<_>>();
+    let mut privilege_grants = current
+        .privilege_grants()
+        .filter(|grant| grant.grantee() != principal)
+        .collect::<Vec<_>>();
+    for class in [
+        PrivilegeClass::Execute,
+        PrivilegeClass::Inspect(InspectPrivilege::OwnInvocation),
+        PrivilegeClass::Inspect(InspectPrivilege::SessionInvocations),
+        PrivilegeClass::Inspect(InspectPrivilege::AnyInvocation),
+        PrivilegeClass::Inspect(InspectPrivilege::Values),
+        PrivilegeClass::Inspect(InspectPrivilege::Source),
+        PrivilegeClass::Inspect(InspectPrivilege::SecurityDetails),
+        PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals),
+    ] {
+        privilege_grants.push(
+            PrivilegeGrant::new(principal, class, None)
+                .expect("local USER privilege grant shape is valid"),
+        );
+    }
+
+    let mut local_peer_credentials = current
+        .local_peer_credentials()
+        .filter(|credential| credential.uid() != uid && credential.principal() != principal)
+        .collect::<Vec<_>>();
+    if health_uid.is_none()
+        || current_uid_credential.is_some_and(|credential| {
+            credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
+        })
+    {
+        if !local_peer_credentials
+            .iter()
+            .any(|credential| credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+        {
+            local_peer_credentials.push(LocalPeerCredential::new(
+                LOCAL_HEALTH_UID,
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            ));
+        }
+    }
+    local_peer_credentials.push(LocalPeerCredential::new(uid, principal));
+
+    SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        active.pair(),
+        current.function_targets().collect(),
+        principals,
+        memberships,
+        execute_grants,
+        local_peer_credentials,
+        privilege_grants,
+    )
+    .map_err(PostgresKernelError::SecuritySnapshot)
+}
+
+fn local_user_invariant(
+    relation: &'static str,
+    record: String,
+    rule: &'static str,
+) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation,
+        record,
+        rule,
     }
 }
 

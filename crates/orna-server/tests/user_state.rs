@@ -1,21 +1,19 @@
-//! Behaviour tests for the installed `orna state get|set` command boundary.
+//! Active `orna state` access to the durable USER state service.
 //!
-//! These tests drive the compiled `orna` binary via `env!("CARGO_BIN_EXE_orna")`
-//! with a cleared environment and a caller-owned scratch directory below
-//! `target/`. They assert observable process output and exit codes. No
-//! instance or database is started, so every test stays fail-closed without
-//! Docker.
+//! This module runs one closed `orna state get|set` command against the
+//! selected local or packaged instance. The host derives the principal from
+//! the authenticated session: the local peer UID authenticated through
+//! [`PostgresKernel::authenticate_local_peer`]. A request never carries a
+//! principal identity.
 //!
-//! What is proved: the listed representative malformed command shapes
-//! produce the exact global usage, and one valid `get` and one valid `set`
-//! shape reach the wrong-service-identity host boundary with the exact
-//! closed diagnostic. What is not proved here: the live load/write success
-//! path, the principal derivation from an authenticated local peer, and the
-//! ORNA0901/ORNA0902 closed outcomes. Those require the installed product
-//! with a live embedded instance (ADR 0061 step 6).
-
-#![cfg(unix)]
-
+//! `orna state get` plans one `load_user_state` call: the root function and
+//! state profile scope the load, optional instance requests filter the
+//! returned cells, and optional expected-type entries arm the load-time
+//! ORNA0901 check. `orna state set` plans one typed `write_user_state` change
+//! carrying its expected revision; a conflict is a per-change closed result
+//! (ORNA0902), never a transport failure. Every cell and write result is
+//! rendered to `stdout` as one JSON record per line, with typed values in
+//! their canonical ORV5 hex form.
 mod support;
 
 use std::{
@@ -78,6 +76,8 @@ fn spawn_orna(
     Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(arguments)
         .env_clear()
+        .env("XDG_STATE_HOME", directory.join("state"))
+        .env("XDG_RUNTIME_DIR", directory.join("runtime"))
         .current_dir(directory)
         .stdin(stdin)
         .stdout(Stdio::piped())
@@ -206,7 +206,7 @@ fn malformed_state_shapes_all_fail_closed_with_exact_usage() {
 }
 
 #[test]
-fn valid_state_shapes_reach_the_service_account_boundary() {
+fn valid_state_shapes_reach_the_active_host_boundary() {
     if runs_as_the_orna_account() {
         eprintln!("skipping service-account boundary: suite runs as the orna account");
         return;
@@ -217,7 +217,6 @@ fn valid_state_shapes_reach_the_service_account_boundary() {
     let value_type = orna_core::TypeId::from_bytes([0x46; 16]).canonical();
     let value_file = directory.path().join("value.bin");
     fs::write(&value_file, [0x0a, 0x0b]).expect("state value file must write");
-
     let get = run_orna(
         directory.path(),
         &[
@@ -234,7 +233,7 @@ fn valid_state_shapes_reach_the_service_account_boundary() {
     );
     assert_eq!(
         get.stderr,
-        b"orna state: the installed Orna instance is not available: Orna service identity is invalid\n",
+        b"orna state: the Orna instance is not available: embedded PostgreSQL instance state is invalid\n",
         "service-account failure must print the exact public diagnostic"
     );
 
@@ -264,7 +263,7 @@ fn valid_state_shapes_reach_the_service_account_boundary() {
     );
     assert_eq!(
         set.stderr,
-        b"orna state: the installed Orna instance is not available: Orna service identity is invalid\n",
+        b"orna state: the Orna instance is not available: embedded PostgreSQL instance state is invalid\n",
         "service-account failure must print the exact public diagnostic"
     );
 }
