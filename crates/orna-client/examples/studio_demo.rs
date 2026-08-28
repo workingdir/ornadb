@@ -30,9 +30,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let library = RuntimeLibrary::load_qt(&arguments.runtime_path)?;
     let session = RuntimeSession::new_qt(library, "en-GB", "UTC", "light")?;
     let mut host = QtRuntimeExecutor::new(session);
-    let frame = studio_ui_frame()?;
+    let frame = studio_ui_frame("Source and invocation workspace")?;
     let surface = host.show_window(STUDIO_TITLE, &frame)?;
     println!("studio_demo: displayed canonical UI through shared Qt host");
+    let refreshed_frame = studio_ui_frame("Source and invocation workspace (refreshed)")?;
+    host.update_window(surface, STUDIO_TITLE, &refreshed_frame)?;
+    println!("studio_demo: applied canonical UI refresh through shared Qt host");
 
     let canonical_state = host.capture_semantic_state(surface)?;
     if canonical_state.is_empty() {
@@ -107,13 +110,13 @@ fn parse_arguments() -> Result<Arguments, io::Error> {
     })
 }
 
-fn studio_ui_frame() -> Result<Vec<u8>, Box<dyn Error>> {
+fn studio_ui_frame(workspace_label: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let body = ui_node(
         "std.ui.column",
         json!({}),
         vec![
             text_node("Orna Studio"),
-            panel_node(vec![text_node("Source and invocation workspace")]),
+            panel_node(vec![text_node(workspace_label)]),
             ui_node(
                 "std.ui.text_input",
                 json!({
