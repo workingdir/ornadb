@@ -1,0 +1,71 @@
+CREATE SCHEMA studio_static_app;
+
+CREATE CLIENT FUNCTION studio_static_app.title_header()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.row(
+        content => std.ui.text(
+            text => 'Orna Studio'
+        )
+    );
+END;
+
+CREATE CLIENT FUNCTION studio_static_app.connection_panel()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.panel(
+        content => std.ui.row(
+            content => std.ui.button(
+                label => 'Connect',
+                enabled => TRUE
+            )
+        )
+    );
+END;
+
+CREATE CLIENT FUNCTION studio_static_app.source_editor_panel()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.panel(
+        content => std.ui.column(
+            content => std.ui.text_input(
+                text => '',
+                placeholder => 'Source input',
+                enabled => TRUE
+            )
+        )
+    );
+END;
+
+CREATE CLIENT FUNCTION studio_static_app.results_panel()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.panel(
+        content => std.ui.tabs(
+            content => std.ui.text(
+                text => 'Results preview'
+            )
+        )
+    );
+END;
+
+CREATE CLIENT FUNCTION studio_static_app.status_bar()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.row(
+        content => std.ui.text(
+            text => 'Ready - static source-authored shell'
+        )
+    );
+END;
+
+CREATE CLIENT FUNCTION studio_static_app.main()
+RETURNS std.ui.UI IS
+BEGIN
+    RETURN std.ui.window(
+        title => 'Orna Studio',
+        content => std.ui.column(
+            content => studio_static_app.title_header()
+        )
+    );
+END;
