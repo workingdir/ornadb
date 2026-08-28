@@ -57,7 +57,6 @@ plan is the current implementation projection. Accepted ADRs and
 
 ## Evidence status (2026-08-28)
 
-
 - **Current validated focused evidence:** the `work/` checkout records the
   focused package, protocol, compiler, LSP, no-`STATE` dogfood, resource-span,
   buffered-preflight, standard-upgrade, runtime-handle, editor-tooling,
