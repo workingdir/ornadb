@@ -24,7 +24,8 @@ description = "CLIENT local assignment and RETURN."
 
 [[demos]]
 name = "client-control-flow"
-mode = "source-check"
+mode = "offline-test"
+test = "checks_and_evaluates_accepted_client_control_flow_fixture_offline"
 source = "crates/orna-server/tests/fixtures/client_control_flow_dogfood.orna"
 description = "A bounded console-style CLIENT counter with mutable state and control flow."
 
