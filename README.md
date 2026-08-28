@@ -137,6 +137,15 @@ The TTY renderer demo exercises the accepted document and byte-stream sinks:
 just runtime-tty-demo
 ```
 
+The client artifact demo exercises the accepted local integrity check:
+
+```text
+just client-artifact-demo
+```
+
+It rejects a server-domain artifact and a payload digest mismatch. It does
+not claim production provenance, signatures, or sandbox mediation.
+
 The Qt recipes are separate from the server package:
 
 ```text
