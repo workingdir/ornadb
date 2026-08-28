@@ -73,7 +73,7 @@ plan is the current implementation projection. Accepted ADRs and
 - `cargo test -p orna-lsp --test lsp_e2e serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges` — 1 test returned success after correcting the expected UTF-16 token range.
 - `cargo test -p orna-server --test standard_database checks_and_evaluates_accepted_client_local_assignment_fixture_offline` — 1 test returned success after correcting the fixture test's durable function-identity conversion.
 - `cargo test --locked -p orna-server --test standard_database checks_and_evaluates_accepted_client_control_flow_fixture_offline -- --exact` — 1 test returned success; the accepted bounded CLIENT control-flow fixture checks, prepares, authorises, and evaluates to INTEGER 5.
-- `CARGO_NET_OFFLINE=true just demo-check` — 13 runnable accepted source-check/
+- `CARGO_NET_OFFLINE=true just demo-check` — 14 runnable accepted source-check/
   offline demos returned success; the compose-only Inspector entry was skipped
   by design.
 - `CARGO_NET_OFFLINE=true cargo test --locked -p orna-client` — 359 tests
@@ -195,12 +195,13 @@ remain labelled, and no environment-gated proof is inferred.
   state machine), `c592113` (hard payload ceilings), and `90a9456` (trust
   contract clarification). It preserves the existing evaluator APIs and makes
   no production sandbox, audit, signature, or host-effect claim.
-- The accepted demo applications `contact_app_dogfood.orna` and
-  `issue_tracker_app_dogfood.orna` are registered by `964df03` and remain
-  source-check-only examples.
+- The accepted demo applications `contact_app_dogfood.orna`,
+  `issue_tracker_app_dogfood.orna`, and `task_board_app_dogfood.orna` are
+  registered by `964df03` and `476c9ea`; they remain source-check-only
+  examples.
 - `python3 scripts/check-editor-tooling.py` passed over 49 `.orna` files;
-  `CARGO_NET_OFFLINE=true just demo-check` passed 13 runnable source-check/
-  offline demos, including the two application fixtures and the
+  `CARGO_NET_OFFLINE=true just demo-check` passed 14 runnable source-check/
+  offline demos, including the three application fixtures and the
   `ui-constructor-showcase`; the compose-only Inspector entry was skipped by
   design. The earlier accepted baseline `just kernel-test` result is
   `artifact://22571`; the current Inspector observer evidence is listed above.
