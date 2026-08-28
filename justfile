@@ -68,10 +68,16 @@ runtime-qt-rust-smoke runtime_path:
 studio-qt-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example studio_demo -- {{runtime_path}} --smoke
 
-# Exercise the accepted TTY and Qt runtime smoke paths in one command.
+# Exercise the accepted TTY and Qt runtime smoke paths without a display server.
 runtime-suite: runtime-tty-demo runtime-qt-test
+    QT_QPA_PLATFORM=offscreen target/runtime-qt/orna-runtime-qt-demo --smoke
+
+# Exercise the Qt visual and action paths against a display server.
+runtime-display-suite: runtime-qt-build
+    test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "runtime-display-suite: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
     env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-visual target/runtime-qt/orna-runtime-qt-display.png
     env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-demo --smoke
+
 
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
