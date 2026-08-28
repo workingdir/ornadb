@@ -180,6 +180,7 @@ struct Surface {
     std::uint64_t semantic_revision = 0;
     bool visible = false;
     bool native_closed = false;
+    bool close_event_delivered = false;
     std::map<OrnaNodeHandle, Node> nodes;
 };
 
@@ -216,7 +217,7 @@ struct Runtime {
     bool in_callback = false;
 };
 
-void emit_surface_closed(Runtime *runtime, OrnaSurfaceHandle surface);
+bool emit_surface_closed(Runtime *runtime, OrnaSurfaceHandle surface);
 
 class RuntimeWindow final : public QWidget {
 public:
@@ -940,20 +941,23 @@ void destroy_node(Runtime *runtime,
         // Destruction must not unwind through the C ABI.
     }
 }
-void emit_surface_closed(Runtime *runtime, OrnaSurfaceHandle surface) {
+bool emit_surface_closed(Runtime *runtime, OrnaSurfaceHandle surface) {
     if (runtime == nullptr || runtime->client.emit_runtime_event == nullptr || runtime->terminal) {
-        return;
+        return true;
     }
     OrnaRuntimeEventV1 event{};
     event.kind = ORNA_RUNTIME_EVENT_SURFACE_CLOSED;
     event.as.surface_closed.surface = surface;
+    OrnaStatus callback_status = internal_error();
     runtime->in_callback = true;
     try {
-        (void)runtime->client.emit_runtime_event(runtime->client.context, runtime_handle(runtime), &event);
+        callback_status =
+            runtime->client.emit_runtime_event(runtime->client.context, runtime_handle(runtime), &event);
     } catch (...) {
         // A foreign callback must not unwind through the C ABI.
     }
     runtime->in_callback = false;
+    return callback_status.code == ORNA_STATUS_OK;
 }
 
 void RuntimeWindow::closeEvent(QCloseEvent *event) {
@@ -962,7 +966,7 @@ void RuntimeWindow::closeEvent(QCloseEvent *event) {
         if (found != runtime_->surfaces.end() && !found->second.native_closed) {
             found->second.native_closed = true;
             found->second.visible = false;
-            emit_surface_closed(runtime_, surface_);
+            found->second.close_event_delivered = emit_surface_closed(runtime_, surface_);
         }
     }
     event->accept();
@@ -972,9 +976,9 @@ void destroy_surface_widgets(Runtime *runtime,
                              Surface &surface,
                              bool emit_event = true,
                              bool unregister_handles = true) {
-    if (emit_event && !surface.native_closed) {
+    if (emit_event && !surface.close_event_delivered) {
         surface.native_closed = true;
-        emit_surface_closed(runtime, surface.handle);
+        surface.close_event_delivered = emit_surface_closed(runtime, surface.handle);
     }
     if (runtime == nullptr && surface.window != nullptr) {
         static_cast<RuntimeWindow *>(surface.window.data())->suppress_close_event();
@@ -996,9 +1000,17 @@ void reap_closed_surfaces(Runtime *runtime) {
         return;
     }
     for (auto iterator = runtime->surfaces.begin(); iterator != runtime->surfaces.end();) {
-        if (!iterator->second.native_closed) {
+        auto &surface = iterator->second;
+        if (!surface.native_closed) {
             ++iterator;
             continue;
+        }
+        if (!surface.close_event_delivered) {
+            surface.close_event_delivered = emit_surface_closed(runtime, surface.handle);
+            if (!surface.close_event_delivered) {
+                ++iterator;
+                continue;
+            }
         }
         auto current = iterator++;
         destroy_surface_widgets(runtime, current->second, false);
@@ -1421,6 +1433,9 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
             while (!runtime->surfaces.empty()) {
                 auto found = runtime->surfaces.begin();
                 destroy_surface_widgets(runtime, found->second);
+                if (!found->second.close_event_delivered) {
+                    return internal_error();
+                }
                 runtime->surfaces.erase(found);
             }
             runtime->terminal = true;
@@ -1476,10 +1491,16 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
                 return status;
             }
             const auto found = runtime->surfaces.find(surface_handle);
-            if (found == runtime->surfaces.end() || found->second.native_closed) {
+            if (found == runtime->surfaces.end()) {
+                return not_found();
+            }
+            if (found->second.native_closed && found->second.close_event_delivered) {
                 return not_found();
             }
             destroy_surface_widgets(runtime, found->second);
+            if (!found->second.close_event_delivered) {
+                return internal_error();
+            }
             runtime->surfaces.erase(found);
             return ok();
         },
@@ -1694,7 +1715,7 @@ ORNA_RUNTIME_EXPORT const OrnaRuntimeApiV1 *orna_runtime_query_v1(void) {
             if (status.code != ORNA_STATUS_OK) {
                 return status;
             }
-            return not_found();
+            return unsupported();
         },
     };
     return &api;
