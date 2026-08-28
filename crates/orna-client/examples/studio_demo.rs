@@ -53,7 +53,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let surface_closed = if arguments.smoke {
         host.poll_runtime(1)?;
         let events = host.drain_runtime_events();
-        let closed = consume_runtime_events(&host, events, surface);
+        let (closed, action_id) = consume_runtime_events(&host, events, surface);
+        if !closed {
+            if let Some(action_id) = action_id.as_deref() {
+                apply_action_feedback(&mut host, surface, action_id)?;
+            }
+        }
         println!("studio_demo: smoke poll complete");
         closed
     } else {
@@ -62,7 +67,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         while !closed {
             host.poll_runtime(50)?;
             let events = host.drain_runtime_events();
-            closed = consume_runtime_events(&host, events, surface);
+            let (next_closed, action_id) = consume_runtime_events(&host, events, surface);
+            if !next_closed {
+                if let Some(action_id) = action_id.as_deref() {
+                    apply_action_feedback(&mut host, surface, action_id)?;
+                }
+            }
+            closed = next_closed;
         }
         println!("studio_demo: received RuntimeSurfaceClosed");
         closed
@@ -188,17 +199,32 @@ fn ui_node(contract: &str, properties: Value, children: Vec<Value>, actions: Val
     })
 }
 
+fn apply_action_feedback(
+    host: &mut QtRuntimeExecutor,
+    surface: AbiSurfaceHandle,
+    action_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let feedback = format!("Action requested: {action_id}");
+    let frame = studio_ui_frame(&feedback)?;
+    host.update_window(surface, STUDIO_TITLE, &frame)?;
+    println!("studio_demo: applied action feedback for {action_id}");
+    Ok(())
+}
+
 fn consume_runtime_events(
     host: &QtRuntimeExecutor,
     events: Vec<RuntimeEventSnapshot>,
     surface: AbiSurfaceHandle,
-) -> bool {
+) -> (bool, Option<String>) {
     let mut surface_closed = false;
+    let mut action_id = None;
     for event in events {
         match event {
             RuntimeEventSnapshot::Action(action) if action.surface == surface => {
                 if let Some(binding) = host.action_binding(action.action) {
-                    println!("studio_demo: action requested {}", binding.action_id());
+                    let binding_id = binding.action_id().to_owned();
+                    println!("studio_demo: action requested {binding_id}");
+                    action_id = Some(binding_id);
                 } else {
                     println!(
                         "studio_demo: action handle {} was not registered",
@@ -214,5 +240,5 @@ fn consume_runtime_events(
             | RuntimeEventSnapshot::Diagnostic(_) => {}
         }
     }
-    surface_closed
+    (surface_closed, action_id)
 }
