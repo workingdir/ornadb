@@ -8,7 +8,7 @@ description: CREATE SERVER FUNCTION and CREATE CLIENT FUNCTION. Domains, cross-d
 Every executable definition is a function. There is no separate definition kind for queries, procedures, components, screens, pages, or applications.
 
 :::warning Development status
-The SERVER and CLIENT domain model is LOCKED. Function body details are CURRENT PROPOSAL. OrnaDB is under active development; there is no released executable yet.
+The SERVER and CLIENT domain model is LOCKED. Accepted local slices include bounded Inspector, resource, and action forms; function body details are CURRENT PROPOSAL. Full Studio and reflective JSON-RPC/MCP gateway programs are CURRENT PROPOSAL (CONCEPTUAL), not released features. OrnaDB is under active development; there is no released executable yet.
 :::
 
 ## The two declarations
@@ -52,15 +52,24 @@ END;
 
 ## CLIENT function
 
-A CLIENT function runs in the sandboxed `orna` client process. It handles:
+A CLIENT function runs in the local `orna` client process. Accepted local
+execution includes UI values, LOCAL and SESSION state, typed scalar and stream
+resources, actions, and the bounded Stage 1 VM control-plane seam. The full
+production sandbox and host-capability mediation remain CURRENT PROPOSAL.
+
+It handles:
 
 - composition of `std.ui.UI` values;
 - LOCAL and SESSION state;
-- calls to SERVER functions through resources and actions;
-- explicitly granted client capabilities;
-- reflective JSON-RPC and MCP gateway programs.
+- calls to SERVER functions through accepted resources and `std.action.call`;
+- local capability declarations checked by the accepted gate;
+- reflective JSON-RPC and MCP gateway programs, as a CURRENT PROPOSAL
+  (CONCEPTUAL) using explicit exposure metadata; universal automatic exposure is
+  not accepted.
 
+> **CURRENT PROPOSAL (CONCEPTUAL):** This `studio.main` example describes the unresolved full-Studio shape; it is not a released program.
 ```sql
+
 CREATE CLIENT FUNCTION studio.main()
 RETURNS std.ui.UI
 AS
@@ -70,7 +79,7 @@ AS
     );
 ```
 
-"CLIENT" describes the execution side of the database protocol. It may be a desktop app, terminal process, browser, service gateway, CI process, or long-running agent.
+"CLIENT" describes the execution side of the database protocol. It can model a desktop app, terminal process, browser process, service gateway, CI process, or long-running agent; reflective gateway behavior remains a conceptual/current-proposal surface.
 
 ## One domain per function
 
@@ -132,7 +141,7 @@ RETURNS std.ui.UI
 RUNTIME CONTRACT 'std.ui.window@1';
 ```
 
-The declaration is stored in the database. An installed runtime supplies the local implementation.
+The declaration is stored in the database. An installed runtime supplies the local implementation. The accepted production v1 profile is `orna-runtime-qt` on Linux x86_64 with Qt 6 Widgets, ABI v1.0, and caller-pumps; other toolkit/runtime families remain gated.
 
 ## Capabilities
 

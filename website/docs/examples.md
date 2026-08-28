@@ -70,7 +70,12 @@ orna invoke tasks.overdue --output json
 
 The JSON path selects `std.json.encode` and writes a byte stream to stdout.
 
-## Trace 2. A CLIENT UI function
+## Trace 2. A CLIENT UI function (conceptual)
+
+> **CURRENT PROPOSAL:** This trace uses the deferred `TABLE`/`ROWS` resource
+> transport and the unresolved full production CLIENT VM. It is illustrative,
+> not a runnable product path. The accepted source-check applications and
+> scalar/stream resource fixtures are listed above.
 
 ```sql
 CREATE CLIENT FUNCTION tasks.overdue_window()

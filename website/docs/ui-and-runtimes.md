@@ -8,7 +8,11 @@ description: std.ui.UI as a standard-library value type, installed native runtim
 `std.ui.UI` is a standard-library value type. CLIENT functions return it. The local `orna` client selects an installed runtime to materialise it.
 
 :::warning Development status
-The `std.ui.UI` concept and the runtime model are LOCKED. The runtime ABI and exact UI syntax are CURRENT PROPOSAL. OrnaDB is under active development; there is no released executable yet.
+The `std.ui.UI` model is LOCKED. The bounded Qt v1 profile is ACCEPTED:
+Linux x86_64, Qt 6 Widgets, ABI v1.0, and the caller-pumps thread model.
+Broader runtime, toolkit, platform, ABI, and UI-syntax extensions remain
+CURRENT PROPOSAL. OrnaDB is under active development; there is no released
+executable yet.
 :::
 
 ## What std.ui.UI is
@@ -55,11 +59,11 @@ A runtime is a locally installed shared library. Database source cannot silently
 
 ```text
 orna-runtime-tty       terminal, streams, documents
-orna-runtime-qt        Windows, macOS, Linux
-orna-runtime-gtk       Linux
-orna-runtime-swiftui   macOS
-orna-runtime-imgui     Windows, macOS, Linux, browser possibility
-orna-runtime-web       browser environment
+orna-runtime-qt        accepted Linux x86_64 Qt v1 profile
+orna-runtime-gtk       proposed Linux runtime
+orna-runtime-swiftui   proposed macOS runtime
+orna-runtime-imgui     proposed Windows, macOS, Linux, or browser runtime
+orna-runtime-web       proposed browser runtime
 ```
 
 ## Automatic selection
@@ -101,7 +105,9 @@ std.ui.code_editor@2
 std.ui.data_grid@2
 ```
 
-Every runtime implementation must pass the same contract suite: property defaults, slot cardinality, event payload types, state round trips, focus behaviour, accessibility labels, and hot reload.
+The accepted Qt v1 provider has a bounded contract suite for property defaults,
+slot cardinality, typed state, callbacks, accessibility labels, and shutdown.
+The other runtime families and broader hot-reload contracts remain proposals.
 
 ## The runtime boundary
 
@@ -116,6 +122,9 @@ This keeps Qt, GTK, SwiftUI, ImGui, and Web implementations focused on local mat
 ## State scopes
 
 State declarations live inside CLIENT functions:
+
+The state scopes are accepted. `std.ui.DockLayout`, `std.ui.dockspace`, and
+the event-binding example below remain CURRENT PROPOSAL runtime contracts.
 
 ```sql
 CREATE CLIENT FUNCTION studio.workspace_shell()
@@ -146,12 +155,16 @@ Each declared state slot has a stable `StateSlotId`. A semantic rename keeps the
 
 CLIENT UI functions must never block the local runtime event loop while waiting for a remote SERVER function.
 
-A resource is a reactive handle to a typed asynchronous computation, usually a SERVER call:
+An accepted v1 resource is a reactive handle to a typed asynchronous
+computation for a scalar SERVER target or a `STREAM<T>` target:
 
 ```sql
-LET rows std.data.Resource<TABLE(...)> :=
+LET values std.data.Resource<INTEGER> :=
     std.data.resource(tasks.overdue);
 ```
+
+The following row-shaped `TABLE` example is a conceptual deferred illustration.
+`TABLE`/`ROWS` resource transport is not an accepted v1 contract.
 
 An action is a typed value triggered by a runtime event:
 
