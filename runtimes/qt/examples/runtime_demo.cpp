@@ -1,11 +1,15 @@
 #include <orna_runtime_abi_v1.h>
 
+#include <QApplication>
+#include <QPushButton>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -27,6 +31,10 @@ constexpr char kUnsupportedMessage[] = "demo callback is unsupported";
 
 struct DemoState {
     std::size_t action_events = 0;
+    OrnaSurfaceHandle action_surface = 0;
+    OrnaNodeHandle action_node = 0;
+    OrnaActionHandle action_handle = 0;
+    std::string action_input_type;
     std::size_t surface_closed_events = 0;
 };
 
@@ -85,6 +93,14 @@ OrnaStatus client_emit_runtime_event(void *context,
         auto *state = static_cast<DemoState *>(context);
         if (event->kind == ORNA_RUNTIME_EVENT_ACTION) {
             ++state->action_events;
+            state->action_surface = event->as.action.surface;
+            state->action_node = event->as.action.node;
+            state->action_handle = event->as.action.action;
+            const auto input_type = event->as.action.payload.type_name;
+            if (input_type.data == nullptr && input_type.len != 0) {
+                return invalid_status();
+            }
+            state->action_input_type.assign(input_type.data == nullptr ? "" : input_type.data, input_type.len);
         } else if (event->kind == ORNA_RUNTIME_EVENT_SURFACE_CLOSED) {
             ++state->surface_closed_events;
         }
@@ -352,6 +368,44 @@ int run_demo(bool smoke) {
         (void)shutdown_runtime(api, runtime);
         return EXIT_FAILURE;
     }
+    if (api->set_surface_visible == nullptr) {
+        std::fprintf(stderr, "orna-runtime-qt-demo: runtime cannot show a surface\n");
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
+    if (!status_ok("set_surface_visible", api->set_surface_visible(runtime, surface, 1))) {
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
+    if (!status_ok("poll_event_loop", api->poll_event_loop(runtime, smoke ? 1U : 50U))) {
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
+
+    QPushButton *button = nullptr;
+    for (QWidget *window : QApplication::topLevelWidgets()) {
+        button = window->findChild<QPushButton *>();
+        if (button != nullptr) {
+            break;
+        }
+    }
+    if (button == nullptr) {
+        std::fprintf(stderr, "orna-runtime-qt-demo: rendered button was not found\n");
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
+    button->click();
+    if (g_demo_state.action_events != 1 || g_demo_state.action_surface != surface
+        || g_demo_state.action_node != kButtonNode || g_demo_state.action_handle != kButtonAction
+        || g_demo_state.action_input_type != kTextType) {
+        std::fprintf(stderr, "orna-runtime-qt-demo: button action callback did not match expected event\n");
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
+    if (!status_ok("poll_event_loop", api->poll_event_loop(runtime, smoke ? 1U : 0U))) {
+        (void)shutdown_runtime(api, runtime);
+        return EXIT_FAILURE;
+    }
 
     OrnaOwnedBytes canonical_state{nullptr, 0, nullptr, nullptr};
     const auto capture_status = api->capture_semantic_state(runtime, surface, &canonical_state);
@@ -363,21 +417,7 @@ int run_demo(bool smoke) {
     std::printf("orna-runtime-qt-demo: canonical state %zu bytes\n", canonical_state.len);
     release_owned_bytes(&canonical_state);
 
-    if (smoke) {
-        if (!status_ok("poll_event_loop", api->poll_event_loop(runtime, 1))) {
-            (void)shutdown_runtime(api, runtime);
-            return EXIT_FAILURE;
-        }
-    } else {
-        if (api->set_surface_visible == nullptr) {
-            std::fprintf(stderr, "orna-runtime-qt-demo: runtime cannot show a surface\n");
-            (void)shutdown_runtime(api, runtime);
-            return EXIT_FAILURE;
-        }
-        if (!status_ok("set_surface_visible", api->set_surface_visible(runtime, surface, 1))) {
-            (void)shutdown_runtime(api, runtime);
-            return EXIT_FAILURE;
-        }
+    if (!smoke) {
         while (g_demo_state.surface_closed_events == 0) {
             if (!status_ok("poll_event_loop", api->poll_event_loop(runtime, 50))) {
                 (void)shutdown_runtime(api, runtime);
@@ -385,7 +425,6 @@ int run_demo(bool smoke) {
             }
         }
     }
-
     return shutdown_runtime(api, runtime) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
