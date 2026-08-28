@@ -54,6 +54,24 @@ mod tests {
     }
 
     #[test]
+    fn checks_client_inspector_source_fixture_against_verified_v9_standard() {
+        let snapshot = retained_standard_library_v9_snapshot()
+            .and_then(verify_standard_library_v9_snapshot)
+            .expect("retained V9 standard must verify");
+        let standard =
+            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+        let source = SourceBundle::new([SourceUnit::new(
+            "client_inspector_dogfood.orna",
+            include_str!("../tests/fixtures/client_inspector_dogfood.orna"),
+        )])
+        .expect("client Inspector application source must form a bundle");
+
+        let report = check_new_application(&source, &standard)
+            .expect("client Inspector application source must be checked against V9");
+        assert_eq!(report.diagnostics(), &[]);
+    }
+
+    #[test]
     fn rejects_retained_table_presenter_as_a_client_resource_target() {
         let snapshot = retained_standard_library_v9_snapshot()
             .and_then(verify_standard_library_v9_snapshot)
