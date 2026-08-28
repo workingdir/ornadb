@@ -370,18 +370,56 @@ impl QtRuntimeExecutor {
             .operations
             .insert(0, RuntimeUiOperation::unmount_node(previous_root));
 
-        self.session.apply_batch(surface, &batch)?;
-        self.next_alias = next_alias;
-        self.surface_revisions.insert(surface, semantic_revision);
-        self.surface_roots.insert(surface, next_root);
-        self.action_bindings
-            .retain(|_, binding| binding.surface != surface);
-        for (action, action_id) in action_bindings {
-            self.action_bindings
-                .insert(action, RuntimeActionBinding { surface, action_id });
-        }
-        Ok(())
+        let provider_result = self.session.apply_batch(surface, &batch);
+        let update = SurfaceUpdate {
+            surface,
+            root: next_root,
+            revision: semantic_revision,
+            next_alias,
+            action_bindings,
+        };
+        commit_surface_update(
+            provider_result,
+            update,
+            &mut self.next_alias,
+            &mut self.surface_revisions,
+            &mut self.surface_roots,
+            &mut self.action_bindings,
+        )
     }
+}
+
+struct SurfaceUpdate {
+    surface: AbiSurfaceHandle,
+    root: AbiNodeHandle,
+    revision: u64,
+    next_alias: u64,
+    action_bindings: Vec<(AbiActionHandle, String)>,
+}
+
+fn commit_surface_update(
+    provider_result: Result<(), RuntimeSessionError>,
+    update: SurfaceUpdate,
+    next_alias: &mut u64,
+    surface_revisions: &mut HashMap<AbiSurfaceHandle, u64>,
+    surface_roots: &mut HashMap<AbiSurfaceHandle, AbiNodeHandle>,
+    action_bindings: &mut HashMap<AbiActionHandle, RuntimeActionBinding>,
+) -> Result<(), RuntimeSessionError> {
+    provider_result?;
+    *next_alias = update.next_alias;
+    surface_revisions.insert(update.surface, update.revision);
+    surface_roots.insert(update.surface, update.root);
+    action_bindings.retain(|_, binding| binding.surface != update.surface);
+    for (action, action_id) in update.action_bindings {
+        action_bindings.insert(
+            action,
+            RuntimeActionBinding {
+                surface: update.surface,
+                action_id,
+            },
+        );
+    }
+    Ok(())
 }
 
 fn reconcile_surface_events(
@@ -1145,6 +1183,50 @@ mod tests {
         assert_eq!(batch.semantic_revision, 7);
         assert_eq!(next_alias, 2);
         assert!(action_bindings.is_empty());
+    }
+
+    #[test]
+    fn rejected_surface_update_preserves_previous_bookkeeping() {
+        let surface = 7;
+        let mut next_alias = 9;
+        let mut surface_revisions = HashMap::from([(surface, 1)]);
+        let mut surface_roots = HashMap::from([(surface, 3)]);
+        let old_action = 11;
+        let new_action = 12;
+        let mut action_bindings = HashMap::from([(
+            old_action,
+            RuntimeActionBinding {
+                surface,
+                action_id: "old".to_owned(),
+            },
+        )]);
+
+        let result = commit_surface_update(
+            Err(RuntimeSessionError::Failed),
+            SurfaceUpdate {
+                surface,
+                root: 99,
+                revision: 2,
+                next_alias: 20,
+                action_bindings: vec![(new_action, "new".to_owned())],
+            },
+            &mut next_alias,
+            &mut surface_revisions,
+            &mut surface_roots,
+            &mut action_bindings,
+        );
+
+        assert!(matches!(result, Err(RuntimeSessionError::Failed)));
+        assert_eq!(next_alias, 9);
+        assert_eq!(surface_revisions, HashMap::from([(surface, 1)]));
+        assert_eq!(surface_roots, HashMap::from([(surface, 3)]));
+        assert_eq!(
+            action_bindings
+                .get(&old_action)
+                .map(RuntimeActionBinding::action_id),
+            Some("old")
+        );
+        assert!(!action_bindings.contains_key(&new_action));
     }
 
     #[test]
