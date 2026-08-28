@@ -68,6 +68,11 @@ runtime-qt-rust-smoke runtime_path:
 studio-qt-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example studio_demo -- {{runtime_path}} --smoke
 
+# Exercise the accepted TTY and Qt runtime smoke paths in one command.
+runtime-suite: runtime-tty-demo runtime-qt-test
+    env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-visual target/runtime-qt/orna-runtime-qt-display.png
+    env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-demo --smoke
+
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
 # ../spec cannot run this local gate until the packaging/checkout contract is resolved.
