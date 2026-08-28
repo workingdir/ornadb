@@ -35,6 +35,7 @@ and run through the source checker:
 |---|---|
 | `crates/orna-server/tests/fixtures/contact_app_dogfood.orna` | constrained contacts, typed directory rows, and a client UI entry |
 | `crates/orna-server/tests/fixtures/issue_tracker_app_dogfood.orna` | constrained issues, typed listing rows, and a client UI entry |
+| `crates/orna-server/tests/fixtures/task_board_app_dogfood.orna` | constrained tasks, USER state, typed listing rows, and a client UI entry |
 
 Run the complete local registry with:
 
