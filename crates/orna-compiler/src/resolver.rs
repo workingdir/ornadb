@@ -12,9 +12,8 @@ pub use identity::{
 };
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
-    CheckedClientCapability,
-    CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
-    CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
+    CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
+    CheckedDefault, CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
     CheckedObjectReferenceUse, CheckedObjectType, CheckedSchema, CheckedServerFunction,
     CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
@@ -42,8 +41,8 @@ pub use model::{
     STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
     STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-    STD_UI_BUTTON_RUNTIME_CONTRACT,
-    STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
+    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
+    STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
     STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
     STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
@@ -53,7 +52,6 @@ pub use model::{
     STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
     STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
     STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
-    STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
     STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID,
     STD_UI_WINDOW_CONTENT_PARAMETER_ID, STD_UI_WINDOW_FUNCTION_ID,
     STD_UI_WINDOW_FUNCTION_REVISION_ID, STD_UI_WINDOW_REVISION_NUMBER,
@@ -79,8 +77,8 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator, ExpressionClientPlan,
-    FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
+    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
+    ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
@@ -92,8 +90,8 @@ use orna_core::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain, FunctionReturn,
-        FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
+        FunctionReturn, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
         QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind, ValueTypeMutability,
@@ -111,8 +109,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
-    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
     OnDeletePolicy, OptionTypeSpelling, PrimitiveValueTypePersistence, QualifiedName,

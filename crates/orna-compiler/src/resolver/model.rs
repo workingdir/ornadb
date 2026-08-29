@@ -948,9 +948,10 @@ impl CheckedBundle {
     }
     /// Returns the checked function with the given identity.
     pub fn function(&self, id: CheckedFunctionId) -> Option<&CheckedClientFunction> {
-        self.client_functions.iter().find(|function| function.id == id)
+        self.client_functions
+            .iter()
+            .find(|function| function.id == id)
     }
-
 
     pub(crate) fn field_renames(&self) -> &[CheckedFieldRename] {
         &self.field_renames
@@ -1665,12 +1666,16 @@ impl CheckedClientFunction {
     /// Returns the complete checked CLIENT body kind without exposing resolver internals.
     pub fn body_kind(&self) -> CheckedClientBodyKind {
         match self.body {
-            CheckedClientFunctionBody::BooleanLiteral { .. } => CheckedClientBodyKind::BooleanLiteral,
+            CheckedClientFunctionBody::BooleanLiteral { .. } => {
+                CheckedClientBodyKind::BooleanLiteral
+            }
             CheckedClientFunctionBody::Expression { .. } => CheckedClientBodyKind::Expression,
             CheckedClientFunctionBody::Procedural { .. } => CheckedClientBodyKind::Procedural,
             CheckedClientFunctionBody::ControlFlow { .. } => CheckedClientBodyKind::ControlFlow,
             CheckedClientFunctionBody::StateBlock { .. } => CheckedClientBodyKind::State,
-            CheckedClientFunctionBody::ExternalContract { .. } => CheckedClientBodyKind::ExternalContract,
+            CheckedClientFunctionBody::ExternalContract { .. } => {
+                CheckedClientBodyKind::ExternalContract
+            }
             #[cfg(test)]
             CheckedClientFunctionBody::Unsupported => CheckedClientBodyKind::ExternalContract,
         }
@@ -1699,7 +1704,6 @@ impl CheckedClientFunction {
         collect_body_calls(&self.body, &mut calls);
         calls
     }
-
 }
 fn collect_body_calls(body: &CheckedClientFunctionBody, calls: &mut Vec<CheckedFunctionId>) {
     match body {
@@ -1757,7 +1761,9 @@ fn collect_control_flow_calls(
                 }
             }
             CheckedClientControlFlowStatement::While {
-                condition, statements, ..
+                condition,
+                statements,
+                ..
             } => {
                 collect_expression_calls(condition, calls);
                 collect_control_flow_calls(statements, calls);
@@ -1766,10 +1772,15 @@ fn collect_control_flow_calls(
     }
 }
 
-fn collect_expression_calls(expression: &CheckedClientExpression, calls: &mut Vec<CheckedFunctionId>) {
+fn collect_expression_calls(
+    expression: &CheckedClientExpression,
+    calls: &mut Vec<CheckedFunctionId>,
+) {
     match expression {
         CheckedClientExpression::Call {
-            function, arguments, ..
+            function,
+            arguments,
+            ..
         } => {
             calls.push(*function);
             for (_, argument) in arguments {
@@ -1819,7 +1830,6 @@ fn collect_expression_calls(expression: &CheckedClientExpression, calls: &mut Ve
         | CheckedClientExpression::FieldPath { .. } => {}
     }
 }
-
 
 /// One checked SERVER function parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]

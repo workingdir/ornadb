@@ -1,0 +1,17 @@
+CREATE SCHEMA introspection_demo;
+
+CREATE CLIENT FUNCTION introspection_demo.compute(p_limit INTEGER) RETURNS INTEGER IS
+    LET total INTEGER := 0;
+    LET current INTEGER := 0;
+BEGIN
+    WHILE current < p_limit LOOP
+        total := total + 1;
+        current := current + 1;
+    END LOOP;
+
+    IF total = p_limit THEN
+        RETURN total;
+    ELSE
+        RETURN 0;
+    END IF;
+END;

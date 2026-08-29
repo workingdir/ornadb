@@ -2688,7 +2688,6 @@ impl Error for RawCallClientError {
         }
     }
 }
-
 /// The bounded response state for one parameter-free protocol-1 raw call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawCallClient {
@@ -2837,6 +2836,334 @@ impl RawCallClient {
                 Ok(RawCallClientResponse::Cancelled)
             }
             _ => Err(RawCallClientError::WrongState),
+        }
+    }
+}
+/// The validated result of one constructed `sys.invoke` server frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InvocationClientResponse {
+    /// The server accepted the invocation and assigned its identity.
+    Accepted { invocation: InvocationId },
+    /// One validated, ordered batch of invocation events.
+    EventBatch(InvocationEventBatch),
+    /// The server completed an invocation after its terminal event.
+    Completed,
+    /// The server rejected an invocation before acceptance.
+    Failed(CallFailure),
+    /// The server cancelled an invocation before acceptance.
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvocationClientPhase {
+    AwaitingAcceptance,
+    Running,
+    AwaitingCompletion,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum InvocationClientError {
+    /// The encoded frame failed the constructed frame codec.
+    Frame { source: FrameCodecError },
+    /// The client stream number was zero.
+    InvalidStream,
+    /// The frame used a different stream.
+    WrongStream { expected: u64, actual: u64 },
+    /// The frame did not match the invocation lifecycle.
+    WrongState,
+    /// The event batch used a channel other than result values.
+    WrongChannel { actual: Channel },
+    /// The outer or inner event sequence was not contiguous.
+    WrongSequence { expected: u64, actual: u64 },
+    /// The event sequence wrapped.
+    SequenceExhausted,
+    /// The frame payload consumed more result credit than the client granted.
+    InsufficientCredit { available: u64, required: u64 },
+    /// The first event was not `InvocationStarted`.
+    MissingStarted,
+    /// An event batch repeated `InvocationStarted`.
+    RepeatedStarted,
+    /// An event did not use the accepted invocation identity.
+    WrongInvocation,
+    /// A terminal event was not the final event in its batch.
+    TerminalEventNotLast,
+    /// A completion frame arrived before a terminal event.
+    TerminalEventRequired,
+}
+
+impl fmt::Display for InvocationClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Frame { .. } => "invocation server frame is invalid",
+            Self::InvalidStream => "invocation stream number must be non-zero",
+            Self::WrongStream { .. } => "invocation server frame uses the wrong stream",
+            Self::WrongState => "invocation server frame is not valid in the current state",
+            Self::WrongChannel { .. } => "invocation server event uses the wrong channel",
+            Self::WrongSequence { .. } => "invocation server event sequence is not contiguous",
+            Self::SequenceExhausted => "invocation server event sequence is exhausted",
+            Self::RepeatedStarted => "invocation event repeated its Started event",
+            Self::InsufficientCredit { .. } => "invocation server exceeded its result-value credit",
+            Self::MissingStarted => "invocation event batch must begin with Started",
+            Self::WrongInvocation => "invocation event uses the wrong invocation identity",
+            Self::TerminalEventNotLast => "invocation terminal event must be last",
+            Self::TerminalEventRequired => "invocation terminal response requires a terminal event",
+        })
+    }
+}
+
+impl Error for InvocationClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frame { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Bounded client state for one constructed `sys.invoke` stream.
+///
+/// The helper validates server lifecycle, event identity, sequence continuity,
+/// and result-value credit. It does not own a transport.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationClient {
+    stream: u64,
+    phase: InvocationClientPhase,
+    cancellation_requested: bool,
+    invocation: Option<InvocationId>,
+    next_outer_sequence: Option<u64>,
+    next_inner_sequence: Option<u64>,
+    remaining_result_credit: u64,
+}
+
+impl InvocationClient {
+    /// Returns the connection-local stream number.
+    pub const fn stream(&self) -> u64 {
+        self.stream
+    }
+
+    /// Returns the accepted root invocation identity, when acceptance arrived.
+    pub const fn invocation(&self) -> Option<InvocationId> {
+        self.invocation
+    }
+
+    /// Returns whether the server sent the terminal completion frame.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self.phase, InvocationClientPhase::Terminal)
+    }
+
+    /// Starts stream 1 and returns the exact initial client frames in wire order.
+    pub fn start(request: RetainedInvokeRequest) -> (Self, [ClientFrame; 3]) {
+        Self::start_on_stream(1, request).expect("stream 1 is valid")
+    }
+
+    /// Starts one constructed invocation on an explicitly selected stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvocationClientError::InvalidStream`] when `stream` is zero.
+    pub fn start_on_stream(
+        stream: u64,
+        request: RetainedInvokeRequest,
+    ) -> Result<(Self, [ClientFrame; 3]), InvocationClientError> {
+        if stream == 0 {
+            return Err(InvocationClientError::InvalidStream);
+        }
+        Ok((
+            Self {
+                stream,
+                phase: InvocationClientPhase::AwaitingAcceptance,
+                cancellation_requested: false,
+                invocation: None,
+                next_outer_sequence: Some(1),
+                next_inner_sequence: None,
+                remaining_result_credit: MAX_CHANNEL_WINDOW,
+            },
+            [
+                ClientFrame::CallInvokeRequest { stream, request },
+                ClientFrame::WindowUpdate {
+                    stream,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+                ClientFrame::CallArgumentsComplete { stream },
+            ],
+        ))
+    }
+
+    /// Requests cancellation once after the call stream has been created.
+    pub fn request_cancellation(&mut self) -> Result<ClientFrame, InvocationClientError> {
+        if self.phase == InvocationClientPhase::Terminal || self.cancellation_requested {
+            return Err(InvocationClientError::WrongState);
+        }
+        self.cancellation_requested = true;
+        Ok(ClientFrame::CallCancel {
+            stream: self.stream,
+        })
+    }
+
+    /// Decodes and validates one complete constructed invocation server frame.
+    pub fn receive_encoded(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        encoded: &[u8],
+    ) -> Result<InvocationClientResponse, InvocationClientError> {
+        let frame = match decode_constructed_invocation_event_frame(active, registry, encoded) {
+            Ok(frame) => frame,
+            Err(_) => decode_constructed_server_frame(active, registry, encoded)
+                .map_err(|source| InvocationClientError::Frame { source })?,
+        };
+        let required = matches!(frame, ServerFrame::EventBatch { .. }).then(|| {
+            u64::try_from(encoded.len().saturating_sub(HEADER_LENGTH)).unwrap_or(u64::MAX)
+        });
+        if let Some(required) = required
+            && self.remaining_result_credit < required
+        {
+            return Err(InvocationClientError::InsufficientCredit {
+                available: self.remaining_result_credit,
+                required,
+            });
+        }
+        let response = self.receive(frame)?;
+        if let Some(required) = required {
+            self.remaining_result_credit -= required;
+        }
+        Ok(response)
+    }
+
+    fn receive(
+        &mut self,
+        frame: ServerFrame,
+    ) -> Result<InvocationClientResponse, InvocationClientError> {
+        let stream = server_frame_stream(&frame);
+        if stream != self.stream {
+            return Err(InvocationClientError::WrongStream {
+                expected: self.stream,
+                actual: stream,
+            });
+        }
+        match frame {
+            ServerFrame::CallAccepted { invocation, .. } => {
+                if self.phase != InvocationClientPhase::AwaitingAcceptance
+                    || self.cancellation_requested
+                    || invocation.to_bytes() == [0; 16]
+                {
+                    return Err(InvocationClientError::WrongState);
+                }
+                self.invocation = Some(invocation);
+                self.phase = InvocationClientPhase::Running;
+                Ok(InvocationClientResponse::Accepted { invocation })
+            }
+            ServerFrame::EventBatch {
+                channel, events, ..
+            } => {
+                if self.phase != InvocationClientPhase::Running {
+                    return Err(InvocationClientError::WrongState);
+                }
+                if channel != Channel::ResultValues {
+                    return Err(InvocationClientError::WrongChannel { actual: channel });
+                }
+                let first_batch = self.next_inner_sequence.is_none();
+                let mut next_outer_sequence = self.next_outer_sequence;
+                let mut next_inner_sequence = self.next_inner_sequence;
+                let mut records = Vec::with_capacity(events.len());
+                for event in events {
+                    let Event::Value(RuntimeValue::InvokeEvent(value)) = event.event else {
+                        return Err(InvocationClientError::WrongInvocation);
+                    };
+                    if Some(value.invocation_id()) != self.invocation {
+                        return Err(InvocationClientError::WrongInvocation);
+                    }
+                    let expected_outer =
+                        next_outer_sequence.ok_or(InvocationClientError::SequenceExhausted)?;
+                    if event.sequence != expected_outer {
+                        return Err(InvocationClientError::WrongSequence {
+                            expected: expected_outer,
+                            actual: event.sequence,
+                        });
+                    }
+                    let expected_inner = next_inner_sequence.unwrap_or(0);
+                    if value.sequence() != expected_inner {
+                        return Err(InvocationClientError::WrongSequence {
+                            expected: expected_inner,
+                            actual: value.sequence(),
+                        });
+                    }
+                    next_outer_sequence = expected_outer.checked_add(1);
+                    next_inner_sequence = expected_inner.checked_add(1);
+                    records.push(InvocationEventRecord::new(event.sequence, value));
+                }
+                if next_inner_sequence == Some(0) {
+                    return Err(InvocationClientError::SequenceExhausted);
+                }
+                if first_batch
+                    && records.first().is_none_or(|record| {
+                        record.event().kind() != InvocationEventKind::InvocationStarted
+                    })
+                {
+                    return Err(InvocationClientError::MissingStarted);
+                }
+                if records.iter().enumerate().any(|(index, record)| {
+                    record.event().kind() == InvocationEventKind::InvocationStarted
+                        && (index > 0 || !first_batch)
+                }) {
+                    return Err(InvocationClientError::RepeatedStarted);
+                }
+                if records.iter().enumerate().any(|(index, record)| {
+                    matches!(
+                        record.event().kind(),
+                        InvocationEventKind::InvocationCompleted
+                            | InvocationEventKind::InvocationFailed
+                            | InvocationEventKind::InvocationCancelled
+                    ) && index + 1 != records.len()
+                }) {
+                    return Err(InvocationClientError::TerminalEventNotLast);
+                }
+                let terminal = records.iter().any(|record| {
+                    matches!(
+                        record.event().kind(),
+                        InvocationEventKind::InvocationCompleted
+                            | InvocationEventKind::InvocationFailed
+                            | InvocationEventKind::InvocationCancelled
+                    )
+                });
+                let events = InvocationEventBatch::new(records)
+                    .map_err(|source| InvocationClientError::Frame { source })?;
+                self.next_outer_sequence = next_outer_sequence;
+                self.next_inner_sequence = next_inner_sequence;
+                if terminal {
+                    self.phase = InvocationClientPhase::AwaitingCompletion;
+                }
+                Ok(InvocationClientResponse::EventBatch(events))
+            }
+            ServerFrame::CallCompleted { .. } => {
+                if self.phase != InvocationClientPhase::AwaitingCompletion {
+                    return Err(if self.phase == InvocationClientPhase::Running {
+                        InvocationClientError::TerminalEventRequired
+                    } else {
+                        InvocationClientError::WrongState
+                    });
+                }
+                self.phase = InvocationClientPhase::Terminal;
+                Ok(InvocationClientResponse::Completed)
+            }
+            ServerFrame::CallFailed { failure, .. }
+                if self.phase == InvocationClientPhase::AwaitingAcceptance
+                    && !self.cancellation_requested =>
+            {
+                self.phase = InvocationClientPhase::Terminal;
+                Ok(InvocationClientResponse::Failed(failure))
+            }
+            ServerFrame::CallCancelled { .. }
+                if self.phase == InvocationClientPhase::AwaitingAcceptance
+                    && self.cancellation_requested =>
+            {
+                self.phase = InvocationClientPhase::Terminal;
+                Ok(InvocationClientResponse::Cancelled)
+            }
+            _ => Err(InvocationClientError::WrongState),
         }
     }
 }
@@ -11750,6 +12077,160 @@ mod tests {
         assert_eq!(
             client.receive_encoded(&valid_encoded).unwrap(),
             RawCallClientResponse::Accepted { invocation: valid }
+        );
+    }
+
+    #[test]
+    fn invocation_client_starts_on_a_constructed_stream() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let retained =
+            encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+        let (client, frames) = InvocationClient::start(retained.clone());
+
+        assert_eq!(frames.len(), 3);
+        assert!(matches!(
+            &frames[0],
+            ClientFrame::CallInvokeRequest { stream: 1, request } if request == &retained
+        ));
+        assert_eq!(
+            frames[1],
+            ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: MAX_CHANNEL_WINDOW,
+            }
+        );
+        assert_eq!(frames[2], ClientFrame::CallArgumentsComplete { stream: 1 });
+        assert_eq!(
+            InvocationClient::start_on_stream(0, retained),
+            Err(InvocationClientError::InvalidStream),
+        );
+        assert_eq!(
+            client,
+            InvocationClient {
+                stream: 1,
+                phase: InvocationClientPhase::AwaitingAcceptance,
+                cancellation_requested: false,
+                invocation: None,
+                next_outer_sequence: Some(1),
+                next_inner_sequence: None,
+                remaining_result_credit: MAX_CHANNEL_WINDOW,
+            },
+        );
+    }
+
+    #[test]
+    fn invocation_client_validates_split_event_batches_and_terminal_completion() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let retained =
+            encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+        let (mut client, _) = InvocationClient::start(retained);
+        let invocation = InvocationId::from_bytes([0x72; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let value = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::ValueBatch {
+                schema: None,
+                values: vec![InvokeValue::new(RuntimeValue::Integer(7)).expect("value")],
+            },
+        )
+        .expect("value event");
+        let completed = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 11,
+            },
+        )
+        .expect("completed event");
+
+        let accepted = encode_constructed_server_frame(
+            &active,
+            &registry,
+            &ServerFrame::CallAccepted {
+                stream: 1,
+                invocation,
+            },
+        )
+        .expect("accepted frame");
+        assert_eq!(
+            client.receive_encoded(&active, &registry, &accepted),
+            Ok(InvocationClientResponse::Accepted { invocation }),
+        );
+
+        for (outer_sequence, event) in [(1, started), (2, value), (3, completed)] {
+            let frame = encode_constructed_server_frame(
+                &active,
+                &registry,
+                &ServerFrame::EventBatch {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    events: vec![EventRecord {
+                        sequence: outer_sequence,
+                        event: Event::Value(RuntimeValue::InvokeEvent(event)),
+                    }],
+                },
+            )
+            .expect("event frame");
+            let response = client
+                .receive_encoded(&active, &registry, &frame)
+                .expect("event response");
+            let InvocationClientResponse::EventBatch(batch) = response else {
+                panic!("expected one event batch");
+            };
+            assert_eq!(batch.records().len(), 1);
+        }
+
+        let completed = encode_constructed_server_frame(
+            &active,
+            &registry,
+            &ServerFrame::CallCompleted { stream: 1 },
+        )
+        .expect("completion frame");
+        assert_eq!(
+            client.receive_encoded(&active, &registry, &completed),
+            Ok(InvocationClientResponse::Completed),
+        );
+        assert_eq!(
+            client.request_cancellation(),
+            Err(InvocationClientError::WrongState),
+        );
+    }
+
+    #[test]
+    fn invocation_client_cancellation_is_explicit_and_one_shot() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let retained =
+            encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+        let (mut client, _) = InvocationClient::start(retained);
+        assert_eq!(
+            client.request_cancellation(),
+            Ok(ClientFrame::CallCancel { stream: 1 }),
+        );
+        assert_eq!(
+            client.request_cancellation(),
+            Err(InvocationClientError::WrongState),
+        );
+        let cancelled = encode_constructed_server_frame(
+            &active,
+            &registry,
+            &ServerFrame::CallCancelled { stream: 1 },
+        )
+        .expect("cancelled frame");
+        assert_eq!(
+            client.receive_encoded(&active, &registry, &cancelled),
+            Ok(InvocationClientResponse::Cancelled),
         );
     }
 }
