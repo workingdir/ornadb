@@ -15243,10 +15243,7 @@ mod tests {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            ["app.first", "app.first", "app.second", "app.first"]
-        );
+        assert_eq!(names, ["app.first", "app.first", "app.second", "app.first"]);
         let call_references = wrapper
             .references()
             .iter()
