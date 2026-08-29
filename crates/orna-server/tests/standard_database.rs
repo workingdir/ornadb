@@ -520,7 +520,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestRes
             initial_context.0 == 2 && initial_context.1 == expected.revision().to_bytes()
                 && initial_context.2 == expected.catalogue().revision().to_bytes()
                 && initial_context.3 == expected.digest().to_bytes(),
-            "opening a fresh database did not select the exact accepted V10 standard context",
+            "opening a fresh database did not select the exact accepted V9 standard context",
         )?;
         let initial_pair = initial.pair();
         let initial_pointer = active_pointer(&database).await?;
@@ -538,7 +538,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestRes
         require(
             reopened_active.pair() == initial_pair
                 && standard_context_facts!(&reopened_active) == initial_context,
-            "reopening an installed V10 database changed its active pair or accepted context",
+            "reopening an installed V9 database changed its active pair or accepted context",
         )?;
 
         let mut reconnect_config = database.config()?;
@@ -548,7 +548,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestRes
         require(
             reconnected_active.pair() == initial_pair
                 && standard_context_facts!(&reconnected_active) == initial_context,
-            "reconnecting to an installed V10 database changed its active pair or accepted context",
+            "reconnecting to an installed V9 database changed its active pair or accepted context",
         )?;
 
         let tampered_contract = format!("{expected_boolean_contract}.tampered");
