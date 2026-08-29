@@ -40,7 +40,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::{self, BufReader, IsTerminal, Write},
+    io::{self, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
@@ -100,15 +100,14 @@ use orna_protocol::{
     MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection,
     ResourceArgument, ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
+    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame, SessionStateError,
+    MAX_SESSION_FRAME_LENGTH, SESSION_HEADER_LENGTH, SESSION_MARKER,
+    decode_constructed_invocation_event_frame,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
-    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame,
-    SessionStateError, SESSION_HEADER_LENGTH, SESSION_MARKER,
-    MAX_SESSION_FRAME_LENGTH, decode_constructed_invocation_event_frame, decode_constructed_server_frame,
-    decode_constructed_value, decode_resource_server_frame, decode_session_server_frame,
-    encode_constructed_client_frame, encode_session_client_frame,
-    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
+    decode_constructed_server_frame, decode_constructed_value, decode_resource_server_frame,
+    decode_session_server_frame, encode_constructed_client_frame, encode_resource_client_frame,
+    encode_constructed_value, encode_invoke_request,
 };
-use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
@@ -3533,6 +3532,9 @@ fn map_resource_transport_completion(
             request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
         }
         Err(ResourceTransportFailure::Cancelled) => request.cancelled(),
+        Err(ResourceTransportFailure::SessionInputUnavailable) => {
+            request.failed("client.input_unavailable".to_owned())
+        }
         Err(
             ResourceTransportFailure::RootPreflightDenied
             | ResourceTransportFailure::RootSealedDispatchInternal,
@@ -3567,6 +3569,7 @@ enum ResourceTransportFailure {
     Transport,
     Shape,
     Cancelled,
+    SessionInputUnavailable,
     /// The sealed root was denied before acceptance, so no InvocationId exists
     /// to carry in a [`SealedInvocationResult::Denied`] value.
     RootPreflightDenied,
@@ -3831,72 +3834,10 @@ fn wire_frame_is_session(frame: &BrokerWireFrame) -> bool {
     frame.bytes.len() >= SESSION_MARKER.len() && &frame.bytes[..SESSION_MARKER.len()] == SESSION_MARKER
 }
 
-struct BrokerSessionDriver {
-    reader: TerminalInputReader<BufReader<io::Stdin>>,
-    output: io::Stdout,
-    state: SessionInputState,
-    root_invocation_id: InvocationId,
-    call_stream: u64,
-}
-
-impl BrokerSessionDriver {
-    fn new(root_invocation_id: InvocationId, call_stream: u64) -> Result<Self, SessionStateError> {
-        Ok(Self {
-            reader: TerminalInputReader::new(BufReader::new(io::stdin())),
-            output: io::stdout(),
-            state: SessionInputState::new(root_invocation_id, call_stream)?,
-            root_invocation_id,
-            call_stream,
-        })
-    }
-
-    fn respond_to(
-        &mut self,
-        request: InputRequested,
-    ) -> Result<SessionClientFrame, SessionStateError> {
-        if request.root_invocation_id != self.root_invocation_id
-            || request.call_stream != self.call_stream
-        {
-            return Err(SessionStateError::MismatchedIdentity);
-        }
-        self.state.request(request.request_invocation_id)?;
-        let frame = match self.reader.read_line(&mut self.output, &request.prompt) {
-            Ok(TerminalInput::Line(line)) => SessionClientFrame::InputLine {
-                root_invocation_id: self.root_invocation_id,
-                call_stream: self.call_stream,
-                request_invocation_id: request.request_invocation_id,
-                line,
-            },
-            Ok(TerminalInput::Eof) => SessionClientFrame::InputEof {
-                root_invocation_id: self.root_invocation_id,
-                call_stream: self.call_stream,
-                request_invocation_id: request.request_invocation_id,
-            },
-            Err(error) => SessionClientFrame::InputFailed {
-                root_invocation_id: self.root_invocation_id,
-                call_stream: self.call_stream,
-                request_invocation_id: request.request_invocation_id,
-                error: terminal_input_error_code(&error).to_owned(),
-            },
-        };
-        self.state.accept(&frame)?;
-        Ok(frame)
-    }
-}
-
-fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
-    match error {
-        TerminalInputError::Io(_) => "terminal.input_io",
-        TerminalInputError::LineTooLong => "terminal.input_line_too_long",
-        TerminalInputError::InvalidUtf8 => "terminal.input_invalid_utf8",
-    }
-}
-
 async fn handle_shared_session_frame<W>(
     frame: BrokerWireFrame,
     stream: &mut W,
     root: &Option<BrokerRootState>,
-    driver: &mut Option<BrokerSessionDriver>,
 ) -> Result<(), ResourceTransportFailure>
 where
     W: AsyncWrite + Unpin,
@@ -3909,23 +3850,10 @@ where
     if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
         return Err(ResourceTransportFailure::Shape);
     }
-    let session_driver = match driver {
-        Some(driver) => driver,
-        slot @ None => {
-            *slot = Some(
-                BrokerSessionDriver::new(root_invocation_id, request.call_stream)
-                    .map_err(|_| ResourceTransportFailure::Shape)?,
-            );
-            slot.as_mut().expect("session driver inserted")
-        }
-    };
-    let response = session_driver
-        .respond_to(request)
-        .map_err(|_| ResourceTransportFailure::Shape)?;
-    let encoded =
-        encode_session_client_frame(&response).map_err(|_| ResourceTransportFailure::Shape)?;
-    write_shared_broker_frame(stream, &encoded).await
+    let _ = stream;
+    Err(ResourceTransportFailure::SessionInputUnavailable)
 }
+
 
 async fn run_shared_invoke_broker(
     stream: tokio::net::UnixStream,
@@ -3942,7 +3870,6 @@ async fn run_shared_invoke_broker(
     let mut resources: BTreeMap<u64, BrokerResourceState> = BTreeMap::new();
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
-    let mut session_driver = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
@@ -3975,7 +3902,7 @@ async fn run_shared_invoke_broker(
             BrokerNext::Command(None) => break,
             BrokerNext::Frame(Some(Ok(frame))) => {
                 let result = if wire_frame_is_session(&frame) {
-                    handle_shared_session_frame(frame, &mut stream, &root, &mut session_driver).await
+                    handle_shared_session_frame(frame, &mut stream, &root).await
                 } else {
                     handle_shared_broker_frame(
                         frame,
@@ -6247,6 +6174,10 @@ async fn host_invoke(
         ResourceTransportFailure::Shape => InstalledInvokeError::new(
             InstalledInvokeErrorKind::Internal,
             "the local invoke connection returned an invalid frame".to_owned(),
+        ),
+        ResourceTransportFailure::SessionInputUnavailable => InstalledInvokeError::new(
+            InstalledInvokeErrorKind::Internal,
+            "the client session input channel is unavailable".to_owned(),
         ),
         ResourceTransportFailure::RootPreflightDenied => {
             unreachable!("preflight denial handled before sealed result mapping")
