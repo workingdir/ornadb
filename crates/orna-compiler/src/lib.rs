@@ -22,25 +22,25 @@ pub use prepare::{
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolver::{
-    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
-    CheckedClientBodyKind, CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
-    CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedExpressionId,
-    CheckedField, CheckedFieldId, CheckedFunctionId, CheckedObjectReferenceUse, CheckedObjectType,
-    CheckedParameterId, CheckedSchema, CheckedSchemaId, CheckedServerFunction,
-    CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
-    CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
-    CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
-    CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
-    CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardJsonEncode,
-    CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
-    CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
-    CheckedStandardUiConstructor, CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeId,
-    CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, NewApplicationCheckError,
-    ProvisionalExpressionId, ProvisionalFieldId, STANDARD_LIBRARY_V3_REVISION_ID,
-    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID,
-    STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
+    CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
+    CheckedDefault, CheckedDefinitionReference, CheckedDefinitionReferenceTarget,
+    CheckedExpressionId, CheckedField, CheckedFieldId, CheckedFunctionId,
+    CheckedObjectReferenceUse, CheckedObjectType, CheckedParameterId, CheckedSchema,
+    CheckedSchemaId, CheckedServerFunction, CheckedServerFunctionParameter,
+    CheckedServerFunctionReturnColumn, CheckedStandardApplicationBundle,
+    CheckedStandardApplicationClientFunction, CheckedStandardApplicationField,
+    CheckedStandardApplicationObjectType, CheckedStandardApplicationParameter,
+    CheckedStandardApplicationRecordValueField, CheckedStandardApplicationRecordValueType,
+    CheckedStandardApplicationReturnColumn, CheckedStandardApplicationServerFunction,
+    CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardLibrary,
+    CheckedStandardParameterEcho, CheckedStandardSchema, CheckedStandardTerminalPresentTable,
+    CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardUiConstructor,
+    CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeId, CheckedTypeUseKind,
+    CheckedValueTypeUse, ConstantValue, NewApplicationCheckError, ProvisionalExpressionId,
+    ProvisionalFieldId, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
+    STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
     STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
     STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
@@ -51,17 +51,14 @@ pub use resolver::{
     STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
     STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
-    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID,
-    STD_UI_BUTTON_LABEL_PARAMETER_ID, STD_UI_BUTTON_RUNTIME_CONTRACT,
-    STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
+    STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
+    STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
     STD_UI_COLUMN_FUNCTION_REVISION_ID, STD_UI_COLUMN_RUNTIME_CONTRACT,
     STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID, STD_UI_PANEL_CONTENT_PARAMETER_ID,
     STD_UI_PANEL_FUNCTION_ID, STD_UI_PANEL_FUNCTION_REVISION_ID, STD_UI_PANEL_RUNTIME_CONTRACT,
-    STD_UI_ROW_CONTENT_PARAMETER_ID, STD_UI_ROW_FUNCTION_ID, STD_UI_ROW_FUNCTION_REVISION_ID,
     STD_UI_ROW_RUNTIME_CONTRACT, STD_UI_SCHEMA_ID, STD_UI_SOURCE_UNIT_ID,
     STD_UI_TABS_CONTENT_PARAMETER_ID, STD_UI_TABS_FUNCTION_ID, STD_UI_TABS_FUNCTION_REVISION_ID,
     STD_UI_TABS_RUNTIME_CONTRACT, STD_UI_TEXT_FUNCTION_ID, STD_UI_TEXT_FUNCTION_REVISION_ID,
-    STD_UI_TEXT_INPUT_ENABLED_PARAMETER_ID, STD_UI_TEXT_INPUT_FUNCTION_ID,
     STD_UI_TEXT_INPUT_FUNCTION_REVISION_ID, STD_UI_TEXT_INPUT_PLACEHOLDER_PARAMETER_ID,
     STD_UI_TEXT_INPUT_RUNTIME_CONTRACT, STD_UI_TEXT_INPUT_TEXT_PARAMETER_ID,
     STD_UI_TEXT_PARAMETER_ID, STD_UI_TEXT_RUNTIME_CONTRACT, STD_UI_TYPE_ID,
@@ -192,7 +189,23 @@ impl DiagnosticCode {
             location,
         }
     }
+
+    /// Converts a syntax diagnostic code into the compiler's stable category.
+    fn from_syntax_code(code: &'static str) -> Self {
+        match code {
+            "ORNA0001" => Self::UnexpectedToken,
+            "ORNA0002" => Self::UnterminatedSourceConstruct,
+            "ORNA0101" => Self::UnknownQualifiedName,
+            "ORNA0103" => Self::DuplicateDefinition,
+            "ORNA0201" => Self::TypeMismatch,
+            "ORNA0203" => Self::InvalidReferenceTarget,
+            "ORNA0304" => Self::CapabilityRequirement,
+            "ORNA0303" => Self::DomainIncompatible,
+            _ => Self::UnexpectedToken,
+        }
+    }
 }
+
 
 /// An owned byte span within one logical source unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
