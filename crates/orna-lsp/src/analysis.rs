@@ -23,6 +23,7 @@ use orna_syntax::{
 };
 
 use crate::documents::{Document, PositionMapper};
+use crate::function::FunctionDeclaration;
 
 /// The verified, checked standard library shared by all documents.
 pub struct StandardLibrary {
@@ -276,19 +277,19 @@ fn function_symbol<F>(
     mapper: &PositionMapper<'_>,
 ) -> DocumentSymbol
 where
-    F: FunctionLike,
+    F: FunctionDeclaration,
 {
     let children = declaration
-        .parameter_names()
-        .into_iter()
-        .map(|(name, span)| DocumentSymbol {
-            name,
+        .parameters()
+        .iter()
+        .map(|parameter| DocumentSymbol {
+            name: parameter.name.text.clone(),
             detail: Some("parameter".to_owned()),
             kind: SymbolKind::VARIABLE,
             tags: None,
             deprecated: None,
-            range: mapper.range(&span),
-            selection_range: mapper.range(&span),
+            range: mapper.range(&parameter.name.span),
+            selection_range: mapper.range(&parameter.name.span),
             children: None,
         })
         .collect();
@@ -301,47 +302,6 @@ where
         range: mapper.range(declaration.span()),
         selection_range: mapper.range(&declaration.name().span),
         children: Some(children),
-    }
-}
-
-/// A common view over SERVER and CLIENT function declarations.
-pub trait FunctionLike {
-    fn name(&self) -> &QualifiedName;
-    fn span(&self) -> &SourceSpan;
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)>;
-}
-
-impl FunctionLike for ServerFunctionDeclaration {
-    fn name(&self) -> &QualifiedName {
-        &self.name
-    }
-
-    fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
-    }
-}
-
-impl FunctionLike for ClientFunctionDeclaration {
-    fn name(&self) -> &QualifiedName {
-        &self.name
-    }
-
-    fn span(&self) -> &SourceSpan {
-        &self.span
-    }
-
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
     }
 }
 

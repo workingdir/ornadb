@@ -7,6 +7,7 @@
 
 mod analysis;
 mod documents;
+mod function;
 mod hover;
 mod reference;
 mod semantic;
