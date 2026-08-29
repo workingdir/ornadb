@@ -7150,7 +7150,6 @@ mod tests {
         decode_resource_client_frame, encode_constructed_server_frame,
         encode_resource_server_frame, encode_session_server_frame,
     };
-    use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
