@@ -20,7 +20,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let session = RuntimeSession::new_qt(library, "en-GB", "UTC", "light")?;
     let mut host = QtRuntimeExecutor::new(session);
     let frame = empty_ui_frame()?;
-    let surface_count = CLIENT_MAX_QUEUED_RUNTIME_EVENTS + 1;
+    let surface_count = CLIENT_MAX_QUEUED_RUNTIME_EVENTS
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(|| io::Error::other("surface count overflow"))?;
     let mut surfaces = Vec::with_capacity(surface_count);
 
     for _ in 0..surface_count {
@@ -32,8 +35,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let overflow_surface = *surfaces
-        .last()
-        .ok_or_else(|| io::Error::other("no surfaces were created"))?;
+        .get(CLIENT_MAX_QUEUED_RUNTIME_EVENTS)
+        .ok_or_else(|| io::Error::other("no overflow surface was created"))?;
     let overflow_error = host
         .destroy_surface(overflow_surface)
         .expect_err("the bounded callback queue must reject one close event");
@@ -44,6 +47,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    let first_shutdown_error = host
+        .shutdown()
+        .expect_err("native shutdown must report callback queue pressure");
+    if !matches!(first_shutdown_error, RuntimeSessionError::Internal) {
+        return Err(io::Error::other(format!(
+            "first shutdown returned {first_shutdown_error:?} instead of internal"
+        ))
+        .into());
+    }
     host.shutdown()?;
     let events = host.drain_runtime_events();
     let closed_surfaces = events
@@ -58,7 +70,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "runtime_qt_shutdown_queue_smoke: queued {} events, rejected overflow, retried shutdown, retained {} close events",
+        "runtime_qt_shutdown_queue_smoke: queued {} events, rejected overflow, failed native shutdown, retried shutdown, retained {} close events",
         CLIENT_MAX_QUEUED_RUNTIME_EVENTS, closed_surfaces
     );
     Ok(())
