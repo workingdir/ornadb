@@ -1,3 +1,6 @@
+// Source apply returns the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::type_complexity)]
 //! Installed one-file source checking, preparation, and atomic activation.
 
 use std::{

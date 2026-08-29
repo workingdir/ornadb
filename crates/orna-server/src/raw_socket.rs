@@ -1,3 +1,12 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::let_unit_value)]
+#![allow(clippy::manual_clamp)]
+#![allow(clippy::nonminimal_bool)]
+// Raw socket protocol preserves accepted carrier and error layouts.
+#![allow(clippy::large_enum_variant)]
+// Raw socket operations return the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
 //! Authenticated local raw-call connection handling.
 
 use std::{
