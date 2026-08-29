@@ -531,9 +531,21 @@ impl SessionBridge {
     pub(crate) fn close(&self) {
         let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
         waiting.closed = true;
+        if waiting.response.is_none() {
+            waiting.response = Some(SessionClientFrame::InputFailed {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: waiting
+                    .state
+                    .pending_request()
+                    .unwrap_or_else(InvocationId::new),
+                error: "client.session_closed".to_owned(),
+            });
+        }
         drop(waiting);
         self.response_ready.notify_all();
     }
+
 
     pub(crate) fn try_take_outbound(&self) -> Option<SessionServerFrame> {
         self.outbound_receiver
