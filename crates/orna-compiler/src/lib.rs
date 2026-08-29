@@ -15,7 +15,6 @@ pub(crate) mod relational;
 mod resolver;
 
 pub use prepare::{
-    compile_standard_client_executables, PrepareError, PrepareStandardApplicationError,
     PrepareStandardUpgradeError, PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
     prepare_checked_standard_upgrade, prepare_standard_application,
 };
