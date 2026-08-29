@@ -1,3 +1,7 @@
+#![allow(clippy::redundant_pattern)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
+// Source diff preserves the accepted host error boundary.
+#![allow(clippy::result_large_err)]
 //! Local read-only semantic source diff (work ADR 0066).
 //!
 //! [`run_installed_source_diff`] checks one application source file against

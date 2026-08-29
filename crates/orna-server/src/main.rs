@@ -1,3 +1,4 @@
+#![allow(clippy::single_element_loop)]
 use std::{
     io::{self, IsTerminal, Write},
     process::ExitCode,

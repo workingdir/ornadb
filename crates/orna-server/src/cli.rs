@@ -1,3 +1,4 @@
+#![allow(clippy::while_let_loop)]
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
