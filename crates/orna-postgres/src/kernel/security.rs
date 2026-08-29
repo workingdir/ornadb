@@ -29,6 +29,12 @@ pub struct ResourceCancellation {
     notify: Arc<tokio::sync::Notify>,
 }
 
+impl Default for ResourceCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceCancellation {
     /// Creates a cancellation state for one resource request.
     pub fn new() -> Self {
