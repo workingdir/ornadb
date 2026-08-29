@@ -6,6 +6,7 @@ use crate::{
 };
 
 const MAGIC: &[u8] = b"ORNA-SOURCE/1\0";
+const SIGNATURE_MAGIC: &[u8] = b"ORNA-SOURCE/2\0";
 const MAX_STRING: usize = 4096;
 const MAX_PARAMETERS: usize = 256;
 const MAX_REFERENCES: usize = 4096;
@@ -20,6 +21,8 @@ pub struct SourceFunctionMetadata {
     byte_start: u32,
     byte_end: u32,
     declaration_content_hash: Sha256Digest,
+    body_kind: SourceBodyKind,
+    return_metadata: Option<SourceReturnMetadata>,
     parameters: Vec<SourceParameterMetadata>,
     references: Vec<SourceReferenceMetadata>,
 }
@@ -35,6 +38,36 @@ impl SourceFunctionMetadata {
         byte_start: u32,
         byte_end: u32,
         declaration_content_hash: Sha256Digest,
+        parameters: Vec<SourceParameterMetadata>,
+        references: Vec<SourceReferenceMetadata>,
+    ) -> Result<Self, SourceMetadataError> {
+        Self::new_with_signature(
+            function,
+            function_revision,
+            function_name,
+            source_unit,
+            byte_start,
+            byte_end,
+            declaration_content_hash,
+            SourceBodyKind::Unknown,
+            None,
+            parameters,
+            references,
+        )
+    }
+
+    /// Creates metadata with generic checked body and return information.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_signature(
+        function: FunctionId,
+        function_revision: FunctionRevisionId,
+        function_name: impl Into<String>,
+        source_unit: SourceUnitId,
+        byte_start: u32,
+        byte_end: u32,
+        declaration_content_hash: Sha256Digest,
+        body_kind: SourceBodyKind,
+        return_metadata: Option<SourceReturnMetadata>,
         parameters: Vec<SourceParameterMetadata>,
         references: Vec<SourceReferenceMetadata>,
     ) -> Result<Self, SourceMetadataError> {
@@ -63,6 +96,8 @@ impl SourceFunctionMetadata {
             byte_start,
             byte_end,
             declaration_content_hash,
+            body_kind,
+            return_metadata,
             parameters,
             references,
         })
@@ -75,6 +110,8 @@ impl SourceFunctionMetadata {
     pub const fn byte_start(&self) -> u32 { self.byte_start }
     pub const fn byte_end(&self) -> u32 { self.byte_end }
     pub const fn declaration_content_hash(&self) -> Sha256Digest { self.declaration_content_hash }
+    pub const fn body_kind(&self) -> SourceBodyKind { self.body_kind }
+    pub const fn return_metadata(&self) -> Option<SourceReturnMetadata> { self.return_metadata }
     pub fn parameters(&self) -> &[SourceParameterMetadata] {
         &self.parameters
     }
@@ -92,8 +129,17 @@ impl SourceFunctionMetadata {
 
     /// Encodes the metadata as a deterministic bounded payload.
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_magic(MAGIC)
+    }
+
+    /// Encodes metadata with the signature-bearing source metadata format.
+    pub fn encode_with_signature(&self) -> Vec<u8> {
+        self.encode_with_magic(SIGNATURE_MAGIC)
+    }
+
+    fn encode_with_magic(&self, magic: &[u8]) -> Vec<u8> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
+        output.extend_from_slice(magic);
         output.extend_from_slice(&self.function.to_bytes());
         output.extend_from_slice(&self.function_revision.to_bytes());
         put_string(&mut output, &self.function_name);
@@ -101,6 +147,16 @@ impl SourceFunctionMetadata {
         output.extend_from_slice(&self.byte_start.to_be_bytes());
         output.extend_from_slice(&self.byte_end.to_be_bytes());
         output.extend_from_slice(&self.declaration_content_hash.to_bytes());
+        if magic == SIGNATURE_MAGIC {
+            output.push(self.body_kind.tag());
+            match self.return_metadata {
+                Some(return_metadata) => {
+                    output.push(1);
+                    return_metadata.encode_into(&mut output);
+                }
+                None => output.push(0),
+            }
+        }
         put_len(&mut output, self.parameters.len());
         for parameter in &self.parameters {
             parameter.encode_into(&mut output);
@@ -115,9 +171,8 @@ impl SourceFunctionMetadata {
     /// Decodes and validates one metadata payload.
     pub fn decode(bytes: &[u8]) -> Result<Self, SourceMetadataError> {
         let mut reader = Reader { bytes, offset: 0 };
-        if reader.take(MAGIC.len())? != MAGIC {
-            return Err(SourceMetadataError::InvalidMagic);
-        }
+        let magic = reader.magic()?;
+        let signature = magic == SIGNATURE_MAGIC;
         let function = FunctionId::from_bytes(reader.array()?);
         let function_revision = FunctionRevisionId::from_bytes(reader.array()?);
         let function_name = reader.string()?;
@@ -125,6 +180,17 @@ impl SourceFunctionMetadata {
         let byte_start = reader.u32()?;
         let byte_end = reader.u32()?;
         let declaration_content_hash = Sha256Digest::from_bytes(reader.array()?);
+        let (body_kind, return_metadata) = if signature {
+            let body_kind = SourceBodyKind::from_tag(reader.u8()?)?;
+            let return_metadata = match reader.u8()? {
+                0 => None,
+                1 => Some(SourceReturnMetadata::decode_from(&mut reader)?),
+                _ => return Err(SourceMetadataError::InvalidReturnMetadata),
+            };
+            (body_kind, return_metadata)
+        } else {
+            (SourceBodyKind::Unknown, None)
+        };
         let parameter_count = reader.count(MAX_PARAMETERS)?;
         let mut parameters = Vec::with_capacity(parameter_count);
         for _ in 0..parameter_count {
@@ -138,7 +204,7 @@ impl SourceFunctionMetadata {
         if reader.offset != bytes.len() {
             return Err(SourceMetadataError::TrailingBytes);
         }
-        Self::new(
+        Self::new_with_signature(
             function,
             function_revision,
             function_name,
@@ -146,9 +212,73 @@ impl SourceFunctionMetadata {
             byte_start,
             byte_end,
             declaration_content_hash,
+            body_kind,
+            return_metadata,
             parameters,
             references,
         )
+    }
+}
+
+/// The checked body category returned by source introspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SourceBodyKind {
+    Unknown = 0,
+    Expression = 1,
+    Procedural = 2,
+    ControlFlow = 3,
+    State = 4,
+    ExternalContract = 5,
+    BooleanLiteral = 6,
+}
+
+impl SourceBodyKind {
+    const fn tag(self) -> u8 { self as u8 }
+
+    fn from_tag(tag: u8) -> Result<Self, SourceMetadataError> {
+        match tag {
+            0 => Ok(Self::Unknown),
+            1 => Ok(Self::Expression),
+            2 => Ok(Self::Procedural),
+            3 => Ok(Self::ControlFlow),
+            4 => Ok(Self::State),
+            5 => Ok(Self::ExternalContract),
+            6 => Ok(Self::BooleanLiteral),
+            _ => Err(SourceMetadataError::InvalidBodyKind),
+        }
+    }
+}
+
+/// The declared return shape and resolved type of a source function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceReturnMetadata {
+    Single(TypeId),
+    Stream(TypeId),
+}
+
+impl SourceReturnMetadata {
+    fn encode_into(self, output: &mut Vec<u8>) {
+        match self {
+            Self::Single(type_id) => {
+                output.push(1);
+                output.extend_from_slice(&type_id.to_bytes());
+            }
+            Self::Stream(type_id) => {
+                output.push(2);
+                output.extend_from_slice(&type_id.to_bytes());
+            }
+        }
+    }
+
+    fn decode_from(reader: &mut Reader<'_>) -> Result<Self, SourceMetadataError> {
+        let tag = reader.u8()?;
+        let type_id = TypeId::from_bytes(reader.array()?);
+        match tag {
+            1 => Ok(Self::Single(type_id)),
+            2 => Ok(Self::Stream(type_id)),
+            _ => Err(SourceMetadataError::InvalidReturnMetadata),
+        }
     }
 }
 
@@ -255,6 +385,8 @@ impl SourceReferenceMetadata {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceMetadataError {
     InvalidMagic,
+    InvalidBodyKind,
+    InvalidReturnMetadata,
     InvalidBounds,
     InvalidString,
     Truncated,
@@ -340,6 +472,18 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    fn magic(&mut self) -> Result<&[u8], SourceMetadataError> {
+        if self.bytes.get(..SIGNATURE_MAGIC.len()) == Some(SIGNATURE_MAGIC) {
+            self.offset = SIGNATURE_MAGIC.len();
+            return Ok(SIGNATURE_MAGIC);
+        }
+        if self.bytes.get(..MAGIC.len()) == Some(MAGIC) {
+            self.offset = MAGIC.len();
+            return Ok(MAGIC);
+        }
+        Err(SourceMetadataError::InvalidMagic)
+    }
+
     fn take(&mut self, length: usize) -> Result<&[u8], SourceMetadataError> {
         let end = self
             .offset
@@ -400,6 +544,29 @@ mod tests {
         let bytes = value.encode();
         assert_eq!(SourceFunctionMetadata::decode(&bytes).unwrap(), value);
         assert_eq!(bytes, value.encode());
+    }
+
+    #[test]
+    fn signature_metadata_round_trips_body_and_return_shape() {
+        let value = SourceFunctionMetadata::new_with_signature(
+            FunctionId::from_bytes([1; 16]),
+            FunctionRevisionId::from_bytes([2; 16]),
+            "app.f",
+            SourceUnitId::from_bytes([3; 16]),
+            4,
+            8,
+            Sha256Digest::from_bytes([4; 32]),
+            SourceBodyKind::ControlFlow,
+            Some(SourceReturnMetadata::Stream(TypeId::from_bytes([6; 16]))),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let bytes = value.encode_with_signature();
+        let decoded = SourceFunctionMetadata::decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(decoded.body_kind(), SourceBodyKind::ControlFlow);
+        assert_eq!(decoded.return_metadata(), value.return_metadata());
     }
 
     #[test]
