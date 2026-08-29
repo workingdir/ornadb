@@ -16,10 +16,17 @@ impl RevisionStore for PostgresKernel {
     }
 
     async fn recover(&self) -> Result<ActiveDatabaseRevision, StorageError<Self::Error>> {
-        PostgresKernel::recover(self).await.map_err(StorageError::Backend)
+        PostgresKernel::recover(self)
+            .await
+            .map_err(StorageError::Backend)
     }
 
-    async fn apply(&self, candidate: &DeployableRevision) -> Result<ActiveDatabaseRevision, StorageError<Self::Error>> {
-        PostgresKernel::apply(self, candidate).await.map_err(StorageError::Backend)
+    async fn apply(
+        &self,
+        candidate: &DeployableRevision,
+    ) -> Result<ActiveDatabaseRevision, StorageError<Self::Error>> {
+        PostgresKernel::apply(self, candidate)
+            .await
+            .map_err(StorageError::Backend)
     }
 }

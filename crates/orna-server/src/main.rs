@@ -22,6 +22,7 @@ use orna_core::{
     invocation_binding::CliArgumentInput,
     security::CATALOGUE_HEALTH_FUNCTION_ID,
 };
+#[cfg(test)]
 use std::{ffi::OsString, path::PathBuf};
 
 fn main() -> ExitCode {
@@ -100,6 +101,7 @@ fn main() -> ExitCode {
                     let _ = writeln!(stderr, "{USAGE}");
                     ExitCode::from(2)
                 }
+                source_check::SourceCheckResult::Failure => ExitCode::from(1),
             }
         }
         Command::SourceApply(path) => match orna_server::run_installed_source_apply(&path) {
@@ -2133,7 +2135,7 @@ mod tests {
     fn parses_a_positional_database_endpoint_before_the_command() {
         let parsed = parse_invocation(arguments(&[
             "orna",
-            "orna+unix:///run/orna/default/orna.sock",
+            "orna+unix:///tmp/orna/default/orna.sock",
             "invoke",
             "demo.main",
         ]))
@@ -2141,7 +2143,7 @@ mod tests {
         assert_eq!(
             parsed.endpoint,
             orna_client::endpoint::DatabaseEndpoint::UnixSocket {
-                path: PathBuf::from("/run/orna/default/orna.sock"),
+                path: PathBuf::from("/tmp/orna/default/orna.sock"),
             },
         );
         assert!(parsed.endpoint_explicit);
