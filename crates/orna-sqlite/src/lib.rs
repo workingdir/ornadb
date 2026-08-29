@@ -184,13 +184,10 @@ impl SqliteRevisionStore {
             let ledger = load_ledger_from(&*transaction)
                 .await
                 .map_err(StorageError::Backend)?;
-            if let Some(last) = ledger.last()
-                && last.candidate_pair() != active.pair()
-            {
-                return Err(StorageError::Backend(SqliteError::InvalidPersistedData(
-                    "migration ledger does not end at active revision",
-                )));
-            }
+            validate_ledger_active_pair(&ledger, &active).map_err(StorageError::Backend)?;
+            validate_active_catalogue_lineage(&*transaction, &active, &ledger)
+                .await
+                .map_err(StorageError::Backend)?;
             Ok(active)
         }
         .await;
@@ -216,9 +213,17 @@ impl SqliteRevisionStore {
         &self,
     ) -> Result<Vec<MigrationLedgerEntry>, StorageError<SqliteError>> {
         let connection = self.connection.lock().await;
-        load_ledger_from(&connection)
+        let active = load_active_from(&connection)
             .await
-            .map_err(StorageError::Backend)
+            .map_err(StorageError::Backend)?;
+        let ledger = load_ledger_from(&connection)
+            .await
+            .map_err(StorageError::Backend)?;
+        validate_ledger_active_pair(&ledger, &active).map_err(StorageError::Backend)?;
+        validate_active_catalogue_lineage(&connection, &active, &ledger)
+            .await
+            .map_err(StorageError::Backend)?;
+        Ok(ledger)
     }
 
     /// Compatibility entry point that plans the exact artifact before applying.
@@ -307,6 +312,7 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
                 )
                 .await?;
         }
+        ensure_catalogue_revision_lineage_schema(&*transaction).await?;
         // Source-unit identities are immutable globally, not just within one
         // revision. Creating this index also hardens legacy databases; a
         // duplicate legacy identity fails the transaction and therefore keeps
@@ -329,7 +335,8 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
             )
             .await?;
 
-        backfill_active_identity_registries(&*transaction, legacy_active_schema).await
+        backfill_active_identity_registries(&*transaction, legacy_active_schema).await?;
+        backfill_catalogue_revision_lineage(&*transaction).await
     }
     .await;
     match result {
@@ -344,6 +351,141 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
     }
 }
 
+async fn ensure_catalogue_revision_lineage_schema(
+    connection: &Connection,
+) -> Result<(), SqliteError> {
+    let mut columns = connection
+        .query("PRAGMA table_info(orna_catalogue_revisions)", ())
+        .await?;
+    let mut has_source_revision = false;
+    let mut has_parent_catalogue_revision = false;
+    while let Some(column) = columns.next().await? {
+        match column.get::<String>(1)?.as_str() {
+            "source_revision_id" => has_source_revision = true,
+            "parent_catalogue_revision_id" => has_parent_catalogue_revision = true,
+            _ => {}
+        }
+    }
+    drop(columns);
+    if !has_source_revision {
+        connection
+            .execute(
+                "ALTER TABLE orna_catalogue_revisions
+                 ADD COLUMN source_revision_id BLOB",
+                (),
+            )
+            .await?;
+    }
+    if !has_parent_catalogue_revision {
+        connection
+            .execute(
+                "ALTER TABLE orna_catalogue_revisions
+                 ADD COLUMN parent_catalogue_revision_id BLOB",
+                (),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn backfill_catalogue_revision_lineage(connection: &Connection) -> Result<(), SqliteError> {
+    let active = load_active_identity_metadata(connection).await?;
+    let mut rows = connection
+        .query(
+            "SELECT expected_source_revision_id, expected_catalogue_revision_id,
+                    candidate_source_revision_id, candidate_catalogue_revision_id
+             FROM orna_application_migrations ORDER BY ordinal ASC",
+            (),
+        )
+        .await?;
+    let mut edges = Vec::new();
+    while let Some(row) = rows.next().await? {
+        edges.push((
+            SourceRevisionId::from_bytes(id16(
+                row.get::<Vec<u8>>(0)?,
+                "migration expected source revision id",
+            )?),
+            CatalogueRevisionId::from_bytes(id16(
+                row.get::<Vec<u8>>(1)?,
+                "migration expected catalogue revision id",
+            )?),
+            SourceRevisionId::from_bytes(id16(
+                row.get::<Vec<u8>>(2)?,
+                "migration candidate source revision id",
+            )?),
+            CatalogueRevisionId::from_bytes(id16(
+                row.get::<Vec<u8>>(3)?,
+                "migration candidate catalogue revision id",
+            )?),
+        ));
+    }
+    drop(rows);
+
+    let mut desired = Vec::with_capacity(edges.len().saturating_add(1));
+    if let Some((source, catalogue, _, _)) = edges.first().copied() {
+        desired.push((catalogue, source, None));
+    } else if let Some(active) = active {
+        desired.push((active.catalogue_id, active.source_id, None));
+    }
+    desired.extend(edges.iter().map(
+        |(_, expected_catalogue, candidate_source, candidate_catalogue)| {
+            (
+                *candidate_catalogue,
+                *candidate_source,
+                Some(*expected_catalogue),
+            )
+        },
+    ));
+
+    for (catalogue, source, parent) in desired {
+        connection
+            .execute(
+                "UPDATE orna_catalogue_revisions
+                 SET source_revision_id = ?1,
+                     parent_catalogue_revision_id = ?2
+                 WHERE catalogue_revision_id = ?3
+                   AND source_revision_id IS NULL",
+                [
+                    Value::Blob(source.to_bytes().to_vec()),
+                    parent.map_or(Value::Null, |parent| {
+                        Value::Blob(parent.to_bytes().to_vec())
+                    }),
+                    Value::Blob(catalogue.to_bytes().to_vec()),
+                ],
+            )
+            .await?;
+        let Some(actual) = load_catalogue_revision_lineage(connection, catalogue).await? else {
+            return Err(SqliteError::InvalidPersistedData(
+                "catalogue revision has no registry record",
+            ));
+        };
+        if actual.source != Some(source) || actual.parent != parent {
+            return Err(SqliteError::InvalidPersistedData(
+                "catalogue revision lineage does not match migration history",
+            ));
+        }
+    }
+
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM orna_catalogue_revisions
+             WHERE source_revision_id IS NULL",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(SqliteError::InvalidPersistedData(
+            "catalogue lineage completeness query returned no row",
+        ));
+    };
+    if row.get::<i64>(0)? != 0 {
+        return Err(SqliteError::InvalidPersistedData(
+            "catalogue revision lineage is incomplete",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SourceRevisionIdentity {
     parent: Option<SourceRevisionId>,
@@ -355,6 +497,12 @@ struct SourceRevisionIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CatalogueRevisionIdentity {
     hash: Sha256Digest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogueRevisionLineage {
+    source: Option<SourceRevisionId>,
+    parent: Option<CatalogueRevisionId>,
 }
 
 #[derive(Clone, Copy)]
@@ -454,6 +602,27 @@ async fn load_catalogue_revision_registry(
     }))
 }
 
+async fn load_catalogue_revision_lineage(
+    connection: &Connection,
+    revision: CatalogueRevisionId,
+) -> Result<Option<CatalogueRevisionLineage>, SqliteError> {
+    let mut rows = connection
+        .query(
+            "SELECT source_revision_id, parent_catalogue_revision_id
+             FROM orna_catalogue_revisions
+             WHERE catalogue_revision_id = ?1",
+            [Value::Blob(revision.to_bytes().to_vec())],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(CatalogueRevisionLineage {
+        source: optional_source_revision_id(row.get_value(0)?, "catalogue source revision id")?,
+        parent: optional_catalogue_revision_id(row.get_value(1)?, "catalogue parent revision id")?,
+    }))
+}
+
 async fn insert_source_revision_registry(
     connection: &Connection,
     revision: SourceRevisionId,
@@ -487,15 +656,22 @@ async fn insert_source_revision_registry(
 async fn insert_catalogue_revision_registry(
     connection: &Connection,
     revision: CatalogueRevisionId,
+    source: SourceRevisionId,
+    parent: Option<CatalogueRevisionId>,
     identity: CatalogueRevisionIdentity,
 ) -> Result<(), SqliteError> {
     let inserted = connection
         .execute(
             "INSERT INTO orna_catalogue_revisions
-             (catalogue_revision_id, catalogue_hash)
-             VALUES (?1, ?2)",
+             (catalogue_revision_id, source_revision_id,
+              parent_catalogue_revision_id, catalogue_hash)
+             VALUES (?1, ?2, ?3, ?4)",
             [
                 Value::Blob(revision.to_bytes().to_vec()),
+                Value::Blob(source.to_bytes().to_vec()),
+                parent.map_or(Value::Null, |parent| {
+                    Value::Blob(parent.to_bytes().to_vec())
+                }),
                 Value::Blob(identity.hash.to_bytes().to_vec()),
             ],
         )
@@ -506,6 +682,28 @@ async fn insert_catalogue_revision_registry(
         ));
     }
     Ok(())
+}
+
+async fn infer_catalogue_parent(
+    connection: &Connection,
+    catalogue: CatalogueRevisionId,
+) -> Result<Option<CatalogueRevisionId>, SqliteError> {
+    let mut rows = connection
+        .query(
+            "SELECT expected_catalogue_revision_id
+             FROM orna_application_migrations
+             WHERE candidate_catalogue_revision_id = ?1
+             ORDER BY ordinal ASC LIMIT 1",
+            [Value::Blob(catalogue.to_bytes().to_vec())],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(CatalogueRevisionId::from_bytes(id16(
+        row.get::<Vec<u8>>(0)?,
+        "migration expected catalogue revision id",
+    )?)))
 }
 
 async fn backfill_active_identity_registries(
@@ -539,8 +737,15 @@ async fn backfill_active_identity_registries(
         }
         Some(_) => {}
         None => {
-            insert_catalogue_revision_registry(connection, active.catalogue_id, active.catalogue)
-                .await?;
+            let parent = infer_catalogue_parent(connection, active.catalogue_id).await?;
+            insert_catalogue_revision_registry(
+                connection,
+                active.catalogue_id,
+                active.source_id,
+                parent,
+                active.catalogue,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -678,13 +883,8 @@ async fn seed_pair_in_transaction(
     if load_active_identity_metadata(transaction).await?.is_some() {
         let active = load_active_from(&*transaction).await?;
         let ledger = load_ledger_from(&*transaction).await?;
-        if let Some(last) = ledger.last()
-            && last.candidate_pair() != active.pair()
-        {
-            return Err(SqliteError::InvalidPersistedData(
-                "migration ledger does not end at active revision",
-            ));
-        }
+        validate_ledger_active_pair(&ledger, &active)?;
+        validate_active_catalogue_lineage(&*transaction, &active, &ledger).await?;
         return Ok(BootstrapRevision::new(
             active.pair().source(),
             active.pair().catalogue(),
@@ -746,6 +946,8 @@ async fn seed_pair_in_transaction(
     insert_catalogue_revision_registry(
         transaction,
         pair.catalogue(),
+        pair.source(),
+        None,
         CatalogueRevisionIdentity {
             hash: catalogue_hash,
         },
@@ -985,6 +1187,120 @@ async fn load_ledger_from(
     Ok(entries)
 }
 
+fn validate_ledger_active_pair(
+    ledger: &[MigrationLedgerEntry],
+    active: &ActiveDatabaseRevision,
+) -> Result<(), SqliteError> {
+    if let Some(last) = ledger.last()
+        && last.candidate_pair() != active.pair()
+    {
+        return Err(SqliteError::InvalidPersistedData(
+            "migration ledger does not end at active revision",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_active_catalogue_lineage(
+    connection: &Connection,
+    active: &ActiveDatabaseRevision,
+    ledger: &[MigrationLedgerEntry],
+) -> Result<(), SqliteError> {
+    let lineage = load_catalogue_revision_lineage(connection, active.pair().catalogue())
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "active catalogue revision has no lineage record",
+        ))?;
+    let expected_parent = ledger.last().map(|entry| entry.expected_base().catalogue());
+    if lineage.source != Some(active.pair().source()) {
+        return Err(SqliteError::InvalidPersistedData(
+            "active catalogue revision source does not match active source",
+        ));
+    }
+    if lineage.parent != expected_parent {
+        return Err(SqliteError::InvalidPersistedData(
+            "active catalogue revision parent does not match migration ledger",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_catalogue_revision(
+    connection: &Connection,
+    revision: CatalogueRevisionId,
+    source: &StoredSourceRevision,
+    expected_parent: Option<CatalogueRevisionId>,
+) -> Result<(), SqliteError> {
+    let registry = load_catalogue_revision_registry(connection, revision)
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "catalogue revision has no registry record",
+        ))?;
+    let lineage = load_catalogue_revision_lineage(connection, revision)
+        .await?
+        .ok_or(SqliteError::InvalidPersistedData(
+            "catalogue revision has no lineage record",
+        ))?;
+    if lineage.source != Some(source.id()) {
+        return Err(SqliteError::InvalidPersistedData(
+            "catalogue revision source does not match its source revision",
+        ));
+    }
+    if lineage.parent != expected_parent {
+        return Err(SqliteError::InvalidPersistedData(
+            "catalogue revision parent does not match migration history",
+        ));
+    }
+    let mut rows = connection
+        .query(
+            "SELECT schema_id, name_parts, source_unit_id, source_start, source_end
+             FROM orna_catalogue_schemas
+             WHERE catalogue_revision_id = ?1 ORDER BY rowid ASC",
+            [Value::Blob(revision.to_bytes().to_vec())],
+        )
+        .await?;
+    let mut schemas = Vec::new();
+    let mut origins = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let schema_id = SchemaId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "schema id")?);
+        let name = decode_qualified_semantic_name(&row.get::<String>(1)?)?;
+        let source_origin = SourceOrigin::new(
+            SourceUnitId::from_bytes(id16(row.get::<Vec<u8>>(2)?, "schema source unit id")?),
+            u32::try_from(row.get::<i64>(3)?).map_err(|_| {
+                SqliteError::InvalidPersistedData("schema source start must fit u32")
+            })?,
+            u32::try_from(row.get::<i64>(4)?)
+                .map_err(|_| SqliteError::InvalidPersistedData("schema source end must fit u32"))?,
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        if !source
+            .units()
+            .iter()
+            .any(|unit| unit.id() == source_origin.source_unit())
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "catalogue schema source unit is not in its source revision",
+            ));
+        }
+        schemas.push(SchemaDefinition::new(schema_id, name));
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema_id),
+            source_origin,
+        ));
+    }
+    drop(rows);
+    let catalogue = CatalogueSnapshot::new(revision, schemas, Vec::new())
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    let computed_hash = catalogue_digest(&catalogue, &[], &[], &origins, &[])
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    if computed_hash != registry.hash {
+        return Err(SqliteError::InvalidPersistedData(
+            "historical catalogue hash mismatch",
+        ));
+    }
+    Ok(())
+}
+
 async fn validate_loaded_ledger_chain(
     connection: &Connection,
     entries: &[MigrationLedgerEntry],
@@ -1010,15 +1326,15 @@ async fn validate_loaded_ledger_chain(
             "migration ledger first expected source revision is not a root source",
         ));
     }
-    if load_catalogue_revision_registry(connection, first.expected_base().catalogue())
-        .await?
-        .is_none()
-    {
-        return Err(SqliteError::InvalidPersistedData(
-            "migration ledger first expected catalogue revision has no registry record",
-        ));
-    }
-    load_source_revision_from(connection, first.expected_base().source(), first_source).await?;
+    let first_source_revision =
+        load_source_revision_from(connection, first.expected_base().source(), first_source).await?;
+    validate_catalogue_revision(
+        connection,
+        first.expected_base().catalogue(),
+        &first_source_revision,
+        None,
+    )
+    .await?;
 
     for (ordinal, entry) in entries.iter().enumerate() {
         if ordinal > 0 {
@@ -1051,21 +1367,19 @@ async fn validate_loaded_ledger_chain(
                 "migration ledger candidate source parent does not match expected source revision",
             ));
         }
-        load_source_revision_from(
+        let candidate_source_revision = load_source_revision_from(
             connection,
             entry.candidate_pair().source(),
             candidate_source,
         )
         .await?;
-
-        if load_catalogue_revision_registry(connection, entry.candidate_pair().catalogue())
-            .await?
-            .is_none()
-        {
-            return Err(SqliteError::InvalidPersistedData(
-                "migration ledger candidate catalogue revision has no registry record",
-            ));
-        }
+        validate_catalogue_revision(
+            connection,
+            entry.candidate_pair().catalogue(),
+            &candidate_source_revision,
+            Some(entry.expected_base().catalogue()),
+        )
+        .await?;
     }
 
     Ok(())
@@ -1127,13 +1441,10 @@ async fn apply_in_transaction(
     let ledger = load_ledger_from(transaction)
         .await
         .map_err(StorageError::Backend)?;
-    if let Some(last) = ledger.last()
-        && last.candidate_pair() != active.pair()
-    {
-        return Err(StorageError::Backend(SqliteError::InvalidPersistedData(
-            "migration ledger does not end at active revision",
-        )));
-    }
+    validate_ledger_active_pair(&ledger, &active).map_err(StorageError::Backend)?;
+    validate_active_catalogue_lineage(transaction, &active, &ledger)
+        .await
+        .map_err(StorageError::Backend)?;
     let ordinal = next_ledger_ordinal(transaction)
         .await
         .map_err(StorageError::Backend)?;
@@ -1268,6 +1579,7 @@ async fn persist_candidate(
     ordinal: i64,
 ) -> Result<(), SqliteError> {
     let source = candidate.source();
+    let catalogue_pair = candidate.candidate_pair();
     insert_source_revision_registry(
         transaction,
         source.id(),
@@ -1279,10 +1591,11 @@ async fn persist_candidate(
         },
     )
     .await?;
-    let catalogue_pair = candidate.candidate_pair();
     insert_catalogue_revision_registry(
         transaction,
         catalogue_pair.catalogue(),
+        source.id(),
+        Some(candidate.parent_catalogue()),
         CatalogueRevisionIdentity {
             hash: candidate.catalogue_hash(),
         },
@@ -1411,6 +1724,17 @@ fn optional_source_revision_id(
     match value {
         Value::Null => Ok(None),
         Value::Blob(value) => Ok(Some(SourceRevisionId::from_bytes(id16(value, field)?))),
+        _ => Err(SqliteError::InvalidPersistedData(field)),
+    }
+}
+
+fn optional_catalogue_revision_id(
+    value: Value,
+    field: &'static str,
+) -> Result<Option<CatalogueRevisionId>, SqliteError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Blob(value) => Ok(Some(CatalogueRevisionId::from_bytes(id16(value, field)?))),
         _ => Err(SqliteError::InvalidPersistedData(field)),
     }
 }
@@ -2445,6 +2769,222 @@ mod tests {
         assert_eq!(recovered.catalogue().schemas().len(), 1);
         assert_eq!(recovered.origins().len(), 1);
         assert_eq!(reopened.read_ledger().await.unwrap(), ledger);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_active_pointer_divergence_when_reading_ledger() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+        let initial_metadata = {
+            let connection = store.connection.lock().await;
+            load_active_identity_metadata(&connection)
+                .await
+                .unwrap()
+                .unwrap()
+        };
+
+        let candidate = schema_candidate(&initial, 0x31, 0x32, 0x33);
+        let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
+        RevisionStore::apply(&store, &candidate, &artifact)
+            .await
+            .unwrap();
+
+        let connection = store.connection.lock().await;
+        let updated = connection
+            .execute(
+                "UPDATE orna_active_revision
+                 SET source_revision_id = ?1,
+                     source_parent_revision_id = ?2,
+                     catalogue_revision_id = ?3,
+                     source_bundle_id = ?4,
+                     source_bundle_hash = ?5,
+                     source_revision_hash = ?6,
+                     catalogue_hash = ?7
+                 WHERE singleton = 1",
+                [
+                    Value::Blob(initial_metadata.source_id.to_bytes().to_vec()),
+                    Value::Null,
+                    Value::Blob(initial_metadata.catalogue_id.to_bytes().to_vec()),
+                    Value::Blob(initial_metadata.source.bundle.to_bytes().to_vec()),
+                    Value::Blob(initial_metadata.source.bundle_hash.to_bytes().to_vec()),
+                    Value::Blob(initial_metadata.source.revision_hash.to_bytes().to_vec()),
+                    Value::Blob(initial_metadata.catalogue.hash.to_bytes().to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        drop(connection);
+
+        assert!(matches!(
+            store.read_ledger().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "migration ledger does not end at active revision"
+            ))
+        ));
+        assert!(matches!(
+            store.recover().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "migration ledger does not end at active revision"
+            ))
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_active_catalogue_lineage_before_apply() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+        let candidate = schema_candidate(&initial, 0x81, 0x82, 0x83);
+        let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
+
+        let connection = store.connection.lock().await;
+        let updated = connection
+            .execute(
+                "UPDATE orna_catalogue_revisions
+                 SET source_revision_id = ?1
+                 WHERE catalogue_revision_id = ?2",
+                [
+                    Value::Blob(vec![0x99; 16]),
+                    Value::Blob(initial.pair().catalogue().to_bytes().to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        drop(connection);
+
+        assert!(matches!(
+            RevisionStore::apply(&store, &candidate, &artifact)
+                .await
+                .unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "active catalogue revision source does not match active source"
+            ))
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_historical_catalogue_when_reading_ledger() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+
+        let first_candidate = schema_candidate(&initial, 0x41, 0x42, 0x43);
+        let first_artifact =
+            PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
+        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+            .await
+            .unwrap();
+        let second_candidate = schema_candidate(&first, 0x51, 0x52, 0x53);
+        let second_artifact =
+            PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
+        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+            .await
+            .unwrap();
+
+        let connection = store.connection.lock().await;
+        let updated = connection
+            .execute(
+                "UPDATE orna_catalogue_revisions
+                 SET catalogue_hash = ?1
+                 WHERE catalogue_revision_id = ?2",
+                [
+                    Value::Blob(vec![0; 32]),
+                    Value::Blob(
+                        first_candidate
+                            .candidate_pair()
+                            .catalogue()
+                            .to_bytes()
+                            .to_vec(),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        drop(connection);
+
+        assert!(matches!(
+            store.read_ledger().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "historical catalogue hash mismatch"
+            ))
+        ));
+        assert!(matches!(
+            store.recover().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "historical catalogue hash mismatch"
+            ))
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_historical_catalogue_parent_when_reading_ledger() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+        let first_candidate = schema_candidate(&initial, 0x61, 0x62, 0x63);
+        let first_artifact =
+            PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
+        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+            .await
+            .unwrap();
+        let second_candidate = schema_candidate(&first, 0x71, 0x72, 0x73);
+        let second_artifact =
+            PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
+        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+            .await
+            .unwrap();
+
+        let connection = store.connection.lock().await;
+        let updated = connection
+            .execute(
+                "UPDATE orna_catalogue_revisions
+                 SET parent_catalogue_revision_id = NULL
+                 WHERE catalogue_revision_id = ?1",
+                [Value::Blob(
+                    first_candidate
+                        .candidate_pair()
+                        .catalogue()
+                        .to_bytes()
+                        .to_vec(),
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        drop(connection);
+
+        assert!(matches!(
+            store.read_ledger().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "catalogue revision parent does not match migration history"
+            ))
+        ));
+        assert!(matches!(
+            store.recover().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "catalogue revision parent does not match migration history"
+            ))
+        ));
         let _ = std::fs::remove_file(path);
     }
 
