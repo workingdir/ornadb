@@ -30,8 +30,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const VALID_SOURCE: &[u8] =
-    b"CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
