@@ -16,8 +16,8 @@ mod resolver;
 
 pub use prepare::{
     PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
-    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
-    prepare_standard_application, prepare_standard_source,
+    PreparedStandardUpgrade, StandardSourceIdentitySeed, StandardUpgradeIdentity, prepare,
+    prepare_checked_standard_upgrade, prepare_standard_application, prepare_standard_source,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
@@ -422,8 +422,9 @@ mod tests {
         EMPTY_APPLICATION_CATALOGUE_REVISION_ID, PrepareError, PrepareStandardApplicationError,
         PrepareStandardUpgradeError, PreparedStandardUpgrade, StandardApplicationCheckContext,
         StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
-        check, check_new_application, check_standard_application, check_standard_library_source,
-        parse_bundle, prepare, prepare_checked_standard_upgrade, prepare_standard_application,
+        StandardSourceIdentitySeed, check, check_new_application, check_standard_application,
+        check_standard_library_source, parse_bundle, prepare, prepare_checked_standard_upgrade,
+        prepare_standard_application, prepare_standard_source,
     };
     use crate::prepare::{
         CandidateAllocator, CandidateIdSource, ReservedStandardIds,
@@ -763,6 +764,7 @@ mod tests {
 
     #[test]
     fn prepares_a_standard_backed_server_only_application_as_version_two() {
+
         let verified = verified_standard_source_fixture();
         let standard = check_standard_library_source(&verified).unwrap();
         let active = empty_version_two_active(&verified);
@@ -791,6 +793,16 @@ mod tests {
         );
         assert_eq!(prepared.current_function_revisions(), Some([].as_slice()));
         assert_eq!(prepared.candidate().schemas().len(), 1);
+    }
+    #[test]
+    fn exposes_the_standard_source_preparation_interface() {
+        let _: fn(
+            &StandardApplicationCheckReport,
+            RevisionPair,
+            &ActiveDatabaseRevision,
+            &StandardSourceIdentitySeed,
+        ) -> Result<DeployableRevision, PrepareStandardApplicationError> =
+            prepare_standard_source;
     }
 
     #[test]
