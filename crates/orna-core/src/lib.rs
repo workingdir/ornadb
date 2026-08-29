@@ -18,6 +18,7 @@ pub mod security;
 pub mod source;
 pub mod state;
 pub mod system;
+pub mod source_metadata;
 pub mod types;
 pub mod value;
 
