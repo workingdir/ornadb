@@ -43,6 +43,7 @@ const INSTANCE_NAME: &str = "default";
 const DEVELOPMENT_IDENT_MAP: &str = "orna_development";
 const DEVELOPMENT_LOCK_NAME: &str = "server.lock";
 const INSTANCE_LOCK_NAME: &str = "lock";
+const SUPPORT_DIRECTORY: &str = "support";
 const INSTANCE_MANIFEST_NAME: &str = "instance.toml";
 const READY_NAME: &str = "ready";
 const GENERATION_NAME: &str = "0000000000000001";
@@ -1999,10 +2000,10 @@ mod tests {
                 "format = 1\ninstance = \"default\"\ngeneration = \"{GENERATION_NAME}\"\npostgresql_major = 18\nengine = \"{digest}\"\nactivation_committed = true\nextra = true\n"
             ),
         ] {
-            assert_eq!(
+            assert!(matches!(
                 parse_instance_manifest(bytes.as_bytes()),
                 Err(EmbeddedHostError::InvalidInstanceState)
-            );
+            ));
         }
     }
 
