@@ -15,16 +15,14 @@ use orna_core::{
 };
 use orna_protocol::CallFailure;
 
-mod package_maintenance;
 mod source_check;
 mod source_diagnostics;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
-const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun functions, inspect invocations, manage user state, and manage an Orna server.\n\nUsage:\n  orna COMMAND [OPTIONS]\n\nCommon Commands:\n  invoke ...   Run a stored function.\n  source ...   Check, apply, or compare Orna source.\n  inspect ...  Inspect a completed invocation.\n  raw-call ... Make a low-level local call.\n\nManagement Commands:\n  server ...   Start, upgrade, or access the server.\n  state ...    Read or update user state.\n  security ... Manage users, roles, and grants.\n  runtime ...  Describe an installed runtime.\n\nOptions:\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nRun `orna COMMAND --help` for more information.\n";
-const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  upgrade        Upgrade the server while it is stopped.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
+const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun functions, inspect invocations, manage user state, and manage an Orna server.\n\nUsage:\n  orna COMMAND [OPTIONS]\n\nCommon Commands:\n  invoke ...   Run a stored function.\n  source ...   Check, apply, or compare Orna source.\n  inspect ...  Inspect a completed invocation.\n  raw-call ... Make a low-level local call.\n\nManagement Commands:\n  server ...   Start or access the server.\n  state ...    Read or update user state.\n  security ... Manage users, roles, and grants.\n  runtime ...  Describe an installed runtime.\n\nOptions:\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nRun `orna COMMAND --help` for more information.\n";
+const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
 const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
-const HELP_SERVER_UPGRADE: &str = "Upgrade the Orna server while it is stopped.\n\nUsage:\n  orna server upgrade\n\nThis command accepts no options.\n";
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
 const HELP_SOURCE: &str = "Work with Orna source.\n\nUsage:\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n\nCommands:\n  check  Check one source file without changing the database.\n  apply  Check and apply one source file.\n  diff   Compare one source file with the current database.\n";
 const HELP_INVOKE: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n";
@@ -72,7 +70,6 @@ enum HelpTopic {
     TopLevel,
     Server,
     ServerRun,
-    ServerUpgrade,
     ServerBackendShell,
     Source,
     Invoke,
@@ -120,7 +117,6 @@ enum Command {
     Version,
     Run,
     BackendShell,
-    Upgrade,
     RuntimeDescribe(PathBuf),
     SourceCheck(String),
     SourceApply(String),
@@ -135,15 +131,6 @@ enum Command {
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    if let Some(result) = package_maintenance::run_if_selected(arguments.len()) {
-        return match result {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
-        };
-    }
     let Some(parsed) = parse_invocation(arguments) else {
         write_stderr_line(USAGE);
         return ExitCode::from(2);
@@ -182,13 +169,6 @@ fn main() -> ExitCode {
             }
         },
         Command::BackendShell => match orna_server::run_backend_shell() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
-        },
-        Command::Upgrade => match orna_server::run_embedded_upgrade() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 write_stderr_line(&error.to_string());
@@ -464,7 +444,6 @@ fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::TopLevel => HELP_TOP_LEVEL,
         HelpTopic::Server => HELP_SERVER,
         HelpTopic::ServerRun => HELP_SERVER_RUN,
-        HelpTopic::ServerUpgrade => HELP_SERVER_UPGRADE,
         HelpTopic::ServerBackendShell => HELP_SERVER_BACKEND_SHELL,
         HelpTopic::Source => HELP_SOURCE,
         HelpTopic::Invoke => HELP_INVOKE,
@@ -532,7 +511,6 @@ where
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
             None => HelpTopic::Server,
             Some(value) if value == OsStr::new("run") => HelpTopic::ServerRun,
-            Some(value) if value == OsStr::new("upgrade") => HelpTopic::ServerUpgrade,
             Some(value) if value == OsStr::new("backend-shell") => HelpTopic::ServerBackendShell,
             _ => return None,
         },
@@ -649,9 +627,6 @@ where
                 Command::BackendShell,
                 HelpTopic::ServerBackendShell,
             ),
-            Some(value) if value == OsStr::new("upgrade") => {
-                parse_server_leaf(&mut args, Command::Upgrade, HelpTopic::ServerUpgrade)
-            }
             _ => None,
         },
         Some(value) if value == OsStr::new("runtime") => match args.next().as_deref() {
@@ -1411,10 +1386,6 @@ mod tests {
             parse_command(arguments(&["orna", "server", "backend-shell"])),
             Some(Command::BackendShell)
         );
-        assert_eq!(
-            parse_command(arguments(&["orna", "server", "upgrade"])),
-            Some(Command::Upgrade)
-        );
     }
 
     #[test]
@@ -1551,21 +1522,6 @@ mod tests {
             parse_command(arguments(&["orna", "--runtime", "tty", "server", "run"])),
             None,
             "runtime override must be rejected for server run"
-        );
-    }
-
-    #[test]
-    fn rejects_global_runtime_override_on_server_upgrade() {
-        assert_eq!(
-            parse_command(arguments(&[
-                "orna",
-                "--runtime",
-                "tty",
-                "server",
-                "upgrade"
-            ])),
-            None,
-            "runtime override must be rejected for server upgrade"
         );
     }
 
@@ -1935,7 +1891,6 @@ mod tests {
             vec!["orna", "backend-shell"],
             vec!["orna", "server", "backend-shell", "--flag"],
             vec!["orna", "server", "backend-shell", "select 1"],
-            vec!["orna", "server", "upgrade", "--force"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None);
         }
@@ -2908,10 +2863,6 @@ mod tests {
             (vec!["orna", "help", "server"], HelpTopic::Server),
             (vec!["orna", "help", "server", "run"], HelpTopic::ServerRun),
             (
-                vec!["orna", "help", "server", "upgrade"],
-                HelpTopic::ServerUpgrade,
-            ),
-            (
                 vec!["orna", "help", "server", "backend-shell"],
                 HelpTopic::ServerBackendShell,
             ),
@@ -2926,10 +2877,6 @@ mod tests {
             (
                 vec!["orna", "server", "run", "--help"],
                 HelpTopic::ServerRun,
-            ),
-            (
-                vec!["orna", "server", "upgrade", "--help"],
-                HelpTopic::ServerUpgrade,
             ),
             (
                 vec!["orna", "server", "backend-shell", "--help"],

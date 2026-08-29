@@ -33,19 +33,6 @@ install(
     LIBRARY DESTINATION lib/orna
 )
 
-set(CPACK_PACKAGE_NAME "orna-runtime-qt")
-set(CPACK_PACKAGE_VENDOR "OrnaDB")
-set(CPACK_PACKAGE_CONTACT "Kieran Drewett <kieran@drewett.dev>")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "OrnaDB Qt runtime provider")
-set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
-set(CPACK_GENERATOR "DEB")
-set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.36), libqt6core6 (>= 6.2), libqt6widgets6 (>= 6.2)")
-set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/packages")
-set(CPACK_DEBIAN_PACKAGE_SECTION "libs")
-set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/workingdir/ornadb")
-include(CPack)
 
 add_executable(orna-runtime-qt-demo
     examples/runtime_demo.cpp

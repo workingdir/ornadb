@@ -12,16 +12,14 @@ pub mod security_admin;
 mod source_apply;
 mod source_diagnostics;
 mod source_diff;
-mod upgrade;
 mod user_state;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
     EmbeddedEngineIdentity, EmbeddedHostError, EmbeddedHostPaths, EmbeddedPostmaster,
     MaterialisedSupport, ReadyEmbeddedHost, initialise_embedded_cluster,
-    inspect_current_embedded_host, inspect_development_embedded_host, inspect_ready_embedded_host,
-    materialise_support_data, private_database_config, run_embedded_server,
-    start_embedded_postmaster,
+    inspect_current_embedded_host, materialise_support_data, private_database_config,
+    run_embedded_server, start_embedded_postmaster,
 };
 pub use inspect::{
     InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
@@ -61,7 +59,6 @@ pub use source_diff::{
     InstalledSourceDiffOutcome, InstalledSourceDiffReport, run_installed_source_diff,
     run_source_diff_with_kernel,
 };
-pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 pub use user_state::{
     AuthenticatedClientStateAdapter, AuthenticatedClientStateError, InstalledUserStateChange,
     InstalledUserStateError, InstalledUserStateErrorKind, InstalledUserStateExpectedType,

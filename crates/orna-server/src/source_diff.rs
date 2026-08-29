@@ -1,4 +1,4 @@
-//! Installed read-only semantic source diff (work ADR 0066).
+//! Local read-only semantic source diff (work ADR 0066).
 //!
 //! [`run_installed_source_diff`] checks one application source file against
 //! the fixed private instance, prepares its candidate revision without
@@ -28,7 +28,7 @@ use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::StandardLibraryError;
 
 use crate::{
-    EmbeddedHostError, inspect_ready_embedded_host,
+    EmbeddedHostError, inspect_current_embedded_host,
     source_apply::{StandardSelectionError, select_accepted_standard},
     source_diagnostics,
 };
@@ -82,15 +82,11 @@ impl InstalledSourceDiffReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSourceDiffHostFailure {
-    /// The process is not the installed Orna service account.
-    ServiceAccountRequired,
-    /// Package maintenance is incomplete or excludes new readers.
-    PackageIncomplete,
-    /// The default managed instance is absent.
+    /// The default local instance is absent.
     InstanceNotInstalled,
-    /// The default managed instance or its readiness evidence is invalid.
+    /// The default local instance or its readiness evidence is invalid.
     InstanceInvalid,
-    /// The running executable cannot verify the installed embedded engine.
+    /// The running executable cannot verify the local embedded engine.
     EngineInvalid,
 }
 
@@ -175,12 +171,6 @@ impl fmt::Display for InstalledSourceDiffError {
                 formatter.write_str("orna: source diff received an invalid source path")
             }
             Self::Host { failure, .. } => formatter.write_str(match failure {
-                InstalledSourceDiffHostFailure::ServiceAccountRequired => {
-                    "orna: source diff must run as the orna service account"
-                }
-                InstalledSourceDiffHostFailure::PackageIncomplete => {
-                    "orna: package maintenance is incomplete"
-                }
                 InstalledSourceDiffHostFailure::InstanceNotInstalled => {
                     "orna: the default Orna instance is not installed"
                 }
@@ -239,15 +229,14 @@ impl Error for InstalledSourceDiffError {
 
 /// Checks one file and renders the semantic diff against the active revision.
 ///
-/// The host inspection retains the package and instance guards for the
-/// complete recovery and preparation path. The report is written to
-/// `stdout`; compiler diagnostics are returned to the caller for the
-/// standard-source channel.
+/// The host inspection retains the local instance guards for the complete
+/// recovery and preparation path. The report is written to `stdout`; compiler
+/// diagnostics are returned to the caller for the standard-source channel.
 pub fn run_installed_source_diff(
     path: &str,
 ) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
     let bundle = read_source_bundle(path)?;
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1062,14 +1051,7 @@ fn validate_source_path(path: &str) -> Result<(), InstalledSourceDiffError> {
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceDiffError {
     let failure = match &source {
-        EmbeddedHostError::InvalidServiceIdentity => {
-            InstalledSourceDiffHostFailure::ServiceAccountRequired
-        }
-        EmbeddedHostError::InvalidPackageState => InstalledSourceDiffHostFailure::PackageIncomplete,
-        EmbeddedHostError::Engine(_)
-        | EmbeddedHostError::InvalidEngineManifest
-        | EmbeddedHostError::MissingDistributionManifest
-        | EmbeddedHostError::InvalidDistributionManifest => {
+        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
             InstalledSourceDiffHostFailure::EngineInvalid
         }
         EmbeddedHostError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
