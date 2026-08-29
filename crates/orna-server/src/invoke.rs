@@ -6837,7 +6837,25 @@ mod tests {
     };
     use std::io::{Read, Write};
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::net::UnixListener, thread};
+
     const ENCODED_VALUE: &[u8] = b"ORV5-encoded-value";
+    #[cfg(unix)]
+    #[test]
+    fn local_socket_connector_attaches_to_a_listener() {
+        let socket_path =
+            std::env::temp_dir().join(format!("orna-invoke-connector-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("test Unix listener");
+        let server = thread::spawn(move || listener.accept().expect("test Unix connection"));
+
+        let client = connect_local_socket(&socket_path).expect("connect to local Orna socket");
+        drop(client);
+        server.join().expect("local socket listener");
+        fs::remove_file(socket_path).expect("remove test Unix socket");
+    }
+
     #[test]
     fn endpoint_transport_accepts_only_the_current_managed_socket() {
         assert!(matches!(
