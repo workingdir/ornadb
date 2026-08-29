@@ -219,7 +219,6 @@ fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

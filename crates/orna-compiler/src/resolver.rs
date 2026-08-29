@@ -339,7 +339,6 @@ impl<'a> StandardApplicationCheckContext<'a> {
 /// This is intentionally distinct from [`check`]: it resolves standard values
 /// through durable type identities and returns no legacy checked-bundle escape.
 pub fn check_standard_application(
-
     bundle: &SourceBundle,
     context: &StandardApplicationCheckContext<'_>,
 ) -> StandardApplicationCheckReport {
@@ -1293,8 +1292,8 @@ pub fn check_standard_cli_repl(
 ) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
     let expected_schema =
         QualifiedSemanticName::new(["std", "cli"]).expect("the fixed CLI schema is valid");
-    let expected_function =
-        QualifiedSemanticName::new(["std", "cli", "repl"]).expect("the fixed CLI function is valid");
+    let expected_function = QualifiedSemanticName::new(["std", "cli", "repl"])
+        .expect("the fixed CLI function is valid");
     let expected_ui =
         QualifiedSemanticName::new(["std", "ui", "ui"]).expect("the fixed UI type is valid");
     if stored_unit.id() != STD_CLI_SOURCE_UNIT_ID
@@ -1375,8 +1374,7 @@ pub fn check_standard_cli_repl(
     let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
         let start =
             u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-        let end =
-            u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
         SourceOrigin::new(stored_unit.id(), start, end)
             .map_err(|_| StandardLibraryCheckError::SourceMismatch)
     };
@@ -1395,9 +1393,7 @@ pub fn check_standard_cli_repl(
         .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
     let function_origin = origins
         .iter()
-        .find(|origin| {
-            origin.identity() == DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID)
-        })
+        .find(|origin| origin.identity() == DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID))
         .map(DefinitionOrigin::source)
         .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?;
     if schema_origin != expected_schema_origin
@@ -1427,10 +1423,8 @@ pub fn check_standard_cli_repl(
     let payload = plan
         .encode()
         .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let artifact_hash =
-        artifact_payload_digest(&payload).map_err(|source| StandardLibraryCheckError::Digest {
-            source,
-        })?;
+    let artifact_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
     let artifact = ExecutableArtifact::new(
         ExecutableArtifactKind::Client,
         CLIENT_PLAN_FORMAT,
@@ -1464,12 +1458,9 @@ pub fn check_standard_cli_repl(
     )
     .map_err(|source| StandardLibraryCheckError::Revision { source })?
     .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
-    let executable = StandardExecutable::new(
-        STD_CLI_REPL_FUNCTION_ID,
-        revision,
-        references.clone(),
-    )
-    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    let executable =
+        StandardExecutable::new(STD_CLI_REPL_FUNCTION_ID, revision, references.clone())
+            .map_err(|source| StandardLibraryCheckError::Revision { source })?;
     Ok(CheckedStandardExecutable {
         function_id: STD_CLI_REPL_FUNCTION_ID,
         parameter_ids: Vec::new(),
@@ -1566,11 +1557,9 @@ fn check_standard_library_source_v10(
         &parent_origins,
         &executables[..11],
     )?;
-    let cli_bundle = SourceBundle::new([SourceUnit::new(
-        cli_unit.logical_path(),
-        cli_unit.content(),
-    )])
-    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let cli_bundle =
+        SourceBundle::new([SourceUnit::new(cli_unit.logical_path(), cli_unit.content())])
+            .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
     let cli_report = parse_bundle(&cli_bundle);
     if !cli_report.diagnostics().is_empty() {
         return Err(StandardLibraryCheckError::Diagnostics {
@@ -9202,11 +9191,15 @@ fn check_client_expression(
                 },
             ))
         }
-        ClientExpression::Call { callee, arguments, span } => {
+        ClientExpression::Call {
+            callee,
+            arguments,
+            span,
+        } => {
             let name = semantic_name(callee);
-            if let Some(system_function) =
-                orna_core::system::system_function_by_name(&name)
-                && system_function.kind() == orna_core::system::SystemFunctionKind::SourceIntrospection
+            if let Some(system_function) = orna_core::system::system_function_by_name(&name)
+                && system_function.kind()
+                    == orna_core::system::SystemFunctionKind::SourceIntrospection
             {
                 if !arguments.is_empty() {
                     diagnostics.push(diagnostic(
