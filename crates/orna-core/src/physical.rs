@@ -3,7 +3,7 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    FieldId, TypeId,
+    CatalogueRevisionId, FieldId, SourceRevisionId, TypeId,
     catalogue::{
         FieldDefinition, ObjectTypeDefinition, OnDeleteAction, ValueTypeDefinition, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
@@ -170,14 +170,80 @@ const SCALAR_FIELD_TYPE_TAG: u8 = 1;
 const ENUM_FIELD_TYPE_TAG: u8 = 2;
 const RECORD_FIELD_TYPE_TAG: u8 = 3;
 const REFERENCE_FIELD_TYPE_TAG: u8 = 4;
+const MAX_PHYSICAL_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PHYSICAL_OPERATIONS: u32 = 65_536;
+const MAX_PHYSICAL_FIELDS: u32 = 65_536;
 
-/// An error returned when a physical migration artifact cannot be formed.
+/// An error returned when a physical migration artifact cannot be formed or
+/// recovered from canonical bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PhysicalMigrationArtifactError {
     /// The physical planner rejected the active-to-candidate transition.
     Planning(PhysicalPlanError),
     /// Canonical artifact bytes could not represent one collection length.
     CanonicalHash(crate::canonical_hash::CanonicalHashError),
+    /// The canonical bytes do not start with the physical artifact magic.
+    InvalidMagic,
+    /// The canonical bytes use an unsupported format version.
+    UnsupportedVersion(u32),
+    /// The embedded expected base differs from the supplied revision metadata.
+    ExpectedBaseMismatch {
+        /// The revision pair supplied by the recovery metadata.
+        expected: RevisionPair,
+        /// The revision pair embedded in the canonical bytes.
+        actual: RevisionPair,
+    },
+    /// The embedded candidate pair differs from the supplied revision metadata.
+    CandidatePairMismatch {
+        /// The revision pair supplied by the recovery metadata.
+        expected: RevisionPair,
+        /// The revision pair embedded in the canonical bytes.
+        actual: RevisionPair,
+    },
+    /// The canonical bytes contain an unknown physical operation tag.
+    InvalidOperationTag(u8),
+    /// The canonical bytes contain an unknown physical field-type tag.
+    InvalidFieldTypeTag(u8),
+    /// The canonical bytes contain an unknown standard-scalar tag.
+    InvalidScalarTag(u8),
+    /// The canonical bytes contain an unknown reference delete-action tag.
+    InvalidDeleteTag(u8),
+    /// A Boolean field in the canonical bytes was not zero or one.
+    InvalidBoolean {
+        /// The encoded Boolean category.
+        context: &'static str,
+        /// The encoded byte.
+        value: u8,
+    },
+    /// A canonical collection exceeds its fixed format bound.
+    CollectionLimit {
+        /// The collection category.
+        kind: &'static str,
+        /// The encoded collection length.
+        count: usize,
+        /// The largest accepted collection length.
+        maximum: u32,
+    },
+    /// The canonical artifact exceeds its fixed byte bound.
+    ArtifactSizeLimit {
+        /// The supplied artifact size.
+        size: usize,
+        /// The largest accepted artifact size.
+        maximum: usize,
+    },
+    /// The canonical artifact ends before a complete value can be read.
+    Truncated,
+    /// The canonical artifact contains bytes after a complete value.
+    TrailingBytes,
+    /// The bytes do not equal the canonical re-encoding of their decoded model.
+    CanonicalBytesMismatch,
+    /// The supplied digest does not cover the canonical bytes.
+    DigestMismatch {
+        /// The digest calculated over the canonical bytes.
+        expected: crate::revision::Sha256Digest,
+        /// The digest supplied with the canonical bytes.
+        actual: crate::revision::Sha256Digest,
+    },
 }
 
 impl fmt::Display for PhysicalMigrationArtifactError {
@@ -192,6 +258,62 @@ impl fmt::Display for PhysicalMigrationArtifactError {
                     "physical migration artifact encoding failed: {error}"
                 )
             }
+            Self::InvalidMagic => {
+                formatter.write_str("invalid orna.migration-ledger artifact magic")
+            }
+            Self::UnsupportedVersion(version) => write!(
+                formatter,
+                "unsupported orna.migration-ledger artifact version {version}"
+            ),
+            Self::ExpectedBaseMismatch { expected, actual } => write!(
+                formatter,
+                "physical migration artifact embeds base {actual:?}; recovery metadata supplies {expected:?}"
+            ),
+            Self::CandidatePairMismatch { expected, actual } => write!(
+                formatter,
+                "physical migration artifact embeds candidate {actual:?}; recovery metadata supplies {expected:?}"
+            ),
+            Self::InvalidOperationTag(tag) => {
+                write!(formatter, "invalid physical migration operation tag {tag}")
+            }
+            Self::InvalidFieldTypeTag(tag) => {
+                write!(formatter, "invalid physical migration field-type tag {tag}")
+            }
+            Self::InvalidScalarTag(tag) => {
+                write!(formatter, "invalid physical migration scalar tag {tag}")
+            }
+            Self::InvalidDeleteTag(tag) => {
+                write!(
+                    formatter,
+                    "invalid physical migration delete-action tag {tag}"
+                )
+            }
+            Self::InvalidBoolean { context, value } => {
+                write!(formatter, "invalid {context} Boolean byte {value}")
+            }
+            Self::CollectionLimit {
+                kind,
+                count,
+                maximum,
+            } => write!(
+                formatter,
+                "physical migration {kind} count {count} exceeds the limit {maximum}"
+            ),
+            Self::ArtifactSizeLimit { size, maximum } => write!(
+                formatter,
+                "physical migration artifact size {size} exceeds the limit {maximum}"
+            ),
+            Self::Truncated => formatter.write_str("truncated physical migration artifact"),
+            Self::TrailingBytes => {
+                formatter.write_str("trailing bytes after physical migration artifact")
+            }
+            Self::CanonicalBytesMismatch => {
+                formatter.write_str("physical migration artifact bytes are not canonical")
+            }
+            Self::DigestMismatch { expected, actual } => write!(
+                formatter,
+                "physical migration artifact digest {actual:?} does not match canonical bytes ({expected:?})"
+            ),
         }
     }
 }
@@ -201,6 +323,7 @@ impl Error for PhysicalMigrationArtifactError {
         match self {
             Self::Planning(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
+            _ => None,
         }
     }
 }
@@ -278,6 +401,76 @@ impl PhysicalMigrationArtifact {
         })
     }
 
+    /// Recovers an artifact after validating its canonical bytes and digest.
+    ///
+    /// The supplied revision pairs are recovery metadata. Both must match the
+    /// corresponding revision pair embedded in the canonical bytes.
+    pub fn from_canonical_bytes(
+        expected_base: RevisionPair,
+        candidate_pair: RevisionPair,
+        canonical_bytes: &[u8],
+        digest: crate::revision::Sha256Digest,
+    ) -> Result<Self, PhysicalMigrationArtifactError> {
+        if canonical_bytes.len() > MAX_PHYSICAL_ARTIFACT_BYTES {
+            return Err(PhysicalMigrationArtifactError::ArtifactSizeLimit {
+                size: canonical_bytes.len(),
+                maximum: MAX_PHYSICAL_ARTIFACT_BYTES,
+            });
+        }
+
+        let mut reader = PhysicalMigrationReader::new(canonical_bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(PhysicalMigrationArtifactError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != FORMAT_VERSION {
+            return Err(PhysicalMigrationArtifactError::UnsupportedVersion(version));
+        }
+
+        let embedded_expected_base = reader.revision_pair()?;
+        if embedded_expected_base != expected_base {
+            return Err(PhysicalMigrationArtifactError::ExpectedBaseMismatch {
+                expected: expected_base,
+                actual: embedded_expected_base,
+            });
+        }
+        let embedded_candidate_pair = reader.revision_pair()?;
+        if embedded_candidate_pair != candidate_pair {
+            return Err(PhysicalMigrationArtifactError::CandidatePairMismatch {
+                expected: candidate_pair,
+                actual: embedded_candidate_pair,
+            });
+        }
+
+        let operation_count =
+            reader.sequence_len("physical operations", MAX_PHYSICAL_OPERATIONS)?;
+        let mut operations = Vec::with_capacity(operation_count);
+        for _ in 0..operation_count {
+            operations.push(decode_physical_operation(&mut reader)?);
+        }
+        reader.require_finished()?;
+
+        let (reencoded_bytes, reencoded_digest) =
+            encode_physical_migration(expected_base, candidate_pair, &operations)?;
+        if reencoded_bytes.as_slice() != canonical_bytes {
+            return Err(PhysicalMigrationArtifactError::CanonicalBytesMismatch);
+        }
+        if reencoded_digest != digest {
+            return Err(PhysicalMigrationArtifactError::DigestMismatch {
+                expected: reencoded_digest,
+                actual: digest,
+            });
+        }
+
+        Ok(Self {
+            expected_base,
+            candidate_pair,
+            operations,
+            canonical_bytes: canonical_bytes.to_vec(),
+            digest,
+        })
+    }
+
     /// Returns the source and catalogue revisions that must currently be active.
     pub const fn expected_base(&self) -> RevisionPair {
         self.expected_base
@@ -314,11 +507,21 @@ fn encode_physical_migration(
     encoder.u32(FORMAT_VERSION);
     encoder.revision_pair(expected_base);
     encoder.revision_pair(candidate_pair);
-    encoder.sequence_len(operations.len(), "physical operations")?;
+    encoder.sequence_len(
+        operations.len(),
+        "physical operations",
+        MAX_PHYSICAL_OPERATIONS,
+    )?;
     for operation in operations {
         encode_physical_operation(&mut encoder, operation)?;
     }
     let canonical_bytes = encoder.finish();
+    if canonical_bytes.len() > MAX_PHYSICAL_ARTIFACT_BYTES {
+        return Err(PhysicalMigrationArtifactError::ArtifactSizeLimit {
+            size: canonical_bytes.len(),
+            maximum: MAX_PHYSICAL_ARTIFACT_BYTES,
+        });
+    }
     let digest = crate::canonical_hash::artifact_payload_digest(&canonical_bytes)
         .map_err(PhysicalMigrationArtifactError::CanonicalHash)?;
     Ok((canonical_bytes, digest))
@@ -347,7 +550,11 @@ fn encode_create_object(
     object: &CreateObject,
 ) -> Result<(), PhysicalMigrationArtifactError> {
     encoder.type_id(object.type_id());
-    encoder.sequence_len(object.fields().len(), "physical object fields")?;
+    encoder.sequence_len(
+        object.fields().len(),
+        "physical object fields",
+        MAX_PHYSICAL_FIELDS,
+    )?;
     for field in object.fields() {
         encode_create_field(encoder, field)?;
     }
@@ -383,6 +590,176 @@ fn encode_create_field(
     Ok(())
 }
 
+fn decode_physical_operation(
+    reader: &mut PhysicalMigrationReader<'_>,
+) -> Result<PhysicalOperation, PhysicalMigrationArtifactError> {
+    match reader.u8()? {
+        CREATE_OBJECT_OPERATION_TAG => Ok(PhysicalOperation::CreateObject(decode_create_object(
+            reader,
+        )?)),
+        ADD_FIELD_OPERATION_TAG => {
+            let object_type = reader.type_id()?;
+            Ok(PhysicalOperation::AddField(AddField {
+                object_type,
+                field: decode_create_field(reader)?,
+            }))
+        }
+        tag => Err(PhysicalMigrationArtifactError::InvalidOperationTag(tag)),
+    }
+}
+
+fn decode_create_object(
+    reader: &mut PhysicalMigrationReader<'_>,
+) -> Result<CreateObject, PhysicalMigrationArtifactError> {
+    let type_id = reader.type_id()?;
+    let field_count = reader.sequence_len("physical object fields", MAX_PHYSICAL_FIELDS)?;
+    let mut fields = Vec::with_capacity(field_count);
+    for _ in 0..field_count {
+        fields.push(decode_create_field(reader)?);
+    }
+    Ok(CreateObject { type_id, fields })
+}
+
+fn decode_create_field(
+    reader: &mut PhysicalMigrationReader<'_>,
+) -> Result<CreateField, PhysicalMigrationArtifactError> {
+    let field_id = reader.field_id()?;
+    let field_type = match reader.u8()? {
+        SCALAR_FIELD_TYPE_TAG => PhysicalFieldType::Scalar(decode_standard_scalar(reader.u8()?)?),
+        ENUM_FIELD_TYPE_TAG => PhysicalFieldType::Enum(reader.type_id()?),
+        RECORD_FIELD_TYPE_TAG => PhysicalFieldType::Record(reader.type_id()?),
+        REFERENCE_FIELD_TYPE_TAG => PhysicalFieldType::Reference {
+            target: reader.type_id()?,
+            on_delete: decode_on_delete(reader.u8()?)?,
+        },
+        tag => return Err(PhysicalMigrationArtifactError::InvalidFieldTypeTag(tag)),
+    };
+    let nullable = reader.boolean("physical field nullable")?;
+    let unique = reader.boolean("physical field unique")?;
+    Ok(CreateField {
+        field_id,
+        field_type,
+        nullable,
+        unique,
+    })
+}
+
+fn decode_standard_scalar(tag: u8) -> Result<StandardScalar, PhysicalMigrationArtifactError> {
+    match tag {
+        1 => Ok(StandardScalar::Boolean),
+        2 => Ok(StandardScalar::Integer),
+        3 => Ok(StandardScalar::BigInt),
+        4 => Ok(StandardScalar::Float),
+        5 => Ok(StandardScalar::Decimal),
+        6 => Ok(StandardScalar::CharacterLargeObject),
+        7 => Ok(StandardScalar::BinaryLargeObject),
+        8 => Ok(StandardScalar::Uuid),
+        9 => Ok(StandardScalar::Date),
+        10 => Ok(StandardScalar::Time),
+        11 => Ok(StandardScalar::Timestamp),
+        12 => Ok(StandardScalar::Duration),
+        13 => Ok(StandardScalar::Void),
+        tag => Err(PhysicalMigrationArtifactError::InvalidScalarTag(tag)),
+    }
+}
+
+fn decode_on_delete(tag: u8) -> Result<Option<OnDeleteAction>, PhysicalMigrationArtifactError> {
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(OnDeleteAction::Restrict)),
+        2 => Ok(Some(OnDeleteAction::SetNull)),
+        3 => Ok(Some(OnDeleteAction::Cascade)),
+        tag => Err(PhysicalMigrationArtifactError::InvalidDeleteTag(tag)),
+    }
+}
+
+struct PhysicalMigrationReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> PhysicalMigrationReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], PhysicalMigrationArtifactError> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(PhysicalMigrationArtifactError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(PhysicalMigrationArtifactError::Truncated)?;
+        self.position = end;
+        Ok(bytes)
+    }
+
+    fn array<const LENGTH: usize>(
+        &mut self,
+    ) -> Result<[u8; LENGTH], PhysicalMigrationArtifactError> {
+        self.take(LENGTH)?
+            .try_into()
+            .map_err(|_| PhysicalMigrationArtifactError::Truncated)
+    }
+
+    fn u8(&mut self) -> Result<u8, PhysicalMigrationArtifactError> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, PhysicalMigrationArtifactError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
+    fn boolean(&mut self, context: &'static str) -> Result<bool, PhysicalMigrationArtifactError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(PhysicalMigrationArtifactError::InvalidBoolean { context, value }),
+        }
+    }
+
+    fn sequence_len(
+        &mut self,
+        kind: &'static str,
+        maximum: u32,
+    ) -> Result<usize, PhysicalMigrationArtifactError> {
+        let count = self.u32()? as usize;
+        if count > maximum as usize {
+            return Err(PhysicalMigrationArtifactError::CollectionLimit {
+                kind,
+                count,
+                maximum,
+            });
+        }
+        Ok(count)
+    }
+
+    fn type_id(&mut self) -> Result<TypeId, PhysicalMigrationArtifactError> {
+        Ok(TypeId::from_bytes(self.array()?))
+    }
+
+    fn field_id(&mut self) -> Result<FieldId, PhysicalMigrationArtifactError> {
+        Ok(FieldId::from_bytes(self.array()?))
+    }
+
+    fn revision_pair(&mut self) -> Result<RevisionPair, PhysicalMigrationArtifactError> {
+        Ok(RevisionPair::new(
+            SourceRevisionId::from_bytes(self.array()?),
+            CatalogueRevisionId::from_bytes(self.array()?),
+        ))
+    }
+
+    fn require_finished(&self) -> Result<(), PhysicalMigrationArtifactError> {
+        if self.position == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(PhysicalMigrationArtifactError::TrailingBytes)
+        }
+    }
+}
+
 struct PhysicalMigrationEncoder {
     bytes: Vec<u8>,
 }
@@ -416,7 +793,15 @@ impl PhysicalMigrationEncoder {
         &mut self,
         length: usize,
         value: &'static str,
+        maximum: u32,
     ) -> Result<(), PhysicalMigrationArtifactError> {
+        if length > maximum as usize {
+            return Err(PhysicalMigrationArtifactError::CollectionLimit {
+                kind: value,
+                count: length,
+                maximum,
+            });
+        }
         let length = u32::try_from(length).map_err(|_| {
             PhysicalMigrationArtifactError::CanonicalHash(
                 crate::canonical_hash::CanonicalHashError::LengthExceedsU32 { value, length },
@@ -4329,6 +4714,195 @@ mod tests {
                     .unwrap()
             ),
             FORMAT_VERSION
+        );
+    }
+
+    fn recovery_artifact() -> PhysicalMigrationArtifact {
+        let active = active(Vec::new(), 1);
+        let candidate = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                )],
+            )],
+            2,
+        );
+        PhysicalMigrationArtifact::from_revisions(&active, &candidate)
+            .expect("recovery fixture must produce an artifact")
+    }
+
+    #[test]
+    fn migration_artifact_recovers_valid_canonical_bytes() {
+        let artifact = recovery_artifact();
+
+        let recovered = PhysicalMigrationArtifact::from_canonical_bytes(
+            artifact.expected_base(),
+            artifact.candidate_pair(),
+            artifact.canonical_bytes(),
+            artifact.digest(),
+        )
+        .expect("canonical artifact must recover");
+
+        assert_eq!(recovered, artifact);
+    }
+
+    #[test]
+    fn migration_artifact_recovery_rejects_mismatched_pairs() {
+        let artifact = recovery_artifact();
+        let different_base = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xf1; 16]),
+            artifact.expected_base().catalogue(),
+        );
+        let different_candidate = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xf2; 16]),
+            artifact.candidate_pair().catalogue(),
+        );
+
+        assert_eq!(
+            PhysicalMigrationArtifact::from_canonical_bytes(
+                different_base,
+                artifact.candidate_pair(),
+                artifact.canonical_bytes(),
+                artifact.digest(),
+            ),
+            Err(PhysicalMigrationArtifactError::ExpectedBaseMismatch {
+                expected: different_base,
+                actual: artifact.expected_base(),
+            })
+        );
+        assert_eq!(
+            PhysicalMigrationArtifact::from_canonical_bytes(
+                artifact.expected_base(),
+                different_candidate,
+                artifact.canonical_bytes(),
+                artifact.digest(),
+            ),
+            Err(PhysicalMigrationArtifactError::CandidatePairMismatch {
+                expected: different_candidate,
+                actual: artifact.candidate_pair(),
+            })
+        );
+    }
+
+    #[test]
+    fn migration_artifact_recovery_rejects_bad_header_tags_and_trailing_bytes() {
+        let artifact = recovery_artifact();
+        let expected_base = artifact.expected_base();
+        let candidate_pair = artifact.candidate_pair();
+        let decode = |bytes: Vec<u8>| {
+            let digest = crate::canonical_hash::artifact_payload_digest(&bytes)
+                .expect("test artifact digest");
+            PhysicalMigrationArtifact::from_canonical_bytes(
+                expected_base,
+                candidate_pair,
+                &bytes,
+                digest,
+            )
+        };
+        let operation_offset = MAGIC.len() + 4 + 32 + 32 + 4;
+        let field_type_offset = operation_offset + 1 + 16 + 4 + 16;
+
+        let mut bad_magic = artifact.canonical_bytes().to_vec();
+        bad_magic[0] ^= 0xff;
+        assert_eq!(
+            decode(bad_magic),
+            Err(PhysicalMigrationArtifactError::InvalidMagic)
+        );
+
+        let mut bad_version = artifact.canonical_bytes().to_vec();
+        bad_version[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&2_u32.to_be_bytes());
+        assert_eq!(
+            decode(bad_version),
+            Err(PhysicalMigrationArtifactError::UnsupportedVersion(2))
+        );
+
+        let mut bad_operation = artifact.canonical_bytes().to_vec();
+        bad_operation[operation_offset] = 0xff;
+        assert_eq!(
+            decode(bad_operation),
+            Err(PhysicalMigrationArtifactError::InvalidOperationTag(0xff))
+        );
+
+        let mut bad_field_type = artifact.canonical_bytes().to_vec();
+        bad_field_type[field_type_offset] = 0xff;
+        assert_eq!(
+            decode(bad_field_type),
+            Err(PhysicalMigrationArtifactError::InvalidFieldTypeTag(0xff))
+        );
+
+        let mut bad_scalar = artifact.canonical_bytes().to_vec();
+        bad_scalar[field_type_offset + 1] = 0xff;
+        assert_eq!(
+            decode(bad_scalar),
+            Err(PhysicalMigrationArtifactError::InvalidScalarTag(0xff))
+        );
+
+        let mut bad_boolean = artifact.canonical_bytes().to_vec();
+        bad_boolean[field_type_offset + 2] = 2;
+        assert_eq!(
+            decode(bad_boolean),
+            Err(PhysicalMigrationArtifactError::InvalidBoolean {
+                context: "physical field nullable",
+                value: 2,
+            })
+        );
+
+        let mut trailing = artifact.canonical_bytes().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            decode(trailing),
+            Err(PhysicalMigrationArtifactError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn migration_artifact_recovery_rejects_oversized_operation_count() {
+        let artifact = recovery_artifact();
+        let mut bytes = artifact.canonical_bytes().to_vec();
+        let operation_count_offset = MAGIC.len() + 4 + 32 + 32;
+        bytes[operation_count_offset..operation_count_offset + 4]
+            .copy_from_slice(&(MAX_PHYSICAL_OPERATIONS + 1).to_be_bytes());
+        let digest = crate::canonical_hash::artifact_payload_digest(&bytes).unwrap();
+
+        assert_eq!(
+            PhysicalMigrationArtifact::from_canonical_bytes(
+                artifact.expected_base(),
+                artifact.candidate_pair(),
+                &bytes,
+                digest,
+            ),
+            Err(PhysicalMigrationArtifactError::CollectionLimit {
+                kind: "physical operations",
+                count: MAX_PHYSICAL_OPERATIONS as usize + 1,
+                maximum: MAX_PHYSICAL_OPERATIONS,
+            })
+        );
+
+        let mut field_bytes = artifact.canonical_bytes().to_vec();
+        let field_count_offset = operation_count_offset + 4 + 1 + 16;
+        field_bytes[field_count_offset..field_count_offset + 4]
+            .copy_from_slice(&(MAX_PHYSICAL_FIELDS + 1).to_be_bytes());
+        let field_digest = crate::canonical_hash::artifact_payload_digest(&field_bytes).unwrap();
+
+        assert_eq!(
+            PhysicalMigrationArtifact::from_canonical_bytes(
+                artifact.expected_base(),
+                artifact.candidate_pair(),
+                &field_bytes,
+                field_digest,
+            ),
+            Err(PhysicalMigrationArtifactError::CollectionLimit {
+                kind: "physical object fields",
+                count: MAX_PHYSICAL_FIELDS as usize + 1,
+                maximum: MAX_PHYSICAL_FIELDS,
+            })
         );
     }
 
