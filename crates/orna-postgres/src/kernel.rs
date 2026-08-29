@@ -23,6 +23,7 @@ use orna_core::{
 };
 use orna_protocol::{FrameCodecError, ValueCodecError};
 use orna_standard::StandardUpgradeIdentity;
+use orna_storage::MigrationLedgerEntryError;
 
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
@@ -222,6 +223,8 @@ pub enum PostgresKernelError {
     DriverTask(JoinError),
     /// PostgreSQL reported a failure while the connection session was closing.
     SessionClose(tokio_postgres::Error),
+    /// A supplied or recovered migration ledger entry failed validation.
+    InvalidLedgerRequest(MigrationLedgerEntryError),
     /// A recorded schema migration does not match this binary.
     MigrationMismatch {
         /// The incompatible migration version.
@@ -407,6 +410,9 @@ impl fmt::Display for PostgresKernelError {
             Self::SessionClose(error) => {
                 write!(formatter, "private PostgreSQL kernel failure: {error}")
             }
+            Self::InvalidLedgerRequest(error) => {
+                write!(formatter, "invalid migration ledger request: {error}")
+            }
             Self::MigrationMismatch { version } => {
                 write!(
                     formatter,
@@ -557,6 +563,7 @@ impl Error for PostgresKernelError {
             | Self::Database(error)
             | Self::RecoveryDatabase(error)
             | Self::SessionClose(error) => Some(error),
+            Self::InvalidLedgerRequest(error) => Some(error),
             Self::DriverTask(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
             Self::RevisionInvariant(error) => Some(error),

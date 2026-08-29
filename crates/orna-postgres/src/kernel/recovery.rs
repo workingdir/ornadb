@@ -44,7 +44,6 @@ use orna_standard::{
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
     STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    STANDARD_LIBRARY_V9_REVISION_ID,
     verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
     verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
     verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
@@ -1463,7 +1462,6 @@ fn verify_recovered_standard_snapshot(
         STANDARD_LIBRARY_V7_REVISION_ID => verify_standard_library_v7_snapshot(snapshot),
         STANDARD_LIBRARY_V8_REVISION_ID => verify_standard_library_v8_snapshot(snapshot),
         STANDARD_LIBRARY_V9_REVISION_ID => verify_standard_library_v9_snapshot(snapshot),
-        STANDARD_LIBRARY_V9_REVISION_ID => verify_standard_library_v9_snapshot(snapshot),
         _ => {
             return Err(DurableRecord::new(
                 "_orna_kernel.standard_library_revisions",
@@ -1510,7 +1508,6 @@ fn verify_recovered_standard_snapshot_for_test_hooks(
             | STANDARD_LIBRARY_V7_REVISION_ID
             | STANDARD_LIBRARY_V8_REVISION_ID
             | STANDARD_LIBRARY_V9_REVISION_ID
-           
     ) {
         return verify_recovered_standard_snapshot(snapshot);
     }
