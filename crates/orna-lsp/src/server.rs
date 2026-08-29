@@ -16,8 +16,9 @@ use lsp_types::{
     InitializeParams, OneOf, PositionEncodingKind, PublishDiagnosticsParams, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 use orna_syntax::Parse;
 
@@ -219,6 +220,11 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
+            retrigger_characters: Some(vec![",".to_owned()]),
+            work_done_progress_options: Default::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -253,6 +259,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
     let id = request.id.clone();
     let result = match method.as_str() {
         "textDocument/hover" => request_hover(state, request),
+        "textDocument/signatureHelp" => request_signature_help(state, request),
         "textDocument/definition" => request_definition(state, request),
         "textDocument/references" => request_references(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
@@ -393,6 +400,22 @@ fn request_hover(
     let hover: Option<Hover> =
         analysis::hover(document, &parse, state.standard.as_ref(), position, &mapper);
     Ok(serde_json::to_value(hover)?)
+}
+
+fn request_signature_help(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) =
+        request.extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")?;
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let Some(document) = state.document(&uri) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let (parse, mapper) = parse_document(document);
+    let help = analysis::signature_help(document, &parse, position, &mapper);
+    Ok(serde_json::to_value(help)?)
 }
 
 fn request_definition(
