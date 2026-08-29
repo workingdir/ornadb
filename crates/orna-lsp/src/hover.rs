@@ -52,8 +52,12 @@ pub fn keyword_hover(reference: &KeywordReference, doc_link: Option<&str>) -> Ho
 /// Builds the hover for one scalar or standard type.
 pub fn scalar_hover(reference: &ScalarReference, doc_link: Option<&str>) -> Hover {
     let mut value = format!(
-        "**`{}`** standard type\n\n{}\n\n**Example**\n```orna\n{}\n```",
-        reference.name, reference.summary, reference.example
+        "**`{}`** standard type\n\n{}\n\n**Type information**\n- Storage: `{}`\n- Usage: `{}`\n\n**Example**\n```orna\n{}\n```",
+        reference.name,
+        reference.summary,
+        reference.name,
+        scalar_usage(reference.name),
+        reference.example,
     );
     append_spec_link(&mut value, doc_link);
     hover(value)
@@ -319,6 +323,20 @@ fn hover(value: String) -> Hover {
             value,
         }),
         range: None,
+    }
+}
+
+fn scalar_usage(name: &str) -> &'static str {
+    match name {
+        "BOOLEAN" | "BOOL" => "Use for true/false values.",
+        "INTEGER" | "INT" | "BIGINT" => "Use for whole-number values.",
+        "FLOAT" | "DECIMAL" => "Use for numeric values that can contain a fraction.",
+        "TEXT" | "CHARACTER LARGE OBJECT" => "Use for text values.",
+        "BYTES" | "BINARY LARGE OBJECT" => "Use for binary values.",
+        "UUID" => "Use for stable unique identifiers.",
+        "DATE" | "TIME" | "TIMESTAMP" | "DURATION" => "Use for temporal values.",
+        "VOID" => "Use when a function returns no value.",
+        _ => "Use this standard type in a declaration or expression.",
     }
 }
 

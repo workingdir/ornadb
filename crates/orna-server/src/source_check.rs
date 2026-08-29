@@ -6,16 +6,15 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{
-    verify_standard_library_v9_snapshot,
-};
+use orna_standard::verify_standard_library_v9_snapshot;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
+    use orna_standard::{
+        retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
+    };
 
-    #[test]
     fn checks_new_application_source_against_verified_v9_standard() {
         let snapshot = retained_standard_library_v9_snapshot()
             .and_then(verify_standard_library_v9_snapshot)
@@ -114,13 +113,22 @@ pub(super) enum SourceCheckResult {
 }
 
 pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
-    run_with_human_output(path, output, false)
+    run_with_output(path, output, false, false)
 }
 
 pub(super) fn run_with_human_output(
     path: &str,
     output: &mut impl Write,
     human_output: bool,
+) -> SourceCheckResult {
+    run_with_output(path, output, human_output, false)
+}
+
+pub(super) fn run_with_output(
+    path: &str,
+    output: &mut impl Write,
+    human_output: bool,
+    colour: bool,
 ) -> SourceCheckResult {
     let bytes = match read_regular_file(path) {
         Ok(bytes) => bytes,
@@ -165,12 +173,15 @@ pub(super) fn run_with_human_output(
         return SourceCheckResult::Success;
     }
     let result = if human_output {
-        output.write_all(&source_diagnostics::render_human_diagnostics(
+        output.write_all(&orna_server::render_human_source_diagnostics(
             report.parse_report(),
             report.diagnostics(),
+            colour,
         ))
     } else {
-        source_diagnostics::write_diagnostics(output, report.diagnostics())
+        output.write_all(&orna_server::render_source_diagnostics(
+            report.diagnostics(),
+        ))
     };
     if result.is_err() {
         return SourceCheckResult::Failure;

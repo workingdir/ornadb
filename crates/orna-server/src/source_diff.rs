@@ -43,16 +43,28 @@ pub enum InstalledSourceDiffOutcome {
     Diff(InstalledSourceDiffReport),
 }
 
-/// Ordered compiler diagnostics rendered with the source-check contract.
+/// Ordered compiler diagnostics rendered for machine and terminal output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSourceDiffDiagnostics {
     bytes: Vec<u8>,
+    human_bytes: Vec<u8>,
+    coloured_bytes: Vec<u8>,
 }
 
 impl InstalledSourceDiffDiagnostics {
     /// Returns the exact diagnostic lines, including their final line feeds.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the source-context diagnostic report without terminal colour.
+    pub fn human_bytes(&self) -> &[u8] {
+        &self.human_bytes
+    }
+
+    /// Returns the source-context diagnostic report with terminal colour.
+    pub fn coloured_bytes(&self) -> &[u8] {
+        &self.coloured_bytes
     }
 }
 
@@ -287,6 +299,16 @@ async fn diff_source_bundle(
         return Ok(InstalledSourceDiffOutcome::Diagnostics(
             InstalledSourceDiffDiagnostics {
                 bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
+                human_bytes: source_diagnostics::render_human_diagnostics(
+                    report.parse_report(),
+                    report.diagnostics(),
+                    false,
+                ),
+                coloured_bytes: source_diagnostics::render_human_diagnostics(
+                    report.parse_report(),
+                    report.diagnostics(),
+                    true,
+                ),
             },
         ));
     }
