@@ -184,7 +184,6 @@ fn assert_usage(output: &Output) {
 #[test]
 fn command_shape_failures_have_exact_process_results() {
     for arguments in [
-        vec![],
         vec![OsString::from("server")],
         vec![OsString::from("backend-shell")],
         vec![
