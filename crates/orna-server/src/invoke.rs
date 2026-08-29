@@ -7282,12 +7282,23 @@ use orna_standard::{
         let root = InvocationId::from_bytes([0x43; 16]);
         let bridge = SessionBridge::new(root, 8).expect("session bridge creates");
         let waiting_bridge = Arc::clone(&bridge);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_cancelled = Arc::clone(&cancelled);
         let waiter = std::thread::spawn(move || {
-            waiting_bridge.request_input_with_cancel(root, || true)
+            waiting_bridge.request_input_with_cancel(root, || {
+                waiter_cancelled.load(std::sync::atomic::Ordering::Acquire)
+            })
         });
+        loop {
+            if bridge.try_take_outbound().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
         let result = waiter.join().expect("input waiter joins");
         assert_eq!(result, Err("client.input_unavailable".to_owned()));
-        assert!(bridge.try_take_outbound().is_some());
     }
     #[cfg(unix)]
     #[test]
