@@ -164,12 +164,11 @@ impl SqliteRevisionStore {
                 ],
             )
             .await?;
-        Ok(self
-            .load_pair()
+        self.load_pair()
             .await?
             .ok_or(SqliteError::InvalidPersistedData(
                 "bootstrap row disappeared",
-            ))?)
+            ))
     }
 
     async fn load_active(&self) -> Result<ActiveDatabaseRevision, SqliteError> {
@@ -345,10 +344,10 @@ fn digest32(
 
 impl RevisionStore for SqliteRevisionStore {
     type Error = SqliteError;
-    fn bootstrap(
+    async fn bootstrap(
         &self,
-    ) -> impl Future<Output = Result<BootstrapRevision, StorageError<Self::Error>>> + Send {
-        async move { self.seed_pair().await.map_err(StorageError::Backend) }
+    ) -> Result<BootstrapRevision, StorageError<Self::Error>> {
+        self.seed_pair().await.map_err(StorageError::Backend)
     }
     fn recover(
         &self,
