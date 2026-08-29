@@ -250,6 +250,8 @@ command shape is a usage error. It writes the exact global usage text below,
 including the final line feed, to standard error and exits with status `2`:
 ```text
 Usage:
+  orna
+  orna repl
   orna --db <target> [command] [options]
   orna --daemon
   orna --version
