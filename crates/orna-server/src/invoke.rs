@@ -125,7 +125,7 @@ use orna_protocol::{
     SessionServerFrame, SessionStateError, decode_constructed_invocation_event_frame,
     decode_constructed_server_frame, decode_constructed_value, decode_resource_server_frame,
     decode_session_server_frame, encode_constructed_client_frame, encode_constructed_value,
-    encode_invoke_request, encode_resource_client_frame,
+    encode_invoke_request, encode_resource_client_frame, encode_session_client_frame,
 };
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
@@ -2468,10 +2468,12 @@ impl BrokerSessionDriver {
         self.reader
             .respond_to(request)
             .map_err(|_| "client.session_input_failed".to_owned())
-            .and_then(|frame| encode_session_client_frame(&frame).map_err(|_| "client.session_input_failed".to_owned()))
+            .and_then(|frame| {
+                encode_session_client_frame(&frame)
+                    .map_err(|_| "client.session_input_failed".to_owned())
+            })
     }
 }
-
 
 async fn handle_shared_session_frame<W>(
     frame: BrokerWireFrame,
@@ -2523,9 +2525,7 @@ async fn run_shared_invoke_broker(
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
     let mut session_driver: Option<Arc<Mutex<BrokerSessionDriver>>> = None;
-    let mut pending_session_input: Option<
-        tokio::task::JoinHandle<Result<Vec<u8>, String>>,
-    > = None;
+    let mut pending_session_input: Option<tokio::task::JoinHandle<Result<Vec<u8>, String>>> = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
@@ -2567,8 +2567,13 @@ async fn run_shared_invoke_broker(
             BrokerNext::Command(None) => break,
             BrokerNext::SessionInput(result) => {
                 pending_session_input = None;
-                let bytes = result.map_err(|_| ResourceTransportFailure::SessionInputUnavailable)?;
-                if write_shared_broker_frame(&mut stream, &bytes).await.is_err() {
+                let Ok(bytes) = result else {
+                    break;
+                };
+                if write_shared_broker_frame(&mut stream, &bytes)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -2579,19 +2584,24 @@ async fn run_shared_invoke_broker(
                             Ok(frame) => frame,
                             Err(_) => break,
                         };
-                    let Some(root_invocation_id) = root.as_ref().and_then(|state| state.invocation) else {
+                    let Some(root_invocation_id) = root.as_ref().and_then(|state| state.invocation)
+                    else {
                         break;
                     };
-                    if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
+                    if request.root_invocation_id != root_invocation_id || request.call_stream == 0
+                    {
                         break;
                     }
                     let driver = match &session_driver {
                         Some(driver) => Arc::clone(driver),
                         None => {
-                            let driver = Arc::new(Mutex::new(
-                                BrokerSessionDriver::new(root_invocation_id, request.call_stream)
-                                    .map_err(|_| ResourceTransportFailure::SessionInputUnavailable)?,
-                            ));
+                            let driver = match BrokerSessionDriver::new(
+                                root_invocation_id,
+                                request.call_stream,
+                            ) {
+                                Ok(driver) => Arc::new(Mutex::new(driver)),
+                                Err(_) => break,
+                            };
                             session_driver = Some(Arc::clone(&driver));
                             driver
                         }
@@ -2601,10 +2611,7 @@ async fn run_shared_invoke_broker(
                     }
                     pending_session_input = Some(tokio::spawn(async move {
                         tokio::task::spawn_blocking(move || {
-                            driver
-                                .lock()
-                                .expect("session driver lock")
-                                .respond(request)
+                            driver.lock().expect("session driver lock").respond(request)
                         })
                         .await
                         .map_err(|_| "client.session_input_failed".to_owned())?
