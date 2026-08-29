@@ -1619,6 +1619,15 @@ impl DispatchService for RawDispatchService {
                 _ = start_signal => {}
                 _ = cancellation_for_task.cancelled() => {}
             };
+            if let Some(broker) = resource_broker.as_ref() {
+                let (session, security, root_invocation) = operation.client_evaluation_context();
+                broker.bind_dynamic_context(
+                    operation.active_revision(),
+                    security,
+                    session,
+                    root_invocation,
+                );
+            }
             let cancellation = cancellation_for_task.clone();
             let worker_kernel = kernel.clone();
             let worker_session = dispatch_session.clone();
@@ -5743,7 +5752,8 @@ mod tests {
             .read_exact(&mut encoded[SESSION_HEADER_LENGTH..])
             .await
             .expect("session request payload");
-        let request = match decode_session_server_frame(&encoded).expect("session request decodes") {
+        let request = match decode_session_server_frame(&encoded).expect("session request decodes")
+        {
             SessionServerFrame::InputRequested(request) => request,
         };
         assert_eq!(request.root_invocation_id, root);
