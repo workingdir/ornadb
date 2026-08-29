@@ -62,7 +62,7 @@ request carrier, event batches, resource transport, cancellation, and local
 peer authentication are authoritative building blocks. The in-process
 `SharedInvokeBroker` remains a test/local seam only.
 
-The next implementation slices must:
+The remaining implementation slices must:
 
 1. extract a shared endpoint and client-session model from the CLI;
 2. route local daemon calls through the authenticated local socket instead of
@@ -70,11 +70,9 @@ The next implementation slices must:
 3. add the versioned remote handshake and TLS transport before accepting
    remote invocation;
 4. add a persistent runtime/session owner for terminal and graphical surfaces;
-5. add source-level input and dynamic invocation primitives, then implement
-   `std.cli.repl` as ordinary `.orna` code;
-6. keep Qt and other genuinely host-only rendering operations behind explicit
+5. keep Qt and other genuinely host-only rendering operations behind explicit
    runtime boundaries;
-7. keep raw-call as an explicit bounded recovery path.
+6. keep raw-call as an explicit bounded recovery path.
 
 No slice may claim remote execution, arbitrary CLIENT artifact execution, or
 interactive action delivery until its transport, trust, and lifecycle tests

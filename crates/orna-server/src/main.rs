@@ -1430,6 +1430,10 @@ mod tests {
                 Some(RuntimeFamily::Qt),
             ))
         );
+        assert_eq!(
+            parse_command(arguments(&["orna", "--runtime", "tty"])),
+            parse_command(arguments(&["orna", "--runtime", "tty", "repl"])),
+        );
         for values in [
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
