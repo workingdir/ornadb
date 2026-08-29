@@ -19,7 +19,6 @@ orna-client = { path = "../orna-client" }
 orna-core = { path = "../orna-core" }
 orna-protocol = { path = "../orna-protocol" }
 orna-standard = { path = "../orna-standard" }
-orna-storage = { path = "../orna-storage" }
 serde_json = "1"
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt", "sync"] }

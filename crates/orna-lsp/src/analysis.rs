@@ -19,7 +19,7 @@ use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
     ObjectTypeDeclaration, OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration,
     QualifiedName, RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
-    SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
+    ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -276,19 +276,19 @@ fn function_symbol<F>(
     mapper: &PositionMapper<'_>,
 ) -> DocumentSymbol
 where
-    F: FunctionLike,
+    F: FunctionDeclarationView,
 {
     let children = declaration
-        .parameter_names()
-        .into_iter()
-        .map(|(name, span)| DocumentSymbol {
-            name,
+        .parameters()
+        .iter()
+        .map(|parameter| DocumentSymbol {
+            name: parameter.name.text.clone(),
             detail: Some("parameter".to_owned()),
             kind: SymbolKind::VARIABLE,
             tags: None,
             deprecated: None,
-            range: mapper.range(&span),
-            selection_range: mapper.range(&span),
+            range: mapper.range(&parameter.name.span),
+            selection_range: mapper.range(&parameter.name.span),
             children: None,
         })
         .collect();
@@ -305,13 +305,13 @@ where
 }
 
 /// A common view over SERVER and CLIENT function declarations.
-pub trait FunctionLike {
+pub trait FunctionDeclarationView {
     fn name(&self) -> &QualifiedName;
     fn span(&self) -> &SourceSpan;
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)>;
+    fn parameters(&self) -> &[ServerFunctionParameter];
 }
 
-impl FunctionLike for ServerFunctionDeclaration {
+impl FunctionDeclarationView for ServerFunctionDeclaration {
     fn name(&self) -> &QualifiedName {
         &self.name
     }
@@ -320,15 +320,12 @@ impl FunctionLike for ServerFunctionDeclaration {
         &self.span
     }
 
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
+    fn parameters(&self) -> &[ServerFunctionParameter] {
+        &self.parameters
     }
 }
 
-impl FunctionLike for ClientFunctionDeclaration {
+impl FunctionDeclarationView for ClientFunctionDeclaration {
     fn name(&self) -> &QualifiedName {
         &self.name
     }
@@ -337,11 +334,8 @@ impl FunctionLike for ClientFunctionDeclaration {
         &self.span
     }
 
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
+    fn parameters(&self) -> &[ServerFunctionParameter] {
+        &self.parameters
     }
 }
 

@@ -353,10 +353,7 @@ where
     {
         let _ = args.next();
         let value = args.next()?.into_string().ok()?;
-        match orna_server::RuntimeFamily::parse(&value) {
-            Some(runtime) => Some(runtime),
-            None => return None,
-        }
+        Some(orna_server::RuntimeFamily::parse(&value)?)
     } else {
         None
     };
