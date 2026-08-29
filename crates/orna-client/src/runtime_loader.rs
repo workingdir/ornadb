@@ -2932,6 +2932,46 @@ mod session_tests {
             })]
         );
     }
+    #[test]
+    fn callback_queue_rejects_overflow_without_discarding_order() {
+        let mut state = CallbackState::new();
+
+        for surface in 1..=CLIENT_MAX_QUEUED_RUNTIME_EVENTS as u64 {
+            state
+                .push_event(RuntimeEventSnapshot::SurfaceClosed(
+                    RuntimeSurfaceClosedEventSnapshot { surface },
+                ))
+                .expect("queue accepts events within its count limit");
+        }
+
+        assert!(matches!(
+            state.push_event(RuntimeEventSnapshot::SurfaceClosed(
+                RuntimeSurfaceClosedEventSnapshot {
+                    surface: CLIENT_MAX_QUEUED_RUNTIME_EVENTS as u64 + 1,
+                },
+            )),
+            Err(AbiStatusCode::INTERNAL)
+        ));
+        assert_eq!(state.events.len(), CLIENT_MAX_QUEUED_RUNTIME_EVENTS);
+
+        let events = state.drain_events();
+        assert_eq!(
+            events.first(),
+            Some(&RuntimeEventSnapshot::SurfaceClosed(
+                RuntimeSurfaceClosedEventSnapshot { surface: 1 }
+            ))
+        );
+        assert_eq!(
+            events.last(),
+            Some(&RuntimeEventSnapshot::SurfaceClosed(
+                RuntimeSurfaceClosedEventSnapshot {
+                    surface: CLIENT_MAX_QUEUED_RUNTIME_EVENTS as u64,
+                }
+            ))
+        );
+        assert!(state.events.is_empty());
+        assert_eq!(state.queued_bytes, 0);
+    }
 
     #[test]
     fn malformed_event_view_is_rejected_without_pointer_escape() {
