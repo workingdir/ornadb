@@ -532,7 +532,6 @@ dependencies = [
  "orna-core",
  "orna-standard",
  "orna-syntax",
- "serde",
  "serde_json",
 ]
 

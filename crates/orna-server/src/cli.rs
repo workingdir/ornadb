@@ -210,8 +210,8 @@ where
         },
         Some(value) if value == OsStr::new("source") => HelpTopic::Source,
         Some(value) if value == OsStr::new("invoke") => HelpTopic::Invoke,
-        Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
         Some(value) if value == OsStr::new("state") => HelpTopic::State,
+        Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
         Some(value) if value == OsStr::new("inspect") => HelpTopic::Inspect,
         Some(value) if value == OsStr::new("runtime") => HelpTopic::Runtime,
         Some(value) if value == OsStr::new("security") => HelpTopic::Security,
@@ -401,17 +401,10 @@ where
             if args.next().is_some() {
                 None
             } else {
-                Some(Command::Invoke(InvokeArguments {
-                    target: parse_qualified_name("std.cli.repl")?,
-                    arguments: Vec::new(),
-                    output: None,
-                    trace: None,
-                    no_progress: false,
-                    explain: false,
-                    runtime,
-                }))
+                default_repl_command(runtime)
             }
         }
+
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
             Some(value) if value == OsStr::new("--help") => args
                 .next()
