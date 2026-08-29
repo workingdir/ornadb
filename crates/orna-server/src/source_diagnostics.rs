@@ -15,9 +15,10 @@ pub(crate) fn render_diagnostics(diagnostics: &[CompilerDiagnostic]) -> Vec<u8> 
 pub(crate) fn render_human_diagnostics(
     parse_report: &ParseReport,
     diagnostics: &[CompilerDiagnostic],
+    colour: bool,
 ) -> Vec<u8> {
     let mut output = Vec::new();
-    write_human_diagnostics(&mut output, parse_report, diagnostics)
+    write_human_diagnostics(&mut output, parse_report, diagnostics, colour)
         .expect("writing diagnostics to Vec cannot fail");
     output
 }
@@ -43,25 +44,25 @@ pub(crate) fn write_diagnostics(
     }
     Ok(())
 }
-
 fn write_human_diagnostics(
     output: &mut impl Write,
     parse_report: &ParseReport,
     diagnostics: &[CompilerDiagnostic],
+    colour: bool,
 ) -> io::Result<()> {
     for (index, diagnostic) in diagnostics.iter().enumerate() {
         if index != 0 {
             output.write_all(b"\n")?;
         }
-        write_human_diagnostic(output, parse_report, diagnostic)?;
+        write_human_diagnostic(output, parse_report, diagnostic, colour)?;
     }
     Ok(())
 }
-
 fn write_human_diagnostic(
     output: &mut impl Write,
     parse_report: &ParseReport,
     diagnostic: &CompilerDiagnostic,
+    colour: bool,
 ) -> io::Result<()> {
     let location = diagnostic.location();
     let span = location.span();
@@ -95,41 +96,70 @@ fn write_human_diagnostic(
         + 1;
     let column = display_column(&source[line_start..start]) + 1;
     let line = &source[line_start..line_end];
+    let source_line = render_source_line(line);
     let underline_width = display_column(&source[start..end]).max(1);
-
+    if colour {
+        write!(output, "\x1b[1;31merror\x1b[0m")?;
+    } else {
+        write!(output, "error")?;
+    }
     writeln!(
         output,
-        "error[{}]: {}",
+        "[{}]: {}",
         diagnostic.code().as_str(),
         diagnostic.message()
     )?;
-    writeln!(
-        output,
-        "  --> {}:{}:{}",
-        location.logical_path(),
-        line_number,
-        column
-    )?;
+    if colour {
+        writeln!(
+            output,
+            "  \x1b[36m-->\x1b[0m {}:{}:{}",
+            location.logical_path(),
+            line_number,
+            column
+        )?;
+    } else {
+        writeln!(
+            output,
+            "  --> {}:{}:{}",
+            location.logical_path(),
+            line_number,
+            column
+        )?;
+    }
     output.write_all(b"   |\n")?;
-    writeln!(output, "{line_number:>2} | {line}")?;
-    writeln!(
-        output,
-        "   | {}{}",
+    writeln!(output, "{line_number:>2} | {source_line}")?;
+    let marker = format!(
+        "{}{}",
         " ".repeat(display_column(&source[line_start..start])),
         "^".repeat(underline_width)
-    )?;
+    );
+    if colour {
+        writeln!(output, "   | \x1b[31m{marker}\x1b[0m")?;
+    } else {
+        writeln!(output, "   | {marker}")?;
+    }
     if let Some(help) = help_for(diagnostic) {
-        writeln!(output, "   |\n   = help: {help}")?;
+        if colour {
+            writeln!(output, "   |\n   = \x1b[1;32mhelp\x1b[0m: {help}")?;
+        } else {
+            writeln!(output, "   |\n   = help: {help}")?;
+        }
     }
     Ok(())
 }
 
-fn display_column(text: &str) -> usize {
-    text.chars().fold(0, |column, character| {
-        column + if character == '\t' { 4 } else { 1 }
-    })
+fn render_source_line(line: &str) -> String {
+    line.chars()
+        .flat_map(|character| match character {
+            '\t' => "    ".chars().collect::<Vec<_>>(),
+            '\r' => Vec::new(),
+            character if character.is_control() => {
+                format!("\\u{{{:04X}}}", character as u32).chars().collect()
+            }
+            character => vec![character],
+        })
+        .collect()
 }
-
 fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&'static str> {
     match diagnostic.code().as_str() {
         "ORNA0001" if diagnostic.message().contains("schema name") => {
@@ -187,6 +217,7 @@ mod tests {
         let rendered = String::from_utf8(render_human_diagnostics(
             report.parse_report(),
             report.diagnostics(),
+            false,
         ))
         .expect("diagnostics are UTF-8");
         assert!(rendered.contains("error[ORNA0001]: expected a schema name after CREATE SCHEMA"));
@@ -194,6 +225,13 @@ mod tests {
         assert!(rendered.contains("1 | CREATE SCHEMA ;"));
         assert!(rendered.contains("^"));
         assert!(rendered.contains("= help: write a schema name before the semicolon"));
+    }
+
+    #[test]
+    fn colour_output_contains_ansi_only_when_requested() {
+        let report = broken_report();
+        let rendered = render_human_diagnostics(report.parse_report(), report.diagnostics(), true);
+        assert!(rendered.starts_with(b"\x1b[1;31merror\x1b[0m"));
     }
 
     #[test]
