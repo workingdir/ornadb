@@ -8917,6 +8917,85 @@ fn check_client_expression(
                 ));
             }
             let name = semantic_name(callee);
+            if name
+                == QualifiedSemanticName::new(["std", "cli", "input"])
+                    .expect("std.cli.input is valid")
+            {
+                if !arguments.is_empty() {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::InvalidArgumentCount,
+                        "std.cli.input takes no arguments",
+                        input.logical_path,
+                        span,
+                    ));
+                    return None;
+                }
+                let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
+                return Some((
+                    CheckedClientExpression::Input {
+                        location: location(input.logical_path, span),
+                    },
+                    ClientExpressionType {
+                        semantic_type: text,
+                        standard_value_type: standard_scalar_type_id(
+                            standard,
+                            StandardScalar::CharacterLargeObject,
+                        ),
+                        result_shape: ClientExpressionResultShape::Value,
+                    },
+                ));
+            }
+            if name
+                == QualifiedSemanticName::new(["std", "cli", "evaluate"])
+                    .expect("std.cli.evaluate is valid")
+            {
+                if arguments.len() != 1 {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::InvalidArgumentCount,
+                        "std.cli.evaluate requires one command expression",
+                        input.logical_path,
+                        span,
+                    ));
+                    return None;
+                }
+                let (command, command_type) = check_client_expression(
+                    &arguments[0].value,
+                    input,
+                    targets,
+                    action_targets,
+                    resource_targets,
+                    query_catalogue,
+                    base,
+                    server_names,
+                    standard,
+                    diagnostics,
+                    references,
+                    used_capabilities,
+                    locals,
+                )?;
+                let text = SemanticType::scalar(StandardScalar::CharacterLargeObject);
+                if command_type.semantic_type != text
+                    || command_type.result_shape != ClientExpressionResultShape::Value
+                {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        "std.cli.evaluate requires a TEXT command expression",
+                        input.logical_path,
+                        arguments[0].value.span(),
+                    ));
+                    return None;
+                }
+                let ui_type =
+                    client_expression_type_from_core(ResolvedType::value(STD_UI_TYPE_ID), standard)
+                        .expect("std.ui.UI is representable as a CLIENT result");
+                return Some((
+                    CheckedClientExpression::Evaluate {
+                        expression: Box::new(command),
+                        location: location(input.logical_path, span),
+                    },
+                    ui_type,
+                ));
+            }
             if let Some(inspect) = check_inspect_call(
                 expression,
                 input,
