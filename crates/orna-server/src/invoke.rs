@@ -7302,6 +7302,34 @@ use orna_standard::{
         let result = waiter.join().expect("input waiter joins");
         assert_eq!(result, Err("client.input_unavailable".to_owned()));
     }
+    #[test]
+    fn session_bridge_close_wakes_pending_input() {
+        let root = InvocationId::from_bytes([0x44; 16]);
+        let bridge = SessionBridge::new(root, 9).expect("session bridge creates");
+        let waiting_bridge = Arc::clone(&bridge);
+        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let result = waiting_bridge.request_input(root);
+            finished_sender.send(result).expect("waiter result sends");
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while bridge.try_take_outbound().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session input request was not queued",
+            );
+            std::thread::yield_now();
+        }
+        bridge.close();
+        assert_eq!(
+            finished_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("closed input waiter completes"),
+            Err("client.input_unavailable".to_owned()),
+        );
+        waiter.join().expect("input waiter joins");
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_socket_connector_attaches_to_a_listener() {
