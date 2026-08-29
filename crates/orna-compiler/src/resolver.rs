@@ -11,7 +11,8 @@ pub use identity::{
     CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId,
 };
 pub use model::{
-    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
+    CheckedClientCapability,
     CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
     CheckedObjectReferenceUse, CheckedObjectType, CheckedSchema, CheckedServerFunction,
@@ -38,7 +39,6 @@ pub use model::{
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
     STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
     STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
-    STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
     STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_BUTTON_ENABLED_PARAMETER_ID,
     STD_UI_BUTTON_FUNCTION_ID, STD_UI_BUTTON_FUNCTION_REVISION_ID,
@@ -79,8 +79,8 @@ use std::{
 };
 
 use orna_artifact::client_plan::{
-    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator,
-    ExpressionClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
+    ClientExpressionNode, ControlFlowBinaryOperator, ControlFlowUnaryOperator, ExpressionClientPlan,
+    FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, ResourceKind,
 };
 use orna_artifact::server_json_encode::{self, JsonEncodePlan};
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
@@ -92,7 +92,7 @@ use orna_core::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain, FunctionReturn,
+        CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain, FunctionReturn,
         FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
@@ -111,8 +111,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    CapabilitySpecification, ClientExpression, ClientFunctionDeclaration,
+    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
     OnDeletePolicy, OptionTypeSpelling, PrimitiveValueTypePersistence, QualifiedName,
@@ -1471,7 +1471,6 @@ fn check_standard_library_source_v9_parts(
     }
     Ok((families, checked_executables))
 }
-
 /// Reconciles the appended `std/data.orna` unit and returns its catalogue
 /// families. The table declaration is checked through the shared retained
 /// terminal-table checker below; this function additionally requires the
