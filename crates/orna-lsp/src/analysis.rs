@@ -3124,6 +3124,10 @@ pub fn completion_at(
                     label: last.clone(),
                     kind: Some(CompletionItemKind::STRUCT),
                     detail: Some(format!("standard type {name}")),
+                    documentation: Some(lsp_types::Documentation::String(format!(
+                        "Standard-library value type `{name}`."
+                    ))),
+                    sort_text: Some(format!("0-{last}")),
                     ..CompletionItem::default()
                 });
             }
@@ -3133,7 +3137,10 @@ pub fn completion_at(
         items.push(CompletionItem {
             label: (*keyword).to_owned(),
             kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some("keyword".to_owned()),
+            detail: Some("language keyword".to_owned()),
+            documentation: crate::reference::keyword_reference(keyword)
+                .map(|reference| lsp_types::Documentation::String(reference.summary.to_owned())),
+            sort_text: Some(format!("2-{keyword}")),
             ..CompletionItem::default()
         });
     }
@@ -3142,6 +3149,9 @@ pub fn completion_at(
             label: (*scalar).to_owned(),
             kind: Some(CompletionItemKind::TYPE_PARAMETER),
             detail: Some("standard scalar type".to_owned()),
+            documentation: crate::reference::scalar_reference(scalar)
+                .map(|reference| lsp_types::Documentation::String(reference.summary.to_owned())),
+            sort_text: Some(format!("1-{scalar}")),
             ..CompletionItem::default()
         });
     }
