@@ -7199,6 +7199,19 @@ use orna_standard::{
             "accepted"
         );
     }
+
+    #[test]
+    fn session_bridge_cancellation_wakes_pending_input() {
+        let root = InvocationId::from_bytes([0x43; 16]);
+        let bridge = SessionBridge::new(root, 8).expect("session bridge creates");
+        let waiting_bridge = Arc::clone(&bridge);
+        let waiter = std::thread::spawn(move || {
+            waiting_bridge.request_input_with_cancel(root, || true)
+        });
+        let result = waiter.join().expect("input waiter joins");
+        assert_eq!(result, Err("client.input_unavailable".to_owned()));
+        assert!(bridge.try_take_outbound().is_some());
+    }
     #[cfg(unix)]
     #[test]
     fn local_socket_connector_attaches_to_a_listener() {
