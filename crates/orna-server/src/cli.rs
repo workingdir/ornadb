@@ -16,9 +16,53 @@ use orna_core::{
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 
-pub(crate) const USAGE: &str = "Usage:\n  orna [OPTIONS] [URI]\n  orna [OPTIONS] [URI] invoke <function> [OPTIONS]\n  orna [OPTIONS] -d\n  orna --help\n  orna --version\n\nCommands:\n  invoke       Run one stored function.\n  repl         Open the function-backed REPL.\n  source       Check or apply Orna source.\n  inspect      Inspect a completed invocation.\n  raw-call     Make a low-level local call.\n  orna raw-call <canonical-function-id>\n\nOptions:\n  --db <URI>   Select the database URI.\n  -d, --daemon Run the local server in the foreground.\n  --runtime <family>  Select tty or qt for invoke.\n  --color <auto|always|never>  Control terminal colour.\n  -h, --help   Show help.\n  -V, --version Show the version.";
+pub(crate) const USAGE: &str = "Usage:
+  orna [OPTIONS] [URI]
+  orna [OPTIONS] [URI] invoke <function> [OPTIONS]
+  orna [OPTIONS] -d
+  orna --help
+  orna --version
 
-pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line\n\nOpen a database session or run a stored function.\n\nUsage:\n  orna [OPTIONS] [URI]\n  orna [OPTIONS] [URI] invoke <function> [OPTIONS]\n  orna [OPTIONS] -d\n\nCommands:\n  invoke ...   Run one stored function.\n  repl ...     Open the function-backed REPL.\n  inspect ...  Inspect a completed invocation.\n  source ...   Check or apply one source file.\n\nOptions:\n  --db <URI>   Select a local path, Unix socket, or remote Orna URI.\n  --runtime <family>  Select tty or qt for invoke.\n  -d, --daemon Run the local server in the foreground for a supervisor.\n  --color <auto|always|never>  Control terminal colour.\n  -h, --help   Show help for a command.\n  -V, --version  Show the Orna version.\n\nThe default command opens the function-backed REPL.\n";
+Commands:
+  invoke       Run one stored function.
+  repl          Open the function-backed REPL.
+  source       Check or apply Orna source.
+  inspect      Inspect a completed invocation.
+  raw-call     Make a low-level local call.
+  orna raw-call <canonical-function-id>
+
+Options:
+  --db <URI>   Select the database URI.
+  -d, --daemon Run the local server in the foreground.
+  --runtime <family>  Select tty or qt for invoke.
+  --color <auto|always|never>  Control terminal colour.
+  -h, --help   Show help.
+  -V, --version Show the version.";
+
+pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line
+
+Open a database session or run a stored function.
+
+Usage:
+  orna [OPTIONS] [URI]
+  orna [OPTIONS] [URI] invoke <function> [OPTIONS]
+  orna [OPTIONS] -d
+
+Common Commands:
+  invoke ...   Run one stored function.
+  repl ...     Open the function-backed REPL.
+  inspect ...  Inspect a completed invocation.
+  source ...   Check or apply one source file.
+
+Host Mode:
+  --daemon     Run the local server in the foreground.
+
+Options:
+  --db <URI>   Select a local path, Unix socket, or remote Orna URI.
+  --runtime <family>  Select tty or qt for invoke.
+  --color <auto|always|never>  Control terminal colour.
+  -h, --help   Show help for a command.
+  -V, --version  Show the Orna version.";
 const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
 const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
