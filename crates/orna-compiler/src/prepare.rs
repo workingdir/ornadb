@@ -97,6 +97,18 @@ use crate::{
         durable_state_slot_id, supports_unique_text_or_required_reference,
     },
 };
+/// Durable identities allocated by the standard source boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardSourceIdentitySeed {
+    /// Durable schema identity for the source-authored standard namespace.
+    pub schema: SchemaId,
+    /// Durable function identities in checked source order.
+    pub functions: Vec<FunctionId>,
+    /// Durable parameter identities grouped in checked function order.
+    pub parameters: Vec<Vec<ParameterId>>,
+    /// Durable function-revision identities in checked function order.
+    pub revisions: Vec<FunctionRevisionId>,
+}
 
 /// One encoded CLIENT or SERVER artifact with the language version that defines it.
 #[derive(Clone)]
@@ -312,11 +324,13 @@ pub fn prepare(
 ) -> Result<DeployableRevision, PrepareError> {
     prepare_with_allocator(report, expected_base, active, CandidateAllocator::legacy())
 }
-
+/// Prepares a source-authored standard revision with identities supplied by the
+/// standard-library boundary.
 pub fn prepare_standard_source(
     report: &StandardApplicationCheckReport,
     expected_base: RevisionPair,
     active: &ActiveDatabaseRevision,
+    seed: &StandardSourceIdentitySeed,
 ) -> Result<DeployableRevision, PrepareStandardApplicationError> {
     let Some(view) = report.preparation_view() else {
         return Err(PrepareStandardApplicationError::CheckNotComplete {
@@ -372,11 +386,11 @@ pub fn prepare_standard_source(
     .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let mut allocations =
         CandidateAllocator::standard(report.standard_library().verified_snapshot());
-    let identities = IdentityMap::build_standard(
+    let identities = IdentityMap::build_standard_source(
         view.checked(),
         active,
         &mut allocations,
-        &standard_preflight.function_identities,
+        seed,
     )
     .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let source = PreparedSource::new(
@@ -4893,6 +4907,7 @@ struct IdentityMap {
     expressions: HashMap<CheckedExpressionId, ExpressionId>,
     functions: HashMap<CheckedFunctionId, FunctionId>,
     parameters: HashMap<CheckedParameterId, ParameterId>,
+    revisions: HashMap<CheckedFunctionId, FunctionRevisionId>,
 }
 
 impl IdentityMap {
@@ -4925,7 +4940,51 @@ impl IdentityMap {
             true,
         )
     }
-
+    fn build_standard_source(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        allocations: &mut CandidateAllocator,
+        seed: &StandardSourceIdentitySeed,
+    ) -> Result<Self, PrepareError> {
+        let mut result = Self::build_generic(checked, active, allocations)?;
+        let provisional_schemas = checked
+            .schemas()
+            .iter()
+            .filter(|schema| matches!(schema.id(), CheckedSchemaId::Provisional(_)))
+            .collect::<Vec<_>>();
+        if provisional_schemas.len() != 1 {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "standard source identity seed requires one provisional schema",
+            });
+        }
+        result.schemas.insert(provisional_schemas[0].id(), seed.schema);
+        let provisional_functions = checked
+            .client_functions()
+            .iter()
+            .filter(|function| matches!(function.id(), CheckedFunctionId::Provisional(_)))
+            .collect::<Vec<_>>();
+        if provisional_functions.len() != seed.functions.len()
+            || provisional_functions.len() != seed.parameters.len()
+            || provisional_functions.len() != seed.revisions.len()
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "standard source identity seed does not match checked CLIENT functions",
+            });
+        }
+        for (index, function) in provisional_functions.into_iter().enumerate() {
+            result.functions.insert(function.id(), seed.functions[index]);
+            result.revisions.insert(function.id(), seed.revisions[index]);
+            if function.parameters().len() != seed.parameters[index].len() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "standard source identity seed does not match checked parameters",
+                });
+            }
+            for (parameter, parameter_id) in function.parameters().iter().zip(&seed.parameters[index]) {
+                result.parameters.insert(parameter.id(), *parameter_id);
+            }
+        }
+        Ok(result)
+    }
     fn build_matching_active(
         checked: &CheckedBundle,
         active: &ActiveDatabaseRevision,
@@ -5100,11 +5159,26 @@ impl IdentityMap {
                         function_id,
                         "duplicate checked function",
                     )?;
+                    let revision_id = match function.id() {
+                        CheckedFunctionId::Existing(_) => None,
+                        CheckedFunctionId::Provisional(_) if allow_provisional => {
+                            Some(allocations.function_revision())
+                        }
+                        CheckedFunctionId::Provisional(_) => None,
+                    };
+                    if let Some(revision_id) = revision_id {
+                        insert_consistent(
+                            &mut result.revisions,
+                            function.id(),
+                            revision_id,
+                            "checked function revision identity maps inconsistently",
+                        )?;
+                    }
                     for parameter in function.parameters() {
                         let parameter_id = match parameter.id() {
                             CheckedParameterId::Existing(id) => id,
                             CheckedParameterId::Provisional(_) if allow_provisional => {
-                                ParameterId::new()
+                                allocations.parameter_id()
                             }
                             CheckedParameterId::Provisional(_) => {
                                 return Err(PrepareError::InvalidCheckedBundle {
@@ -5150,7 +5224,7 @@ impl IdentityMap {
                             let function_id = match function.id() {
                                 CheckedFunctionId::Existing(id) => id,
                                 CheckedFunctionId::Provisional(_) if allow_provisional => {
-                                    FunctionId::new()
+                                    allocations.function_id()
                                 }
                                 CheckedFunctionId::Provisional(_) => {
                                     return Err(PrepareError::InvalidCheckedBundle {
@@ -5159,11 +5233,19 @@ impl IdentityMap {
                                 }
                             };
                             result.functions.insert(function.id(), function_id);
+                            if let CheckedFunctionId::Provisional(_) = function.id() {
+                                insert_consistent(
+                                    &mut result.revisions,
+                                    function.id(),
+                                    allocations.function_revision(),
+                                    "checked function revision identity maps inconsistently",
+                                )?;
+                            }
                             for parameter in function.parameters() {
                                 let parameter_id = match parameter.id() {
                                     CheckedParameterId::Existing(id) => id,
                                     CheckedParameterId::Provisional(_) if allow_provisional => {
-                                        ParameterId::new()
+                                        allocations.parameter_id()
                                     }
                                     CheckedParameterId::Provisional(_) => {
                                         return Err(PrepareError::InvalidCheckedBundle {
@@ -5238,6 +5320,14 @@ impl IdentityMap {
                 });
             }
         };
+        if let CheckedFunctionId::Provisional(_) = function.id() {
+            insert_consistent(
+                &mut result.revisions,
+                function.id(),
+                FunctionRevisionId::new(),
+                "checked function revision identity maps inconsistently",
+            )?;
+        }
         if reject_duplicate {
             insert_unique(
                 &mut result.functions,
@@ -5464,6 +5554,13 @@ impl IdentityMap {
             &self.parameters,
             id,
             "checked parameter has no durable identity",
+        )
+    }
+    fn revision(&self, id: CheckedFunctionId) -> Result<FunctionRevisionId, PrepareError> {
+        copied(
+            &self.revisions,
+            id,
+            "checked function has no durable revision identity",
         )
     }
 
@@ -8225,7 +8322,7 @@ impl<'a> CandidateBuilder<'a> {
                 .function_by_id(function)
                 .ok_or(existing_mismatch(DefinitionIdentity::Function(function)))
                 .map(|definition| definition.current_revision()),
-            CheckedFunctionId::Provisional(_) => Ok(FunctionRevisionId::new()),
+            CheckedFunctionId::Provisional(_) => self.identities.revision(checked),
         }
     }
 
@@ -15557,6 +15654,62 @@ END;"#;
         );
     }
 
+
+    #[test]
+    fn prepares_seeded_standard_source_identities() {
+        let standard = crate::check_standard_library_source(&invocation_carrier_standard()).unwrap();
+        let active = empty_standard_application_active(standard.verified_snapshot());
+
+        let source = "CREATE SCHEMA examples; \
+            CREATE CLIENT FUNCTION examples.first(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value; \
+            CREATE CLIENT FUNCTION examples.second(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value; \
+            CREATE CLIENT FUNCTION examples.third(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value; \
+            CREATE CLIENT FUNCTION examples.fourth(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value; \
+            CREATE CLIENT FUNCTION examples.fifth(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value; \
+            CREATE CLIENT FUNCTION examples.sixth(p_value BOOLEAN) RETURNS BOOLEAN RETURN p_value;";
+        let report = crate::check_standard_application(
+            &SourceBundle::new([SourceUnit::new("standard.orna", source)]).unwrap(),
+            &StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap(),
+        );
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let seed = StandardSourceIdentitySeed {
+            schema: SchemaId::from_bytes([0x10; 16]),
+            functions: (0x11..=0x16)
+                .map(|value| FunctionId::from_bytes([value; 16]))
+                .collect(),
+            parameters: (0x21..=0x26)
+                .map(|value| vec![ParameterId::from_bytes([value; 16])])
+                .collect(),
+            revisions: (0x31..=0x36)
+                .map(|value| FunctionRevisionId::from_bytes([value; 16]))
+                .collect(),
+        };
+        let prepared = prepare_standard_source(&report, active.pair(), &active, &seed).unwrap();
+        assert_eq!(
+            prepared.candidate().schema_by_name(&semantic_name(&["examples"])).unwrap().id(),
+            seed.schema
+        );
+        let functions = prepared.candidate().functions();
+        assert_eq!(
+            functions.iter().map(FunctionDefinition::id).collect::<Vec<_>>(),
+            seed.functions
+        );
+        assert_eq!(
+            functions
+                .iter()
+                .map(|function| function.parameters()[0].id())
+                .collect::<Vec<_>>(),
+            seed.parameters.iter().map(|parameters| parameters[0]).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prepared
+                .new_function_revisions()
+                .iter()
+                .map(FunctionRevisionRecord::id)
+                .collect::<Vec<_>>(),
+            seed.revisions
+        );
+    }
     type DistinctFixture = (
         crate::relational::DistinctQueryIr<TypeId, FieldId>,
         FunctionDefinition,
