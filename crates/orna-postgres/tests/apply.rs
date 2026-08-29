@@ -10063,6 +10063,7 @@ async fn proves_find_latest_inspect_epoch_resolves_the_dispatch_epoch() -> TestR
 }
 
 /// Returns the protected columns for every denied INSPECT audit row.
+#[allow(clippy::type_complexity)]
 async fn inspect_denied_audit_rows(
     database: &TestDatabase,
 ) -> TestResult<Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, String)>> {
@@ -10095,7 +10096,7 @@ async fn inspect_denied_audit_rows(
     match (result, shutdown_result) {
         (Ok(audits), Ok(())) => Ok(audits),
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(_), Err(error)) => Err(error),
     }
 }
 
