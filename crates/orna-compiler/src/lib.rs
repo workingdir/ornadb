@@ -167,11 +167,17 @@ impl DiagnosticCode {
         }
     }
 
-    fn from_syntax_code(code: &str) -> Self {
-        match code {
-            "ORNA0001" => Self::UnexpectedToken,
-            "ORNA0002" => Self::UnterminatedSourceConstruct,
-            _ => panic!("orna-syntax emitted a diagnostic outside the compiler syntax contract"),
+    /// Returns a short explanation of the diagnostic category.
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::UnexpectedToken => "The source contains invalid syntax.",
+            Self::UnterminatedSourceConstruct => "A source construct is not closed.",
+            Self::UnknownQualifiedName => "A referenced name does not exist.",
+            Self::DuplicateDefinition => "A name is declared more than once.",
+            Self::TypeMismatch => "A value does not match its declared type.",
+            Self::InvalidReferenceTarget => "A reference targets an invalid type.",
+            Self::CapabilityRequirement => "A client capability is not supported.",
+            Self::DomainIncompatible => "A valid construct is outside this compiler domain.",
         }
     }
 
