@@ -102,8 +102,8 @@ impl ClientExecutionFuel {
 
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
-    STANDARD_CATALOGUE_V10_REVISION_ID, STANDARD_CATALOGUE_V9_REVISION_ID,
-    STANDARD_LIBRARY_V10_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
+    STANDARD_CATALOGUE_V10_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID,
+    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
     STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
@@ -8878,11 +8878,10 @@ fn evaluate_standard_ui_constructor(
             OpaqueValueError::ActiveStandardRequired,
         ));
     };
-    if !matches!(standard.revision(), STANDARD_LIBRARY_V9_REVISION_ID)
-        || !matches!(
-            standard.catalogue().revision(),
-            STANDARD_CATALOGUE_V9_REVISION_ID
-        )
+    if !((standard.revision() == STANDARD_LIBRARY_V9_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V9_REVISION_ID)
+        || (standard.revision() == STANDARD_LIBRARY_V10_REVISION_ID
+            && standard.catalogue().revision() == STANDARD_CATALOGUE_V10_REVISION_ID))
     {
         return Err(invalid_ui_constructor_registry(
             context,
