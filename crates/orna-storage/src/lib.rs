@@ -3,6 +3,8 @@
 //! This crate deliberately exposes only Orna domain values. Backend adapters
 //! own connection pools, transactions, SQL, and driver-specific errors.
 
+pub mod migration;
+
 use std::{error::Error, fmt, future::Future};
 
 use orna_core::{
