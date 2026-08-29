@@ -32,7 +32,6 @@ pub use model::{
     STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
     STD_CLI_REPL_FUNCTION_ID, STD_CLI_REPL_FUNCTION_REVISION_ID, STD_CLI_REPL_REVISION_NUMBER,
     STD_CLI_SCHEMA_ID, STD_CLI_SOURCE_UNIT_ID, STD_CSV_ENCODE_FUNCTION_ID,
-    STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
     STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
     STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
@@ -1300,8 +1299,7 @@ pub fn check_standard_cli_repl(
         || declaration.external
         || declaration.runtime_contract.is_some()
         || !declaration.capabilities.is_empty()
-        || declaration.parameters.len() != 0
-        || unquoted_semantic_name(&declaration.name)? != expected_function
+        || declaration.parameters.is_empty()
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
