@@ -2725,38 +2725,67 @@ fn source_reference_target_name(
     active: &ActiveDatabaseRevision,
     target: DefinitionReferenceTarget,
 ) -> Option<String> {
+    let standard_catalogue = active
+        .catalogue_hash_context()
+        .standard()
+        .map(|snapshot| snapshot.catalogue());
     match target {
         DefinitionReferenceTarget::ObjectType(id) => active
             .catalogue()
             .object_type_by_id(id)
+            .or_else(|| standard_catalogue.and_then(|catalogue| catalogue.object_type_by_id(id)))
             .map(|definition| definition.name().to_string()),
         DefinitionReferenceTarget::ValueType(id) => active
             .catalogue()
             .value_type_by_id(id)
-            .map(|definition| definition.name().to_string()),
+            .or_else(|| standard_catalogue.and_then(|catalogue| catalogue.value_type_by_id(id)))
+            .map(|definition| definition.name().to_string())
+            .or_else(|| {
+                (id == orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID)
+                    .then_some(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_NAME.to_string())
+            }),
         DefinitionReferenceTarget::Function(id) => active
             .catalogue()
             .function_by_id(id)
-            .map(|definition| definition.name().to_string()),
+            .or_else(|| standard_catalogue.and_then(|catalogue| catalogue.function_by_id(id)))
+            .map(|definition| definition.name().to_string())
+            .or_else(|| {
+                orna_core::system::system_function_by_id(id)
+                    .map(|definition| definition.name_parts().join("."))
+            }),
         DefinitionReferenceTarget::Parameter { owner, parameter } => active
             .catalogue()
             .function_by_id(owner)
-            .and_then(|function| function.parameter_by_id(parameter))
-            .and_then(|parameter| {
-                active
-                    .catalogue()
-                    .function_by_id(owner)
-                    .map(|function| format!("{}.{}", function.name(), parameter.name()))
+            .and_then(|function| {
+                function
+                    .parameter_by_id(parameter)
+                    .map(|parameter| format!("{}.{}", function.name(), parameter.name()))
+            })
+            .or_else(|| {
+                standard_catalogue
+                    .and_then(|catalogue| catalogue.function_by_id(owner))
+                    .and_then(|function| {
+                        function
+                            .parameter_by_id(parameter)
+                            .map(|parameter| format!("{}.{}", function.name(), parameter.name()))
+                    })
             }),
         DefinitionReferenceTarget::Field { owner, field } => active
             .catalogue()
             .object_type_by_id(owner)
-            .and_then(|definition| definition.field_by_id(field))
-            .and_then(|field_definition| {
-                active
-                    .catalogue()
-                    .object_type_by_id(owner)
-                    .map(|definition| format!("{}.{}", definition.name(), field_definition.name()))
+            .and_then(|definition| {
+                definition
+                    .field_by_id(field)
+                    .map(|field_definition| format!("{}.{}", definition.name(), field_definition.name()))
+            })
+            .or_else(|| {
+                standard_catalogue
+                    .and_then(|catalogue| catalogue.object_type_by_id(owner))
+                    .and_then(|definition| {
+                        definition
+                            .field_by_id(field)
+                            .map(|field_definition| format!("{}.{}", definition.name(), field_definition.name()))
+                    })
             }),
         DefinitionReferenceTarget::Expression(id) => Some(format!("expression:{id:?}")),
         _ => None,
@@ -2789,9 +2818,12 @@ fn source_metadata_type_id(
                 StandardScalar::Void => return None,
             };
             active
-                .catalogue()
-                .value_types()
-                .iter()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.catalogue())
+                .into_iter()
+                .flat_map(|catalogue| catalogue.value_types())
+                .chain(active.catalogue().value_types())
                 .find(|definition| definition.representation_contract() == contract)
                 .map(|definition| definition.id())
         }
@@ -22072,7 +22104,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
         assert_eq!(metadata.references().len(), 1);
         assert_eq!(
             metadata.references()[0].target_name(),
-            "ValueType(TypeId(type:00000000000000000000000064))"
+            "sys.source.function"
         );
     }
 
