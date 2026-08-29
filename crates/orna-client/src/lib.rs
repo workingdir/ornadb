@@ -2721,6 +2721,47 @@ fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
         ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
     }
 }
+fn source_reference_target_name(
+    active: &ActiveDatabaseRevision,
+    target: DefinitionReferenceTarget,
+) -> Option<String> {
+    match target {
+        DefinitionReferenceTarget::ObjectType(id) => active
+            .catalogue()
+            .object_type_by_id(id)
+            .map(|definition| definition.name().to_string()),
+        DefinitionReferenceTarget::ValueType(id) => active
+            .catalogue()
+            .value_type_by_id(id)
+            .map(|definition| definition.name().to_string()),
+        DefinitionReferenceTarget::Function(id) => active
+            .catalogue()
+            .function_by_id(id)
+            .map(|definition| definition.name().to_string()),
+        DefinitionReferenceTarget::Parameter { owner, parameter } => active
+            .catalogue()
+            .function_by_id(owner)
+            .and_then(|function| function.parameter_by_id(parameter))
+            .and_then(|parameter| {
+                active
+                    .catalogue()
+                    .function_by_id(owner)
+                    .map(|function| format!("{}.{}", function.name(), parameter.name()))
+            }),
+        DefinitionReferenceTarget::Field { owner, field } => active
+            .catalogue()
+            .object_type_by_id(owner)
+            .and_then(|definition| definition.field_by_id(field))
+            .and_then(|field_definition| {
+                active
+                    .catalogue()
+                    .object_type_by_id(owner)
+                    .map(|definition| format!("{}.{}", definition.name(), field_definition.name()))
+            }),
+        DefinitionReferenceTarget::Expression(id) => Some(format!("expression:{id:?}")),
+        _ => None,
+    }
+}
 fn source_metadata_type_id(
     active: &ActiveDatabaseRevision,
     resolved_type: ResolvedType,
@@ -10498,10 +10539,12 @@ fn evaluate_expression_with_fuel(
                         && reference.source_revision() == context.function_revision()
                 })
                 .map(|reference| {
+                    let target_name = source_reference_target_name(active, reference.target())
+                        .unwrap_or_else(|| format!("{:?}", reference.target()));
                     orna_core::source_metadata::SourceReferenceMetadata::new(
                         reference.ordinal(),
                         reference.target(),
-                        format!("{:?}", reference.target()),
+                        target_name,
                         reference.source_origin().source_unit(),
                         reference.source_origin().byte_start(),
                         reference.source_origin().byte_end(),
