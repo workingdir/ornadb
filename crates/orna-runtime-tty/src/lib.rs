@@ -12,15 +12,16 @@
 //!
 //! The crate is independent of the database: it receives payload bytes plus
 //! a sink writer, never a kernel or session. It validates the frame itself
-//! rather than relying on the value codec that constructed it, and reports
-//! no interactive surface beyond the two sinks in this slice. The client
-//! ABI that selects and drives a runtime is a later ADR; this slice is the
-//! renderer library.
+//! rather than relying on the value codec that constructed it. The interactive
+//! session module provides bounded line transport but does not parse SQL or
+//! Orna commands.
 
 use std::fmt;
 use std::io::Write;
 
 use orna_core::value::MAX_OPAQUE_CODEC_PAYLOAD_LENGTH;
+pub mod session;
+pub use session::{MAX_INPUT_LINE_BYTES, TerminalInput, TerminalInputError, TerminalInputReader};
 
 /// The tty runtime family name (spec `docs/15-runtime-architecture.md`).
 ///
