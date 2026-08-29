@@ -237,6 +237,13 @@ fn read_server_frame<S: Read>(stream: &mut S) -> Result<Vec<u8>, InvocationConne
 mod tests {
     use std::io::{self, Cursor, Read, Write};
 
+    #[cfg(unix)]
+    use std::{
+        fs,
+        os::unix::net::{UnixListener, UnixStream},
+        thread,
+    };
+
     use super::*;
 
     struct MemoryStream {
@@ -294,6 +301,29 @@ mod tests {
             InvocationConnectionError::HandshakeRejected
         ));
         assert_eq!(stream.output, CONSTRUCTED_PROTOCOL_HELLO);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn constructed_handshake_runs_over_a_local_unix_stream() {
+        let socket_path =
+            std::env::temp_dir().join(format!("orna-connection-test-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("test Unix listener");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test Unix connection");
+            let mut hello = [0_u8; CONSTRUCTED_PROTOCOL_HELLO.len()];
+            stream.read_exact(&mut hello).expect("client hello");
+            assert_eq!(hello, CONSTRUCTED_PROTOCOL_HELLO);
+            stream
+                .write_all(&CONSTRUCTED_PROTOCOL_ACK)
+                .expect("server acknowledgement");
+        });
+
+        let mut stream = UnixStream::connect(&socket_path).expect("connect to test Unix socket");
+        InvocationConnection::<UnixStream>::handshake(&mut stream)
+            .expect("constructed handshake over Unix stream");
+        server.join().expect("Unix handshake server");
+        fs::remove_file(socket_path).expect("remove test Unix socket");
     }
 
     #[test]
