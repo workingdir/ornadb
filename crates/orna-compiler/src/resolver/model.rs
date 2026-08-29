@@ -1698,136 +1698,20 @@ impl CheckedClientFunction {
     pub fn capabilities(&self) -> &[CheckedClientCapability] {
         &self.capabilities
     }
+
     /// Returns the checked CLIENT calls in source traversal order.
+    ///
+    /// Each target is a checked identity resolved from the Orna source call.
+    /// An unresolved call cannot enter a successful checked bundle.
     pub fn called_functions(&self) -> Vec<CheckedFunctionId> {
-        let mut calls = Vec::new();
-        collect_body_calls(&self.body, &mut calls);
-        calls
-    }
-}
-fn collect_body_calls(body: &CheckedClientFunctionBody, calls: &mut Vec<CheckedFunctionId>) {
-    match body {
-        CheckedClientFunctionBody::BooleanLiteral { .. }
-        | CheckedClientFunctionBody::ExternalContract { .. } => {}
-        CheckedClientFunctionBody::Expression { expression }
-        | CheckedClientFunctionBody::StateBlock {
-            return_expression: expression,
-            ..
-        } => collect_expression_calls(expression, calls),
-        CheckedClientFunctionBody::Procedural {
-            statements,
-            return_expression,
-            ..
-        } => {
-            for statement in statements {
-                collect_expression_calls(statement.expression(), calls);
-            }
-            collect_expression_calls(return_expression, calls);
-        }
-        CheckedClientFunctionBody::ControlFlow { statements, .. } => {
-            collect_control_flow_calls(statements, calls);
-        }
-        #[cfg(test)]
-        CheckedClientFunctionBody::Unsupported => {}
-    }
-}
-
-fn collect_control_flow_calls(
-    statements: &[CheckedClientControlFlowStatement],
-    calls: &mut Vec<CheckedFunctionId>,
-) {
-    for statement in statements {
-        match statement {
-            CheckedClientControlFlowStatement::Let { expression, .. }
-            | CheckedClientControlFlowStatement::Assignment { expression, .. } => {
-                collect_expression_calls(expression, calls);
-            }
-            CheckedClientControlFlowStatement::Return { expression, .. } => {
-                if let Some(expression) = expression {
-                    collect_expression_calls(expression, calls);
-                }
-            }
-            CheckedClientControlFlowStatement::If {
-                branches,
-                else_statements,
-                ..
-            } => {
-                for branch in branches {
-                    collect_expression_calls(branch.condition(), calls);
-                    collect_control_flow_calls(branch.statements(), calls);
-                }
-                if let Some(statements) = else_statements {
-                    collect_control_flow_calls(statements, calls);
-                }
-            }
-            CheckedClientControlFlowStatement::While {
-                condition,
-                statements,
-                ..
-            } => {
-                collect_expression_calls(condition, calls);
-                collect_control_flow_calls(statements, calls);
-            }
-        }
-    }
-}
-
-fn collect_expression_calls(
-    expression: &CheckedClientExpression,
-    calls: &mut Vec<CheckedFunctionId>,
-) {
-    match expression {
-        CheckedClientExpression::Call {
-            function,
-            arguments,
-            ..
-        } => {
-            calls.push(*function);
-            for (_, argument) in arguments {
-                collect_expression_calls(argument, calls);
-            }
-        }
-        CheckedClientExpression::Await { expression, .. }
-        | CheckedClientExpression::Concat {
-            left: expression, ..
-        }
-        | CheckedClientExpression::Unary { expression, .. }
-        | CheckedClientExpression::Parenthesized { expression, .. } => {
-            collect_expression_calls(expression, calls);
-        }
-        CheckedClientExpression::Binary { left, right, .. } => {
-            collect_expression_calls(left, calls);
-            collect_expression_calls(right, calls);
-        }
-        CheckedClientExpression::Resource { operation } => {
-            for (_, argument) in operation.arguments() {
-                collect_expression_calls(argument, calls);
-            }
-        }
-        CheckedClientExpression::Action { operation } => {
-            for (_, argument) in operation.arguments() {
-                collect_expression_calls(argument, calls);
-            }
-        }
-        CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot {
-                target, options, ..
-            } => {
-                collect_expression_calls(target, calls);
-                if let Some(options) = options {
-                    collect_expression_calls(options, calls);
-                }
-            }
-            CheckedInspectOperation::Projection { snapshot, .. } => {
-                collect_expression_calls(snapshot, calls);
-            }
-        },
-        CheckedClientExpression::String { .. }
-        | CheckedClientExpression::Integer { .. }
-        | CheckedClientExpression::Boolean { .. }
-        | CheckedClientExpression::ParameterRead { .. }
-        | CheckedClientExpression::LocalRead { .. }
-        | CheckedClientExpression::FieldPath { .. } => {}
+        self.references
+            .iter()
+            .filter(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall)
+            .filter_map(|reference| match reference.target() {
+                CheckedDefinitionReferenceTarget::Function(id) => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 }
 
