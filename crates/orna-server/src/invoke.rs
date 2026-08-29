@@ -1,13 +1,3 @@
-#![allow(clippy::clone_on_copy)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::question_mark)]
-#![allow(clippy::match_like_matches_macro)]
-// Invocation execution preserves the accepted error and carrier layouts.
-#![allow(clippy::large_enum_variant)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::type_complexity)]
-// Invocation operations return the stable embedded-host error boundary.
-#![allow(clippy::result_large_err)]
 //! In-process sealed `sys.invoke` command host (ADR 0056 step 3).
 //!
 //! This module runs one `orna invoke` command against the fixed private
@@ -40,7 +30,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::{self, IsTerminal, Write},
+    io::{self, BufReader, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
@@ -100,14 +90,15 @@ use orna_protocol::{
     MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection,
     ResourceArgument, ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
-    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame, SessionStateError,
-    MAX_SESSION_FRAME_LENGTH, SESSION_HEADER_LENGTH, SESSION_MARKER,
-    decode_constructed_invocation_event_frame,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
-    decode_constructed_server_frame, decode_constructed_value, decode_resource_server_frame,
-    decode_session_server_frame, encode_constructed_client_frame, encode_resource_client_frame,
-    encode_constructed_value, encode_invoke_request,
+    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame,
+    SessionStateError, SESSION_HEADER_LENGTH, SESSION_MARKER,
+    MAX_SESSION_FRAME_LENGTH, decode_constructed_invocation_event_frame, decode_constructed_server_frame,
+    decode_constructed_value, decode_resource_server_frame, decode_session_server_frame,
+    encode_constructed_client_frame, encode_session_client_frame,
+    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
 };
+use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
@@ -156,51 +147,6 @@ const MAXIMUM_ARTIFACT_SIZE: u64 = 0;
 enum InvokeTransport {
     InProcess,
     UnixSocket(PathBuf),
-}
-/// Parses one bounded command entered through `std.cli.evaluate`.
-///
-/// The grammar deliberately reuses the installed CLI binding model:
-/// `qualified.function [--parameter=value ...]`. Values remain opaque strings
-/// until the authenticated invocation binder converts them against the target
-#[cfg(test)]
-fn parse_session_command(command: &str) -> Result<InstalledInvokeRequest, String> {
-    let mut tokens = command.split_whitespace();
-    let target = tokens
-        .next()
-        .and_then(parse_session_target)
-        .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
-    let mut arguments = Vec::new();
-    for token in tokens {
-        let pair = token
-            .strip_prefix("--")
-            .and_then(|value| value.split_once('='))
-            .filter(|(name, _)| !name.is_empty())
-            .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
-        arguments.push(CliArgumentInput::Friendly {
-            name: pair.0.to_owned(),
-            value: pair.1.to_owned(),
-        });
-    }
-    Ok(InstalledInvokeRequest::new(
-        target,
-        arguments,
-        None,
-        None,
-        true,
-        false,
-        Some(RuntimeFamily::Tty),
-    ))
-}
-#[cfg(test)]
-fn parse_session_target(value: &str) -> Option<InvocationTarget> {
-    let mut parts = value.split('.');
-    let first = parts.next()?;
-    let rest = parts.collect::<Vec<_>>();
-    if first.is_empty() || rest.is_empty() || rest.iter().any(|part| part.is_empty()) {
-        return None;
-    }
-    let name = QualifiedSemanticName::new(std::iter::once(first).chain(rest)).ok()?;
-    InvocationTarget::qualified_name(name).ok()
 }
 
 /// The media type of the `std.terminal.Document` sink: the ADR 0057 document
@@ -531,20 +477,9 @@ impl SessionBridge {
     pub(crate) fn close(&self) {
         let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
         waiting.closed = true;
-        if waiting.response.is_none() {
-            if let Some(request_invocation_id) = waiting.state.pending_request() {
-                waiting.response = Some(SessionClientFrame::InputFailed {
-                    root_invocation_id: self.root_invocation_id,
-                    call_stream: self.call_stream,
-                    request_invocation_id,
-                    error: "client.session_closed".to_owned(),
-                });
-            }
-        }
         drop(waiting);
         self.response_ready.notify_all();
     }
-
 
     pub(crate) fn try_take_outbound(&self) -> Option<SessionServerFrame> {
         self.outbound_receiver
@@ -3543,9 +3478,6 @@ fn map_resource_transport_completion(
             request.failed(SERVER_RESOURCE_SHAPE_CODE.to_owned())
         }
         Err(ResourceTransportFailure::Cancelled) => request.cancelled(),
-        Err(ResourceTransportFailure::SessionInputUnavailable) => {
-            request.failed("client.input_unavailable".to_owned())
-        }
         Err(
             ResourceTransportFailure::RootPreflightDenied
             | ResourceTransportFailure::RootSealedDispatchInternal,
@@ -3580,7 +3512,6 @@ enum ResourceTransportFailure {
     Transport,
     Shape,
     Cancelled,
-    SessionInputUnavailable,
     /// The sealed root was denied before acceptance, so no InvocationId exists
     /// to carry in a [`SealedInvocationResult::Denied`] value.
     RootPreflightDenied,
@@ -3845,10 +3776,72 @@ fn wire_frame_is_session(frame: &BrokerWireFrame) -> bool {
     frame.bytes.len() >= SESSION_MARKER.len() && &frame.bytes[..SESSION_MARKER.len()] == SESSION_MARKER
 }
 
+struct BrokerSessionDriver {
+    reader: TerminalInputReader<BufReader<io::Stdin>>,
+    output: io::Stdout,
+    state: SessionInputState,
+    root_invocation_id: InvocationId,
+    call_stream: u64,
+}
+
+impl BrokerSessionDriver {
+    fn new(root_invocation_id: InvocationId, call_stream: u64) -> Result<Self, SessionStateError> {
+        Ok(Self {
+            reader: TerminalInputReader::new(BufReader::new(io::stdin())),
+            output: io::stdout(),
+            state: SessionInputState::new(root_invocation_id, call_stream)?,
+            root_invocation_id,
+            call_stream,
+        })
+    }
+
+    fn respond_to(
+        &mut self,
+        request: InputRequested,
+    ) -> Result<SessionClientFrame, SessionStateError> {
+        if request.root_invocation_id != self.root_invocation_id
+            || request.call_stream != self.call_stream
+        {
+            return Err(SessionStateError::MismatchedIdentity);
+        }
+        self.state.request(request.request_invocation_id)?;
+        let frame = match self.reader.read_line(&mut self.output, &request.prompt) {
+            Ok(TerminalInput::Line(line)) => SessionClientFrame::InputLine {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+                line,
+            },
+            Ok(TerminalInput::Eof) => SessionClientFrame::InputEof {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+            },
+            Err(error) => SessionClientFrame::InputFailed {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+                error: terminal_input_error_code(&error).to_owned(),
+            },
+        };
+        self.state.accept(&frame)?;
+        Ok(frame)
+    }
+}
+
+fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
+    match error {
+        TerminalInputError::Io(_) => "terminal.input_io",
+        TerminalInputError::LineTooLong => "terminal.input_line_too_long",
+        TerminalInputError::InvalidUtf8 => "terminal.input_invalid_utf8",
+    }
+}
+
 async fn handle_shared_session_frame<W>(
     frame: BrokerWireFrame,
     stream: &mut W,
     root: &Option<BrokerRootState>,
+    driver: &mut Option<BrokerSessionDriver>,
 ) -> Result<(), ResourceTransportFailure>
 where
     W: AsyncWrite + Unpin,
@@ -3861,10 +3854,23 @@ where
     if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
         return Err(ResourceTransportFailure::Shape);
     }
-    let _ = stream;
-    Err(ResourceTransportFailure::SessionInputUnavailable)
+    let session_driver = match driver {
+        Some(driver) => driver,
+        slot @ None => {
+            *slot = Some(
+                BrokerSessionDriver::new(root_invocation_id, request.call_stream)
+                    .map_err(|_| ResourceTransportFailure::Shape)?,
+            );
+            slot.as_mut().expect("session driver inserted")
+        }
+    };
+    let response = session_driver
+        .respond_to(request)
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    let encoded =
+        encode_session_client_frame(&response).map_err(|_| ResourceTransportFailure::Shape)?;
+    write_shared_broker_frame(stream, &encoded).await
 }
-
 
 async fn run_shared_invoke_broker(
     stream: tokio::net::UnixStream,
@@ -3881,6 +3887,7 @@ async fn run_shared_invoke_broker(
     let mut resources: BTreeMap<u64, BrokerResourceState> = BTreeMap::new();
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
+    let mut session_driver = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
@@ -3913,7 +3920,7 @@ async fn run_shared_invoke_broker(
             BrokerNext::Command(None) => break,
             BrokerNext::Frame(Some(Ok(frame))) => {
                 let result = if wire_frame_is_session(&frame) {
-                    handle_shared_session_frame(frame, &mut stream, &root).await
+                    handle_shared_session_frame(frame, &mut stream, &root, &mut session_driver).await
                 } else {
                     handle_shared_broker_frame(
                         frame,
@@ -6186,10 +6193,6 @@ async fn host_invoke(
             InstalledInvokeErrorKind::Internal,
             "the local invoke connection returned an invalid frame".to_owned(),
         ),
-        ResourceTransportFailure::SessionInputUnavailable => InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Internal,
-            "the client session input channel is unavailable".to_owned(),
-        ),
         ResourceTransportFailure::RootPreflightDenied => {
             unreachable!("preflight denial handled before sealed result mapping")
         }
@@ -7137,6 +7140,7 @@ mod tests {
         decode_resource_client_frame, encode_constructed_server_frame,
         encode_resource_server_frame, encode_session_server_frame,
     };
+    use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
@@ -7182,18 +7186,6 @@ use orna_standard::{
             "accepted"
         );
     }
-
-    #[test]
-    fn session_bridge_close_before_request_does_not_publish_fake_response() {
-        let bridge = SessionBridge::new(InvocationId::from_bytes([0x43; 16]), 7)
-            .expect("session bridge creates");
-        bridge.close();
-        assert!(bridge.try_take_outbound().is_none());
-        let error = bridge
-            .request_input(InvocationId::from_bytes([0x43; 16]))
-            .expect_err("closed bridge rejects input");
-        assert_eq!(error, "client.input_unavailable");
-    }
     #[cfg(unix)]
     #[test]
     fn local_socket_connector_attaches_to_a_listener() {
@@ -7207,35 +7199,6 @@ use orna_standard::{
         drop(client);
         server.join().expect("local socket listener");
         fs::remove_file(socket_path).expect("remove test Unix socket");
-    }
-
-    #[test]
-    fn session_command_accepts_qualified_target_and_friendly_arguments() {
-        let request = parse_session_command("demo.echo --message=hello").expect("command parses");
-        assert_eq!(
-            request.target,
-            InvocationTarget::qualified_name(
-                QualifiedSemanticName::new(["demo", "echo"]).expect("name is valid"),
-            )
-            .expect("target is valid"),
-        );
-        assert_eq!(
-            request.arguments,
-            vec![CliArgumentInput::Friendly {
-                name: "message".to_owned(),
-                value: "hello".to_owned(),
-            }],
-        );
-    }
-
-    #[test]
-    fn session_command_rejects_missing_target_and_malformed_arguments() {
-        for command in ["", "echo", "demo.echo message=hello", "demo.echo --message"] {
-            assert!(
-                parse_session_command(command).is_err(),
-                "command should be rejected: {command:?}"
-            );
-        }
     }
 
     #[test]
