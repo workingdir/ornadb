@@ -9202,13 +9202,10 @@ fn check_client_expression(
                 },
             ))
         }
-        ClientExpression::Call {
-            callee,
-            arguments,
-            span,
-        } => {
+        ClientExpression::Call { callee, arguments, span } => {
+            let name = semantic_name(callee);
             if let Some(system_function) =
-                orna_core::system::system_function_by_name(&semantic_name(callee))
+                orna_core::system::system_function_by_name(&name)
                 && system_function.kind() == orna_core::system::SystemFunctionKind::SourceIntrospection
             {
                 if !arguments.is_empty() {
@@ -9233,7 +9230,6 @@ fn check_client_expression(
                     },
                 ));
             }
-            let name = semantic_name(callee);
             if name
                 == QualifiedSemanticName::new(["std", "cli", "input"])
                     .expect("std.cli.input is valid")
