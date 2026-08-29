@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // These internal execution seams preserve the accepted error and state layouts.
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::too_many_arguments)]
@@ -558,6 +557,7 @@ enum ResourceProducerFailureStage {
     None,
     PreAcceptance,
     PostAcceptance,
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     PostAcceptanceAudit,
     PostAcceptanceAuditCancellation,
     PostAcceptanceCancelledExitAudit,
@@ -9882,7 +9882,6 @@ fn require_audit_value<T>(
     value.ok_or_else(|| audit_invariant(record, rule))
 }
 
-#[allow(dead_code)]
 fn require_invocation_audit_value<T>(
     value: Option<T>,
     record: &str,
