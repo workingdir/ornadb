@@ -101,7 +101,6 @@ fn main() -> ExitCode {
                     let _ = writeln!(stderr, "{USAGE}");
                     ExitCode::from(2)
                 }
-                source_check::SourceCheckResult::Failure => ExitCode::from(1),
             }
         }
         Command::SourceApply(path) => match orna_server::run_installed_source_apply(&path) {
