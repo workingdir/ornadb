@@ -10634,10 +10634,11 @@ fn evaluate_expression_with_fuel(
                     ClientExpressionError::InvalidCall,
                 ))
             })?;
+            let payload = metadata.encode_with_signature();
             let value = OpaqueValue::new_source_metadata_carrier(
                 active,
                 SYS_SOURCE_FUNCTION_TYPE_ID,
-                metadata.encode(),
+                payload,
             )
             .map_err(|_| {
                 Box::new(expression_error(
