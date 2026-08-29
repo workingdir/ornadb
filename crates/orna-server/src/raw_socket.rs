@@ -5749,9 +5749,8 @@ mod tests {
             .read_exact(&mut encoded[SESSION_HEADER_LENGTH..])
             .await
             .expect("session request payload");
-        let request = match decode_session_server_frame(&encoded).expect("session request decodes") {
-            SessionServerFrame::InputRequested(request) => request,
-        };
+        let SessionServerFrame::InputRequested(request) =
+            decode_session_server_frame(&encoded).expect("session request decodes");
         assert_eq!(request.root_invocation_id, root);
         assert_eq!(request.call_stream, 1);
 
