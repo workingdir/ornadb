@@ -16,7 +16,8 @@ mod resolver;
 
 pub use prepare::{
     PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
-    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
+    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
+    prepare_source_authored_client_functions, prepare_checked_standard_upgrade,
     prepare_standard_application,
 };
 

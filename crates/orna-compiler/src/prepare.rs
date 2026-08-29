@@ -3710,6 +3710,18 @@ fn preflight(
     }
     Ok(())
 }
+/// Prepares source-authored CLIENT functions with the generic lowering path.
+///
+/// The caller supplies the active catalogue that owns the durable identities.
+/// This keeps source preparation independent of any standard-library function
+/// names or Rust-side function catalogue.
+pub fn prepare_source_authored_client_functions(
+    report: &CheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+) -> Result<DeployableRevision, PrepareError> {
+    prepare(report, expected_base, active)
+}
 
 fn standard_preflight(
     parse_report: &ParseReport,
