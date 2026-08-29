@@ -15210,6 +15210,46 @@ mod tests {
     }
 
     #[test]
+    fn checked_client_calls_follow_reference_order_and_retain_locations() {
+        let source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.first() RETURNS INTEGER AS 1; \
+            CREATE CLIENT FUNCTION app.second() RETURNS INTEGER AS 2; \
+            CREATE CLIENT FUNCTION app.wrapper() RETURNS INTEGER IS \
+                BEGIN RETURN app.first() + app.second() + app.first(); END;";
+        let report = check(&bundle([("calls.orna", source)]), &empty_catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let checked = report.checked_bundle().unwrap();
+        let wrapper = &checked.client_functions()[2];
+        let calls = wrapper.called_functions();
+        assert_eq!(calls.len(), 3);
+        let names = calls
+            .iter()
+            .map(|id| {
+                checked
+                    .function(*id)
+                    .expect("call target must be a checked CLIENT function")
+                    .name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["app.first", "app.second", "app.first"]);
+        let call_references = wrapper
+            .references()
+            .iter()
+            .filter(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall)
+            .collect::<Vec<_>>();
+        assert_eq!(call_references.len(), 3);
+        assert!(call_references
+            .windows(2)
+            .all(|references| references[0].location().span().start()
+                < references[1].location().span().start()));
+    }
+
+    #[test]
     fn lowers_ordinary_client_call_with_canonical_target_identities_and_reference() {
         let integer = ResolvedType::Scalar(StandardScalar::Integer);
         let target_id = FunctionId::from_bytes([0x61; 16]);
