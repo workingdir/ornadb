@@ -26,6 +26,8 @@ use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUs
 use orna_compiler::{
     StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::catalogue::FunctionDomain;
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
@@ -33,8 +35,6 @@ use orna_core::{
     state::{UserStateChange, UserStateWriteOutcome},
     value::RuntimeValue,
 };
-#[cfg(feature = "test-hooks")]
-use orna_core::catalogue::FunctionDomain;
 use orna_postgres::PostgresKernel;
 use orna_protocol::encode_constructed_value;
 use orna_server::{

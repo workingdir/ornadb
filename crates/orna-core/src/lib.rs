@@ -16,9 +16,9 @@ pub mod presenter;
 pub mod revision;
 pub mod security;
 pub mod source;
+pub mod source_metadata;
 pub mod state;
 pub mod system;
-pub mod source_metadata;
 pub mod types;
 pub mod value;
 

@@ -60,13 +60,13 @@ use orna_protocol::{
     CallFailure, ClientAction, ClientFrame, ConnectionError, FrameCodecError, InvocationEventBatch,
     InvocationEventRecord, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
     ResourceClientFrame, ResourceConnectionError, ResourceFrameDisposition, ResourceKind,
-    ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, ServerAction, ServerFrame,
-    SessionClientFrame, SessionCodecError, SESSION_HEADER_LENGTH, SESSION_MARKER,
+    ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, SESSION_HEADER_LENGTH,
+    SESSION_MARKER, ServerAction, ServerFrame, SessionClientFrame, SessionCodecError,
     decode_active_client_frame, decode_catalogue_client_frame, decode_client_frame,
     decode_constructed_client_frame, decode_registered_client_frame, decode_resource_client_frame,
-    decode_session_client_frame, encode_session_server_frame,
-    encode_active_server_frame, encode_catalogue_server_frame, encode_constructed_server_frame,
-    encode_registered_server_frame, encode_resource_server_frame, encode_server_frame,
+    decode_session_client_frame, encode_active_server_frame, encode_catalogue_server_frame,
+    encode_constructed_server_frame, encode_registered_server_frame, encode_resource_server_frame,
+    encode_server_frame, encode_session_server_frame,
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
@@ -1480,7 +1480,9 @@ fn sealed_result_cancellation_won(
 
 impl DispatchService for RawDispatchService {
     fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
-        self.resource_broker.as_ref().and_then(SharedInvokeBroker::session_bridge)
+        self.resource_broker
+            .as_ref()
+            .and_then(SharedInvokeBroker::session_bridge)
     }
 
     fn cancelled(&self, stream: u64) {
@@ -2799,7 +2801,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             }
             Next::SealedPull(None) => {}
             Next::Shutdown => break Ok(()),
-            Next::SessionWake => {},
+            Next::SessionWake => {}
             Next::Start => {
                 start_one_dispatch(&mut unstarted, &mut tasks);
             }
@@ -4522,9 +4524,7 @@ async fn flush_session_pending<D: DispatchService>(
     Ok(true)
 }
 
-async fn wait_for_session_outbound(
-    bridge: Option<Arc<crate::invoke::SessionBridge>>,
-) {
+async fn wait_for_session_outbound(bridge: Option<Arc<crate::invoke::SessionBridge>>) {
     match bridge {
         Some(bridge) => bridge.wait_for_outbound().await,
         None => std::future::pending::<()>().await,
@@ -4616,10 +4616,10 @@ mod tests {
         Channel, ClientFrame, Event, MAX_RESOURCE_WINDOW, ResourceCancel, ResourceCancellationCode,
         ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame,
         ResourceWindowUpdate, ServerFrame, SessionClientFrame, SessionServerFrame,
-        decode_catalogue_server_frame, decode_constructed_server_frame, decode_resource_server_frame,
-        decode_server_frame, decode_session_server_frame, encode_catalogue_client_frame,
-        encode_client_frame, encode_constructed_client_frame, encode_invoke_request,
-        encode_resource_client_frame, encode_session_client_frame,
+        decode_catalogue_server_frame, decode_constructed_server_frame,
+        decode_resource_server_frame, decode_server_frame, decode_session_server_frame,
+        encode_catalogue_client_frame, encode_client_frame, encode_constructed_client_frame,
+        encode_invoke_request, encode_resource_client_frame, encode_session_client_frame,
     };
     use orna_standard::{
         registered_opaque_codecs, retained_standard_library_snapshot,
@@ -5742,7 +5742,10 @@ mod tests {
         ));
 
         let mut encoded = vec![0_u8; SESSION_HEADER_LENGTH];
-        client.read_exact(&mut encoded).await.expect("session request header");
+        client
+            .read_exact(&mut encoded)
+            .await
+            .expect("session request header");
         let payload_length = u32::from_be_bytes(encoded[55..59].try_into().unwrap()) as usize;
         encoded.resize(SESSION_HEADER_LENGTH + payload_length, 0);
         client

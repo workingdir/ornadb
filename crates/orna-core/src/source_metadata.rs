@@ -1,8 +1,8 @@
 //! Stable, bounded metadata returned by `sys.source.current()`.
 
 use crate::{
-    revision::{DefinitionReferenceTarget, Sha256Digest},
     FunctionId, FunctionRevisionId, SourceUnitId, TypeId,
+    revision::{DefinitionReferenceTarget, Sha256Digest},
 };
 
 const MAGIC: &[u8] = b"ORNA-SOURCE/1\0";
@@ -103,15 +103,33 @@ impl SourceFunctionMetadata {
         })
     }
 
-    pub const fn function(&self) -> FunctionId { self.function }
-    pub const fn function_revision(&self) -> FunctionRevisionId { self.function_revision }
-    pub fn function_name(&self) -> &str { &self.function_name }
-    pub const fn source_unit(&self) -> SourceUnitId { self.source_unit }
-    pub const fn byte_start(&self) -> u32 { self.byte_start }
-    pub const fn byte_end(&self) -> u32 { self.byte_end }
-    pub const fn declaration_content_hash(&self) -> Sha256Digest { self.declaration_content_hash }
-    pub const fn body_kind(&self) -> SourceBodyKind { self.body_kind }
-    pub const fn return_metadata(&self) -> Option<SourceReturnMetadata> { self.return_metadata }
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+    pub const fn function_revision(&self) -> FunctionRevisionId {
+        self.function_revision
+    }
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+    pub const fn source_unit(&self) -> SourceUnitId {
+        self.source_unit
+    }
+    pub const fn byte_start(&self) -> u32 {
+        self.byte_start
+    }
+    pub const fn byte_end(&self) -> u32 {
+        self.byte_end
+    }
+    pub const fn declaration_content_hash(&self) -> Sha256Digest {
+        self.declaration_content_hash
+    }
+    pub const fn body_kind(&self) -> SourceBodyKind {
+        self.body_kind
+    }
+    pub const fn return_metadata(&self) -> Option<SourceReturnMetadata> {
+        self.return_metadata
+    }
     pub fn parameters(&self) -> &[SourceParameterMetadata] {
         &self.parameters
     }
@@ -234,7 +252,9 @@ pub enum SourceBodyKind {
 }
 
 impl SourceBodyKind {
-    const fn tag(self) -> u8 { self as u8 }
+    const fn tag(self) -> u8 {
+        self as u8
+    }
 
     fn from_tag(tag: u8) -> Result<Self, SourceMetadataError> {
         match tag {
@@ -305,10 +325,18 @@ impl SourceParameterMetadata {
             resolved_type,
         }
     }
-    pub const fn id(&self) -> crate::ParameterId { self.id }
-    pub fn name(&self) -> &str { &self.name }
-    pub const fn ordinal(&self) -> u32 { self.ordinal }
-    pub const fn resolved_type(&self) -> TypeId { self.resolved_type }
+    pub const fn id(&self) -> crate::ParameterId {
+        self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    pub const fn resolved_type(&self) -> TypeId {
+        self.resolved_type
+    }
     fn encode_into(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.id.to_bytes());
         put_string(output, &self.name);
@@ -355,12 +383,24 @@ impl SourceReferenceMetadata {
             byte_end,
         }
     }
-    pub const fn ordinal(&self) -> u32 { self.ordinal }
-    pub const fn target(&self) -> DefinitionReferenceTarget { self.target }
-    pub fn target_name(&self) -> &str { &self.target_name }
-    pub const fn source_unit(&self) -> SourceUnitId { self.source_unit }
-    pub const fn byte_start(&self) -> u32 { self.byte_start }
-    pub const fn byte_end(&self) -> u32 { self.byte_end }
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    pub const fn target(&self) -> DefinitionReferenceTarget {
+        self.target
+    }
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+    pub const fn source_unit(&self) -> SourceUnitId {
+        self.source_unit
+    }
+    pub const fn byte_start(&self) -> u32 {
+        self.byte_start
+    }
+    pub const fn byte_end(&self) -> u32 {
+        self.byte_end
+    }
     fn encode_into(&self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.ordinal.to_be_bytes());
         output.push(target_tag(self.target));
@@ -425,8 +465,9 @@ fn target_tag(target: DefinitionReferenceTarget) -> u8 {
 
 fn encode_target(output: &mut Vec<u8>, target: DefinitionReferenceTarget) {
     match target {
-        DefinitionReferenceTarget::ObjectType(id)
-        | DefinitionReferenceTarget::ValueType(id) => output.extend_from_slice(&id.to_bytes()),
+        DefinitionReferenceTarget::ObjectType(id) | DefinitionReferenceTarget::ValueType(id) => {
+            output.extend_from_slice(&id.to_bytes())
+        }
         DefinitionReferenceTarget::Expression(id) => output.extend_from_slice(&id.to_bytes()),
         DefinitionReferenceTarget::Function(id) => output.extend_from_slice(&id.to_bytes()),
         DefinitionReferenceTarget::Field { owner, field } => {
@@ -440,7 +481,9 @@ fn encode_target(output: &mut Vec<u8>, target: DefinitionReferenceTarget) {
     }
 }
 
-fn decode_target(reader: &mut Reader<'_>) -> Result<DefinitionReferenceTarget, SourceMetadataError> {
+fn decode_target(
+    reader: &mut Reader<'_>,
+) -> Result<DefinitionReferenceTarget, SourceMetadataError> {
     match reader.u8()? {
         1 => Ok(DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(
             reader.array()?,
@@ -496,7 +539,9 @@ impl Reader<'_> {
         self.offset = end;
         Ok(output)
     }
-    fn u8(&mut self) -> Result<u8, SourceMetadataError> { Ok(self.take(1)?[0]) }
+    fn u8(&mut self) -> Result<u8, SourceMetadataError> {
+        Ok(self.take(1)?[0])
+    }
     fn u32(&mut self) -> Result<u32, SourceMetadataError> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
