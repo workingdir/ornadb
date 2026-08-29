@@ -118,12 +118,14 @@ use orna_standard::{
 };
 
 pub mod capability;
+pub mod connection;
 pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod vm;
+pub use connection::{InvocationConnection, InvocationConnectionError};
 pub use endpoint::{DatabaseEndpoint, EndpointParseError, DEFAULT_REMOTE_PORT};
 
 pub use runtime_adapter::{QtRuntimeExecutor, RuntimeActionBinding};
