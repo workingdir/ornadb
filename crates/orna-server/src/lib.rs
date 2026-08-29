@@ -43,7 +43,7 @@ pub use invoke::RawResourceRequestAuthorizer;
 pub use invoke::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
     InstalledInvokeOutcome, InstalledInvokeRequest, RuntimeFamily, run_installed_invoke,
-    run_invoke_with_kernel,
+    run_installed_invoke_at, run_invoke_with_kernel,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
