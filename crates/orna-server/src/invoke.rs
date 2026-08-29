@@ -32,6 +32,7 @@ use std::{
     future::Future,
     io::{self, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -39,8 +40,8 @@ use std::{
 
 use orna_client::{
     ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest,
-    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest, QtRuntimeExecutor,
-    RuntimeLibrary, RuntimeSession,
+    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest, DatabaseEndpoint,
+    QtRuntimeExecutor, RuntimeLibrary, RuntimeSession,
 };
 use orna_core::inspect::{
     CallRow, INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, InspectInvocationNodeKind,
@@ -136,6 +137,11 @@ const CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 const MAXIMUM_FRAME_SIZE: u32 = 1_024;
 /// The first client run offers no artifact budget.
 const MAXIMUM_ARTIFACT_SIZE: u64 = 0;
+#[derive(Debug)]
+enum InvokeTransport {
+    InProcess,
+    UnixSocket(PathBuf),
+}
 
 /// The media type of the `std.terminal.Document` sink: the ADR 0057 document
 /// layout is plain text, so the client sink consumes `text/plain`.
@@ -5575,17 +5581,32 @@ const fn server_resource_failure_code(failure: orna_protocol::CallFailure) -> &'
 
 /// Runs one local sealed `orna invoke` command in-process.
 ///
-/// The host inspection retains the instance guards for the complete recovery,
-/// authentication, dispatch, and rendering operation. All result values are
-/// written to `stdout`; every diagnostic, denial, and bind failure is written
-/// to `stderr`.
-///
-/// # Errors
-///
-/// Returns [`InstalledInvokeError`] for host inspection, recovery, target
-/// resolution, binding, sealed request construction, encoding,
-/// authentication, dispatch, or rendering failures.
+/// This compatibility entry point keeps the in-process test seam.
+/// User-facing endpoint routing goes through [`run_installed_invoke_at`].
 pub fn run_installed_invoke(
+    request: InstalledInvokeRequest,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    run_installed_invoke_with_transport(InvokeTransport::InProcess, request, stdout, stderr)
+}
+
+/// Runs one installed sealed invocation against the selected database endpoint.
+///
+/// Managed local and explicit Unix endpoints use the authenticated Orna socket.
+/// Other endpoint kinds fail closed until their session bootstrap is available.
+pub fn run_installed_invoke_at(
+    endpoint: &DatabaseEndpoint,
+    request: InstalledInvokeRequest,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    let transport = endpoint_transport(endpoint)?;
+    run_installed_invoke_with_transport(transport, request, stdout, stderr)
+}
+
+fn run_installed_invoke_with_transport(
+    transport: InvokeTransport,
     request: InstalledInvokeRequest,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
@@ -5602,7 +5623,45 @@ pub fn run_installed_invoke(
             )
         })?;
 
-    runtime.block_on(host_invoke(kernel, request, stdout, stderr))
+    runtime.block_on(host_invoke(kernel, request, stdout, stderr, transport))
+}
+
+fn endpoint_transport(
+    endpoint: &DatabaseEndpoint,
+) -> Result<InvokeTransport, InstalledInvokeError> {
+    match endpoint {
+        DatabaseEndpoint::ManagedLocal { instance } if instance == "default" => Ok(
+            InvokeTransport::UnixSocket(crate::embedded::active_runtime_root().join("orna.sock")),
+        ),
+        DatabaseEndpoint::ManagedLocal { instance } => Err(endpoint_error(format!(
+            "managed local instance `{instance}` is not available in this binary",
+        ))),
+        DatabaseEndpoint::UnixSocket { path } => {
+            let expected = crate::embedded::active_runtime_root().join("orna.sock");
+            if path != &expected {
+                return Err(endpoint_error(
+                    "this Unix socket is not the current managed Orna instance",
+                ));
+            }
+            Ok(InvokeTransport::UnixSocket(path.clone()))
+        }
+        DatabaseEndpoint::LocalPath { .. } => Err(endpoint_error(
+            "local database paths need session bootstrap and are not available yet",
+        )),
+        DatabaseEndpoint::RemoteTls { .. } => Err(endpoint_error(
+            "remote Orna URIs need TLS session bootstrap and are not available yet",
+        )),
+    }
+}
+
+fn endpoint_error(message: impl Into<String>) -> InstalledInvokeError {
+    InstalledInvokeError::new(InstalledInvokeErrorKind::Authentication, message.into())
+}
+fn connect_local_socket(path: &PathBuf) -> io::Result<StandardUnixStream> {
+    let stream = StandardUnixStream::connect(path)?;
+    stream.set_read_timeout(Some(RESOURCE_FRAME_TIMEOUT))?;
+    stream.set_write_timeout(Some(RESOURCE_FRAME_TIMEOUT))?;
+    Ok(stream)
 }
 
 /// Runs one installed sealed `orna invoke` command against a caller-supplied
@@ -5621,7 +5680,7 @@ pub async fn run_invoke_with_kernel(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
-    host_invoke(kernel, request, stdout, stderr).await
+    host_invoke(kernel, request, stdout, stderr, InvokeTransport::InProcess).await
 }
 
 fn bind_installed_cli_arguments(
@@ -5695,6 +5754,7 @@ async fn host_invoke(
     request: InstalledInvokeRequest,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
+    transport: InvokeTransport,
 ) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
     let active = kernel.recover().await.map_err(|_| {
         InstalledInvokeError::new(
@@ -5746,31 +5806,51 @@ async fn host_invoke(
         )
     })?;
 
-    let (server_end, client_end) = StandardUnixStream::pair().map_err(|_| {
-        InstalledInvokeError::new(
-            InstalledInvokeErrorKind::Authentication,
-            "the local invoke connection could not be created".to_owned(),
-        )
-    })?;
     let (broker, receiver) = SharedInvokeBroker::pending();
-    let mut server_task = tokio::spawn(serve_local_raw_stream_with_broker(
-        kernel.clone(),
-        server_end,
-        LocalRawSocketResources::new(),
-        Some(broker.clone()),
-    ));
+    let (mut server_task, client_end) = match transport {
+        InvokeTransport::InProcess => {
+            let (server_end, client_end) = StandardUnixStream::pair().map_err(|_| {
+                InstalledInvokeError::new(
+                    InstalledInvokeErrorKind::Authentication,
+                    "the local invoke connection could not be created".to_owned(),
+                )
+            })?;
+            let server_task = tokio::spawn(serve_local_raw_stream_with_broker(
+                kernel.clone(),
+                server_end,
+                LocalRawSocketResources::new(),
+                Some(broker.clone()),
+            ));
+            (Some(server_task), client_end)
+        }
+        InvokeTransport::UnixSocket(path) => {
+            let client_end = connect_local_socket(&path).map_err(|_| {
+                InstalledInvokeError::new(
+                    InstalledInvokeErrorKind::Authentication,
+                    format!(
+                        "the local Orna socket could not be opened: {}",
+                        path.display()
+                    ),
+                )
+            })?;
+            (None, client_end)
+        }
+    };
     if broker
         .activate(client_end, active.clone(), registry.clone(), receiver)
         .await
         .is_err()
     {
         broker.shutdown().await;
-        if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
-            .await
-            .is_err()
-        {
-            server_task.abort();
-            let _ = server_task.await;
+        if let Some(server_task) = server_task.take() {
+            let mut server_task = server_task;
+            if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
+                .await
+                .is_err()
+            {
+                server_task.abort();
+                let _ = server_task.await;
+            }
         }
         return Err(InstalledInvokeError::new(
             InstalledInvokeErrorKind::Authentication,
@@ -5779,12 +5859,15 @@ async fn host_invoke(
     }
     let result = broker.invoke(retained).await;
     broker.shutdown().await;
-    if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
-        .await
-        .is_err()
-    {
-        server_task.abort();
-        let _ = server_task.await;
+    if let Some(server_task) = server_task.take() {
+        let mut server_task = server_task;
+        if tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, &mut server_task)
+            .await
+            .is_err()
+        {
+            server_task.abort();
+            let _ = server_task.await;
+        }
     }
     if matches!(
         result.as_ref(),
@@ -6755,6 +6838,33 @@ mod tests {
     use std::io::{Read, Write};
 
     const ENCODED_VALUE: &[u8] = b"ORV5-encoded-value";
+    #[test]
+    fn endpoint_transport_accepts_only_the_current_managed_socket() {
+        assert!(matches!(
+            endpoint_transport(&DatabaseEndpoint::managed_local()),
+            Ok(InvokeTransport::UnixSocket(_)),
+        ));
+
+        let custom = DatabaseEndpoint::UnixSocket {
+            path: PathBuf::from("/tmp/another-orna.sock"),
+        };
+        let custom_error = endpoint_transport(&custom).expect_err("custom socket must fail closed");
+        assert_eq!(
+            custom_error.to_string(),
+            "orna: invoke: this Unix socket is not the current managed Orna instance",
+        );
+
+        let remote = DatabaseEndpoint::RemoteTls {
+            host: "db.example.test".to_owned(),
+            port: 7443,
+            database: "default".to_owned(),
+        };
+        let remote_error = endpoint_transport(&remote).expect_err("remote transport is not wired");
+        assert_eq!(
+            remote_error.to_string(),
+            "orna: invoke: remote Orna URIs need TLS session bootstrap and are not available yet",
+        );
+    }
 
     fn encoded_record() -> Vec<u8> {
         [ENCODED_VALUE, b"\n"].concat()
