@@ -346,6 +346,7 @@ pub fn check_standard_application(
         parse_bundle(bundle),
         context.application,
         Some(context.standard),
+        false,
     );
     sort_standard_type_uses(&mut result.uses, &result.parse_report);
     let ApplicationCheckResult {
@@ -386,6 +387,56 @@ pub fn check_standard_application(
         checked_bundle,
     }
 }
+
+/// Checks source authored inside the protected standard namespace.
+///
+/// This entry point is reserved for the standard-library builder. Ordinary
+/// application checks continue to reject declarations under `std`.
+pub fn check_standard_source(
+    bundle: &SourceBundle,
+    base: &CatalogueSnapshot,
+    standard: &CheckedStandardLibrary,
+) -> StandardApplicationCheckReport {
+    let mut result = check_application_parsed(parse_bundle(bundle), base, Some(standard), true);
+    sort_standard_type_uses(&mut result.uses, &result.parse_report);
+    let ApplicationCheckResult {
+        parse_report,
+        diagnostics,
+        checked_bundle,
+        uses,
+    } = result;
+    let use_indices = uses
+        .iter()
+        .enumerate()
+        .map(|(index, type_use)| (type_use.kind(), index))
+        .collect();
+    let snapshot = standard.verified_snapshot();
+    let checked_bundle = checked_bundle.map(|inner| {
+        let standard_type_references =
+            collect_standard_type_references(&uses, &inner, &parse_report);
+        let preparation_evidence = model::StandardApplicationPreparationEvidence::from_canonical(
+            &uses,
+            &standard_type_references,
+        );
+        CheckedStandardApplicationBundle {
+            inner,
+            standard_catalogue_revision: snapshot.catalogue().revision(),
+            standard_library_revision: snapshot.revision(),
+            standard_library_digest: snapshot.digest(),
+            uses,
+            standard_type_references,
+            use_indices,
+            preparation_evidence,
+        }
+    });
+    StandardApplicationCheckReport {
+        standard_library: standard.clone(),
+        parse_report,
+        diagnostics,
+        checked_bundle,
+    }
+}
+
 
 /// Checks retained standard source against its verified catalogue and origins.
 ///
@@ -5215,7 +5266,7 @@ struct ResolvedServerFunctionInput<'a> {
 }
 
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
-    let result = check_application_parsed(parse_report, base, None);
+    let result = check_application_parsed(parse_report, base, None, false);
     CheckReport {
         parse_report: result.parse_report,
         diagnostics: result.diagnostics,
@@ -5234,15 +5285,18 @@ fn check_application_parsed(
     parse_report: ParseReport,
     base: &CatalogueSnapshot,
     standard: Option<&CheckedStandardLibrary>,
+    allow_protected_source: bool,
 ) -> ApplicationCheckResult {
     let mut diagnostics = parse_report.diagnostics().to_vec();
     if !diagnostics.is_empty() {
         return application_failed(parse_report, diagnostics);
     }
 
-    diagnostics.extend(check_protected_source(&parse_report));
-    if !diagnostics.is_empty() {
-        return application_failed(parse_report, diagnostics);
+    if !allow_protected_source {
+        diagnostics.extend(check_protected_source(&parse_report));
+        if !diagnostics.is_empty() {
+            return application_failed(parse_report, diagnostics);
+        }
     }
 
     let mut assignments = CheckAssignments::new();

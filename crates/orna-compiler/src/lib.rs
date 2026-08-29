@@ -16,8 +16,8 @@ mod resolver;
 
 pub use prepare::{
     PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
-    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
-    prepare_checked_standard_upgrade, prepare_standard_application,
+    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
+    prepare_standard_application, prepare_standard_source,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
@@ -75,6 +75,7 @@ pub use resolver::{
     check_standard_application, check_standard_cli_repl, check_standard_json_encode,
     check_standard_library_source, check_standard_parameter_echo,
     check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
+    check_standard_source,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.
@@ -390,7 +391,7 @@ mod tests {
 
     use orna_artifact::server_plan::{SelectBindValue, UniqueTextSelectedServerPlan};
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FunctionId, FunctionRevisionId, SchemaId,
+        CatalogueRevisionId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
         SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
@@ -523,6 +524,8 @@ mod tests {
                 source_unit: retry_unit_id,
                 schema: retry_schema_id,
                 type_id: retry_type_id,
+                function: FunctionId::new,
+                parameter: ParameterId::new,
                 function_revision: next_function_revision_id,
             },
         )
