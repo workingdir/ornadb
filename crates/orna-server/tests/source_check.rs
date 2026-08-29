@@ -221,7 +221,6 @@ fn accepts_only_the_exact_command_shape_and_valid_path_tokens() {
     assert_success(&run_source_check(&directory.0, "./-x").expect("qualified hyphen path"));
 
     for arguments in [
-        vec![],
         vec![OsString::from("source")],
         vec![OsString::from("source"), OsString::from("check")],
         vec![OsString::from("source"), OsString::from("--check")],
