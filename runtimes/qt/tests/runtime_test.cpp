@@ -38,6 +38,9 @@ struct EventState {
     std::size_t surface_closed = 0;
     std::size_t surface_close_attempts = 0;
     bool reject_surface_closed = false;
+    bool enforce_queue_capacity = false;
+    std::size_t queued_callbacks = 0;
+    std::size_t callback_queue_capacity = 1;
     std::size_t actions = 0;
     std::string action_input_type;
     OrnaSurfaceHandle action_surface = 0;
@@ -58,6 +61,13 @@ OrnaStatus emit_event(void *context, OrnaRuntimeHandle, const OrnaRuntimeEventV1
             ++state->surface_close_attempts;
             if (state->reject_surface_closed) {
                 return OrnaStatus{ORNA_STATUS_INTERNAL, view("test callback rejected close")};
+            }
+            if (state->enforce_queue_capacity
+                && state->queued_callbacks >= state->callback_queue_capacity) {
+                return OrnaStatus{ORNA_STATUS_INTERNAL, view("test callback queue is full")};
+            }
+            if (state->enforce_queue_capacity) {
+                ++state->queued_callbacks;
             }
             ++state->surface_closed;
             state->closed_surfaces.push_back(event->as.surface_closed.surface);
@@ -631,19 +641,21 @@ int main() {
     REQUIRE(capture(api, runtime, second_surface, after_retired_action_unbind).code == ORNA_STATUS_OK);
     REQUIRE(after_retired_action_unbind == second_owned_state);
 
-    // A rejecting callback models a full bounded client event queue. A
-    // shutdown failure must remain retryable after the caller drains it.
+    // A bounded client event queue is pre-filled before shutdown. The
+    // provider must report failure, then succeed after the caller drains it.
     const auto callbacks_before_failed_shutdown = events.callbacks;
     const auto close_attempts_before_failed_shutdown = events.surface_close_attempts;
-    events.reject_surface_closed = true;
+    events.enforce_queue_capacity = true;
+    events.queued_callbacks = events.callback_queue_capacity;
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_INTERNAL);
     REQUIRE(events.surface_close_attempts == close_attempts_before_failed_shutdown + 1);
     REQUIRE(events.callbacks == callbacks_before_failed_shutdown + 1);
     REQUIRE(events.surface_closed == 2);
 
-    events.reject_surface_closed = false;
+    events.queued_callbacks = 0;
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_OK);
     REQUIRE(events.surface_closed == 3);
+    REQUIRE(events.queued_callbacks == 1);
     REQUIRE(events.closed_surfaces.size() == 3);
     REQUIRE(events.closed_surfaces[2] == second_surface);
     const auto callbacks_after_shutdown = events.callbacks;
