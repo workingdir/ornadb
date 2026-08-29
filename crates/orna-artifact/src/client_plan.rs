@@ -292,6 +292,8 @@ const NODE_INSPECT: u8 = 13;
 const NODE_UNARY: u8 = 14;
 const NODE_BINARY: u8 = 15;
 const NODE_SOURCE_INTROSPECTION: u8 = 16;
+const NODE_INPUT: u8 = 17;
+const NODE_EVALUATE: u8 = 18;
 
 const INSPECT_OPERATION_SNAPSHOT: u8 = 1;
 const INSPECT_OPERATION_PROJECTION: u8 = 2;
@@ -742,6 +744,13 @@ pub enum ClientExpressionNode {
     },
     /// A read-only view of the enclosing function's source metadata.
     SourceIntrospection,
+    /// Reads one bounded line from the active client session.
+    Input,
+    /// Evaluates one bounded CLI command through the active session.
+    Evaluate {
+        /// The command expression.
+        expression: Box<ClientExpressionNode>,
+    },
     ParameterRead {
         /// The read parameter identity.
         parameter: ParameterId,
@@ -2939,6 +2948,17 @@ fn encode_control_flow_expression(
             )?;
         }
         ClientExpressionNode::SourceIntrospection => writer.push(NODE_SOURCE_INTROSPECTION),
+        ClientExpressionNode::Input => writer.push(NODE_INPUT),
+        ClientExpressionNode::Evaluate { expression } => {
+            writer.push(NODE_EVALUATE);
+            encode_control_flow_expression(
+                expression,
+                depth + 1,
+                writer,
+                expression_count,
+                resource_count,
+            )?;
+        }
     }
     Ok(())
 }
@@ -3180,6 +3200,15 @@ fn decode_control_flow_expression(
             })
         }
         NODE_SOURCE_INTROSPECTION => Ok(ClientExpressionNode::SourceIntrospection),
+        NODE_INPUT => Ok(ClientExpressionNode::Input),
+        NODE_EVALUATE => Ok(ClientExpressionNode::Evaluate {
+            expression: Box::new(decode_control_flow_expression(
+                reader,
+                depth + 1,
+                expression_count,
+                resource_count,
+            )?),
+        }),
         NODE_EXTERNAL_CONTRACT => {
             let length = reader.u32()? as usize;
             let identity = std::str::from_utf8(reader.bytes(length)?)
@@ -3685,6 +3714,17 @@ fn validate_control_flow_expression_shape(
                 true,
             )?;
         }
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            validate_control_flow_expression_shape(
+                expression,
+                locals,
+                initialized,
+                false,
+                false,
+                true,
+            )?;
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -3762,6 +3802,8 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
             expression_contains_inspect(left) || expression_contains_inspect(right)
         }
         ClientExpressionNode::Unary { expression, .. } => expression_contains_inspect(expression),
+        ClientExpressionNode::Input => false,
+        ClientExpressionNode::Evaluate { expression } => expression_contains_inspect(expression),
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -3880,6 +3922,10 @@ fn validate_external_contract_placement_inner(
             validate_external_contract_placement_inner(right, false, depth + 1, count)
         }
         ClientExpressionNode::Unary { expression, .. } => {
+            validate_external_contract_placement_inner(expression, false, depth + 1, count)
+        }
+        ClientExpressionNode::Input => Ok(()),
+        ClientExpressionNode::Evaluate { expression } => {
             validate_external_contract_placement_inner(expression, false, depth + 1, count)
         }
         ClientExpressionNode::String { .. }
@@ -4172,6 +4218,20 @@ fn encode_expression_node_with_resources(
             writer.extend(bytes);
         }
         ClientExpressionNode::SourceIntrospection => writer.push(NODE_SOURCE_INTROSPECTION),
+        ClientExpressionNode::Input => writer.push(NODE_INPUT),
+        ClientExpressionNode::Evaluate { expression } => {
+            writer.push(NODE_EVALUATE);
+            encode_expression_node_with_resources(
+                expression,
+                writer,
+                depth + 1,
+                count,
+                allow_resources,
+                allow_local,
+                allow_inspect,
+                resource_count,
+            )?;
+        }
         ClientExpressionNode::Unary { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
         }
@@ -4611,6 +4671,10 @@ fn validate_procedural_local_reads(
         ClientExpressionNode::Binary { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_BINARY));
         }
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            validate_procedural_local_reads(expression, initialized_locals)?;
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -4706,6 +4770,10 @@ fn validate_procedural_expression(
         ClientExpressionNode::Unary { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
         }
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            validate_procedural_expression(expression, locals, false, false, true)?;
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -4767,6 +4835,10 @@ fn validate_resource_await_placement(
         ClientExpressionNode::Concat { left, right } => {
             validate_resource_await_placement(left, false, false)?;
             validate_resource_await_placement(right, false, false)?;
+        }
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            validate_resource_await_placement(expression, false, false)?;
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
@@ -5018,6 +5090,18 @@ fn decode_expression_node_with_resources(
             })
         }
         NODE_SOURCE_INTROSPECTION => Ok(ClientExpressionNode::SourceIntrospection),
+        NODE_INPUT => Ok(ClientExpressionNode::Input),
+        NODE_EVALUATE => Ok(ClientExpressionNode::Evaluate {
+            expression: Box::new(decode_expression_node_with_resources(
+                reader,
+                depth + 1,
+                count,
+                allow_resources,
+                allow_local,
+                allow_inspect,
+                resource_count,
+            )?),
+        }),
         tag => Err(ClientPlanError::InvalidExpressionNode(tag)),
     }
 }
