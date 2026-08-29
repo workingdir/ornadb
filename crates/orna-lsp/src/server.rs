@@ -265,6 +265,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/references" => request_references(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
+        "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
         "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
