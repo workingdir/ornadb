@@ -5621,7 +5621,7 @@ fn evaluate_plan(
                 .map_err(Box::new)
             }
         }
-        ClientReturnShape::Inspect(expected) => {
+        ClientReturnShape::Inspect(expected) | ClientReturnShape::Source(expected) => {
             let plan = ExpressionClientPlan::decode(payload).map_err(|source| {
                 Box::new(ClientExecutionError::InvalidArtifact { context, source })
             })?;
@@ -10492,7 +10492,7 @@ fn evaluate_expression_with_fuel(
                     ClientExpressionError::InvalidCall,
                 ))
             })?;
-            let value = OpaqueValue::new_inspect_carrier(
+            let value = OpaqueValue::new_source_metadata_carrier(
                 active,
                 SYS_SOURCE_FUNCTION_TYPE_ID,
                 metadata.encode(),
@@ -10871,10 +10871,13 @@ fn runtime_value_matches(
             }
         }
         ResolvedType::Named(type_id) => {
+            if type_id == SYS_SOURCE_FUNCTION_TYPE_ID {
+                return matches!(
+                    value,
+                    RuntimeValue::Opaque(opaque) if opaque.opaque_type() == type_id
+                );
+            }
             if type_id == SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID {
-                // V1 has no registered options codec. Never admit an opaque
-                // payload merely because its type id is sealed; supplied
-                // options therefore fail closed instead of being discarded.
                 return false;
             }
             if is_inspect_carrier_type(type_id) {
@@ -10900,7 +10903,6 @@ fn runtime_value_matches(
         }
     }
 }
-
 fn active_type_is_known(active: &ActiveDatabaseRevision, resolved: ResolvedType) -> bool {
     match resolved {
         ResolvedType::Scalar(_) => true,
@@ -11256,6 +11258,7 @@ enum ClientReturnShape {
     StreamControlFlow(ResolvedType),
     Action(TypeId),
     Inspect(ResolvedType),
+    Source(ResolvedType),
     OtherValue,
     Unsupported,
 }
@@ -11332,8 +11335,18 @@ fn classify_client_return(
             ClientReturnShape::Unsupported
         };
     }
-    if resolved_type.reference_target().is_some() || resolved_type.named_type().is_some() {
+    if resolved_type.reference_target().is_some() {
         return ClientReturnShape::Unsupported;
+    }
+    if resolved_type.named_type() == Some(SYS_SOURCE_FUNCTION_TYPE_ID) {
+        return if matches!(
+            artifact_version,
+            EXPRESSION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+        ) {
+            ClientReturnShape::Source(resolved_type)
+        } else {
+            ClientReturnShape::Unsupported
+        };
     }
     if let Some(type_id) = resolved_type.value_type() {
         if artifact_version == orna_artifact::client_plan::ACTION_FORMAT_VERSION
@@ -11492,6 +11505,7 @@ fn validate_selected_references(
                     | ClientReturnShape::StreamControlFlow(_)
                     | ClientReturnShape::Action(_)
                     | ClientReturnShape::Inspect(_)
+                    | ClientReturnShape::Source(_)
             ) {
                 if selected
                     .iter()
@@ -11532,19 +11546,8 @@ fn validate_selected_references(
                                     && definition
                                         .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
                             }
-                            ClientReturnShape::Expression(_)
-                            | ClientReturnShape::StreamExpression(_)
-                            | ClientReturnShape::State(_)
-                            | ClientReturnShape::StreamState(_)
-                            | ClientReturnShape::Resource(_)
-                            | ClientReturnShape::StreamResource(_)
-                            | ClientReturnShape::Procedural(_)
-                            | ClientReturnShape::StreamProcedural(_)
-                            | ClientReturnShape::ControlFlow(_)
-                            | ClientReturnShape::StreamControlFlow(_)
-                            | ClientReturnShape::Inspect(_)
-                            | ClientReturnShape::OtherValue
-                            | ClientReturnShape::Unsupported => false,
+                            ClientReturnShape::Source(_) => type_id == SYS_SOURCE_FUNCTION_TYPE_ID,
+                            _ => false,
                         }
                     }
                     _ => false,
@@ -12102,6 +12105,7 @@ fn validate_artifact(
         }
         ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
         ClientReturnShape::Inspect(_) => orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
+        ClientReturnShape::Source(_) => EXPRESSION_FORMAT_VERSION,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };
@@ -21958,6 +21962,35 @@ CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
 
         assert!(matches!(result.value(), RuntimeValue::Opaque(_)));
         assert!(executor.executed.is_empty());
+    }
+
+    #[test]
+    fn source_introspection_executes_from_source_authored_client_function() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; \
+             CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
+             RETURN sys.source.current();",
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|candidate| candidate.name().to_string() == "app.describe")
+            .expect("the source-authored function is present")
+            .id();
+
+        let result = evaluate_client_function(&active, function)
+            .expect("source introspection must execute through the public entry point");
+        let RuntimeValue::Opaque(value) = result.value() else {
+            panic!("source introspection must return an opaque metadata value");
+        };
+        let metadata = orna_core::source_metadata::SourceFunctionMetadata::decode(
+            value.canonical_payload(),
+        )
+        .expect("the returned payload must decode as source metadata");
+        assert_eq!(metadata.function(), function);
+        assert_eq!(metadata.function_name(), "app.describe");
     }
 
     #[test]
