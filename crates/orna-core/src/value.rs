@@ -1231,7 +1231,6 @@ fn compare_standard_primitive_map_key(left: &RuntimeValue, right: &RuntimeValue)
     }
 }
 
-
 /// One named immutable record value validated against an active catalogue.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordValue {
