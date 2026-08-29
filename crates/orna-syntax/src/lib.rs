@@ -799,6 +799,20 @@ pub enum StateScope {
     User,
 }
 
+impl ClientFunctionBody {
+    /// Return the parsed procedural statements in a CLIENT block.
+    #[must_use]
+    pub fn procedural_statements(&self) -> Option<&[ClientProceduralStatement]> {
+        match self {
+            Self::StateBlock(block) => Some(&block.statements),
+            Self::BooleanLiteral { .. }
+            | Self::Expression { .. }
+            | Self::ReturnExpression { .. }
+            | Self::ExternalContract { .. } => None,
+        }
+    }
+}
+
 /// The initial value declaration for one CLIENT state slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateDefault {
@@ -6665,11 +6679,15 @@ mod tests {
         assert_eq!(parsed.client_functions().len(), 2);
 
         let reset = &parsed.client_functions()[0];
-        let ClientFunctionBody::StateBlock(block) = &reset.body else {
-            panic!("expected a state block body");
-        };
-        assert!(block.states.is_empty());
-        assert!(block.return_expression.is_none());
+        assert!(matches!(
+            &reset.body,
+            ClientFunctionBody::StateBlock(block) if block.states.is_empty()
+        ));
+        assert!(reset.body.procedural_statements().is_some_and(|statements| {
+            statements.is_empty()
+        }));
+        assert!(reset.body.as_expression().is_none());
+        assert!(reset.body.as_boolean_literal().is_none());
 
         let touched = &parsed.client_functions()[1];
         let ClientFunctionBody::StateBlock(block) = &touched.body else {
