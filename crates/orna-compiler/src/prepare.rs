@@ -7289,10 +7289,13 @@ impl<'a> CandidateBuilder<'a> {
             CheckedClientExpression::SourceIntrospection { .. } => {
                 ClientExpressionNode::SourceIntrospection
             }
-            CheckedClientExpression::Input { .. } | CheckedClientExpression::Evaluate { .. } => {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT session expressions are not supported in artefact plans",
-                });
+            CheckedClientExpression::Input { .. } => ClientExpressionNode::Input,
+            CheckedClientExpression::Evaluate { expression, .. } => {
+                ClientExpressionNode::Evaluate {
+                    expression: Box::new(
+                        self.client_expression_node_with_locals(expression, local_ids)?,
+                    ),
+                }
             }
             CheckedClientExpression::Unary {
                 operator,
@@ -7709,7 +7712,6 @@ impl<'a> CandidateBuilder<'a> {
                 self.append_client_expression_call_references(right, calls)?;
             }
             CheckedClientExpression::Input { .. }
-            | CheckedClientExpression::Evaluate { .. }
             | CheckedClientExpression::SourceIntrospection { .. }
             | CheckedClientExpression::String { .. }
             | CheckedClientExpression::Integer { .. }

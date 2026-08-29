@@ -9906,7 +9906,9 @@ fn validate_control_flow_expression_type(
             }
             Ok(None)
         }
-        ClientExpressionNode::SourceIntrospection => Ok(None),
+        ClientExpressionNode::SourceIntrospection
+        | ClientExpressionNode::Input
+        | ClientExpressionNode::Evaluate { .. } => Ok(None),
         ClientExpressionNode::ExternalContract { .. } => Ok(None),
     }
 }
@@ -10466,6 +10468,9 @@ fn evaluate_expression_with_fuel(
             })?;
             Ok(RuntimeValue::Opaque(value))
         }
+        ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => Err(Box::new(
+            expression_error(context, ClientExpressionError::InvalidCall),
+        )),
         ClientExpressionNode::ExternalContract { identity } => {
             if let Some(spec) = standard_ui_constructor_spec(active, context, identity) {
                 return evaluate_standard_ui_constructor(active, context, spec, arguments);
@@ -11938,6 +11943,7 @@ fn collect_client_expression_call_targets(
         ClientExpressionNode::Unary { expression, .. } => {
             collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
         }
+        ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => {}
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -25542,6 +25548,7 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             ClientExpressionNode::Unary { expression, .. } => {
                 collect_fixture_expression_call_targets(expression, targets);
             }
+            ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => {}
             ClientExpressionNode::String { .. }
             | ClientExpressionNode::Integer { .. }
             | ClientExpressionNode::Boolean { .. }
