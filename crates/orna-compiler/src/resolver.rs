@@ -416,7 +416,9 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
-            STANDARD_LIBRARY_V9_REVISION_ID => check_standard_library_source_v9(snapshot),
+            STANDARD_LIBRARY_V10_REVISION_ID | STANDARD_LIBRARY_V9_REVISION_ID => {
+                check_standard_library_source_v9(snapshot)
+            }
             STANDARD_LIBRARY_V8_REVISION_ID => check_standard_library_source_v8(snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
             STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
