@@ -22006,7 +22006,12 @@ CREATE CLIENT FUNCTION math.clamp(p_value INTEGER, p_min INTEGER, p_max INTEGER)
         };
         let argument = |function: FunctionId, ordinal: usize, value: RuntimeValue| {
             FunctionArgument::new(
-                active.catalogue().function_by_id(function).unwrap().parameters()[ordinal].id(),
+                active
+                    .catalogue()
+                    .function_by_id(function)
+                    .unwrap()
+                    .parameters()[ordinal]
+                    .id(),
                 value,
             )
             .unwrap()
@@ -22024,14 +22029,22 @@ CREATE CLIENT FUNCTION math.clamp(p_value INTEGER, p_min INTEGER, p_max INTEGER)
         assert_eq!(
             value(
                 "math.increment",
-                vec![argument(find("math.increment"), 0, RuntimeValue::Integer(4))],
+                vec![argument(
+                    find("math.increment"),
+                    0,
+                    RuntimeValue::Integer(4)
+                )],
             ),
             RuntimeValue::Integer(5)
         );
         assert_eq!(
             value(
                 "math.decrement",
-                vec![argument(find("math.decrement"), 0, RuntimeValue::Integer(4))],
+                vec![argument(
+                    find("math.decrement"),
+                    0,
+                    RuntimeValue::Integer(4)
+                )],
             ),
             RuntimeValue::Integer(3)
         );

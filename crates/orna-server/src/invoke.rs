@@ -41,8 +41,9 @@ use std::{
 use orna_client::{
     ClientExecutionContext, ClientExternalContractRequest, ClientInspectOperation,
     ClientInspectRequest, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
-    DatabaseEndpoint,
-    QtRuntimeExecutor, RuntimeLibrary, RuntimeSession,
+    ClientStateStore, DatabaseEndpoint, QtRuntimeExecutor, RuntimeLibrary, RuntimeSession,
+    capability::LocalCapabilityGrantSet,
+    evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
 };
 use orna_core::inspect::{
     CallRow, INSPECT_RENDER_CARRIER_SIGNATURE, INSPECT_RENDER_CONTRACT, InspectInvocationNodeKind,
@@ -71,13 +72,11 @@ use orna_core::{
     },
     invocation_binding::{CliArgumentInput, bind_cli_arguments},
     revision::{ActiveDatabaseRevision, ExecutableArtifactKind, VerifiedStandardLibrarySnapshot},
-    security::AuthenticatedSession,
-    system::{
-        SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INVOKE_FUNCTION_ID,
-    },
-    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
+    security::{AuthenticatedSession, SecuritySnapshot},
+    types::{ResolvedType, TypeDescriptor, TypeDescriptorKind},
     value::{
-        ConstructedValueKind, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RuntimeValue,
+        ConstructedValueKind, FunctionArgument, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError,
+        RuntimeValue,
     },
 };
 use orna_postgres::{
@@ -86,17 +85,16 @@ use orna_postgres::{
     ResourceCredit, SealedInvocationResult,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, Event, InvocationEventRecord, MAX_CHANNEL_WINDOW,
-    MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection,
-    ResourceArgument, ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
-    ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
-    ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
-    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame,
-    SessionStateError, SESSION_HEADER_LENGTH, SESSION_MARKER,
-    MAX_SESSION_FRAME_LENGTH, decode_constructed_invocation_event_frame, decode_constructed_server_frame,
-    decode_constructed_value, decode_resource_server_frame, decode_session_server_frame,
-    encode_constructed_client_frame, encode_session_client_frame,
-    encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
+    CallFailure, Channel, ClientFrame, Event, InputRequested, InvocationEventRecord,
+    MAX_CHANNEL_WINDOW, MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW,
+    MAX_SESSION_FRAME_LENGTH, ProtocolConnection, ResourceArgument, ResourceCancel,
+    ResourceCancellationCode, ResourceClientFrame, ResourceKind as ProtocolResourceKind,
+    ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, ResourceWindowUpdate,
+    SESSION_HEADER_LENGTH, SESSION_MARKER, ServerFrame, SessionClientFrame, SessionInputState,
+    SessionServerFrame, SessionStateError, decode_constructed_invocation_event_frame,
+    decode_constructed_server_frame, decode_constructed_value, decode_resource_server_frame,
+    decode_session_server_frame, encode_constructed_client_frame, encode_constructed_value,
+    encode_invoke_request, encode_resource_client_frame, encode_session_client_frame,
 };
 use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
@@ -104,9 +102,9 @@ use orna_standard::{
     STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Notify;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Notify;
 
 use crate::{
     EmbeddedHostError, LocalRawSocketResources, inspect_current_embedded_host,
@@ -426,6 +424,41 @@ pub(crate) struct SharedInvokeBroker {
     resource_expectations: BrokerResourceExpectations,
     next_resource_stream_id: std::sync::Arc<std::sync::Mutex<u64>>,
     resource_terminal_provenance: BrokerResourceProvenance,
+    dynamic_context: Arc<Mutex<Option<DynamicInvocationContext>>>,
+}
+#[derive(Clone)]
+struct DynamicInvocationContext {
+    active: ActiveDatabaseRevision,
+    security: SecuritySnapshot,
+    session: AuthenticatedSession,
+    root_invocation: InvocationId,
+}
+
+impl SharedInvokeBroker {
+    pub(crate) fn bind_dynamic_context(
+        &self,
+        active: ActiveDatabaseRevision,
+        security: SecuritySnapshot,
+        session: AuthenticatedSession,
+        root_invocation: InvocationId,
+    ) {
+        *self
+            .dynamic_context
+            .lock()
+            .expect("dynamic invocation context lock") = Some(DynamicInvocationContext {
+            active,
+            security,
+            session,
+            root_invocation,
+        });
+    }
+
+    fn dynamic_context(&self) -> Option<DynamicInvocationContext> {
+        self.dynamic_context
+            .lock()
+            .expect("dynamic invocation context lock")
+            .clone()
+    }
 }
 
 pub(crate) struct SessionBridge {
@@ -442,6 +475,55 @@ struct SessionBridgeWaiting {
     state: SessionInputState,
     response: Option<SessionClientFrame>,
     closed: bool,
+}
+
+fn dynamic_invocation_target(
+    active: &ActiveDatabaseRevision,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
+    resolved: &ResolvedTarget<'_>,
+) -> orna_core::security::InvocationTarget {
+    if standard.is_some_and(|snapshot| {
+        snapshot
+            .catalogue()
+            .function_by_id(resolved.function.id())
+            .is_some()
+    }) && active
+        .catalogue()
+        .function_by_id(resolved.function.id())
+        .is_none()
+    {
+        let standard = standard.expect("standard target has a verified snapshot");
+        let executable = standard
+            .executables()
+            .iter()
+            .find(|candidate| candidate.function() == resolved.function.id())
+            .expect("resolved standard target has an executable");
+        orna_core::security::InvocationTarget::verified_standard(
+            resolved.function.id(),
+            active.pair(),
+            standard.revision(),
+            executable.revision().id(),
+        )
+    } else {
+        orna_core::security::InvocationTarget::new(resolved.function.id(), active.pair())
+    }
+}
+
+fn dynamic_invocation_arguments(
+    arguments: Vec<InvocationArgument>,
+) -> Result<Vec<FunctionArgument>, String> {
+    arguments
+        .into_iter()
+        .map(|argument| {
+            let orna_core::invocation::InvocationParameterSelector::ParameterId(parameter) =
+                argument.selector()
+            else {
+                return Err("client.dynamic_invocation_invalid_command".to_owned());
+            };
+            FunctionArgument::new(*parameter, argument.value().value().clone())
+                .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())
+        })
+        .collect()
 }
 
 impl SessionBridge {
@@ -520,7 +602,10 @@ impl SessionBridge {
         }
     }
 
-    pub(crate) fn accept_response(&self, frame: SessionClientFrame) -> Result<(), SessionStateError> {
+    pub(crate) fn accept_response(
+        &self,
+        frame: SessionClientFrame,
+    ) -> Result<(), SessionStateError> {
         let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
         if waiting.closed {
             return Err(SessionStateError::WrongState);
@@ -553,7 +638,6 @@ impl SessionBridge {
     pub(crate) async fn wait_for_outbound(&self) {
         self.outbound_notify.notified().await;
     }
-
 }
 
 /// Test-only authorisation state for manually driven installed resource
@@ -2851,6 +2935,59 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             .request_input_with_cancel(root_invocation_id, || self.cancellation.is_requested())
             .map(RuntimeValue::Text)
     }
+    fn evaluate_command(
+        &mut self,
+        _context: ClientExecutionContext,
+        command: &str,
+    ) -> Result<RuntimeValue, String> {
+        let Some(broker) = self.broker.as_ref() else {
+            return Err("client.dynamic_invocation_unavailable".to_owned());
+        };
+        let Some(dynamic) = broker.dynamic_context() else {
+            return Err("client.dynamic_invocation_unavailable".to_owned());
+        };
+        if self.cancellation.is_requested() {
+            return Err("client.dynamic_invocation_cancelled".to_owned());
+        }
+        let request = parse_session_command(command)?;
+        let standard = dynamic.active.catalogue_hash_context().standard();
+        let resolved = resolve_target(&dynamic.active, standard, &request.target)
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        if resolved.function.domain() != FunctionDomain::Client {
+            return Err("client.dynamic_invocation_target_not_client".to_owned());
+        }
+        let target = dynamic_invocation_target(&dynamic.active, standard, &resolved);
+        let ExecuteDecision::Allowed(authorisation) =
+            dynamic.security.authorise_execute(&dynamic.session, target)
+        else {
+            return Err("client.dynamic_invocation_denied".to_owned());
+        };
+        let arguments = bind_installed_cli_arguments(
+            dynamic.active.catalogue(),
+            standard,
+            resolved.function,
+            &request.arguments,
+        )
+        .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let arguments = dynamic_invocation_arguments(arguments)?;
+        let mut state = ClientStateStore::new();
+        let grants = LocalCapabilityGrantSet::new();
+        let result =
+            evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+                &authorisation,
+                &arguments,
+                &[],
+                &grants,
+                &mut state,
+                dynamic.root_invocation,
+                self,
+            )
+            .map_err(|_| "client.dynamic_invocation_failed".to_owned())?;
+        if self.cancellation.is_requested() {
+            return Err("client.dynamic_invocation_cancelled".to_owned());
+        }
+        Ok(result.into_value())
+    }
 
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
@@ -3653,6 +3790,7 @@ impl SharedInvokeBroker {
                 resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 next_resource_stream_id: std::sync::Arc::new(std::sync::Mutex::new(1)),
                 resource_terminal_provenance: Arc::new(Mutex::new(BTreeMap::new())),
+                dynamic_context: Arc::new(Mutex::new(None)),
             },
             receiver,
         )
@@ -3708,8 +3846,11 @@ impl SharedInvokeBroker {
         self.clear_session_bridge();
         self.clear_resource_expectations();
         self.clear_resource_terminal_provenance();
+        *self
+            .dynamic_context
+            .lock()
+            .expect("dynamic invocation context lock") = None;
     }
-
     async fn invoke(
         &self,
         request: orna_protocol::RetainedInvokeRequest,
@@ -3743,9 +3884,9 @@ where
         RESOURCE_FRAME_TIMEOUT,
         stream.read_exact(&mut header[..SESSION_MARKER.len()]),
     )
-        .await
-        .map_err(|_| ResourceTransportFailure::Transport)?
-        .map_err(|_| ResourceTransportFailure::Transport)?;
+    .await
+    .map_err(|_| ResourceTransportFailure::Transport)?
+    .map_err(|_| ResourceTransportFailure::Transport)?;
     let session = &header[..SESSION_MARKER.len()] == SESSION_MARKER;
     if !session {
         tokio::time::timeout(
@@ -3834,7 +3975,8 @@ where
 }
 
 fn wire_frame_is_session(frame: &BrokerWireFrame) -> bool {
-    frame.bytes.len() >= SESSION_MARKER.len() && &frame.bytes[..SESSION_MARKER.len()] == SESSION_MARKER
+    frame.bytes.len() >= SESSION_MARKER.len()
+        && &frame.bytes[..SESSION_MARKER.len()] == SESSION_MARKER
 }
 
 struct BrokerSessionDriver {
@@ -3912,8 +4054,7 @@ async fn read_session_input(
 ) -> Result<SessionClientFrame, SessionStateError> {
     let read = tokio::task::spawn_blocking(move || {
         let mut driver = driver.lock().expect("session driver lock");
-        driver
-            .request(request.clone())?;
+        driver.request(request.clone())?;
         match driver.read_line(&request.prompt) {
             Ok(input) => driver.respond(request, input),
             Err(error) => {
@@ -3928,8 +4069,7 @@ async fn read_session_input(
             }
         }
     });
-    read.await
-        .map_err(|_| SessionStateError::WrongState)?
+    read.await.map_err(|_| SessionStateError::WrongState)?
 }
 fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
     match error {
@@ -3938,7 +4078,6 @@ fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
         TerminalInputError::InvalidUtf8 => "terminal.input_invalid_utf8",
     }
 }
-
 
 async fn run_shared_invoke_broker(
     stream: tokio::net::UnixStream,
@@ -3956,8 +4095,9 @@ async fn run_shared_invoke_broker(
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
     let mut session_driver: Option<Arc<Mutex<BrokerSessionDriver>>> = None;
-    let mut pending_session_input:
-        Option<tokio::task::JoinHandle<Result<SessionClientFrame, SessionStateError>>> = None;
+    let mut pending_session_input: Option<
+        tokio::task::JoinHandle<Result<SessionClientFrame, SessionStateError>>,
+    > = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
@@ -4007,7 +4147,10 @@ async fn run_shared_invoke_broker(
                     Ok(encoded) => encoded,
                     Err(_) => break,
                 };
-                if write_shared_broker_frame(&mut stream, &encoded).await.is_err() {
+                if write_shared_broker_frame(&mut stream, &encoded)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -4021,12 +4164,12 @@ async fn run_shared_invoke_broker(
                             Ok(frame) => frame,
                             Err(_) => break,
                         };
-                    let Some(root_invocation_id) =
-                        root.as_ref().and_then(|state| state.invocation)
+                    let Some(root_invocation_id) = root.as_ref().and_then(|state| state.invocation)
                     else {
                         break;
                     };
-                    if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
+                    if request.root_invocation_id != root_invocation_id || request.call_stream == 0
+                    {
                         break;
                     }
                     let session_driver = match &session_driver {
@@ -4043,10 +4186,8 @@ async fn run_shared_invoke_broker(
                             driver
                         }
                     };
-                    pending_session_input = Some(tokio::spawn(read_session_input(
-                        request,
-                        session_driver,
-                    )));
+                    pending_session_input =
+                        Some(tokio::spawn(read_session_input(request, session_driver)));
                 } else {
                     let result = handle_shared_broker_frame(
                         frame,
@@ -7271,7 +7412,7 @@ mod tests {
         encode_resource_server_frame, encode_session_server_frame,
     };
     use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
-use orna_standard::{
+    use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
     use std::io::{Read, Write};
@@ -7341,7 +7482,10 @@ use orna_standard::{
             })
             .expect("matching response accepted");
         assert_eq!(
-            waiter.join().expect("input waiter joins").expect("input succeeds"),
+            waiter
+                .join()
+                .expect("input waiter joins")
+                .expect("input succeeds"),
             "accepted"
         );
     }
@@ -7501,7 +7645,9 @@ use orna_standard::{
             .write_all(&encoded)
             .await
             .expect("session request writes");
-        let decoded = read_shared_broker_frame(&mut server).await.expect("frame reads");
+        let decoded = read_shared_broker_frame(&mut server)
+            .await
+            .expect("frame reads");
         assert!(!decoded.resource);
         assert_eq!(
             decode_session_server_frame(&decoded.bytes).expect("session request decodes"),
