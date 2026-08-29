@@ -3,12 +3,11 @@
 mod candidate_builder;
 mod server_plans;
 
-use candidate_builder::next_function_revision_number;
 #[cfg(test)]
 use candidate_builder::{
     client_capability_requirement, durable_client_local_id, standard_upgrade_reuse_is_current_only,
-    supports_durable_unique_field,
 };
+use candidate_builder::{next_function_revision_number, supports_durable_unique_field};
 
 #[cfg(test)]
 use server_plans::{
@@ -128,6 +127,7 @@ pub use standard_upgrade::{
     PrepareStandardUpgradeError, PreparedStandardUpgrade, StandardUpgradeIdentity,
     prepare_checked_standard_upgrade,
 };
+#[cfg(test)]
 pub(crate) use standard_upgrade::{
     active_reserved_standard_identity, prepare_checked_standard_upgrade_with_allocator,
 };
