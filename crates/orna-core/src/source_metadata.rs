@@ -75,8 +75,20 @@ impl SourceFunctionMetadata {
     pub const fn byte_start(&self) -> u32 { self.byte_start }
     pub const fn byte_end(&self) -> u32 { self.byte_end }
     pub const fn declaration_content_hash(&self) -> Sha256Digest { self.declaration_content_hash }
-    pub fn parameters(&self) -> &[SourceParameterMetadata] { &self.parameters }
-    pub fn references(&self) -> &[SourceReferenceMetadata] { &self.references }
+    pub fn parameters(&self) -> &[SourceParameterMetadata] {
+        &self.parameters
+    }
+
+    /// Finds a parameter by its declaration ordinal.
+    pub fn parameter(&self, ordinal: u32) -> Option<&SourceParameterMetadata> {
+        self.parameters
+            .iter()
+            .find(|parameter| parameter.ordinal() == ordinal)
+    }
+
+    pub fn references(&self) -> &[SourceReferenceMetadata] {
+        &self.references
+    }
 
     /// Encodes the metadata as a deterministic bounded payload.
     pub fn encode(&self) -> Vec<u8> {

@@ -605,8 +605,8 @@ pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
 const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
 const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x1e, 0x99, 0xf3, 0x2f, 0xf7, 0xc2, 0xf0, 0x65, 0x4d, 0x67, 0x61, 0xa6, 0xa9, 0xce, 0xd8, 0x26,
-    0x95, 0x6c, 0x09, 0x5d, 0xdf, 0xd1, 0x2e, 0xbb, 0xdc, 0xc1, 0x8e, 0xc4, 0xe9, 0xab, 0x19, 0xc4,
+    0x9b, 0x07, 0x77, 0x13, 0x7a, 0x77, 0xe2, 0x85, 0x5f, 0xcf, 0x84, 0x06, 0x61, 0xce, 0xfd, 0x98,
+    0x0c, 0xb0, 0x71, 0xa4, 0xc2, 0x64, 0xbc, 0x3c, 0x24, 0x81, 0x40, 0xfc, 0x7e, 0x7c, 0x5b, 0x00,
 ]);
 const ACCEPTED_V10_CLI_ARTIFACT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0xb4, 0xa2, 0xd8, 0xcb, 0x75, 0x7e, 0x49, 0x17, 0xcc, 0x1e, 0xe5, 0x1e, 0x92, 0xc4, 0x5f, 0x0a,
@@ -2744,6 +2744,24 @@ pub fn prepare_standard_upgrade_v8_to_v9(
         active,
         retained_standard_library_v9_snapshot,
         verify_standard_library_v9_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
+/// Prepares the append-only `orna.std/9` to `orna.std/10` standard upgrade.
+pub fn prepare_standard_upgrade_v9_to_v10(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V9_REVISION_ID)?;
+    let version_nine = retained_standard_library_v9_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v9_snapshot(version_nine)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v10_snapshot,
+        verify_standard_library_v10_snapshot,
         check_standard_library_source,
         prepare_checked_standard_upgrade,
     )
@@ -5623,6 +5641,10 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().bundle() == STANDARD_SOURCE_V4_BUNDLE_ID
         && standard.source().id() == STANDARD_SOURCE_V4_REVISION_ID
         && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
+}
+
 fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
     standard.revision() == STANDARD_LIBRARY_V10_REVISION_ID
         && standard.catalogue().revision() == STANDARD_CATALOGUE_V10_REVISION_ID
@@ -5633,10 +5655,6 @@ fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool 
         && standard.source().units()[9].content_hash() == ACCEPTED_V10_CLI_CONTENT_DIGEST
         && standard.source().revision_hash() == ACCEPTED_V10_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V10_STANDARD_LIBRARY_DIGEST
-}
-
-        && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
-        && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
 }
 
 fn is_accepted_v9_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
