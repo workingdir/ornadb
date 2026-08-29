@@ -946,6 +946,11 @@ impl CheckedBundle {
     pub fn client_functions(&self) -> &[CheckedClientFunction] {
         &self.client_functions
     }
+    /// Returns the checked function with the given identity.
+    pub fn function(&self, id: CheckedFunctionId) -> Option<&CheckedClientFunction> {
+        self.client_functions.iter().find(|function| function.id == id)
+    }
+
 
     pub(crate) fn field_renames(&self) -> &[CheckedFieldRename] {
         &self.field_renames
@@ -1580,6 +1585,24 @@ pub struct CheckedClientFunction {
     pub(super) capabilities: Vec<CheckedClientCapability>,
 }
 
+/// A stable public summary of a checked CLIENT function body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CheckedClientBodyKind {
+    /// A direct expression body.
+    Expression,
+    /// A procedural body with locals and assignments.
+    Procedural,
+    /// A programmable body with branches, loops, and returns.
+    ControlFlow,
+    /// A state-backed expression body.
+    State,
+    /// A host-provided runtime contract.
+    ExternalContract,
+    /// A legacy Boolean body.
+    BooleanLiteral,
+}
+
 impl CheckedClientFunction {
     /// Returns the checked function identity.
     pub const fn id(&self) -> CheckedFunctionId {
@@ -1639,7 +1662,21 @@ impl CheckedClientFunction {
     pub(crate) fn boolean_body(&self) -> Option<(bool, &SourceLocation)> {
         self.body.as_boolean_literal()
     }
-    /// Returns the complete checked CLIENT body.
+    /// Returns the complete checked CLIENT body kind without exposing resolver internals.
+    pub fn body_kind(&self) -> CheckedClientBodyKind {
+        match self.body {
+            CheckedClientFunctionBody::BooleanLiteral { .. } => CheckedClientBodyKind::BooleanLiteral,
+            CheckedClientFunctionBody::Expression { .. } => CheckedClientBodyKind::Expression,
+            CheckedClientFunctionBody::Procedural { .. } => CheckedClientBodyKind::Procedural,
+            CheckedClientFunctionBody::ControlFlow { .. } => CheckedClientBodyKind::ControlFlow,
+            CheckedClientFunctionBody::StateBlock { .. } => CheckedClientBodyKind::State,
+            CheckedClientFunctionBody::ExternalContract { .. } => CheckedClientBodyKind::ExternalContract,
+            #[cfg(test)]
+            CheckedClientFunctionBody::Unsupported => CheckedClientBodyKind::ExternalContract,
+        }
+    }
+
+    /// Returns the complete checked CLIENT body for compiler-owned introspection.
     pub(crate) fn body(&self) -> &CheckedClientFunctionBody {
         &self.body
     }
@@ -1656,7 +1693,133 @@ impl CheckedClientFunction {
     pub fn capabilities(&self) -> &[CheckedClientCapability] {
         &self.capabilities
     }
+    /// Returns the checked CLIENT calls in source traversal order.
+    pub fn called_functions(&self) -> Vec<CheckedFunctionId> {
+        let mut calls = Vec::new();
+        collect_body_calls(&self.body, &mut calls);
+        calls
+    }
+
 }
+fn collect_body_calls(body: &CheckedClientFunctionBody, calls: &mut Vec<CheckedFunctionId>) {
+    match body {
+        CheckedClientFunctionBody::BooleanLiteral { .. }
+        | CheckedClientFunctionBody::ExternalContract { .. } => {}
+        CheckedClientFunctionBody::Expression { expression }
+        | CheckedClientFunctionBody::StateBlock {
+            return_expression: expression,
+            ..
+        } => collect_expression_calls(expression, calls),
+        CheckedClientFunctionBody::Procedural {
+            statements,
+            return_expression,
+            ..
+        } => {
+            for statement in statements {
+                collect_expression_calls(statement.expression(), calls);
+            }
+            collect_expression_calls(return_expression, calls);
+        }
+        CheckedClientFunctionBody::ControlFlow { statements, .. } => {
+            collect_control_flow_calls(statements, calls);
+        }
+        #[cfg(test)]
+        CheckedClientFunctionBody::Unsupported => {}
+    }
+}
+
+fn collect_control_flow_calls(
+    statements: &[CheckedClientControlFlowStatement],
+    calls: &mut Vec<CheckedFunctionId>,
+) {
+    for statement in statements {
+        match statement {
+            CheckedClientControlFlowStatement::Let { expression, .. }
+            | CheckedClientControlFlowStatement::Assignment { expression, .. } => {
+                collect_expression_calls(expression, calls);
+            }
+            CheckedClientControlFlowStatement::Return { expression, .. } => {
+                if let Some(expression) = expression {
+                    collect_expression_calls(expression, calls);
+                }
+            }
+            CheckedClientControlFlowStatement::If {
+                branches,
+                else_statements,
+                ..
+            } => {
+                for branch in branches {
+                    collect_expression_calls(branch.condition(), calls);
+                    collect_control_flow_calls(branch.statements(), calls);
+                }
+                if let Some(statements) = else_statements {
+                    collect_control_flow_calls(statements, calls);
+                }
+            }
+            CheckedClientControlFlowStatement::While {
+                condition, statements, ..
+            } => {
+                collect_expression_calls(condition, calls);
+                collect_control_flow_calls(statements, calls);
+            }
+        }
+    }
+}
+
+fn collect_expression_calls(expression: &CheckedClientExpression, calls: &mut Vec<CheckedFunctionId>) {
+    match expression {
+        CheckedClientExpression::Call {
+            function, arguments, ..
+        } => {
+            calls.push(*function);
+            for (_, argument) in arguments {
+                collect_expression_calls(argument, calls);
+            }
+        }
+        CheckedClientExpression::Await { expression, .. }
+        | CheckedClientExpression::Concat {
+            left: expression, ..
+        }
+        | CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            collect_expression_calls(expression, calls);
+        }
+        CheckedClientExpression::Binary { left, right, .. } => {
+            collect_expression_calls(left, calls);
+            collect_expression_calls(right, calls);
+        }
+        CheckedClientExpression::Resource { operation } => {
+            for (_, argument) in operation.arguments() {
+                collect_expression_calls(argument, calls);
+            }
+        }
+        CheckedClientExpression::Action { operation } => {
+            for (_, argument) in operation.arguments() {
+                collect_expression_calls(argument, calls);
+            }
+        }
+        CheckedClientExpression::Inspect { operation } => match operation {
+            CheckedInspectOperation::Snapshot {
+                target, options, ..
+            } => {
+                collect_expression_calls(target, calls);
+                if let Some(options) = options {
+                    collect_expression_calls(options, calls);
+                }
+            }
+            CheckedInspectOperation::Projection { snapshot, .. } => {
+                collect_expression_calls(snapshot, calls);
+            }
+        },
+        CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::LocalRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => {}
+    }
+}
+
 
 /// One checked SERVER function parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4550,6 +4713,14 @@ impl CheckedStandardApplicationBundle {
                 function,
             }
         })
+    }
+    /// Returns the checked source bundle for generic standard-client lowering.
+    ///
+    /// The bundle retains checked stable identities and source locations. The
+    /// caller must use the standard catalogue and source authority supplied
+    /// with the surrounding standard check.
+    pub fn checked_bundle(&self) -> &CheckedBundle {
+        &self.inner
     }
 
     fn type_use(&self, kind: CheckedTypeUseKind) -> &CheckedApplicationTypeUse {
