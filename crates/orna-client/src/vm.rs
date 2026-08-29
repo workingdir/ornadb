@@ -254,14 +254,11 @@ pub fn admit_client_function(
                         .map(|requirement| {
                             if let CapabilityArgumentSource::Parameter(parameter) =
                                 requirement.argument()
+                                && !definition.parameters().iter().any(|candidate| {
+                                    candidate.name() == parameter
+                                })
                             {
-                                if !definition
-                                    .parameters()
-                                    .iter()
-                                    .any(|candidate| candidate.name() == parameter)
-                                {
-                                    return Err(ClientVmAdmissionError::SemanticRejected);
-                                }
+                                return Err(ClientVmAdmissionError::SemanticRejected);
                             }
                             let argument = match requirement.argument() {
                                 CapabilityArgumentSource::Text(value) => {
@@ -655,10 +652,10 @@ fn statements_budget(
         if let Some(expression) = statement.expression() {
             statement_budget.include_nested(expression_budget(expression)?)?;
         }
-        if let Some(return_statement) = statement.return_statement() {
-            if let Some(expression) = return_statement.expression() {
-                statement_budget.include_nested(expression_budget(expression)?)?;
-            }
+        if let Some(return_statement) = statement.return_statement()
+            && let Some(expression) = return_statement.expression()
+        {
+            statement_budget.include_nested(expression_budget(expression)?)?;
         }
         if let Some(if_statement) = statement.if_statement() {
             for branch in if_statement.branches() {
