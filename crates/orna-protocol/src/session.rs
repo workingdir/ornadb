@@ -12,12 +12,14 @@ pub const MAX_SESSION_LINE_LENGTH: usize = 16 * 1024;
 pub const MAX_SESSION_FRAME_LENGTH: usize = 128 * 1024;
 /// The maximum UTF-8 byte length of one session error.
 pub const MAX_SESSION_ERROR_LENGTH: usize = 16 * 1024;
+/// The fixed encoded header length for session-control frames.
+pub const SESSION_HEADER_LENGTH: usize = 59;
 
 const SERVER_INPUT_REQUESTED: u8 = 0x01;
 const CLIENT_INPUT_LINE: u8 = 0x81;
 const CLIENT_INPUT_EOF: u8 = 0x82;
 const CLIENT_INPUT_FAILED: u8 = 0x83;
-const HEADER_LENGTH: usize = 59;
+const HEADER_LENGTH: usize = SESSION_HEADER_LENGTH;
 
 /// One server request for input from the client-owned session.
 #[derive(Clone, Debug, Eq, PartialEq)]

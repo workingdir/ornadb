@@ -37,9 +37,9 @@ pub use frame::{
 
 pub use session::{
     InputRequested, MAX_SESSION_ERROR_LENGTH, MAX_SESSION_FRAME_LENGTH, MAX_SESSION_LINE_LENGTH,
-    SESSION_MARKER, SessionClientFrame, SessionCodecError, SessionInputState, SessionServerFrame,
-    SessionStateError, decode_session_client_frame, decode_session_server_frame,
-    encode_session_client_frame, encode_session_server_frame,
+    SESSION_HEADER_LENGTH, SESSION_MARKER, SessionClientFrame, SessionCodecError,
+    SessionInputState, SessionServerFrame, SessionStateError, decode_session_client_frame,
+    decode_session_server_frame, encode_session_client_frame, encode_session_server_frame,
 };
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
