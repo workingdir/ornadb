@@ -59,7 +59,13 @@ pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> V
             code_description: None,
             source: Some("orna".to_owned()),
             message: diagnostic.message.clone(),
-            related_information: None,
+            related_information: Some(vec![DiagnosticRelatedInformation {
+                location: Location {
+                    uri: document.uri.clone(),
+                    range: mapper.range(&diagnostic.span),
+                },
+                message: syntax_help(diagnostic.message.as_str()),
+            }]),
             tags: None,
             data: None,
         })
@@ -128,6 +134,16 @@ fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
         diagnostic.code().as_str(),
         diagnostic.code().summary()
     )
+}
+
+fn syntax_help(message: &str) -> String {
+    if message.contains("expected a name") {
+        "Add the missing name at this location.".to_owned()
+    } else if message.contains("expected") {
+        "Add the expected token or close the current construct.".to_owned()
+    } else {
+        "Review the syntax at this location.".to_owned()
+    }
 }
 
 /// Returns the outline symbols of one parsed document.
