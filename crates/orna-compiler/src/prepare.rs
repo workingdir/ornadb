@@ -405,11 +405,8 @@ pub fn prepare_standard_source(
         active,
         identities,
         source,
-        PreparationMode::StandardV2 {
+        PreparationMode::StandardSource {
             standard: report.standard_library(),
-            declaration_evidence,
-            signature_evidence,
-            standard_preflight: Box::new(standard_preflight),
         },
         allocations.catalogue_revision(),
     )

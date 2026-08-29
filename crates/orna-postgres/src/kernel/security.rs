@@ -662,6 +662,18 @@ impl SealedInvocationOperation {
     pub fn active_revision(&self) -> ActiveDatabaseRevision {
         self.active.clone()
     }
+    /// Returns the operation-bound session and security evidence for nested
+    /// CLIENT evaluation.
+    #[doc(hidden)]
+    pub fn client_evaluation_context(
+        &self,
+    ) -> (AuthenticatedSession, SecuritySnapshot, InvocationId) {
+        (
+            self.authenticated_session.clone(),
+            self.security.clone(),
+            self.invocation,
+        )
+    }
 }
 
 impl std::fmt::Debug for SealedInvocationOperation {
