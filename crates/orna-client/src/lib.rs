@@ -1520,6 +1520,24 @@ pub trait ClientResourceExecutor {
     fn inspect(&mut self, _request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         Err("inspect.runtime_unavailable".to_owned())
     }
+    /// Reads one bounded input value from the active client session.
+    ///
+    /// This is a language interaction primitive, not an external runtime
+    /// contract. Hosts provide the terminal or graphical input source.
+    fn read_input(&mut self, _context: ClientExecutionContext) -> Result<RuntimeValue, String> {
+        Err("client.input_unavailable".to_owned())
+    }
+    /// Evaluates one bounded command through the authenticated client session.
+    ///
+    /// The host owns transport and authority; the CLIENT function owns when
+    /// this primitive is called.
+    fn evaluate_command(
+        &mut self,
+        _context: ClientExecutionContext,
+        _command: &str,
+    ) -> Result<RuntimeValue, String> {
+        Err("client.dynamic_invocation_unavailable".to_owned())
+    }
     /// Evaluates one typed external CLIENT runtime contract.
     ///
     /// Hosts that do not install the exact contract fail closed. Generic
@@ -4381,6 +4399,10 @@ pub enum ClientExpressionError {
     ExecutionLimit,
     /// A control-flow function reached its end without returning a value.
     MissingReturn,
+    /// The active client session cannot provide input.
+    InputUnavailable,
+    /// The active session rejected a dynamic command evaluation.
+    DynamicInvocation,
 }
 
 impl fmt::Display for ClientExpressionError {
@@ -4394,6 +4416,8 @@ impl fmt::Display for ClientExpressionError {
             Self::Arithmetic => "client.arithmetic_error",
             Self::ExecutionLimit => "client.execution_limit",
             Self::MissingReturn => "client.control_flow_missing_return",
+            Self::InputUnavailable => "client.input_unavailable",
+            Self::DynamicInvocation => "client.dynamic_invocation_failed",
         })
     }
 }
@@ -8155,6 +8179,17 @@ impl ClientResourceExecutor for ClientActionNestedExecutor<'_> {
         completion
     }
 
+    fn read_input(&mut self, context: ClientExecutionContext) -> Result<RuntimeValue, String> {
+        self.inner.read_input(context)
+    }
+
+    fn evaluate_command(
+        &mut self,
+        context: ClientExecutionContext,
+        command: &str,
+    ) -> Result<RuntimeValue, String> {
+        self.inner.evaluate_command(context, command)
+    }
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         self.inner.inspect(request)
     }
