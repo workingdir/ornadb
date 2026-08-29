@@ -224,7 +224,8 @@ search neighbouring files, follow source imports, or discover a project root.
 
 ## Command shape and global usage
 
-After `argv[0]`, the command accepts exactly these three tokens:
+After any optional leading global `--color auto|always|never` flag, the
+command accepts exactly these three command tokens:
 
 ```text
 source
@@ -244,21 +245,42 @@ one path fails the exact command-shape rule. Orna receives and checks only the
 one resulting path token.
 
 An absent path, empty path, non-UTF-8 path, control character, `U+2028`,
-`U+2029`, leading-hyphen path, flag, additional token, or another command shape
-is a usage error. It writes the exact global usage text below, including the
-final line feed, to standard error and exits with status `2`:
-
+`U+2029`, leading-hyphen path, unsupported flag, additional token, or another
+command shape is a usage error. It writes the exact global usage text below,
+including the final line feed, to standard error and exits with status `2`:
 ```text
 Usage:
+  orna
+  orna repl
+  orna --db <target> [command] [options]
+  orna --daemon
+  orna --version
   orna server run
-  orna server upgrade
   orna server backend-shell
+  orna runtime describe <runtime-shared-library>
   orna source check <file.orna>
+  orna source apply <file.orna>
+  orna source diff <file.orna>
+  orna security grant-execute <canonical-function-id>
+  orna security user create|disable <canonical-principal-id>
+  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]
+  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]
+  orna security grants list <canonical-principal-id>
+  orna security check can-execute <canonical-principal-id> <canonical-function-id>
+  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]
+  orna security whoami
+  orna raw-call <canonical-function-id>
+  orna raw-call <canonical-function-id> <canonical-parameter-id>
+  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>
+  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]
+  orna state get <root-function-id> [options]
+  orna state set <root-function-id> [options]
+  orna inspect <invocation-id> [options]
 ```
 
 This appends the source-check line anticipated by work ADR 0017. It does not
-change the accepted shapes or operation of `orna server run`,
-`orna server upgrade`, or `orna server backend-shell`.
+change the accepted shapes or operation of `orna server run` or
+`orna server backend-shell`.
 
 ## File boundary
 
@@ -458,7 +480,7 @@ does not give `orna-compiler` filesystem or process authority.
 
 | Boundary | Required cases | Required result |
 | --- | --- | --- |
-| Command shape | source-check leaf plus one path; optional leading `--color auto|always|never`; missing command or path; empty path; other flag placement; extra path; `-`; `--`; literal wildcard; shell expansion to multiple paths | The three-token leaf and its optional leading colour flag continue. Every other invalid shape prints the exact four-line usage and exits `2`. A literal wildcard is an ordinary path and uses the read result for that literal name. Orna performs no glob expansion and never reads standard input. |
+| Command shape | source-check leaf plus one path; optional leading `--color auto|always|never`; missing command or path; empty path; other flag placement; extra path; `-`; `--`; literal wildcard; shell expansion to multiple paths | The three-token leaf and its optional leading colour flag continue. Every other invalid shape prints the exact global usage and exits `2`. A literal wildcard is an ordinary path and uses the read result for that literal name. Orna performs no glob expansion and never reads standard input. |
 | Path token | UTF-8 path; non-UTF-8 Unix `OsString`; tab, line-feed, carriage-return, another Unicode control, `U+2028`, and `U+2029`; `-x`; `./-x`; path without `.orna`; path containing spaces | Invalid UTF-8, control, `U+2028`, `U+2029`, empty, and leading-hyphen paths use the exact usage contract before file access. `./-x`, spaces, and a non-`.orna` suffix remain valid path tokens. No exact rendered path can add a display line. |
 | Path resolution | relative path under a changed current working directory; absolute path; symbolic link to a regular file; dangling link; absent path; directory; special file | Relative lookup uses the process current working directory. Logical and rendered paths remain exact `argv`. Only a regular file or link to one reaches decoding. Every other case uses the exact read diagnostic. |
 | File access | readable file; permission-denied file; failure during the byte read; empty file; file larger than test buffer boundaries | The command performs one complete byte-read phase, imposes no source-size policy, maps access failures to the exact read line, and does not perform another source read. |
@@ -476,7 +498,7 @@ does not give `orna-compiler` filesystem or process authority.
 | Streams and status | success; compiler diagnostics; each pre-check failure; piped hostile standard input; redirected standard output | Standard output is empty in every case. Success is silent `0`, check and operational failures are `1`, usage is `2`, and piped input is neither consumed nor allowed to change or delay the result. |
 | PostgreSQL isolation | no external PostgreSQL installation or service; hostile PostgreSQL, package-maintenance, and Orna environment variables; invalid embedded-engine evidence; absent or changed materialised support data; changed server configuration | The same source result is produced without entering an embedded PostgreSQL role or performing a PostgreSQL socket, connection, child, package, engine-manifest, support-data, instance, or environment operation. The hostile private package selector cannot intercept a public source-check shape. |
 | No command-issued state writes | successful and failed checks in a snapshotted writable directory and a read-only directory; process tracing where available; filesystem access-time updates enabled and disabled | The command opens no path for writing and issues no create, content mutation, truncate, rename, remove, ownership, mode, or other metadata mutation. It starts no network or child process. Snapshots exclude access time or use a no-access-time mount. Ordinary read-driven access-time changes do not invalidate the proof. Only the supplied standard-error descriptor can receive command output bytes. |
-| Existing host commands | current backend-shell unit and integration suites, valid backend-shell dispatch, invalid global shapes | Source-check dispatch leaves backend-shell terminal, configuration, process, exit, and pre-attachment write behaviour unchanged. The only shared change is the accepted four-line global usage body. |
+| Existing host commands | current backend-shell unit and integration suites, valid backend-shell dispatch, invalid global shapes | Source-check dispatch leaves backend-shell terminal, configuration, process, exit, and pre-attachment write behaviour unchanged. The only shared change is the accepted global usage body. |
 
 Normal workspace formatting, build, strict Clippy, unit-test, integration-test,
 rustdoc, diff, and similarity gates remain required. Integration tests must run
@@ -512,24 +534,22 @@ proof. The later PostgreSQL recovery test, CLI dependency, and command rows
 cannot start before that compiler row is complete. The source-check slice does
 not reorder, weaken, or bypass any work ADR 0016 authority gate.
 
-Implementation order also requires ADR 0019's corrected command dispatcher
-through all three accepted server leaves. Its sequence must be complete
-through and including:
+Implementation order also required ADR 0019's corrected command dispatcher
+through the retained server leaves. Its sequence must be complete through and
+including:
 
 * `feat(server): supervise embedded PostgreSQL`, which implements
   `orna server run`;
-* `feat(server): add embedded engine upgrade`, which implements
-  `orna server upgrade`; and
 * `feat(server): replace psql with a native shell`, which rebinds
   `orna server backend-shell` without a second executable and completes the
   accepted server dispatcher.
 
-All earlier ADR 0019 rows required by those three rows are therefore
+All earlier ADR 0019 rows required by those two rows are therefore
 implementation-order prerequisites. Retained work ADR 0017 host and instance
 rows remain prerequisites where ADR 0019 does not replace them. The
-source-check command row preserves that working dispatcher and changes its
-global three-command usage to the exact final four-line usage in this record.
-There is no conditional or interim source-check usage form.
+source-check command row preserves that working dispatcher and uses the
+exact global usage listed in this record. There is no conditional or interim
+source-check usage form.
 
 This is an implementation-order dependency, not an operational PostgreSQL
 dependency. Dispatch selects `orna source check` before any service-account,
