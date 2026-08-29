@@ -7289,10 +7289,12 @@ use orna_standard::{
                 waiter_cancelled.load(std::sync::atomic::Ordering::Acquire)
             })
         });
-        loop {
-            if bridge.try_take_outbound().is_some() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while bridge.try_take_outbound().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session input request was not queued",
+            );
             std::thread::yield_now();
         }
         std::thread::sleep(Duration::from_millis(10));
