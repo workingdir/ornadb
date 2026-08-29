@@ -72,8 +72,6 @@ pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> V
         })
         .collect()
 }
-
-/// Returns the full compiler diagnostics of one document.
 pub fn check_document(
     document: &Document,
     standard: Option<&StandardLibrary>,
@@ -88,10 +86,20 @@ pub fn check_document(
             Ok(bundle) => bundle,
             Err(_) => return syntax_diagnostics(document, mapper),
         };
-    let report = match check_new_application(&bundle, &standard.checked) {
-        Ok(report) => report,
+    let application = orna_core::catalogue::CatalogueSnapshot::new(
+        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("the empty application catalogue is valid");
+    let context = match orna_compiler::StandardApplicationCheckContext::try_new(
+        &application,
+        &standard.checked,
+    ) {
+        Ok(context) => context,
         Err(_) => return syntax_diagnostics(document, mapper),
     };
+    let report = orna_compiler::check_standard_application(&bundle, &context);
     report
         .diagnostics()
         .iter()
