@@ -388,9 +388,45 @@ pub(crate) struct SharedInvokeBroker {
     commands: UnboundedSender<BrokerCommand>,
     task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     session_bridge: Arc<Mutex<Option<Arc<SessionBridge>>>>,
+    dynamic_context: Arc<Mutex<Option<DynamicInvocationContext>>>,
     resource_expectations: BrokerResourceExpectations,
     next_resource_stream_id: std::sync::Arc<std::sync::Mutex<u64>>,
     resource_terminal_provenance: BrokerResourceProvenance,
+}
+
+#[derive(Clone)]
+struct DynamicInvocationContext {
+    active: ActiveDatabaseRevision,
+    security: orna_core::security::SecuritySnapshot,
+    session: AuthenticatedSession,
+    root_invocation: InvocationId,
+}
+
+impl SharedInvokeBroker {
+    pub(crate) fn bind_dynamic_context(
+        &self,
+        active: ActiveDatabaseRevision,
+        security: orna_core::security::SecuritySnapshot,
+        session: AuthenticatedSession,
+        root_invocation: InvocationId,
+    ) {
+        *self
+            .dynamic_context
+            .lock()
+            .expect("dynamic invocation context lock") = Some(DynamicInvocationContext {
+            active,
+            security,
+            session,
+            root_invocation,
+        });
+    }
+
+    fn dynamic_context(&self) -> Option<DynamicInvocationContext> {
+        self.dynamic_context
+            .lock()
+            .expect("dynamic invocation context lock")
+            .clone()
+    }
 }
 
 pub(crate) struct SessionBridge {
@@ -1321,6 +1357,60 @@ impl InstalledClientResourceExecutor {
             self.transport = Some(transport);
         }
     }
+    fn evaluate_command(
+        &mut self,
+        context: ClientExecutionContext,
+        command: &str,
+    ) -> Result<RuntimeValue, String> {
+        let Some(broker) = self.broker.as_ref() else {
+            return Err("client.dynamic_invocation_unavailable".to_owned());
+        };
+        let Some(dynamic) = broker.dynamic_context() else {
+            return Err("client.dynamic_invocation_unavailable".to_owned());
+        };
+        if self.cancellation.is_requested() {
+            return Err("client.dynamic_invocation_cancelled".to_owned());
+        }
+        let tokens = command.split_whitespace().collect::<Vec<_>>();
+        let target_name = tokens
+            .first()
+            .copied()
+            .filter(|value| value.split('.').count() > 1)
+            .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let name = QualifiedSemanticName::new(target_name.split('.').map(str::to_owned))
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let target = InvocationTarget::qualified_name(name)
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let standard = dynamic.active.catalogue_hash_context().standard();
+        let resolved = installed::resolve_target(&dynamic.active, standard, &target)
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        if resolved.function.domain() != FunctionDomain::Client {
+            return Err("client.dynamic_invocation_target_not_client".to_owned());
+        }
+        let target = orna_core::security::InvocationTarget::new(
+            resolved.function.id(),
+            dynamic.active.pair(),
+        );
+        let orna_core::security::ExecuteDecision::Allowed(authorisation) =
+            dynamic.security.authorise_execute(&dynamic.session, target)
+        else {
+            return Err("client.dynamic_invocation_denied".to_owned());
+        };
+        let mut state = orna_client::ClientStateStore::new();
+        let grants = orna_client::capability::LocalCapabilityGrantSet::new();
+        let result = orna_client::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
+            &dynamic.active,
+            &authorisation,
+            &[],
+            &[],
+            &grants,
+            &mut state,
+            context.parent_invocation_id(),
+            self,
+        )
+        .map_err(|_| "client.dynamic_invocation_failed".to_owned())?;
+        Ok(result.into_value())
+    }
 }
 
 impl ClientResourceExecutor for InstalledClientResourceExecutor {
@@ -2145,6 +2235,7 @@ impl SharedInvokeBroker {
                 commands,
                 task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                 session_bridge: Arc::new(Mutex::new(None)),
+                dynamic_context: Arc::new(Mutex::new(None)),
                 resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 next_resource_stream_id: std::sync::Arc::new(std::sync::Mutex::new(1)),
                 resource_terminal_provenance: Arc::new(Mutex::new(BTreeMap::new())),

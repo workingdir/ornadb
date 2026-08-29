@@ -7,13 +7,13 @@ pub(super) enum InvokeTransport {
 }
 
 /// The private host resolution of one invocation target.
-struct ResolvedTarget<'a> {
+pub(super) struct ResolvedTarget<'a> {
     /// The resolved function signature in the owning catalogue.
-    function: &'a FunctionDefinition,
+    pub(super) function: &'a FunctionDefinition,
     /// The exact immutable executable revision for the resolved class.
-    executable_revision: FunctionRevisionId,
+    pub(super) executable_revision: FunctionRevisionId,
     /// The durable revision pin description for the resolved class.
-    revision_pin: String,
+    pub(super) revision_pin: String,
 }
 
 /// Runs one local sealed `orna invoke` command in-process.
@@ -355,7 +355,7 @@ async fn host_invoke(
 /// A function present in both catalogues resolves to neither (closed
 /// ambiguity, the same rule as the sealed boundary); a function absent from
 /// both is a not-found usage error.
-fn resolve_target<'a>(
+pub(super) fn resolve_target<'a>(
     active: &'a ActiveDatabaseRevision,
     standard: Option<&'a VerifiedStandardLibrarySnapshot>,
     target: &InvocationTarget,
