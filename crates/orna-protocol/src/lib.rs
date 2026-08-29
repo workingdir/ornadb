@@ -1,6 +1,7 @@
 //! Canonical runtime values and the bounded authenticated raw-call protocol.
 
 mod frame;
+mod session;
 
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
@@ -32,6 +33,13 @@ pub use frame::{
     encode_resource_cancelled, encode_resource_client_frame, encode_resource_completed,
     encode_resource_failed, encode_resource_request, encode_resource_server_frame,
     encode_resource_values, encode_resource_window_update, encode_server_frame,
+};
+
+pub use session::{
+    InputRequested, MAX_SESSION_ERROR_LENGTH, MAX_SESSION_FRAME_LENGTH, MAX_SESSION_LINE_LENGTH,
+    SESSION_MARKER, SessionClientFrame, SessionCodecError, SessionInputState, SessionServerFrame,
+    SessionStateError, decode_session_client_frame, decode_session_server_frame,
+    encode_session_client_frame, encode_session_server_frame,
 };
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
