@@ -157,6 +157,321 @@ impl PhysicalCatalogue {
     }
 }
 
+/// The stable public identity of the physical migration artifact format.
+pub const FORMAT_IDENTITY: &str = "orna.migration-ledger";
+/// The canonical version of the physical migration artifact format.
+pub const FORMAT_VERSION: u32 = 1;
+/// The exact header prefix of every physical migration artifact.
+pub const MAGIC: [u8; 8] = *b"ORNAML\0\0";
+
+const CREATE_OBJECT_OPERATION_TAG: u8 = 1;
+const ADD_FIELD_OPERATION_TAG: u8 = 2;
+const SCALAR_FIELD_TYPE_TAG: u8 = 1;
+const ENUM_FIELD_TYPE_TAG: u8 = 2;
+const RECORD_FIELD_TYPE_TAG: u8 = 3;
+const REFERENCE_FIELD_TYPE_TAG: u8 = 4;
+
+/// An error returned when a physical migration artifact cannot be formed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhysicalMigrationArtifactError {
+    /// The physical planner rejected the active-to-candidate transition.
+    Planning(PhysicalPlanError),
+    /// Canonical artifact bytes could not represent one collection length.
+    CanonicalHash(crate::canonical_hash::CanonicalHashError),
+}
+
+impl fmt::Display for PhysicalMigrationArtifactError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Planning(error) => {
+                write!(formatter, "physical migration planning failed: {error}")
+            }
+            Self::CanonicalHash(error) => {
+                write!(
+                    formatter,
+                    "physical migration artifact encoding failed: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for PhysicalMigrationArtifactError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Planning(error) => Some(error),
+            Self::CanonicalHash(error) => Some(error),
+        }
+    }
+}
+
+impl From<PhysicalPlanError> for PhysicalMigrationArtifactError {
+    fn from(error: PhysicalPlanError) -> Self {
+        Self::Planning(error)
+    }
+}
+
+/// One ordered backend-neutral physical operation in a migration artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhysicalOperation {
+    /// Creates one complete durable object relation.
+    CreateObject(CreateObject),
+    /// Adds one field to one existing durable object relation.
+    AddField(AddField),
+}
+
+/// One deterministic, revision-bound physical migration artifact.
+///
+/// The artifact is built from a validated [`PhysicalPlan`]. Operations retain
+/// the plan's physical execution order: new objects in candidate catalogue
+/// order, followed by the one existing-object field addition when present.
+/// Its canonical bytes contain only stable revision identities and typed
+/// physical projections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhysicalMigrationArtifact {
+    expected_base: RevisionPair,
+    candidate_pair: RevisionPair,
+    operations: Vec<PhysicalOperation>,
+    canonical_bytes: Vec<u8>,
+    digest: crate::revision::Sha256Digest,
+}
+
+impl PhysicalMigrationArtifact {
+    /// Builds an artifact by planning the supplied active-to-candidate change.
+    pub fn from_revisions(
+        active: &ActiveDatabaseRevision,
+        candidate: &DeployableRevision,
+    ) -> Result<Self, PhysicalMigrationArtifactError> {
+        let plan = plan_physical_changes(active, candidate)?;
+        Self::from_plan(active.pair(), candidate.candidate_pair(), &plan)
+    }
+
+    /// Binds a validated physical plan to its expected base and candidate pair.
+    pub fn from_plan(
+        expected_base: RevisionPair,
+        candidate_pair: RevisionPair,
+        plan: &PhysicalPlan,
+    ) -> Result<Self, PhysicalMigrationArtifactError> {
+        let mut operations = Vec::with_capacity(
+            plan.create_objects
+                .len()
+                .saturating_add(usize::from(plan.add_field.is_some())),
+        );
+        operations.extend(
+            plan.create_objects
+                .iter()
+                .cloned()
+                .map(PhysicalOperation::CreateObject),
+        );
+        if let Some(add_field) = &plan.add_field {
+            operations.push(PhysicalOperation::AddField(add_field.clone()));
+        }
+
+        let (canonical_bytes, digest) =
+            encode_physical_migration(expected_base, candidate_pair, &operations)?;
+        Ok(Self {
+            expected_base,
+            candidate_pair,
+            operations,
+            canonical_bytes,
+            digest,
+        })
+    }
+
+    /// Returns the source and catalogue revisions that must currently be active.
+    pub const fn expected_base(&self) -> RevisionPair {
+        self.expected_base
+    }
+
+    /// Returns the source and catalogue revisions produced by the candidate.
+    pub const fn candidate_pair(&self) -> RevisionPair {
+        self.candidate_pair
+    }
+
+    /// Returns operations in their deterministic physical execution order.
+    pub fn operations(&self) -> &[PhysicalOperation] {
+        &self.operations
+    }
+
+    /// Returns the complete canonical artifact bytes.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    /// Returns the SHA-256 digest of the canonical artifact payload.
+    pub const fn digest(&self) -> crate::revision::Sha256Digest {
+        self.digest
+    }
+}
+
+fn encode_physical_migration(
+    expected_base: RevisionPair,
+    candidate_pair: RevisionPair,
+    operations: &[PhysicalOperation],
+) -> Result<(Vec<u8>, crate::revision::Sha256Digest), PhysicalMigrationArtifactError> {
+    let mut encoder = PhysicalMigrationEncoder::new();
+    encoder.bytes(&MAGIC);
+    encoder.u32(FORMAT_VERSION);
+    encoder.revision_pair(expected_base);
+    encoder.revision_pair(candidate_pair);
+    encoder.sequence_len(operations.len(), "physical operations")?;
+    for operation in operations {
+        encode_physical_operation(&mut encoder, operation)?;
+    }
+    let canonical_bytes = encoder.finish();
+    let digest = crate::canonical_hash::artifact_payload_digest(&canonical_bytes)
+        .map_err(PhysicalMigrationArtifactError::CanonicalHash)?;
+    Ok((canonical_bytes, digest))
+}
+
+fn encode_physical_operation(
+    encoder: &mut PhysicalMigrationEncoder,
+    operation: &PhysicalOperation,
+) -> Result<(), PhysicalMigrationArtifactError> {
+    match operation {
+        PhysicalOperation::CreateObject(object) => {
+            encoder.u8(CREATE_OBJECT_OPERATION_TAG);
+            encode_create_object(encoder, object)?;
+        }
+        PhysicalOperation::AddField(add_field) => {
+            encoder.u8(ADD_FIELD_OPERATION_TAG);
+            encoder.type_id(add_field.object_type());
+            encode_create_field(encoder, add_field.field())?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_create_object(
+    encoder: &mut PhysicalMigrationEncoder,
+    object: &CreateObject,
+) -> Result<(), PhysicalMigrationArtifactError> {
+    encoder.type_id(object.type_id());
+    encoder.sequence_len(object.fields().len(), "physical object fields")?;
+    for field in object.fields() {
+        encode_create_field(encoder, field)?;
+    }
+    Ok(())
+}
+
+fn encode_create_field(
+    encoder: &mut PhysicalMigrationEncoder,
+    field: &CreateField,
+) -> Result<(), PhysicalMigrationArtifactError> {
+    encoder.field_id(field.field_id());
+    match field.field_type() {
+        PhysicalFieldType::Scalar(scalar) => {
+            encoder.u8(SCALAR_FIELD_TYPE_TAG);
+            encoder.standard_scalar(scalar);
+        }
+        PhysicalFieldType::Enum(type_id) => {
+            encoder.u8(ENUM_FIELD_TYPE_TAG);
+            encoder.type_id(type_id);
+        }
+        PhysicalFieldType::Record(type_id) => {
+            encoder.u8(RECORD_FIELD_TYPE_TAG);
+            encoder.type_id(type_id);
+        }
+        PhysicalFieldType::Reference { target, on_delete } => {
+            encoder.u8(REFERENCE_FIELD_TYPE_TAG);
+            encoder.type_id(target);
+            encoder.on_delete(on_delete);
+        }
+    }
+    encoder.boolean(field.nullable());
+    encoder.boolean(field.unique());
+    Ok(())
+}
+
+struct PhysicalMigrationEncoder {
+    bytes: Vec<u8>,
+}
+
+impl PhysicalMigrationEncoder {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.bytes(&value.to_be_bytes());
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.u8(u8::from(value));
+    }
+
+    fn sequence_len(
+        &mut self,
+        length: usize,
+        value: &'static str,
+    ) -> Result<(), PhysicalMigrationArtifactError> {
+        let length = u32::try_from(length).map_err(|_| {
+            PhysicalMigrationArtifactError::CanonicalHash(
+                crate::canonical_hash::CanonicalHashError::LengthExceedsU32 { value, length },
+            )
+        })?;
+        self.u32(length);
+        Ok(())
+    }
+
+    fn id(&mut self, id: [u8; 16]) {
+        self.bytes(&id);
+    }
+
+    fn type_id(&mut self, id: TypeId) {
+        self.id(id.to_bytes());
+    }
+
+    fn field_id(&mut self, id: FieldId) {
+        self.id(id.to_bytes());
+    }
+
+    fn revision_pair(&mut self, pair: RevisionPair) {
+        self.id(pair.source().to_bytes());
+        self.id(pair.catalogue().to_bytes());
+    }
+
+    fn standard_scalar(&mut self, scalar: StandardScalar) {
+        let tag = match scalar {
+            StandardScalar::Boolean => 1,
+            StandardScalar::Integer => 2,
+            StandardScalar::BigInt => 3,
+            StandardScalar::Float => 4,
+            StandardScalar::Decimal => 5,
+            StandardScalar::CharacterLargeObject => 6,
+            StandardScalar::BinaryLargeObject => 7,
+            StandardScalar::Uuid => 8,
+            StandardScalar::Date => 9,
+            StandardScalar::Time => 10,
+            StandardScalar::Timestamp => 11,
+            StandardScalar::Duration => 12,
+            StandardScalar::Void => 13,
+        };
+        self.u8(tag);
+    }
+
+    fn on_delete(&mut self, action: Option<OnDeleteAction>) {
+        self.u8(match action {
+            None => 0,
+            Some(OnDeleteAction::Restrict) => 1,
+            Some(OnDeleteAction::SetNull) => 2,
+            Some(OnDeleteAction::Cascade) => 3,
+        });
+    }
+}
+
 /// One complete ordered set of supported physical changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysicalPlan {
@@ -3975,6 +4290,214 @@ mod tests {
                 object_type: FIRST_TYPE,
                 field: FIRST_FIELD,
             })
+        );
+    }
+
+    #[test]
+    fn migration_artifact_bytes_and_digest_are_deterministic() {
+        let active = active(Vec::new(), 1);
+        let candidate = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                )],
+            )],
+            2,
+        );
+
+        let first = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
+        let second = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
+
+        assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+        assert_eq!(first.digest(), second.digest());
+        assert_eq!(
+            first.digest(),
+            crate::canonical_hash::artifact_payload_digest(first.canonical_bytes()).unwrap()
+        );
+        assert_eq!(&first.canonical_bytes()[..MAGIC.len()], &MAGIC);
+        assert_eq!(
+            u32::from_be_bytes(
+                first.canonical_bytes()[MAGIC.len()..MAGIC.len() + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            FORMAT_VERSION
+        );
+    }
+
+    #[test]
+    fn migration_artifact_preserves_plan_operation_order() {
+        let active = active(Vec::new(), 1);
+        let candidate = candidate(
+            &active,
+            vec![
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        SECOND_FIELD,
+                        "value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        true,
+                    )],
+                ),
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![field(
+                        FIRST_FIELD,
+                        "value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        true,
+                    )],
+                ),
+            ],
+            2,
+        );
+
+        let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
+        assert_eq!(artifact.operations().len(), 2);
+        assert!(matches!(
+            &artifact.operations()[0],
+            PhysicalOperation::CreateObject(object) if object.type_id() == SECOND_TYPE
+        ));
+        assert!(matches!(
+            &artifact.operations()[1],
+            PhysicalOperation::CreateObject(object) if object.type_id() == FIRST_TYPE
+        ));
+    }
+
+    #[test]
+    fn migration_artifact_orders_new_objects_before_existing_field_addition() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let existing = field(
+            FIRST_FIELD,
+            "first_value",
+            0,
+            ResolvedType::Value(boolean),
+            false,
+        );
+        let appended = field(
+            SECOND_FIELD,
+            "second_value",
+            1,
+            ResolvedType::Value(boolean),
+            true,
+        );
+        let active = active_version_two(
+            vec![object(FIRST_TYPE, "first", vec![existing.clone()])],
+            standard.clone(),
+            1,
+        );
+        let candidate = candidate_version_two(
+            &active,
+            vec![
+                object(FIRST_TYPE, "first", vec![existing, appended]),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        FIRST_FIELD,
+                        "value",
+                        0,
+                        ResolvedType::Value(boolean),
+                        true,
+                    )],
+                ),
+            ],
+            standard,
+            2,
+        );
+
+        let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
+        assert!(matches!(
+            &artifact.operations()[0],
+            PhysicalOperation::CreateObject(object) if object.type_id() == SECOND_TYPE
+        ));
+        assert!(matches!(
+            &artifact.operations()[1],
+            PhysicalOperation::AddField(add_field)
+                if add_field.object_type() == FIRST_TYPE
+                    && add_field.field().field_id() == SECOND_FIELD
+        ));
+    }
+
+    #[test]
+    fn migration_artifact_binds_expected_and_candidate_revision_pairs() {
+        let active = active(Vec::new(), 1);
+        let candidate = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                )],
+            )],
+            2,
+        );
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        let expected_base = active.pair();
+        let candidate_pair = candidate.candidate_pair();
+        let artifact =
+            PhysicalMigrationArtifact::from_plan(expected_base, candidate_pair, &plan).unwrap();
+
+        assert_eq!(artifact.expected_base(), expected_base);
+        assert_eq!(artifact.candidate_pair(), candidate_pair);
+
+        let different_base = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xf1; 16]),
+            expected_base.catalogue(),
+        );
+        let different =
+            PhysicalMigrationArtifact::from_plan(different_base, candidate_pair, &plan).unwrap();
+        assert_ne!(artifact.canonical_bytes(), different.canonical_bytes());
+        assert_ne!(artifact.digest(), different.digest());
+    }
+
+    #[test]
+    fn migration_artifact_propagates_unsupported_physical_planning() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                )],
+            )],
+            1,
+        );
+        let candidate = candidate(&active, Vec::new(), 2);
+
+        assert_eq!(
+            PhysicalMigrationArtifact::from_revisions(&active, &candidate),
+            Err(PhysicalMigrationArtifactError::Planning(
+                PhysicalPlanError::UnsupportedObjectDrop {
+                    object_type: FIRST_TYPE,
+                }
+            ))
         );
     }
 
