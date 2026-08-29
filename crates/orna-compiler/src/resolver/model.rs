@@ -5008,6 +5008,11 @@ impl<'a> CheckedStandardApplicationClientFunction<'a> {
         self.function.volatility
     }
 
+    /// Returns the complete checked CLIENT body kind.
+    pub fn body_kind(&self) -> CheckedClientBodyKind {
+        self.function.body_kind()
+    }
+
     /// Returns the complete function declaration location.
     pub fn location(&self) -> &SourceLocation {
         &self.function.location
