@@ -3238,10 +3238,6 @@ fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
 fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
     slice.map(|slice| slice.text.as_str())
 }
-#[allow(dead_code)]
-pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
-    completion_at(parse, standard, None, None)
-}
 
 /// Returns global completion items plus fields for an accepted CLIENT path at
 /// the requested source byte.
@@ -3690,7 +3686,8 @@ fn client_field_path_at_byte(
 #[cfg(test)]
 mod tests {
     use super::{
-        StandardLibrary, completion, declaration_at, hover, references, type_owner_name_from_source,
+        StandardLibrary, completion_at, declaration_at, hover, references,
+        type_owner_name_from_source,
     };
     use crate::documents::{Document, PositionMapper};
     use lsp_types::{Hover, HoverContents, Position, Range};
@@ -3727,7 +3724,7 @@ mod tests {
     #[test]
     fn completion_includes_canonical_scalar_type_spellings() {
         let parse = orna_syntax::parse("");
-        let labels: Vec<_> = completion(&parse, None)
+        let labels: Vec<_> = completion_at(&parse, None, None, None)
             .into_iter()
             .map(|item| item.label)
             .collect();
