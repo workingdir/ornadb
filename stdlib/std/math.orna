@@ -1,0 +1,50 @@
+CREATE SCHEMA std.math;
+
+CREATE CLIENT FUNCTION std.math.increment(p_value INTEGER)
+RETURNS INTEGER
+RETURN p_value + 1;
+
+CREATE CLIENT FUNCTION std.math.decrement(p_value INTEGER)
+RETURNS INTEGER
+RETURN p_value - 1;
+
+CREATE CLIENT FUNCTION std.math.is_zero(p_value INTEGER)
+RETURNS BOOLEAN
+RETURN p_value = 0;
+
+CREATE CLIENT FUNCTION std.math.min(p_left INTEGER, p_right INTEGER)
+RETURNS INTEGER
+IS
+BEGIN
+    IF p_left < p_right THEN
+        RETURN p_left;
+    ELSE
+        RETURN p_right;
+    END IF;
+END;
+
+CREATE CLIENT FUNCTION std.math.max(p_left INTEGER, p_right INTEGER)
+RETURNS INTEGER
+IS
+BEGIN
+    IF p_left > p_right THEN
+        RETURN p_left;
+    ELSE
+        RETURN p_right;
+    END IF;
+END;
+
+CREATE CLIENT FUNCTION std.math.clamp(p_value INTEGER, p_min INTEGER, p_max INTEGER)
+RETURNS INTEGER
+IS
+BEGIN
+    IF p_value < p_min THEN
+        RETURN p_min;
+    ELSE
+        IF p_value > p_max THEN
+            RETURN p_max;
+        ELSE
+            RETURN p_value;
+        END IF;
+    END IF;
+END;
