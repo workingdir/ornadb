@@ -17,8 +17,7 @@ mod resolver;
 pub use prepare::{
     PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
     PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
-    prepare_source_authored_client_functions, prepare_checked_standard_upgrade,
-    prepare_standard_application,
+    prepare_checked_standard_upgrade, prepare_standard_application,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
