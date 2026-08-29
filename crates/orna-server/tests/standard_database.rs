@@ -16253,7 +16253,7 @@ fn checks_and_evaluates_accepted_client_control_flow_fixture_offline() -> TestRe
 }
 #[test]
 fn checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline() -> TestResult<()> {
-    let snapshot = verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)?;
+    let snapshot = verify_standard_library_v10_snapshot(retained_standard_library_v10_snapshot()?)?;
     let standard = check_standard_library_source(&snapshot)?;
     let base = offline_empty_version_two_active(standard.verified_snapshot())?;
     let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
@@ -16489,7 +16489,7 @@ fn checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline() -> Test
 
 #[test]
 fn checks_and_evaluates_accepted_static_studio_shell_offline() -> TestResult<()> {
-    let snapshot = verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)?;
+    let snapshot = verify_standard_library_v10_snapshot(retained_standard_library_v10_snapshot()?)?;
     let standard = check_standard_library_source(&snapshot)?;
     let base = offline_empty_version_two_active(standard.verified_snapshot())?;
     let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;

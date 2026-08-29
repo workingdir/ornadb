@@ -1396,7 +1396,9 @@ impl PreparationMode<'_> {
 
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
+                CatalogueHashContext::version_one()
+            }
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
@@ -1406,7 +1408,7 @@ impl PreparationMode<'_> {
 
     fn durable_standard_catalogue(&self) -> Option<&CatalogueSnapshot> {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
             Self::StandardV2Plan { standard, .. } | Self::StandardV2 { standard, .. } => {
                 Some(standard.verified_snapshot().catalogue())
             }
@@ -1415,7 +1417,7 @@ impl PreparationMode<'_> {
 
     fn standard_preflight(&self) -> Option<&StandardPreflight> {
         match self {
-            Self::LegacyV1 => None,
+            Self::Generic | Self::LegacyV1 => None,
             Self::StandardV1Match {
                 standard_preflight, ..
             }
