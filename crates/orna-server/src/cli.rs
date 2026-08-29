@@ -316,6 +316,8 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "inspect"
                 | "security"
                 | "repl"
+                | "version"
+                | "backend-shell"
         )
     })
 }
@@ -398,7 +400,15 @@ where
             if args.next().is_some() {
                 None
             } else {
-                default_repl_command(runtime)
+                Some(Command::Invoke(InvokeArguments {
+                    target: parse_qualified_name("std.cli.repl")?,
+                    arguments: Vec::new(),
+                    output: None,
+                    trace: None,
+                    no_progress: false,
+                    explain: false,
+                    runtime,
+                }))
             }
         }
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
@@ -986,6 +996,7 @@ where
             }
             "explain" => explain = true,
             "no-progress" => no_progress = true,
+            "db" => return None,
             _ => {
                 let value = args.next()?.into_string().ok()?;
                 arguments.push(CliArgumentInput::Friendly {
