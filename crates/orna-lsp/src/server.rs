@@ -17,8 +17,8 @@ use lsp_types::{
     RelatedFullDocumentDiagnosticReport, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 use orna_syntax::Parse;
 
@@ -227,11 +227,11 @@ fn server_capabilities() -> ServerCapabilities {
         }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
-        document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
             ..CompletionOptions::default()
         }),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: SemanticTokensLegend {
@@ -265,7 +265,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
         "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
-        "textDocument/completion" => request_completion(state, request),
+        "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
             let _ = connection.sender.send(Message::Response(Response {
@@ -468,6 +468,36 @@ fn request_document_symbols(
     let symbols = analysis::document_symbols(&parse, &mapper);
     let response = DocumentSymbolResponse::Nested(symbols);
     Ok(serde_json::to_value(response)?)
+}
+
+fn request_workspace_symbols(
+    state: &mut ServerState,
+    request: Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, params) = request.extract::<lsp_types::WorkspaceSymbolParams>("workspace/symbol")?;
+    let query = params.query.to_ascii_lowercase();
+    let mut symbols = Vec::new();
+    for document in state.documents.values() {
+        let (parse, mapper) = parse_document(document);
+        for symbol in analysis::document_symbols(&parse, &mapper) {
+            if symbol.name.to_ascii_lowercase().contains(&query) {
+                symbols.push(lsp_types::WorkspaceSymbol {
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    tags: symbol.tags,
+                    container_name: symbol.detail,
+                    location: lsp_types::OneOf::Left(lsp_types::Location {
+                        uri: document.uri.clone(),
+                        range: symbol.selection_range,
+                    }),
+                    data: None,
+                });
+            }
+        }
+    }
+    Ok(serde_json::to_value(
+        lsp_types::WorkspaceSymbolResponse::Nested(symbols),
+    )?)
 }
 
 fn request_semantic_tokens_full(
