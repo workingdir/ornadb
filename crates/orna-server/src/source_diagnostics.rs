@@ -160,6 +160,12 @@ fn render_source_line(line: &str) -> String {
         })
         .collect()
 }
+fn display_column(text: &str) -> usize {
+    text.chars().fold(0, |column, character| {
+        column + if character == '\t' { 4 } else { 1 }
+    })
+}
+
 fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&'static str> {
     match diagnostic.code().as_str() {
         "ORNA0001" if diagnostic.message().contains("schema name") => {
@@ -199,7 +205,7 @@ mod tests {
     use super::*;
     use orna_core::source::{SourceBundle, SourceUnit};
 
-    fn broken_report() -> orna_compiler::CheckReport {
+    fn broken_report() -> orna_compiler::StandardApplicationCheckReport {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])
             .expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(
