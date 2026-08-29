@@ -337,6 +337,7 @@ impl<'a> StandardApplicationCheckContext<'a> {
 /// This is intentionally distinct from [`check`]: it resolves standard values
 /// through durable type identities and returns no legacy checked-bundle escape.
 pub fn check_standard_application(
+
     bundle: &SourceBundle,
     context: &StandardApplicationCheckContext<'_>,
 ) -> StandardApplicationCheckReport {
