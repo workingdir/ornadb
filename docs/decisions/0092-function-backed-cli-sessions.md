@@ -10,11 +10,14 @@ The `orna` binary has two lifetimes:
   container supervisor; and
 * every other invocation is a client session attached to one endpoint.
 
-The no-command client form invokes the source-authored standard
-`std.cli.repl` CLIENT function. `orna repl` is an explicit spelling of the
-same target. The function owns the session behaviour in `.orna`, including
+The function-backed session is a deferred extension to this client path. Once
+the source-authored standard `std.cli.repl` CLIENT function, its input/action
+contract, and a persistent runtime/session owner exist, the no-command client
+form will invoke that function; `orna repl` will be an explicit spelling of the
+same target. The function will own the session behaviour in `.orna`, including
 input handling and command evaluation; the host supplies only the language
-execution and transport primitives that the source contract requires.
+execution and transport primitives that the source contract requires. The
+current CLI does not expose either spelling.
 
 One-shot function calls use the same client path:
 
@@ -45,11 +48,12 @@ is the only local authority form under the `orna` scheme. Other authorities
 are remote. Unknown query parameters, fragments, credentials, and empty
 DATABASE paths fail before a connection attempt.
 
-The public help surface is intentionally small: the default session, `invoke`,
-`inspect`, `source check|apply`, daemon mode, help, and version. Backend shell,
-raw recovery, runtime metadata, security administration, and state repair remain
-available behind explicit administrative/recovery paths but are not the normal
-user workflow.
+The current public help surface is intentionally small: `invoke`, `inspect`,
+`source check|apply`, daemon mode, help, and version. The deferred
+function-backed session is not advertised until its standard function and
+lifecycle exist. Backend shell, raw recovery, runtime metadata, security
+administration, and state repair remain available behind explicit
+administrative/recovery paths but are not the normal user workflow.
 
 Daemon output is Orna-owned status and error output. The linked storage
 engine's routine startup and shutdown messages do not reach the terminal.
