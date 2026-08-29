@@ -37,9 +37,16 @@ CREATE TABLE IF NOT EXISTS orna_source_revisions (
 
 CREATE TABLE IF NOT EXISTS orna_catalogue_revisions (
     catalogue_revision_id BLOB NOT NULL,
+    source_revision_id BLOB NOT NULL,
+    parent_catalogue_revision_id BLOB,
     catalogue_hash BLOB NOT NULL,
     PRIMARY KEY (catalogue_revision_id),
     CHECK (length(catalogue_revision_id) = 16),
+    CHECK (length(source_revision_id) = 16),
+    CHECK (
+        parent_catalogue_revision_id IS NULL
+        OR length(parent_catalogue_revision_id) = 16
+    ),
     CHECK (length(catalogue_hash) = 32)
 );
 
