@@ -492,32 +492,14 @@ mod tests {
     }
 
     #[test]
-    fn no_command_starts_the_function_backed_repl() {
-        let Some(Command::Invoke(arguments)) = parse_command(arguments(&["orna"])) else {
-            panic!("no-command form must invoke the REPL function");
-        };
-        assert_eq!(
-            arguments.target,
-            InvocationTarget::qualified_name(
-                QualifiedSemanticName::new(["std", "cli", "repl"])
-                    .expect("the REPL target is qualified"),
-            )
-            .expect("the REPL target is valid"),
-        );
-        assert!(arguments.arguments.is_empty());
-        assert!(arguments.runtime.is_none());
-    }
-
-    #[test]
-    fn explicit_repl_starts_the_same_function() {
-        assert_eq!(
-            parse_command(arguments(&["orna", "repl"])),
-            parse_command(arguments(&["orna"])),
-        );
-        assert_eq!(
-            parse_command(arguments(&["orna", "help", "repl"])),
-            Some(Command::Help(HelpTopic::Repl)),
-        );
+    fn rejects_missing_and_removed_repl_commands() {
+        for values in [
+            vec!["orna"],
+            vec!["orna", "repl"],
+            vec!["orna", "help", "repl"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
     }
 
     #[test]
@@ -1431,6 +1413,7 @@ mod tests {
             ))
         );
         for values in [
+            vec!["orna", "--runtime", "tty"],
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
         ] {
@@ -2052,11 +2035,11 @@ mod tests {
     }
 
     #[test]
-    fn help_text_is_short_and_describes_the_session_workflow() {
+    fn help_text_is_short_and_describes_the_command_workflow() {
         let top_level = help_text(HelpTopic::TopLevel);
         assert!(top_level.contains("Orna command line"));
-        assert!(top_level.contains("function-backed REPL"));
-        for command in ["invoke", "source", "inspect", "repl", "--daemon", "--db"] {
+        assert!(!top_level.contains("function-backed REPL"));
+        for command in ["invoke", "source", "inspect", "--daemon", "--db"] {
             assert!(
                 top_level.contains(command),
                 "{command} is missing from top-level help",
@@ -2075,8 +2058,9 @@ mod tests {
 
     #[test]
     fn usage_diagnostic_keeps_the_stable_command_list() {
-        assert!(USAGE.starts_with("Usage:\n  orna\n"));
+        assert!(USAGE.starts_with("Usage:\n  orna --db"));
         assert!(USAGE.contains("orna raw-call"));
+        assert!(!USAGE.contains("orna repl"));
         assert!(!USAGE.ends_with('\n'));
         assert_ne!(USAGE, HELP_TOP_LEVEL);
     }
@@ -2200,6 +2184,6 @@ mod tests {
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
         assert!(coloured.contains("\x1b[1;36mHost Mode:\x1b[0m"));
-        assert!(coloured.contains("function-backed REPL"));
+        assert!(!coloured.contains("function-backed REPL"));
     }
 }
