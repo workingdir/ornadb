@@ -188,10 +188,14 @@ pub fn admit_client_function(
         admission_host,
         |payload| decode_client_plan(outer_version, payload),
         move |plan| {
-            let return_shape =
-                super::validate_function_shape(active, definition, context, effective_version)
-                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
-            super::validate_artifact(
+            let return_shape = super::execution::validate_function_shape(
+                active,
+                definition,
+                context,
+                effective_version,
+            )
+            .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
+            super::execution::validate_artifact(
                 artifact,
                 revision.language_version(),
                 context,
@@ -199,7 +203,7 @@ pub fn admit_client_function(
                 effective_version,
             )
             .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
-            super::validate_selected_references(
+            super::execution::validate_selected_references(
                 active,
                 resolved_references,
                 definition,
@@ -235,11 +239,15 @@ pub fn admit_client_function(
             match plan {
                 ClientVmDecodedPlan::Boolean(_) | ClientVmDecodedPlan::Opaque(_) => {}
                 ClientVmDecodedPlan::Expression(plan) => {
-                    super::preflight_client_expression_calls(active, plan.expression(), context)
-                        .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
+                    super::execution::preflight_client_expression_calls(
+                        active,
+                        plan.expression(),
+                        context,
+                    )
+                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::State(plan) => {
-                    super::preflight_client_state_calls(active, plan, context)
+                    super::execution::preflight_client_state_calls(active, plan, context)
                         .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::Capability(plan) => {
@@ -281,23 +289,35 @@ pub fn admit_client_function(
                             field: "capabilities",
                         });
                     }
-                    super::preflight_client_inner_plan_calls(active, plan.inner_plan(), context)
-                        .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
+                    super::execution::preflight_client_inner_plan_calls(
+                        active,
+                        plan.inner_plan(),
+                        context,
+                    )
+                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::Resource(plan) => {
-                    super::preflight_client_expression_calls(active, plan.expression(), context)
-                        .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
+                    super::execution::preflight_client_expression_calls(
+                        active,
+                        plan.expression(),
+                        context,
+                    )
+                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::Procedural(plan) => {
-                    super::preflight_client_procedural_calls(active, plan, context)
+                    super::execution::preflight_client_procedural_calls(active, plan, context)
                         .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::Action(plan) => {
-                    super::preflight_client_action_calls(active, plan.operation(), context)
-                        .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
+                    super::execution::preflight_client_action_calls(
+                        active,
+                        plan.operation(),
+                        context,
+                    )
+                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
                 ClientVmDecodedPlan::ControlFlow(plan) => {
-                    super::preflight_client_control_flow_calls(active, plan, context)
+                    super::execution::preflight_client_control_flow_calls(active, plan, context)
                         .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                 }
             }
