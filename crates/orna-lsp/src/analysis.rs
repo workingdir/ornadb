@@ -13,7 +13,7 @@ use lsp_types::{
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
+use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
@@ -30,14 +30,15 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V10 standard library snapshot.
+    /// Loads and verifies the retained V9 standard library snapshot.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
-        let snapshot = retained_standard_library_snapshot().map_err(|error| error.to_string())?;
+        let snapshot =
+            retained_standard_library_v9_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v9_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -92,13 +93,9 @@ pub fn check_document(
         Vec::new(),
     )
     .expect("the empty application catalogue is valid");
-    let context = match orna_compiler::StandardApplicationCheckContext::try_new(
-        &application,
-        &standard.checked,
-    ) {
-        Ok(context) => context,
-        Err(_) => return syntax_diagnostics(document, mapper),
-    };
+    let context =
+        orna_compiler::StandardApplicationCheckContext::try_new(&application, &standard.checked)
+            .expect("the empty application catalogue is valid for the checked standard");
     let report = orna_compiler::check_standard_application(&bundle, &context);
     report
         .diagnostics()
@@ -3707,17 +3704,17 @@ mod tests {
     }
 
     #[test]
-    fn standard_library_loads_verified_current_snapshot() {
-        let standard = StandardLibrary::load().expect("retained standard must load");
+    fn standard_library_loads_verified_v9_snapshot() {
+        let standard = StandardLibrary::load().expect("retained V9 standard must load");
         let snapshot = standard.checked.verified_snapshot();
 
         assert_eq!(
             snapshot.revision(),
-            orna_standard::STANDARD_LIBRARY_REVISION_ID
+            orna_standard::STANDARD_LIBRARY_V9_REVISION_ID
         );
         assert_eq!(
             snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_REVISION_ID
+            orna_standard::STANDARD_SOURCE_V9_REVISION_ID
         );
     }
 
