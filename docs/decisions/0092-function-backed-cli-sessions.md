@@ -10,10 +10,11 @@ The `orna` binary has two lifetimes:
   container supervisor; and
 * every other invocation is a client session attached to one endpoint.
 
-The no-command client form invokes the standard `std.cli.repl` CLIENT entry
-function. `orna repl` is an explicit spelling of the same target. The target
-is a normal function, not a parser-owned SQL shell. Its session remains open
-while its terminal or graphical surfaces remain open.
+The no-command client form invokes the source-authored standard
+`std.cli.repl` CLIENT function. `orna repl` is an explicit spelling of the
+same target. The function owns the session behaviour in `.orna`, including
+input handling and command evaluation; the host supplies only the language
+execution and transport primitives that the source contract requires.
 
 One-shot function calls use the same client path:
 
@@ -69,8 +70,11 @@ The next implementation slices must:
 3. add the versioned remote handshake and TLS transport before accepting
    remote invocation;
 4. add a persistent runtime/session owner for terminal and graphical surfaces;
-5. add the `std.cli.repl@1` standard function and its input/action contract;
-6. keep raw-call as an explicit bounded recovery path.
+5. add source-level input and dynamic invocation primitives, then implement
+   `std.cli.repl` as ordinary `.orna` code;
+6. keep Qt and other genuinely host-only rendering operations behind explicit
+   runtime boundaries;
+7. keep raw-call as an explicit bounded recovery path.
 
 No slice may claim remote execution, arbitrary CLIENT artifact execution, or
 interactive action delivery until its transport, trust, and lifecycle tests
