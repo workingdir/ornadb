@@ -15,6 +15,7 @@ pub mod security_admin;
 mod source_apply;
 mod source_diagnostics;
 mod source_diff;
+mod source_support;
 mod user_state;
 
 /// Renders source diagnostics in the stable machine-readable format.
