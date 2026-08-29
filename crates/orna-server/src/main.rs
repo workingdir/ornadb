@@ -38,15 +38,12 @@ fn main() -> ExitCode {
         command,
     } = parsed;
     if endpoint_explicit
-        && !matches!(&command, Command::Help(_) | Command::Version)
         && !matches!(
-            &endpoint,
-            orna_client::endpoint::DatabaseEndpoint::ManagedLocal { .. }
+            &command,
+            Command::Help(_) | Command::Version | Command::Invoke(_)
         )
     {
-        write_stderr_line(
-            "orna: the selected endpoint needs a client transport that is not available yet",
-        );
+        write_stderr_line("orna: endpoint selection is supported for invoke only");
         return ExitCode::from(3);
     }
     match command {
@@ -98,6 +95,7 @@ fn main() -> ExitCode {
                 color.enabled(terminal),
             ) {
                 source_check::SourceCheckResult::Success => ExitCode::SUCCESS,
+                source_check::SourceCheckResult::Failure => ExitCode::from(1),
                 source_check::SourceCheckResult::Usage => {
                     let _ = writeln!(stderr, "{USAGE}");
                     ExitCode::from(2)
@@ -132,6 +130,10 @@ fn main() -> ExitCode {
             }
             Ok(_) => {
                 write_stderr_line("orna: source apply returned an unsupported result");
+                ExitCode::from(1)
+            }
+            Err(error) => {
+                write_stderr_line(&error.to_string());
                 ExitCode::from(1)
             }
         },
@@ -240,7 +242,12 @@ fn main() -> ExitCode {
                 arguments.explain,
                 arguments.runtime,
             );
-            match orna_server::run_installed_invoke(request, &mut stdout, &mut stderr) {
+            let result = if endpoint_explicit {
+                orna_server::run_installed_invoke_at(&endpoint, request, &mut stdout, &mut stderr)
+            } else {
+                orna_server::run_installed_invoke(request, &mut stdout, &mut stderr)
+            };
+            match result {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
                 Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
                 Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
