@@ -1,3 +1,7 @@
+// State operations keep the accepted error layout across their public seam.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
+
 //! Protected durable USER state operations from ADR 0061 step 4.
 //!
 //! The authenticated session supplies the principal for every operation. The

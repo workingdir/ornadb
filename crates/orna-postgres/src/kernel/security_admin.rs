@@ -1,3 +1,6 @@
+// Security administration keeps the accepted error layout across its public seam.
+#![allow(clippy::result_large_err)]
+
 //! ADR 0065: the protected `sys.security` kernel model methods.
 //!
 //! The session identity functions return typed facts from the bound

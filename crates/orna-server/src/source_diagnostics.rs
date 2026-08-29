@@ -281,6 +281,34 @@ mod tests {
 }
 
 #[cfg(test)]
+mod source_context_tests {
+    use super::*;
+
+    #[test]
+    fn display_column_counts_utf8_scalars_and_expands_tabs() {
+        assert_eq!(display_column("é\tX"), 6);
+        assert_eq!(display_column("e\u{301}"), 2);
+    }
+
+    #[test]
+    fn source_line_renderer_removes_cr_and_escapes_controls() {
+        assert_eq!(
+            render_source_line("CREATE\tSCHEMA\r"),
+            "CREATE    SCHEMA".to_owned()
+        );
+        assert_eq!(render_source_line("bad\u{0007}"), "bad\\u{0007}".to_owned());
+    }
+
+    #[test]
+    fn character_boundary_helpers_never_split_utf8() {
+        let source = "éclair";
+        assert_eq!(char_boundary_at_or_before(source, 1), 0);
+        assert_eq!(char_boundary_at_or_after(source, 1), 2);
+        assert_eq!(char_boundary_at_or_before(source, 3), 3);
+    }
+}
+
+#[cfg(test)]
 mod escaping_tests {
     use super::*;
 

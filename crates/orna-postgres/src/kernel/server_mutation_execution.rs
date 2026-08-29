@@ -1,3 +1,6 @@
+// Mutation execution keeps the accepted error layout across its public seam.
+#![allow(clippy::result_large_err)]
+
 //! Execution of the initial single-object SERVER mutation subset.
 //!
 //! This module accepts stable identities, typed runtime arguments, and one
