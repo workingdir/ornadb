@@ -343,9 +343,6 @@ fn digest32(
     ))
 }
 
-fn pair_to_revision_pair(pair: BootstrapRevision) -> orna_core::revision::RevisionPair {
-    orna_core::revision::RevisionPair::new(pair.source(), pair.catalogue())
-}
 impl RevisionStore for SqliteRevisionStore {
     type Error = SqliteError;
     fn bootstrap(
