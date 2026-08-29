@@ -2309,6 +2309,23 @@ pub const STANDARD_LIBRARY_V8_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed Work ADR 0088 `orna.std/9` standard-library revision identity.
 pub const STANDARD_LIBRARY_V9_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
+/// The fixed CLI-session `orna.std/10` standard-library revision identity: `...0A`.
+pub const STANDARD_LIBRARY_V10_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
+/// The fixed CLI-session `std/cli.orna` source-unit identity: `...0B`.
+pub const STD_CLI_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0B]);
+/// The fixed CLI-session `std.cli` schema identity: `...0A`.
+pub const STD_CLI_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
+/// The fixed source-authored `std.cli.repl` function identity: `...1C`.
+pub const STD_CLI_REPL_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1C]);
+/// The fixed source-authored `std.cli.repl` function-revision identity: `...1C`.
+pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1C]);
+/// The source-authored `std.cli.repl` function revision number.
+pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
 /// The fixed Work ADR 0088 `std/ui_constructors.orna` source-unit identity: `...0A`.
 pub const STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0A]);
