@@ -135,10 +135,10 @@ use orna_standard::{
     STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     registered_opaque_codecs, retained_standard_library_snapshot,
     retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
-    retained_standard_library_v6_snapshot, retained_standard_library_v9_snapshot,
+    retained_standard_library_v6_snapshot, retained_standard_library_v10_snapshot,
     verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
     verify_standard_library_v3_snapshot, verify_standard_library_v6_snapshot,
-    verify_standard_library_v9_snapshot,
+    verify_standard_library_v10_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -506,7 +506,7 @@ fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()> {
 
 async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestResult<()> {
     let expected =
-        retained_standard_library_v9_snapshot().and_then(verify_standard_library_v9_snapshot)?;
+        retained_standard_library_v10_snapshot().and_then(verify_standard_library_v10_snapshot)?;
     let expected_boolean_contract = expected
         .catalogue()
         .value_type_by_id(BOOLEAN_TYPE_ID)
