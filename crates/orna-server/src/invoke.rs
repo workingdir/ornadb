@@ -532,15 +532,14 @@ impl SessionBridge {
         let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
         waiting.closed = true;
         if waiting.response.is_none() {
-            waiting.response = Some(SessionClientFrame::InputFailed {
-                root_invocation_id: self.root_invocation_id,
-                call_stream: self.call_stream,
-                request_invocation_id: waiting
-                    .state
-                    .pending_request()
-                    .unwrap_or_else(InvocationId::new),
-                error: "client.session_closed".to_owned(),
-            });
+            if let Some(request_invocation_id) = waiting.state.pending_request() {
+                waiting.response = Some(SessionClientFrame::InputFailed {
+                    root_invocation_id: self.root_invocation_id,
+                    call_stream: self.call_stream,
+                    request_invocation_id,
+                    error: "client.session_closed".to_owned(),
+                });
+            }
         }
         drop(waiting);
         self.response_ready.notify_all();
@@ -7182,6 +7181,18 @@ use orna_standard::{
             waiter.join().expect("input waiter joins").expect("input succeeds"),
             "accepted"
         );
+    }
+
+    #[test]
+    fn session_bridge_close_before_request_does_not_publish_fake_response() {
+        let bridge = SessionBridge::new(InvocationId::from_bytes([0x43; 16]), 7)
+            .expect("session bridge creates");
+        bridge.close();
+        assert!(bridge.try_take_outbound().is_none());
+        let error = bridge
+            .request_input(InvocationId::from_bytes([0x43; 16]))
+            .expect_err("closed bridge rejects input");
+        assert_eq!(error, "client.input_unavailable");
     }
     #[cfg(unix)]
     #[test]
