@@ -599,6 +599,7 @@ fn expression_budget(
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::SourceIntrospection
         | ClientExpressionNode::ExternalContract { .. } => {}
     }
     Ok(budget)
@@ -710,7 +711,9 @@ fn expression_contains_external_contract(expression: &ClientExpressionNode) -> b
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
-        | ClientExpressionNode::FieldPath { .. } => false,
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::SourceIntrospection
+        | ClientExpressionNode::ExternalContract { .. } => false,
     }
 }
 

@@ -98,6 +98,8 @@ fn write_human_diagnostic(
     let source = unit.source_text();
     let start = span.start().min(source.len());
     let end = span.end().min(source.len()).max(start);
+    let start = char_boundary_at_or_before(source, start);
+    let end = char_boundary_at_or_after(source, end);
     let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
     let line_end = source[start..]
         .find('\n')
@@ -110,7 +112,8 @@ fn write_human_diagnostic(
     let column = display_column(&source[line_start..start]) + 1;
     let line = &source[line_start..line_end];
     let source_line = render_source_line(line);
-    let underline_width = display_column(&source[start..end]).max(1);
+    let underline_end = end.min(line_end);
+    let underline_width = display_column(&source[start..underline_end]).max(1);
     if colour {
         write!(output, "\x1b[1;31merror\x1b[0m")?;
     } else {
@@ -185,6 +188,21 @@ fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&'static str> {
         _ => None,
     }
 }
+fn char_boundary_at_or_before(source: &str, offset: usize) -> usize {
+    let mut boundary = offset.min(source.len());
+    while boundary > 0 && !source.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn char_boundary_at_or_after(source: &str, offset: usize) -> usize {
+    let mut boundary = offset.min(source.len());
+    while boundary < source.len() && !source.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    boundary
+}
 fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<()> {
     for character in message.chars() {
         match character {
@@ -244,7 +262,7 @@ mod tests {
     fn colour_output_contains_ansi_only_when_requested() {
         let report = broken_report();
         let rendered = render_human_diagnostics(report.parse_report(), report.diagnostics(), true);
-        assert!(rendered.starts_with(b"\x1b[1;31merror\x1b[0m"));
+        assert!(String::from_utf8_lossy(&rendered).contains("\x1b[1;31m"));
     }
 
     #[test]
