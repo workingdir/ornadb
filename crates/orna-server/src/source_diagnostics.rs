@@ -223,6 +223,7 @@ fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<(
 mod tests {
     use super::*;
     use orna_core::source::{SourceBundle, SourceUnit};
+    use orna_compiler::CompilerDiagnostic;
 
     fn broken_report() -> orna_compiler::StandardApplicationCheckReport {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])
@@ -271,6 +272,34 @@ mod tests {
     #[test]
     fn expands_tabs_without_panicking() {
         assert_eq!(display_column("\tX"), 5);
+    }
+    #[test]
+    fn aligns_caret_after_escaped_control_character() {
+        let source = SourceBundle::new([SourceUnit::new("main.orna", "bad\u{0007}x")])
+            .expect("source bundle");
+        let standard = orna_compiler::check_standard_library_source(
+            &orna_standard::retained_standard_library_v10_snapshot()
+                .and_then(orna_standard::verify_standard_library_v10_snapshot)
+                .expect("standard snapshot"),
+        )
+        .expect("standard source");
+        let report = orna_compiler::check_new_application(&source, &standard).expect("source check");
+        let diagnostic = report
+            .diagnostics()
+            .first()
+            .expect("source check should report invalid syntax");
+        let rendered = String::from_utf8(render_human_diagnostics(
+            report.parse_report(),
+            std::slice::from_ref(diagnostic),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(rendered.contains("1 | bad\\u{0007}x"));
+        let marker = rendered
+            .lines()
+            .find(|line| line.contains("^"))
+            .expect("caret line");
+        assert_eq!(marker, "   | ^^^");
     }
 }
 
