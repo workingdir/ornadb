@@ -1191,7 +1191,6 @@ fn checked_type_use_kind_tag(kind: crate::CheckedTypeUseKind) -> &'static str {
 }
 
 enum PreparationMode<'a> {
-    Generic,
     LegacyV1,
     StandardV1Match {
         declaration_evidence: DeclarationEvidence,
@@ -1322,7 +1321,6 @@ enum CandidateTypeProjection {
 /// The candidate lowering policy selected by preparation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateLoweringMode {
-    Generic,
     LegacyV1,
     StandardV1Match,
     StandardV2Plan,
@@ -1361,9 +1359,7 @@ impl CandidateLoweringMode {
         compatibility: StandardScalar,
     ) -> ResolvedType {
         match self {
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match => {
-                ResolvedType::Scalar(compatibility)
-            }
+            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Scalar(compatibility),
             Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
         }
     }
@@ -1391,7 +1387,6 @@ impl PreparationMode<'_> {
 
     fn candidate_lowering_mode(&self) -> CandidateLoweringMode {
         match self {
-            Self::Generic => CandidateLoweringMode::Generic,
             Self::LegacyV1 => CandidateLoweringMode::LegacyV1,
             Self::StandardV1Match { .. } => CandidateLoweringMode::StandardV1Match,
             Self::StandardV2Plan { .. } => CandidateLoweringMode::StandardV2Plan,
@@ -1401,9 +1396,7 @@ impl PreparationMode<'_> {
 
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
-                CatalogueHashContext::version_one()
-            }
+            Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
@@ -1413,7 +1406,7 @@ impl PreparationMode<'_> {
 
     fn durable_standard_catalogue(&self) -> Option<&CatalogueSnapshot> {
         match self {
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
             Self::StandardV2Plan { standard, .. } | Self::StandardV2 { standard, .. } => {
                 Some(standard.verified_snapshot().catalogue())
             }
@@ -1422,7 +1415,7 @@ impl PreparationMode<'_> {
 
     fn standard_preflight(&self) -> Option<&StandardPreflight> {
         match self {
-            Self::Generic | Self::LegacyV1 => None,
+            Self::LegacyV1 => None,
             Self::StandardV1Match {
                 standard_preflight, ..
             }
@@ -1443,7 +1436,7 @@ impl PreparationMode<'_> {
             | Self::StandardV2Plan {
                 signature_evidence, ..
             } => Some(signature_evidence),
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
         }
     }
 
@@ -1452,9 +1445,7 @@ impl PreparationMode<'_> {
         references: &[DefinitionReference],
     ) -> FunctionSemanticHashVersion {
         match self {
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
-                FunctionSemanticHashVersion::Version1
-            }
+            Self::LegacyV1 | Self::StandardV1Match { .. } => FunctionSemanticHashVersion::Version1,
             Self::StandardV2Plan { .. } | Self::StandardV2 { .. }
                 if references.iter().any(|reference| {
                     matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
@@ -5959,7 +5950,7 @@ impl<'a> CandidateBuilder<'a> {
         catalogue_revision: CatalogueRevisionId,
     ) -> Self {
         let declaration_evidence = match &mode {
-            PreparationMode::Generic | PreparationMode::LegacyV1 => None,
+            PreparationMode::LegacyV1 => None,
             PreparationMode::StandardV1Match {
                 declaration_evidence,
                 ..
