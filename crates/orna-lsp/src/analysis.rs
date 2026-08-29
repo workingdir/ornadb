@@ -7,7 +7,8 @@
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
-    DiagnosticSeverity, DocumentSymbol, Hover, Location, NumberOrString, Position, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
+    MarkedString, NumberOrString, Position, SymbolKind,
 };
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
