@@ -12,6 +12,8 @@ use orna_protocol::{
 };
 
 const FRAME_HEADER_LENGTH: usize = 18;
+const CONSTRUCTED_PROTOCOL_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00";
+const CONSTRUCTED_PROTOCOL_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00";
 
 /// A framed constructed-protocol client over an already-authenticated stream.
 ///
@@ -26,6 +28,36 @@ pub struct InvocationConnection<S> {
 }
 
 impl<S: Read + Write> InvocationConnection<S> {
+    /// Completes the constructed Orna protocol handshake on an authenticated stream.
+    ///
+    /// The caller remains responsible for local peer authentication or remote TLS.
+    /// This method negotiates framing only and does not establish a principal.
+    pub fn handshake(stream: &mut S) -> Result<(), InvocationConnectionError> {
+        stream
+            .write_all(&CONSTRUCTED_PROTOCOL_HELLO)
+            .map_err(InvocationConnectionError::Io)?;
+        stream.flush().map_err(InvocationConnectionError::Io)?;
+
+        let mut acknowledgement = [0_u8; CONSTRUCTED_PROTOCOL_ACK.len()];
+        stream
+            .read_exact(&mut acknowledgement)
+            .map_err(InvocationConnectionError::Io)?;
+        if acknowledgement != CONSTRUCTED_PROTOCOL_ACK {
+            return Err(InvocationConnectionError::HandshakeRejected);
+        }
+        Ok(())
+    }
+
+    /// Performs the constructed protocol handshake and starts one invocation.
+    pub fn connect(
+        mut stream: S,
+        active: ActiveDatabaseRevision,
+        registry: OpaqueCodecRegistry,
+        request: RetainedInvokeRequest,
+    ) -> Result<Self, InvocationConnectionError> {
+        Self::handshake(&mut stream)?;
+        Self::start(stream, active, registry, request)
+    }
     /// Starts one invocation and writes its initial frames in protocol order.
     ///
     /// The stream must already have completed the Orna transport handshake.
@@ -113,6 +145,8 @@ pub enum InvocationConnectionError {
     Frame(FrameCodecError),
     /// The invocation lifecycle rejected a server frame.
     Client(InvocationClientError),
+    /// A server did not accept the constructed protocol handshake.
+    HandshakeRejected,
     /// The caller attempted to write a second invocation start frame.
     InvalidControlFrame,
 }
@@ -124,6 +158,9 @@ impl fmt::Display for InvocationConnectionError {
             Self::Frame(source) => write!(formatter, "invocation transport frame failed: {source}"),
             Self::Client(source) => {
                 write!(formatter, "invocation transport lifecycle failed: {source}")
+            }
+            Self::HandshakeRejected => {
+                formatter.write_str("invocation transport handshake was rejected")
             }
             Self::InvalidControlFrame => {
                 formatter.write_str("invocation transport control frame is not allowed")
@@ -138,7 +175,7 @@ impl Error for InvocationConnectionError {
             Self::Io(source) => Some(source),
             Self::Frame(source) => Some(source),
             Self::Client(source) => Some(source),
-            Self::InvalidControlFrame => None,
+            Self::HandshakeRejected | Self::InvalidControlFrame => None,
         }
     }
 }
@@ -186,9 +223,66 @@ fn read_server_frame<S: Read>(stream: &mut S) -> Result<Vec<u8>, InvocationConne
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read, Write};
 
     use super::*;
+
+    struct MemoryStream {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl MemoryStream {
+        fn with_input(input: Vec<u8>) -> Self {
+            Self {
+                input: Cursor::new(input),
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for MemoryStream {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for MemoryStream {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn constructed_handshake_writes_hello_and_accepts_acknowledgement() {
+        let mut stream = MemoryStream::with_input(CONSTRUCTED_PROTOCOL_ACK.to_vec());
+
+        InvocationConnection::<MemoryStream>::handshake(&mut stream)
+            .expect("constructed handshake should succeed");
+
+        assert_eq!(stream.output, CONSTRUCTED_PROTOCOL_HELLO);
+    }
+
+    #[test]
+    fn constructed_handshake_rejects_wrong_acknowledgement() {
+        let mut acknowledgement = CONSTRUCTED_PROTOCOL_ACK;
+        acknowledgement[0] = b'X';
+        let mut stream = MemoryStream::with_input(acknowledgement.to_vec());
+
+        let error = InvocationConnection::<MemoryStream>::handshake(&mut stream)
+            .expect_err("wrong acknowledgement must fail");
+
+        assert!(matches!(
+            error,
+            InvocationConnectionError::HandshakeRejected
+        ));
+        assert_eq!(stream.output, CONSTRUCTED_PROTOCOL_HELLO);
+    }
 
     #[test]
     fn frame_reader_rejects_oversized_payload_before_allocation() {
