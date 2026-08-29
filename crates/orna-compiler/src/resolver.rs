@@ -9207,9 +9207,9 @@ fn check_client_expression(
             arguments,
             span,
         } => {
-            if semantic_name(callee)
-                == QualifiedSemanticName::new(["sys", "source", "current"])
-                    .expect("sys.source.current is valid")
+            if let Some(system_function) =
+                orna_core::system::system_function_by_name(&semantic_name(callee))
+                && system_function.kind() == orna_core::system::SystemFunctionKind::SourceIntrospection
             {
                 if !arguments.is_empty() {
                     diagnostics.push(diagnostic(
