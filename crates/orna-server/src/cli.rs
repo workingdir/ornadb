@@ -16,14 +16,15 @@ use orna_core::{
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 
-pub(crate) const USAGE: &str = "Usage:\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
+pub(crate) const USAGE: &str = "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
-pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun stored functions and manage the Orna server.\n\nUsage:\n  orna [GLOBAL OPTIONS] [COMMAND] [OPTIONS]\n\nCommon Commands:\n  invoke ...   Run one stored function.\n  inspect ...  Inspect a completed invocation.\n  source ...   Check or apply one source file.\n\nHost Mode:\n  --daemon, -d Run the Orna server in the foreground for a supervisor.\n\nOptions:\n  --db <target> Select a local path, Unix socket, or remote Orna URI.\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nUse `orna COMMAND --help` for command-specific options.\n";
+pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun functions and open a database session.\n\nUsage:\n  orna [GLOBAL OPTIONS] [COMMAND] [OPTIONS]\n\nCommon Commands:\n  (none)       Open the function-backed REPL.\n  repl         Open the function-backed REPL explicitly.\n  invoke ...   Run one stored function.\n  inspect ...  Inspect a completed invocation.\n  source ...   Check or apply one source file.\n\nHost Mode:\n  --daemon, -d Run the Orna server in the foreground for a supervisor.\n\nOptions:\n  --db <target> Select a local path, Unix socket, or remote Orna URI.\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nUse `orna COMMAND --help` for command-specific options.\n";
 const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
 const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
 const HELP_SOURCE: &str = "Work with Orna source.\n\nUsage:\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n\nCommands:\n  check  Check one source file without changing the database.\n  apply  Check and apply one source file.\n  diff   Compare one source file with the current database.\n";
 const HELP_INVOKE: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n";
+const HELP_REPL: &str = "Open the standard function-backed Orna session.\n\nUsage:\n  orna\n  orna repl\n\nThe session is a normal CLIENT function invocation. The selected local runtime\nowns terminal or graphical surfaces and input events.\n";
 const HELP_STATE: &str = "Read or update user state.\n\nUsage:\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n\nOptions for get:\n  --profile <state-profile>\n  --instance <canonical-function-id> [--instance-key <instance-key>]\n  --expect-type <canonical-function-id> <canonical-state-slot-id> <canonical-type-id>\n\nOptions for set:\n  --function <canonical-function-id>\n  --instance-key <instance-key>\n  --slot <canonical-state-slot-id>\n  --revision <create|revision-number>\n  --type <canonical-type-id>\n  --value-file <path>\n  --profile <state-profile>\n";
 const HELP_INSPECT: &str = "Inspect a completed invocation.\n\nUsage:\n  orna inspect <invocation-id> [options]\n\nOptions:\n  --projection <name>  Select one of: invocation_nodes, calls, resources, state_cells, ui_nodes, presentation_candidates, runtime_bindings, security_decisions.\n  --trace              Include trace events.\n  --after <n>          Resume after a sequence number.\n  --include-values     Include value data where permitted.\n  --include-source     Include source provenance.\n  --include-security   Include security decisions.\n  --include-runtime    Include runtime bindings.\n  --epoch <epoch-id>   Inspect an exact epoch.\n";
 
@@ -73,6 +74,7 @@ pub(crate) enum HelpTopic {
     ServerBackendShell,
     Source,
     Invoke,
+    Repl,
     State,
     Inspect,
     Runtime,
@@ -137,6 +139,7 @@ pub(crate) fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::ServerBackendShell => HELP_SERVER_BACKEND_SHELL,
         HelpTopic::Source => HELP_SOURCE,
         HelpTopic::Invoke => HELP_INVOKE,
+        HelpTopic::Repl => HELP_REPL,
         HelpTopic::State => HELP_STATE,
         HelpTopic::Inspect => HELP_INSPECT,
         HelpTopic::Runtime => HELP_RUNTIME,
@@ -208,6 +211,7 @@ where
         Some(value) if value == OsStr::new("source") => HelpTopic::Source,
         Some(value) if value == OsStr::new("invoke") => HelpTopic::Invoke,
         Some(value) if value == OsStr::new("state") => HelpTopic::State,
+        Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
         Some(value) if value == OsStr::new("inspect") => HelpTopic::Inspect,
         Some(value) if value == OsStr::new("runtime") => HelpTopic::Runtime,
         Some(value) if value == OsStr::new("security") => HelpTopic::Security,
@@ -312,10 +316,23 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "state"
                 | "inspect"
                 | "security"
+                | "repl"
                 | "version"
                 | "backend-shell"
         )
     })
+}
+
+fn default_repl_command(runtime: Option<orna_server::RuntimeFamily>) -> Option<Command> {
+    Some(Command::Invoke(InvokeArguments {
+        target: parse_qualified_name("std.cli.repl")?,
+        arguments: Vec::new(),
+        output: None,
+        trace: None,
+        no_progress: false,
+        explain: false,
+        runtime,
+    }))
 }
 
 fn parse_command_args<I>(args: I) -> Option<Command>
@@ -344,14 +361,18 @@ where
         None
     };
 
-    // The global override belongs to a root invocation and is valid only for
-    // the explicit `invoke` form.
+    // The global override belongs to a root invocation. It is valid for the
+    // explicit `invoke` form and the function-backed REPL.
     if runtime.is_some()
         && !args
             .peek()
-            .is_none_or(|value| value == OsStr::new("invoke"))
+            .is_none_or(|value| value == OsStr::new("invoke") || value == OsStr::new("repl"))
     {
         return None;
+    }
+
+    if args.peek().is_none() {
+        return default_repl_command(runtime);
     }
 
     match args.next().as_deref() {
@@ -365,6 +386,23 @@ where
         Some(value) if value == OsStr::new("help") => parse_help_command(args),
         Some(value) if value == OsStr::new("--version") => {
             args.next().is_none().then_some(Command::Version)
+        }
+        Some(value) if value == OsStr::new("repl") => {
+            if args
+                .peek()
+                .is_some_and(|value| value == OsStr::new("--help"))
+            {
+                let _ = args.next();
+                return args
+                    .next()
+                    .is_none()
+                    .then_some(Command::Help(HelpTopic::Repl));
+            }
+            if args.next().is_some() {
+                None
+            } else {
+                default_repl_command(runtime)
+            }
         }
 
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
