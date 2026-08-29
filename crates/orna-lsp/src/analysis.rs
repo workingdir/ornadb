@@ -29,7 +29,7 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V9 standard library snapshot.
+    /// Loads and verifies the retained V10 standard library snapshot.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
@@ -3543,8 +3543,8 @@ mod tests {
     }
 
     #[test]
-    fn standard_library_loads_verified_v9_snapshot() {
-        let standard = StandardLibrary::load().expect("retained V9 standard must load");
+    fn standard_library_loads_verified_v10_snapshot() {
+        let standard = StandardLibrary::load().expect("retained V10 standard must load");
         let snapshot = standard.checked.verified_snapshot();
 
         assert_eq!(
@@ -3553,7 +3553,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_V9_REVISION_ID
+            orna_standard::STANDARD_SOURCE_V10_REVISION_ID
         );
         assert!(snapshot.source().units().iter().any(|unit| {
             unit.logical_path() == orna_standard::STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
