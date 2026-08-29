@@ -3111,6 +3111,81 @@ pub fn references(
 }
 
 /// Returns the completion items for one document.
+
+/// Returns signature help for the callable declaration at a source position.
+pub fn signature_help(
+    document: &Document,
+    parse: &Parse,
+    position: Position,
+    mapper: &PositionMapper<'_>,
+) -> Option<lsp_types::SignatureHelp> {
+    let byte = mapper.byte_offset(position);
+    let highlighted = parse.highlight();
+    let (name, kind, _) = token_at(&document.text, &highlighted, byte)?;
+    if kind != HighlightKind::FunctionName {
+        return None;
+    }
+    let declaration = declaration_at(parse, &name)?;
+    let (parameters, return_type, label) = match declaration {
+        DeclarationRef::ServerFunction(function) => (
+            function
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    lsp_types::ParameterInformation::new(
+                        lsp_types::ParameterLabel::Simple(parameter.name.text.clone()),
+                        Some(lsp_types::Documentation::String(
+                            documentation_text(parameter.documentation.as_ref())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        )),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            return_text(&function.return_type, &document.text),
+            format!("SERVER FUNCTION {}", qualified_name_text(&function.name)),
+        ),
+        DeclarationRef::ClientFunction(function) => (
+            function
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    lsp_types::ParameterInformation::new(
+                        lsp_types::ParameterLabel::Simple(parameter.name.text.clone()),
+                        Some(lsp_types::Documentation::String(
+                            documentation_text(parameter.documentation.as_ref())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        )),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            return_text(&function.return_type, &document.text),
+            format!("CLIENT FUNCTION {}", qualified_name_text(&function.name)),
+        ),
+        _ => return None,
+    };
+    Some(lsp_types::SignatureHelp {
+        signatures: vec![lsp_types::SignatureInformation {
+            label: format!(
+                "{label}({}) RETURNS {return_type}",
+                parameters
+                    .iter()
+                    .map(|parameter| match &parameter.label {
+                        lsp_types::ParameterLabel::Simple(label) => label.clone(),
+                        lsp_types::ParameterLabel::LabelOffsets(_) => "parameter".to_owned(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            documentation: None,
+            parameters: Some(parameters),
+            active_parameter: None,
+        }],
+        active_signature: Some(0),
+        active_parameter: None,
+    })
+}
 #[allow(dead_code)]
 pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
     completion_at(parse, standard, None, None)
