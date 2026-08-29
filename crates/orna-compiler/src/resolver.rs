@@ -15214,9 +15214,15 @@ mod tests {
     fn checked_client_calls_follow_reference_order_and_retain_locations() {
         let source = "CREATE SCHEMA app; \
             CREATE CLIENT FUNCTION app.first() RETURNS INTEGER AS 1; \
-            CREATE CLIENT FUNCTION app.second() RETURNS INTEGER AS 2; \
+            CREATE CLIENT FUNCTION app.second(p_value INTEGER) RETURNS INTEGER AS p_value; \
             CREATE CLIENT FUNCTION app.wrapper() RETURNS INTEGER IS \
-                BEGIN RETURN app.first() + app.second() + app.first(); END;";
+                BEGIN \
+                    IF app.first() = 1 THEN \
+                        RETURN app.second(p_value => app.first()); \
+                    ELSE \
+                        RETURN app.first(); \
+                    END IF; \
+                END;";
         let report = check(&bundle([("calls.orna", source)]), &empty_catalogue());
         assert!(
             report.diagnostics().is_empty(),
@@ -15226,7 +15232,7 @@ mod tests {
         let checked = report.checked_bundle().unwrap();
         let wrapper = &checked.client_functions()[2];
         let calls = wrapper.called_functions();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
         let names = calls
             .iter()
             .map(|id| {
@@ -15237,18 +15243,27 @@ mod tests {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        assert_eq!(names, ["app.first", "app.second", "app.first"]);
+        assert_eq!(
+            names,
+            ["app.first", "app.first", "app.second", "app.first"]
+        );
         let call_references = wrapper
             .references()
             .iter()
             .filter(|reference| reference.kind() == DefinitionReferenceKind::FunctionCall)
             .collect::<Vec<_>>();
-        assert_eq!(call_references.len(), 3);
-        assert!(
+        assert_eq!(call_references.len(), 4);
+        assert_eq!(
             call_references
-                .windows(2)
-                .all(|references| references[0].location().span().start()
-                    < references[1].location().span().start())
+                .iter()
+                .map(|reference| reference.location().span().start())
+                .collect::<Vec<_>>(),
+            vec![
+                source.find("app.first() = 1").unwrap(),
+                source.find("app.first());").unwrap(),
+                source.find("app.second(p_value =>").unwrap(),
+                source.rfind("app.first();").unwrap(),
+            ]
         );
     }
 
