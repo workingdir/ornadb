@@ -73,7 +73,7 @@ pub use resolver::{
     SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
     check_standard_application, check_standard_cli_repl, check_standard_json_encode,
-    check_standard_library_source, check_standard_parameter_echo, check_standard_source,
+    check_standard_library_source, check_standard_parameter_echo,
     check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
 };
 
