@@ -5,28 +5,26 @@
 
 use std::{
     error::Error,
-    fmt, fs,
-    io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    fmt,
+    io::{self, Write},
 };
 
 use orna_compiler::{
-    PrepareStandardApplicationError, StandardApplicationCheckContext,
-    StandardApplicationContextError, StandardLibraryCheckError, check_standard_application,
-    check_standard_library_source, prepare_standard_application,
+    PrepareStandardApplicationError, StandardApplicationContextError, StandardLibraryCheckError,
+    prepare_standard_application,
 };
+#[cfg(test)]
+use orna_core::revision::VerifiedStandardLibrarySnapshot;
 use orna_core::{
     FunctionId,
-    revision::{ActiveDatabaseRevision, RevisionPair, VerifiedStandardLibrarySnapshot},
+    revision::RevisionPair,
     security::CATALOGUE_HEALTH_FUNCTION_ID,
-    source::{SourceBundle, SourceBundleError, SourceUnit},
+    source::{SourceBundle, SourceBundleError},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
+use orna_standard::StandardLibraryError;
+#[cfg(test)]
 use orna_standard::{
-    STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
-    STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, StandardLibraryError,
     retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
     retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
     retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
@@ -39,7 +37,14 @@ use orna_standard::{
 };
 use serde::Serialize;
 
-use crate::{EmbeddedHostError, inspect_current_embedded_host, source_diagnostics};
+#[cfg(test)]
+use crate::source_support::select_accepted_standard;
+use crate::{
+    EmbeddedHostError, inspect_current_embedded_host,
+    source_support::{
+        self, ApplicationCheckError, HostFailureClass, KernelFailureClass, SourceFileError,
+    },
+};
 
 /// The result of checking and applying one local application source file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -304,7 +309,6 @@ impl Error for InstalledSourceApplyError {
 pub fn run_installed_source_apply(
     path: &str,
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
-    validate_source_path(path)?;
     let bundle = read_source_bundle(path)?;
     let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
@@ -321,39 +325,18 @@ async fn apply_source_bundle(
     bundle: SourceBundle,
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
     let active = kernel.recover().await.map_err(map_recovery_error)?;
-    let installed = active
-        .catalogue_hash_context()
-        .standard()
-        .ok_or(InstalledSourceApplyError::ActiveStandardMismatch)?;
-    let accepted = select_accepted_standard(installed).map_err(|error| match error {
-        StandardSelectionError::UnknownRevision => {
-            InstalledSourceApplyError::ActiveStandardMismatch
-        }
-        StandardSelectionError::Verification(source) => {
-            InstalledSourceApplyError::StandardLibrary { source }
-        }
-    })?;
-    require_accepted_active_standard(&active, &accepted)?;
-    let standard = check_standard_library_source(&accepted)
-        .map_err(|source| InstalledSourceApplyError::StandardSource { source })?;
-    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-        .map_err(|source| InstalledSourceApplyError::ApplicationContext { source })?;
-    let report = check_standard_application(&bundle, &context);
+    let report = source_support::check_application_source(&active, &bundle)
+        .map_err(map_application_check_error)?;
 
     if !report.diagnostics().is_empty() {
+        let (bytes, human_bytes, coloured_bytes) =
+            source_support::render_source_diagnostics(report.parse_report(), report.diagnostics())
+                .into_parts();
         return Ok(InstalledSourceApplyOutcome::Diagnostics(
             InstalledSourceApplyDiagnostics {
-                bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
-                human_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    false,
-                ),
-                coloured_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    true,
-                ),
+                bytes,
+                human_bytes,
+                coloured_bytes,
             },
         ));
     }
@@ -378,65 +361,16 @@ async fn apply_source_bundle(
 }
 
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceApplyError> {
-    validate_source_path(path)?;
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|source| InstalledSourceApplyError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?;
-    if !file
-        .metadata()
-        .map_err(|source| InstalledSourceApplyError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?
-        .is_file()
-    {
-        return Err(InstalledSourceApplyError::SourceRead {
-            path: path.to_owned(),
-            source: None,
-        });
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|source| InstalledSourceApplyError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?;
-    let source = String::from_utf8(bytes).map_err(|_| InstalledSourceApplyError::SourceUtf8 {
-        path: path.to_owned(),
-    })?;
-    SourceBundle::new([SourceUnit::new(path, source)])
-        .map_err(|source| InstalledSourceApplyError::SourceBundle { source })
-}
-
-fn validate_source_path(path: &str) -> Result<(), InstalledSourceApplyError> {
-    if path.is_empty()
-        || path.starts_with('-')
-        || path
-            .chars()
-            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
-    {
-        return Err(InstalledSourceApplyError::SourceBundle {
-            source: SourceBundleError::EmptyLogicalPath { index: 0 },
-        });
-    }
-
-    Ok(())
+    source_support::read_source_bundle(path).map_err(map_source_file_error)
 }
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
-    let failure = match &source {
-        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
-            InstalledSourceApplyHostFailure::EngineInvalid
-        }
-        EmbeddedHostError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+    let failure = match source_support::classify_host_error(&source) {
+        HostFailureClass::InstanceNotInstalled => {
             InstalledSourceApplyHostFailure::InstanceNotInstalled
         }
-        _ => InstalledSourceApplyHostFailure::InstanceInvalid,
+        HostFailureClass::InstanceInvalid => InstalledSourceApplyHostFailure::InstanceInvalid,
+        HostFailureClass::EngineInvalid => InstalledSourceApplyHostFailure::EngineInvalid,
     };
     InstalledSourceApplyError::Host {
         failure,
@@ -445,17 +379,43 @@ fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
 }
 
 fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceApplyError {
-    match source {
-        source @ (PostgresKernelError::Configuration(_) | PostgresKernelError::Database(_)) => {
+    match source_support::classify_kernel_error(&source) {
+        KernelFailureClass::Configuration | KernelFailureClass::Database => {
             InstalledSourceApplyError::Attach { source }
         }
-        source @ (PostgresKernelError::DriverTask(_) | PostgresKernelError::SessionClose(_)) => {
+        KernelFailureClass::DriverTask | KernelFailureClass::SessionClose => {
             InstalledSourceApplyError::SessionClose { source }
         }
-        source @ PostgresKernelError::RecoveryDatabase(_) => {
+        KernelFailureClass::RecoveryDatabase | KernelFailureClass::Other => {
             InstalledSourceApplyError::Recovery { source }
         }
-        source => InstalledSourceApplyError::Recovery { source },
+    }
+}
+
+fn map_source_file_error(source: SourceFileError) -> InstalledSourceApplyError {
+    match source {
+        SourceFileError::Read { path, source } => {
+            InstalledSourceApplyError::SourceRead { path, source }
+        }
+        SourceFileError::Utf8 { path } => InstalledSourceApplyError::SourceUtf8 { path },
+        SourceFileError::Bundle { source } => InstalledSourceApplyError::SourceBundle { source },
+    }
+}
+
+fn map_application_check_error(source: ApplicationCheckError) -> InstalledSourceApplyError {
+    match source {
+        ApplicationCheckError::ActiveStandardMismatch => {
+            InstalledSourceApplyError::ActiveStandardMismatch
+        }
+        ApplicationCheckError::StandardLibrary(source) => {
+            InstalledSourceApplyError::StandardLibrary { source }
+        }
+        ApplicationCheckError::StandardSource(source) => {
+            InstalledSourceApplyError::StandardSource { source }
+        }
+        ApplicationCheckError::ApplicationContext(source) => {
+            InstalledSourceApplyError::ApplicationContext { source }
+        }
     }
 }
 
@@ -472,64 +432,6 @@ fn map_apply_error(source: PostgresKernelError) -> InstalledSourceApplyError {
         ) => InstalledSourceApplyError::RecoveryMismatch,
         source => InstalledSourceApplyError::Apply { source },
     }
-}
-
-#[derive(Debug)]
-pub(super) enum StandardSelectionError {
-    UnknownRevision,
-    Verification(StandardLibraryError),
-}
-
-pub(super) fn select_accepted_standard(
-    installed: &VerifiedStandardLibrarySnapshot,
-) -> Result<VerifiedStandardLibrarySnapshot, StandardSelectionError> {
-    let accepted =
-        match installed.revision() {
-            STANDARD_LIBRARY_REVISION_ID => {
-                retained_standard_library_snapshot().and_then(verify_standard_library_snapshot)
-            }
-            STANDARD_LIBRARY_V2_REVISION_ID => retained_standard_library_v2_snapshot()
-                .and_then(verify_standard_library_v2_snapshot),
-            STANDARD_LIBRARY_V3_REVISION_ID => retained_standard_library_v3_snapshot()
-                .and_then(verify_standard_library_v3_snapshot),
-            STANDARD_LIBRARY_V4_REVISION_ID => retained_standard_library_v4_snapshot()
-                .and_then(verify_standard_library_v4_snapshot),
-            STANDARD_LIBRARY_V5_REVISION_ID => retained_standard_library_v5_snapshot()
-                .and_then(verify_standard_library_v5_snapshot),
-            STANDARD_LIBRARY_V6_REVISION_ID => retained_standard_library_v6_snapshot()
-                .and_then(verify_standard_library_v6_snapshot),
-            STANDARD_LIBRARY_V7_REVISION_ID => retained_standard_library_v7_snapshot()
-                .and_then(verify_standard_library_v7_snapshot),
-            STANDARD_LIBRARY_V8_REVISION_ID => retained_standard_library_v8_snapshot()
-                .and_then(verify_standard_library_v8_snapshot),
-            STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
-                .and_then(verify_standard_library_v9_snapshot),
-            _ => return Err(StandardSelectionError::UnknownRevision),
-        };
-
-    accepted.map_err(StandardSelectionError::Verification)
-}
-
-fn require_accepted_active_standard(
-    active: &ActiveDatabaseRevision,
-    accepted: &VerifiedStandardLibrarySnapshot,
-) -> Result<(), InstalledSourceApplyError> {
-    let Some(installed) = active.catalogue_hash_context().standard() else {
-        return Err(InstalledSourceApplyError::ActiveStandardMismatch);
-    };
-    let installed_source = installed.source();
-    let accepted_source = accepted.source();
-    if installed.revision() != accepted.revision()
-        || installed.catalogue().revision() != accepted.catalogue().revision()
-        || installed_source.bundle() != accepted_source.bundle()
-        || installed_source.id() != accepted_source.id()
-        || installed_source.bundle_hash() != accepted_source.bundle_hash()
-        || installed_source.revision_hash() != accepted_source.revision_hash()
-        || installed.digest() != accepted.digest()
-    {
-        return Err(InstalledSourceApplyError::ActiveStandardMismatch);
-    }
-    Ok(())
 }
 
 #[derive(Serialize)]

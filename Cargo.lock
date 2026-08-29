@@ -547,7 +547,6 @@ dependencies = [
  "orna-core",
  "orna-protocol",
  "orna-standard",
- "orna-storage",
  "serde_json",
  "sha2",
  "tokio",
@@ -600,13 +599,6 @@ dependencies = [
  "orna-compiler",
  "orna-core",
  "orna-syntax",
-]
-
-[[package]]
-name = "orna-storage"
-version = "0.1.0"
-dependencies = [
- "orna-core",
 ]
 
 [[package]]
