@@ -4,16 +4,17 @@
 
 ## Decision
 
-The first developer source command is exactly:
+The source command leaf is exactly:
 
 ```text
 orna source check <file.orna>
 ```
 
-It checks one regular UTF-8 file as the complete source for a new application.
-It accepts no flag, standard-input form, directory, glob, second file, active
-revision, or database target. The `<file.orna>` text in usage describes the
-path argument. The command does not require an `.orna` suffix.
+The optional global `--color auto|always|never` flag may precede the command
+and controls colour in terminal human diagnostics. No other flag, standard-
+input form, directory, glob, second file, active revision, or database target
+is accepted. The `<file.orna>` text in usage describes the path argument. The
+command does not require an `.orna` suffix.
 
 This is a standalone compiler check. It ends at one
 `StandardApplicationCheckReport`; it does not compute a semantic diff, call
@@ -352,7 +353,8 @@ writes the exact global usage, exits `2`, and does not expose the compiler error
 display text. Direct compiler callers receive the typed error and exact display
 contract above.
 
-Each compiler diagnostic is one exact line on standard error:
+The command has two diagnostic presentations. The machine presentation remains
+the stable source-command format:
 
 ```text
 <path>:<start>..<end>: <code>: <message>
@@ -362,8 +364,8 @@ Each compiler diagnostic is one exact line on standard error:
 zero-based UTF-8 byte offsets, and the end is exclusive. `<code>` is the
 stable Orna diagnostic code, such as `ORNA0001` or `ORNA0303`.
 
-Before inserting `<message>`, the command scans the compiler message as Unicode
-scalar values and applies this exact escaping in order:
+Before inserting `<message>`, the machine presentation scans the compiler
+message as Unicode scalar values and applies this exact escaping in order:
 
 1. backslash becomes `\\`;
 2. line feed, carriage return, and tab become `\n`, `\r`, and `\t`;
@@ -379,17 +381,36 @@ and a backslash in a valid path remains a backslash. The escaped message has no
 physical line-feed or carriage-return character. It has no source excerpt or
 path rewrite.
 
-The command emits diagnostics in the order returned by
-`StandardApplicationCheckReport`. It does
-not sort, group, deduplicate, colour, annotate, or convert them to another
-format. Every line has one final line feed.
+The machine presentation emits diagnostics in the order returned by
+`StandardApplicationCheckReport`. It does not sort, group, deduplicate,
+colour, annotate, or convert them to another format. Every line has one final
+line feed.
+
+When standard error is a terminal, source check instead emits a human-readable
+presentation with the diagnostic code and message, a one-based line and
+column, source context, a caret, and help text when the diagnostic is covered
+by the renderer:
+
+```text
+error[ORNA0001]: expected a schema name after CREATE SCHEMA
+  --> broken.orna:1:15
+   |
+ 1 | CREATE SCHEMA ;
+   |               ^
+   |
+   = help: write a schema name before the semicolon
+```
+
+Human output remains on standard error and retains compiler order. It is a
+presentation of the same diagnostic; it does not change compiler byte spans or
+messages. Non-terminal source-check output remains machine-readable.
 
 The complete exit contract is:
 
 | Result | Standard output | Standard error | Status |
 | --- | --- | --- | --- |
 | Valid source with no diagnostics | empty | empty | `0` |
-| One or more compiler diagnostics | empty | exact diagnostic lines | `1` |
+| One or more compiler diagnostics | empty | machine diagnostic lines when standard error is redirected; human diagnostic report when it is a terminal | `1` |
 | Source read failure | empty | exact read line | `1` |
 | Invalid source UTF-8 | empty | exact UTF-8 line | `1` |
 | Embedded standard, empty-catalogue, or context failure | empty | exact standard line | `1` |
@@ -437,7 +458,7 @@ does not give `orna-compiler` filesystem or process authority.
 
 | Boundary | Required cases | Required result |
 | --- | --- | --- |
-| Command shape | exact `source check` plus one path; missing command or path; empty path; flag before, within, or after the command; extra path; `-`; `--`; literal wildcard; shell expansion to multiple paths | Only the exact three-token command continues. Every other invalid shape prints the exact four-line usage and exits `2`. A literal wildcard is an ordinary path and uses the read result for that literal name. Orna performs no glob expansion and never reads standard input. |
+| Command shape | source-check leaf plus one path; optional leading `--color auto|always|never`; missing command or path; empty path; other flag placement; extra path; `-`; `--`; literal wildcard; shell expansion to multiple paths | The three-token leaf and its optional leading colour flag continue. Every other invalid shape prints the exact four-line usage and exits `2`. A literal wildcard is an ordinary path and uses the read result for that literal name. Orna performs no glob expansion and never reads standard input. |
 | Path token | UTF-8 path; non-UTF-8 Unix `OsString`; tab, line-feed, carriage-return, another Unicode control, `U+2028`, and `U+2029`; `-x`; `./-x`; path without `.orna`; path containing spaces | Invalid UTF-8, control, `U+2028`, `U+2029`, empty, and leading-hyphen paths use the exact usage contract before file access. `./-x`, spaces, and a non-`.orna` suffix remain valid path tokens. No exact rendered path can add a display line. |
 | Path resolution | relative path under a changed current working directory; absolute path; symbolic link to a regular file; dangling link; absent path; directory; special file | Relative lookup uses the process current working directory. Logical and rendered paths remain exact `argv`. Only a regular file or link to one reaches decoding. Every other case uses the exact read diagnostic. |
 | File access | readable file; permission-denied file; failure during the byte read; empty file; file larger than test buffer boundaries | The command performs one complete byte-read phase, imposes no source-size policy, maps access failures to the exact read line, and does not perform another source read. |
@@ -451,7 +472,7 @@ does not give `orna-compiler` filesystem or process authority.
 | Standard authority | accepted retained source and digest; changed retained source; changed hard-coded digest; self-consistent but non-golden snapshot; source-independent manifest alone; host standard-source reconciliation failure; direct compiler raw-capability attempt | Host composition alone verifies the accepted retained `orna.std/1` snapshot and checks its source before application checking. Only `CheckedStandardLibrary` reaches `check_new_application`; no `orna_standard::StandardLibraryError` crosses the compiler seam. The CLI maps host standard failure to the exact embedded-standard line and no application diagnostic. The manifest alone grants no compiler authority. A core-verified nongolden checked standard library remains acceptable only when its checked facts agree and every compatibility contract is supported and unique. |
 | Standard type identity | `BOOLEAN`, `BOOL`, `std.boolean`, and `std.types.boolean` in accepted type positions | Every spelling resolves to the same Boolean `TypeId` and emits the exact standard value-type reference evidence. No spelling adapter or second scalar identity participates. |
 | Protected standard source | application-owned `std` declaration, `KERNEL CONTRACT`, qualified type export, and prelude export, alone and after valid declarations | The accepted `ORNA0303` code, message, span, protection precedence, and compiler order are preserved. No checked bundle or durable change results. |
-| Diagnostic rendering | syntax and semantic failures; multiple ordered diagnostics; path containing spaces and punctuation; CRLF and Unicode before a failure; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029` | Each line is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Path, span, and code text remain unescaped. |
+| Diagnostic rendering | syntax and semantic failures; multiple ordered diagnostics; path containing spaces and punctuation; CRLF and Unicode before a failure; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029`; terminal and redirected standard error | Redirected output is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Terminal output is the human diagnostic presentation with a one-based line and column, source context, caret, and optional help. Path, span, and code text remain unescaped in the machine format. |
 | Streams and status | success; compiler diagnostics; each pre-check failure; piped hostile standard input; redirected standard output | Standard output is empty in every case. Success is silent `0`, check and operational failures are `1`, usage is `2`, and piped input is neither consumed nor allowed to change or delay the result. |
 | PostgreSQL isolation | no external PostgreSQL installation or service; hostile PostgreSQL, package-maintenance, and Orna environment variables; invalid embedded-engine evidence; absent or changed materialised support data; changed server configuration | The same source result is produced without entering an embedded PostgreSQL role or performing a PostgreSQL socket, connection, child, package, engine-manifest, support-data, instance, or environment operation. The hostile private package selector cannot intercept a public source-check shape. |
 | No command-issued state writes | successful and failed checks in a snapshotted writable directory and a read-only directory; process tracing where available; filesystem access-time updates enabled and disabled | The command opens no path for writing and issues no create, content mutation, truncate, rename, remove, ownership, mode, or other metadata mutation. It starts no network or child process. Snapshots exclude access time or use a no-access-time mount. Ordinary read-driven access-time changes do not invalidate the proof. Only the supplied standard-error descriptor can receive command output bytes. |
