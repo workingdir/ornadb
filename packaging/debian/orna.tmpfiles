@@ -1,4 +1,0 @@
-d /var/lib/orna 0755 root root -
-d /var/lib/orna/instances 0700 orna orna -
-d /run/orna-upgrade 0755 root root -
-d /run/orna-upgrade/default 0700 orna orna -
