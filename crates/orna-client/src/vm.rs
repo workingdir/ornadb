@@ -593,6 +593,12 @@ fn expression_budget(
             budget.include_nested(expression_budget(left)?)?;
             budget.include_nested(expression_budget(right)?)?;
         }
+        ClientExpressionNode::Input => {
+            budget.add_operation()?;
+        }
+        ClientExpressionNode::Evaluate { expression } => {
+            budget.include_nested(expression_budget(expression)?)?;
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
@@ -705,6 +711,10 @@ fn expression_contains_external_contract(expression: &ClientExpressionNode) -> b
         | ClientExpressionNode::Binary { left, right, .. } => {
             expression_contains_external_contract(left)
                 || expression_contains_external_contract(right)
+        }
+        ClientExpressionNode::Input => false,
+        ClientExpressionNode::Evaluate { expression } => {
+            expression_contains_external_contract(expression)
         }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }

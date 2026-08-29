@@ -8923,7 +8923,7 @@ fn check_client_expression(
             {
                 if !arguments.is_empty() {
                     diagnostics.push(diagnostic(
-                        DiagnosticCode::InvalidArgumentCount,
+                        DiagnosticCode::TypeMismatch,
                         "std.cli.input takes no arguments",
                         input.logical_path,
                         span,
@@ -8951,7 +8951,7 @@ fn check_client_expression(
             {
                 if arguments.len() != 1 {
                     diagnostics.push(diagnostic(
-                        DiagnosticCode::InvalidArgumentCount,
+                        DiagnosticCode::TypeMismatch,
                         "std.cli.evaluate requires one command expression",
                         input.logical_path,
                         span,
