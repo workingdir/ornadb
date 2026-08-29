@@ -1,12 +1,3 @@
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::let_unit_value)]
-#![allow(clippy::manual_clamp)]
-#![allow(clippy::nonminimal_bool)]
-// Raw socket protocol preserves accepted carrier and error layouts.
-#![allow(clippy::large_enum_variant)]
-// Raw socket operations return the stable embedded-host error boundary.
-#![allow(clippy::result_large_err)]
-#![allow(clippy::too_many_arguments)]
 //! Authenticated local raw-call connection handling.
 
 use std::{
@@ -5752,8 +5743,9 @@ mod tests {
             .read_exact(&mut encoded[SESSION_HEADER_LENGTH..])
             .await
             .expect("session request payload");
-        let SessionServerFrame::InputRequested(request) =
-            decode_session_server_frame(&encoded).expect("session request decodes");
+        let request = match decode_session_server_frame(&encoded).expect("session request decodes") {
+            SessionServerFrame::InputRequested(request) => request,
+        };
         assert_eq!(request.root_invocation_id, root);
         assert_eq!(request.call_stream, 1);
 
