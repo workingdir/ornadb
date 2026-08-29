@@ -3903,7 +3903,6 @@ fn opaque_values_require_the_same_active_standard_and_exact_payload() {
             opaque_type: OPAQUE_TYPE,
         })
     );
-
 }
 
 #[test]
