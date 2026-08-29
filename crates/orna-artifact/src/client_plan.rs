@@ -181,6 +181,8 @@ use orna_core::{
     StateSlotId, TypeId, revision::RevisionPair,
 };
 
+use crate::artifact_codec::{DecodeError, Reader};
+
 /// The stable public identity of this artefact format.
 pub const FORMAT_IDENTITY: &str = "orna.client-plan";
 /// The Orna language version whose semantics this artefact executes.
@@ -405,7 +407,7 @@ impl OpaqueClientPlan {
                 actual: payload_length,
             });
         }
-        let canonical_payload = reader.bytes(payload_length as usize)?.to_vec();
+        let canonical_payload = reader.take(payload_length as usize)?.to_vec();
         reader.require_finished()?;
         Ok(Self::return_opaque(opaque_type, canonical_payload))
     }
@@ -2281,7 +2283,7 @@ impl CapabilityClientPlan {
         }
         let inner_plan_version = reader.u32()?;
         let inner_payload_length = reader.u32()? as usize;
-        let inner_payload = reader.bytes(inner_payload_length)?;
+        let inner_payload = reader.take(inner_payload_length)?;
         let inner_plan = match inner_plan_version {
             FORMAT_VERSION => InnerClientPlan::Boolean(ClientPlan::decode(inner_payload)?),
             OPAQUE_FORMAT_VERSION => {
@@ -2334,7 +2336,7 @@ impl CapabilityClientPlan {
                     limit: MAX_CAPABILITY_NAME_LENGTH,
                 });
             }
-            let name = std::str::from_utf8(reader.bytes(name_length)?)
+            let name = std::str::from_utf8(reader.take(name_length)?)
                 .map_err(|_| ClientPlanError::InvalidCapabilityNameUtf8)?
                 .to_owned();
             if seen.contains(&name) {
@@ -2352,7 +2354,7 @@ impl CapabilityClientPlan {
                     limit: MAX_CAPABILITY_ARGUMENT_LENGTH,
                 });
             }
-            let argument_text = std::str::from_utf8(reader.bytes(argument_length)?)
+            let argument_text = std::str::from_utf8(reader.take(argument_length)?)
                 .map_err(|_| ClientPlanError::InvalidCapabilityArgumentUtf8)?
                 .to_owned();
             let argument = match argument_tag {
@@ -3145,7 +3147,7 @@ fn decode_control_flow_expression(
         }
         NODE_STRING => {
             let length = reader.u32()? as usize;
-            let value = std::str::from_utf8(reader.bytes(length)?)
+            let value = std::str::from_utf8(reader.take(length)?)
                 .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_STRING))?
                 .to_owned();
             Ok(ClientExpressionNode::String { value })
@@ -3211,7 +3213,7 @@ fn decode_control_flow_expression(
         }),
         NODE_EXTERNAL_CONTRACT => {
             let length = reader.u32()? as usize;
-            let identity = std::str::from_utf8(reader.bytes(length)?)
+            let identity = std::str::from_utf8(reader.take(length)?)
                 .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))?;
             validate_external_contract_identity(identity)?;
             Ok(ClientExpressionNode::ExternalContract {
@@ -5008,7 +5010,7 @@ fn decode_expression_node_with_resources(
         }
         NODE_STRING => {
             let length = reader.u32()? as usize;
-            let bytes = reader.bytes(length)?;
+            let bytes = reader.take(length)?;
             let value = std::str::from_utf8(bytes)
                 .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_STRING))?
                 .to_owned();
@@ -5081,7 +5083,7 @@ fn decode_expression_node_with_resources(
         }
         NODE_EXTERNAL_CONTRACT => {
             let length = reader.u32()? as usize;
-            let bytes = reader.bytes(length)?;
+            let bytes = reader.take(length)?;
             let identity = std::str::from_utf8(bytes)
                 .map_err(|_| ClientPlanError::InvalidExpressionNode(NODE_EXTERNAL_CONTRACT))?;
             validate_external_contract_identity(identity)?;
@@ -5420,6 +5422,15 @@ pub enum ClientPlanError {
     TrailingBytes,
 }
 
+impl From<DecodeError> for ClientPlanError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Truncated => Self::Truncated,
+            DecodeError::TrailingBytes => Self::TrailingBytes,
+        }
+    }
+}
+
 impl fmt::Display for ClientPlanError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -5723,52 +5734,6 @@ impl fmt::Display for ClientPlanError {
 }
 
 impl std::error::Error for ClientPlanError {}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> Reader<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
-    }
-
-    fn bytes(&mut self, length: usize) -> Result<&'a [u8], ClientPlanError> {
-        let end = self
-            .cursor
-            .checked_add(length)
-            .ok_or(ClientPlanError::Truncated)?;
-        let value = self
-            .bytes
-            .get(self.cursor..end)
-            .ok_or(ClientPlanError::Truncated)?;
-        self.cursor = end;
-        Ok(value)
-    }
-
-    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], ClientPlanError> {
-        self.bytes(LENGTH)?
-            .try_into()
-            .map_err(|_| ClientPlanError::Truncated)
-    }
-
-    fn u8(&mut self) -> Result<u8, ClientPlanError> {
-        Ok(self.array::<1>()?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, ClientPlanError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-
-    fn require_finished(&self) -> Result<(), ClientPlanError> {
-        if self.cursor == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(ClientPlanError::TrailingBytes)
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

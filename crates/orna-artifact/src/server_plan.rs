@@ -34,6 +34,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 
+use crate::artifact_codec::{DecodeError, Reader, Writer};
+
 /// The stable public identity of this artifact format.
 pub const FORMAT_IDENTITY: &str = "orna.server-plan";
 /// The Orna language version whose semantics this artifact version executes.
@@ -108,7 +110,7 @@ impl ServerPlan {
 
         let mut writer = encode_plan_prefix(FORMAT_VERSION, self.scan, &self.projections)?;
         encode_optional_selection(&mut writer, self.selection.as_ref())?;
-        writer.count("ordering", self.ordering.len(), MAX_ORDERING)?;
+        encode_count(&mut writer, "ordering", self.ordering.len(), MAX_ORDERING)?;
         for ordering in &self.ordering {
             encode_expression(&mut writer, &ordering.expression, 0)?;
             writer.u8(encode_sort_direction(ordering.direction));
@@ -124,7 +126,7 @@ impl ServerPlan {
         let (mut reader, scan, projections, mut remaining_expression_nodes) =
             decode_plan_prefix(bytes, FORMAT_VERSION)?;
         let selection = decode_optional_selection(&mut reader, &mut remaining_expression_nodes)?;
-        let ordering_count = reader.count("ordering", MAX_ORDERING)?;
+        let ordering_count = decode_count(&mut reader, "ordering", MAX_ORDERING)?;
         let mut ordering = Vec::with_capacity(ordering_count as usize);
         for _ in 0..ordering_count {
             ordering.push(Ordering {
@@ -203,9 +205,9 @@ impl IdentitySelectedServerPlan {
             self.scan,
             &self.projections,
         )?;
-        writer.boolean("selection presence", true);
+        writer.boolean(true);
         encode_identity_selection(&mut writer, self.scan, self.selector)?;
-        writer.count("ordering", 0, MAX_ORDERING)?;
+        encode_count(&mut writer, "ordering", 0, MAX_ORDERING)?;
         let bytes = writer.finish();
         validate_artifact_size(bytes.len())?;
         Ok(bytes)
@@ -215,14 +217,14 @@ impl IdentitySelectedServerPlan {
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
         let (mut reader, scan, projections, mut remaining_expression_nodes) =
             decode_plan_prefix(bytes, IDENTITY_SELECTED_FORMAT_VERSION)?;
-        if !reader.boolean("selection presence")? {
+        if !decode_boolean(&mut reader, "selection presence")? {
             return Err(ServerPlanError::InvalidModel(
                 "an identity-selected server plan must contain its fixed selection",
             ));
         }
         consume_identity_selection_nodes(&mut remaining_expression_nodes)?;
         let selector = decode_identity_selection(&mut reader, scan)?;
-        let ordering_count = reader.count("ordering", MAX_ORDERING)?;
+        let ordering_count = decode_count(&mut reader, "ordering", MAX_ORDERING)?;
         if ordering_count != 0 {
             return Err(ServerPlanError::InvalidModel(
                 "an identity-selected server plan must not contain ordering terms",
@@ -302,9 +304,9 @@ impl UniqueTextSelectedServerPlan {
             self.scan,
             &self.projections,
         )?;
-        writer.boolean("selection presence", true);
+        writer.boolean(true);
         encode_unique_text_selection(&mut writer, self.selector)?;
-        writer.count("ordering", 0, MAX_ORDERING)?;
+        encode_count(&mut writer, "ordering", 0, MAX_ORDERING)?;
         let bytes = writer.finish();
         validate_artifact_size(bytes.len())?;
         Ok(bytes)
@@ -314,14 +316,14 @@ impl UniqueTextSelectedServerPlan {
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
         let (mut reader, scan, projections, mut remaining_expression_nodes) =
             decode_plan_prefix(bytes, UNIQUE_TEXT_SELECTED_FORMAT_VERSION)?;
-        if !reader.boolean("selection presence")? {
+        if !decode_boolean(&mut reader, "selection presence")? {
             return Err(ServerPlanError::InvalidModel(
                 "a unique-Text-selected server plan must contain its fixed selection",
             ));
         }
         consume_unique_text_selection_nodes(&mut remaining_expression_nodes)?;
         let selector = decode_unique_text_selection(&mut reader)?;
-        let ordering_count = reader.count("ordering", MAX_ORDERING)?;
+        let ordering_count = decode_count(&mut reader, "ordering", MAX_ORDERING)?;
         if ordering_count != 0 {
             return Err(ServerPlanError::InvalidModel(
                 "a unique-Text-selected server plan must not contain ordering terms",
@@ -398,7 +400,7 @@ impl DistinctServerPlan {
 
         let mut writer = encode_plan_prefix(DISTINCT_FORMAT_VERSION, self.scan, &self.projections)?;
         encode_optional_selection(&mut writer, self.selection.as_ref())?;
-        writer.count("ordering", 0, MAX_ORDERING)?;
+        encode_count(&mut writer, "ordering", 0, MAX_ORDERING)?;
         let bytes = writer.finish();
         validate_artifact_size(bytes.len())?;
         Ok(bytes)
@@ -604,6 +606,15 @@ pub enum ServerPlanError {
     InvalidModel(&'static str),
 }
 
+impl From<DecodeError> for ServerPlanError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Truncated => Self::Truncated,
+            DecodeError::TrailingBytes => Self::TrailingBytes,
+        }
+    }
+}
+
 impl fmt::Display for ServerPlanError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -677,7 +688,12 @@ fn encode_plan_prefix(
     writer.u32(version);
     writer.u32(EXACT_INPUT_COUNT);
     encode_scan(&mut writer, scan);
-    writer.count("projections", projections.len(), MAX_PROJECTIONS)?;
+    encode_count(
+        &mut writer,
+        "projections",
+        projections.len(),
+        MAX_PROJECTIONS,
+    )?;
     for expression in projections {
         encode_expression(&mut writer, expression, 0)?;
     }
@@ -702,7 +718,7 @@ fn decode_plan_prefix(
         return Err(ServerPlanError::UnexpectedInputCount(input_count));
     }
     let scan = decode_scan(&mut reader)?;
-    let projection_count = reader.count("projections", MAX_PROJECTIONS)?;
+    let projection_count = decode_count(&mut reader, "projections", MAX_PROJECTIONS)?;
     if projection_count == 0 {
         return Err(ServerPlanError::InvalidModel(
             "a server plan must contain at least one projection",
@@ -726,10 +742,10 @@ fn encode_optional_selection(
 ) -> Result<(), ServerPlanError> {
     match selection {
         Some(expression) => {
-            writer.boolean("selection presence", true);
+            writer.boolean(true);
             encode_expression(writer, expression, 0)?;
         }
-        None => writer.boolean("selection presence", false),
+        None => writer.boolean(false),
     }
     Ok(())
 }
@@ -738,7 +754,7 @@ fn decode_optional_selection(
     reader: &mut Reader<'_>,
     remaining_expression_nodes: &mut u32,
 ) -> Result<Option<Expression>, ServerPlanError> {
-    match reader.boolean("selection presence")? {
+    match decode_boolean(reader, "selection presence")? {
         true => decode_expression(reader, 0, remaining_expression_nodes).map(Some),
         false => Ok(None),
     }
@@ -1164,11 +1180,8 @@ fn encode_unique_text_selection(
     writer.function_id(parameter_owner);
     writer.parameter_id(parameter);
     encode_unique_text_resolved_type(writer, resolved_type)?;
-    writer.boolean("unique-Text selector field nullability", field_nullable);
-    writer.boolean(
-        "unique-Text selector parameter required non-null",
-        parameter_required_non_null,
-    );
+    writer.boolean(field_nullable);
+    writer.boolean(parameter_required_non_null);
     Ok(())
 }
 
@@ -1189,9 +1202,11 @@ fn decode_unique_text_selection(
         parameter_owner: reader.function_id()?,
         parameter: reader.parameter_id()?,
         resolved_type: decode_unique_text_resolved_type(reader)?,
-        field_nullable: reader.boolean("unique-Text selector field nullability")?,
-        parameter_required_non_null: reader
-            .boolean("unique-Text selector parameter required non-null")?,
+        field_nullable: decode_boolean(reader, "unique-Text selector field nullability")?,
+        parameter_required_non_null: decode_boolean(
+            reader,
+            "unique-Text selector parameter required non-null",
+        )?,
     })
 }
 
@@ -1255,7 +1270,12 @@ fn encode_expression(
             writer.u8(2);
             encode_value_type(writer, expression.value_type)?;
             writer.u32(*input);
-            writer.count("field path steps", steps.len(), MAX_FIELD_PATH_STEPS)?;
+            encode_count(
+                writer,
+                "field path steps",
+                steps.len(),
+                MAX_FIELD_PATH_STEPS,
+            )?;
             for step in steps {
                 writer.type_id(step.owner);
                 writer.field_id(step.field);
@@ -1264,7 +1284,7 @@ fn encode_expression(
         ExpressionKind::BooleanLiteral { value } => {
             writer.u8(3);
             encode_value_type(writer, expression.value_type)?;
-            writer.boolean("literal", *value);
+            writer.boolean(*value);
         }
         ExpressionKind::Equality { left, right } => {
             writer.u8(4);
@@ -1302,7 +1322,7 @@ fn decode_expression(
         },
         2 => {
             let input = reader.u32()?;
-            let count = reader.count("field path steps", MAX_FIELD_PATH_STEPS)?;
+            let count = decode_count(reader, "field path steps", MAX_FIELD_PATH_STEPS)?;
             if count == 0 {
                 return Err(ServerPlanError::EmptyFieldPath);
             }
@@ -1316,7 +1336,7 @@ fn decode_expression(
             ExpressionKind::FieldPath { input, steps }
         }
         3 => ExpressionKind::BooleanLiteral {
-            value: reader.boolean("literal")?,
+            value: decode_boolean(reader, "literal")?,
         },
         4 => ExpressionKind::Equality {
             left: Box::new(decode_expression(reader, depth + 1, remaining_nodes)?),
@@ -1329,14 +1349,14 @@ fn decode_expression(
 
 fn encode_value_type(writer: &mut Writer, value_type: ValueType) -> Result<(), ServerPlanError> {
     encode_resolved_type(writer, value_type.resolved_type)?;
-    writer.boolean("expression nullability", value_type.nullable);
+    writer.boolean(value_type.nullable);
     Ok(())
 }
 
 fn decode_value_type(reader: &mut Reader<'_>) -> Result<ValueType, ServerPlanError> {
     Ok(ValueType {
         resolved_type: decode_resolved_type(reader)?,
-        nullable: reader.boolean("expression nullability")?,
+        nullable: decode_boolean(reader, "expression nullability")?,
     })
 }
 
@@ -1454,142 +1474,38 @@ fn decode_null_order(tag: u8) -> Result<NullOrder, ServerPlanError> {
     }
 }
 
-struct Writer {
-    bytes: Vec<u8>,
+fn encode_count(
+    writer: &mut Writer,
+    kind: &'static str,
+    count: usize,
+    maximum: u32,
+) -> Result<(), ServerPlanError> {
+    writer.u32(validate_count(kind, count, maximum)?);
+    Ok(())
 }
 
-impl Writer {
-    fn new() -> Self {
-        Self { bytes: Vec::new() }
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-    }
-
-    fn u8(&mut self, value: u8) {
-        self.bytes.push(value);
-    }
-
-    fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn boolean(&mut self, context: &'static str, value: bool) {
-        let _ = context;
-        self.u8(u8::from(value));
-    }
-
-    fn count(
-        &mut self,
-        kind: &'static str,
-        count: usize,
-        maximum: u32,
-    ) -> Result<(), ServerPlanError> {
-        self.u32(validate_count(kind, count, maximum)?);
-        Ok(())
-    }
-
-    fn type_id(&mut self, id: TypeId) {
-        self.bytes(&id.to_bytes());
-    }
-
-    fn field_id(&mut self, id: FieldId) {
-        self.bytes(&id.to_bytes());
-    }
-
-    fn function_id(&mut self, id: FunctionId) {
-        self.bytes(&id.to_bytes());
-    }
-
-    fn parameter_id(&mut self, id: ParameterId) {
-        self.bytes(&id.to_bytes());
+fn decode_boolean(reader: &mut Reader<'_>, context: &'static str) -> Result<bool, ServerPlanError> {
+    match reader.u8()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(ServerPlanError::InvalidBoolean { context, value }),
     }
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
+fn decode_count(
+    reader: &mut Reader<'_>,
+    kind: &'static str,
+    maximum: u32,
+) -> Result<u32, ServerPlanError> {
+    let count = reader.u32()?;
+    if count > maximum {
+        return Err(ServerPlanError::CollectionLimit {
+            kind,
+            count,
+            maximum,
+        });
     }
-
-    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], ServerPlanError> {
-        let bytes = self.take(LENGTH)?;
-        bytes.try_into().map_err(|_| ServerPlanError::Truncated)
-    }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8], ServerPlanError> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(ServerPlanError::Truncated)?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(ServerPlanError::Truncated)?;
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn u8(&mut self) -> Result<u8, ServerPlanError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, ServerPlanError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-
-    fn boolean(&mut self, context: &'static str) -> Result<bool, ServerPlanError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            value => Err(ServerPlanError::InvalidBoolean { context, value }),
-        }
-    }
-
-    fn count(&mut self, kind: &'static str, maximum: u32) -> Result<u32, ServerPlanError> {
-        let count = self.u32()?;
-        if count > maximum {
-            return Err(ServerPlanError::CollectionLimit {
-                kind,
-                count,
-                maximum,
-            });
-        }
-        Ok(count)
-    }
-
-    fn type_id(&mut self) -> Result<TypeId, ServerPlanError> {
-        Ok(TypeId::from_bytes(self.array()?))
-    }
-
-    fn field_id(&mut self) -> Result<FieldId, ServerPlanError> {
-        Ok(FieldId::from_bytes(self.array()?))
-    }
-
-    fn function_id(&mut self) -> Result<FunctionId, ServerPlanError> {
-        Ok(FunctionId::from_bytes(self.array()?))
-    }
-
-    fn parameter_id(&mut self) -> Result<ParameterId, ServerPlanError> {
-        Ok(ParameterId::from_bytes(self.array()?))
-    }
-
-    fn require_finished(&self) -> Result<(), ServerPlanError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(ServerPlanError::TrailingBytes)
-        }
-    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -2117,7 +2033,7 @@ mod tests {
         let mut writer =
             encode_plan_prefix(DISTINCT_FORMAT_VERSION, scan, &[maximum_projection]).unwrap();
         encode_optional_selection(&mut writer, Some(&oversized_selection)).unwrap();
-        writer.count("ordering", 0, MAX_ORDERING).unwrap();
+        encode_count(&mut writer, "ordering", 0, MAX_ORDERING).unwrap();
         assert_eq!(
             DistinctServerPlan::decode(&writer.finish()),
             Err(ServerPlanError::ExpressionNodeLimitExceeded)
@@ -2542,9 +2458,9 @@ mod tests {
 
         let mut writer =
             encode_plan_prefix(IDENTITY_SELECTED_FORMAT_VERSION, scan, &projections).unwrap();
-        writer.boolean("selection presence", true);
+        writer.boolean(true);
         encode_identity_selection(&mut writer, scan, selector).unwrap();
-        writer.count("ordering", 0, MAX_ORDERING).unwrap();
+        encode_count(&mut writer, "ordering", 0, MAX_ORDERING).unwrap();
         assert_eq!(
             IdentitySelectedServerPlan::decode(&writer.finish()),
             Err(ServerPlanError::ExpressionNodeLimitExceeded)
