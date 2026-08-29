@@ -6,15 +6,13 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::verify_standard_library_v9_snapshot;
+use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_standard::{
-        retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
-    };
 
+    #[test]
     fn checks_new_application_source_against_verified_v9_standard() {
         let snapshot = retained_standard_library_v9_snapshot()
             .and_then(verify_standard_library_v9_snapshot)
@@ -103,25 +101,11 @@ mod tests {
     }
 }
 
-use crate::source_diagnostics;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SourceCheckResult {
     Success,
     Failure,
     Usage,
-}
-
-pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
-    run_with_output(path, output, false, false)
-}
-
-pub(super) fn run_with_human_output(
-    path: &str,
-    output: &mut impl Write,
-    human_output: bool,
-) -> SourceCheckResult {
-    run_with_output(path, output, human_output, false)
 }
 
 pub(super) fn run_with_output(

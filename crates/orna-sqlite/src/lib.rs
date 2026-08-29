@@ -62,28 +62,49 @@ impl fmt::Display for SqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Backend(error) => write!(f, "Turso backend error: {error}"),
-            Self::InvalidPersistedData(message) => write!(f, "invalid persisted SQLite data: {message}"),
-            Self::UnsupportedApply => f.write_str("SQLite adapter does not yet support applying non-empty revisions"),
+            Self::InvalidPersistedData(message) => {
+                write!(f, "invalid persisted SQLite data: {message}")
+            }
+            Self::UnsupportedApply => {
+                f.write_str("SQLite adapter does not yet support applying non-empty revisions")
+            }
             Self::Domain(message) => write!(f, "Orna domain error: {message}"),
         }
     }
 }
 impl Error for SqliteError {}
-impl From<turso::Error> for SqliteError { fn from(error: turso::Error) -> Self { Self::Backend(error) } }
+impl From<turso::Error> for SqliteError {
+    fn from(error: turso::Error) -> Self {
+        Self::Backend(error)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SqliteConfig { path: PathBuf }
+pub struct SqliteConfig {
+    path: PathBuf,
+}
 impl SqliteConfig {
-    pub fn new(path: impl Into<PathBuf>) -> Self { Self { path: path.into() } }
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[derive(Clone)]
-pub struct SqliteRevisionStore { connection: Connection }
+pub struct SqliteRevisionStore {
+    connection: Connection,
+}
 
 impl SqliteRevisionStore {
     pub async fn open(config: &SqliteConfig) -> Result<Self, SqliteError> {
-        let path = config.path.to_str().ok_or(SqliteError::InvalidPersistedData("database path is not UTF-8"))?;
+        let path = config
+            .path
+            .to_str()
+            .ok_or(SqliteError::InvalidPersistedData(
+                "database path is not UTF-8",
+            ))?;
         let database = Builder::new_local(path).build().await?;
         let connection = database.connect()?;
         connection.execute_batch(SCHEMA).await?;
@@ -104,7 +125,9 @@ impl SqliteRevisionStore {
     }
 
     async fn seed_pair(&self) -> Result<BootstrapRevision, SqliteError> {
-        if let Some(pair) = self.load_pair().await? { return Ok(pair); }
+        if let Some(pair) = self.load_pair().await? {
+            return Ok(pair);
+        }
         let pair = BootstrapRevision::new(SourceRevisionId::new(), CatalogueRevisionId::new());
         let bundle = SourceBundleId::new();
         let source_bundle_hash = source_bundle_digest(&[]).map_err(|e| SqliteError::Domain(e.to_string()))?;
@@ -125,7 +148,12 @@ impl SqliteRevisionStore {
                 Value::Blob(source_hash.to_bytes().to_vec()), Value::Blob(catalogue_hash.to_bytes().to_vec()),
             ],
         ).await?;
-        Ok(self.load_pair().await?.ok_or(SqliteError::InvalidPersistedData("bootstrap row disappeared"))?)
+        Ok(self
+            .load_pair()
+            .await?
+            .ok_or(SqliteError::InvalidPersistedData(
+                "bootstrap row disappeared",
+            ))?)
     }
 
     async fn load_active(&self) -> Result<ActiveDatabaseRevision, SqliteError> {
@@ -237,14 +265,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path() -> PathBuf {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("orna-sqlite-{nonce}.db"))
     }
 
     #[tokio::test]
     async fn opens_local_file_bootstraps_idempotently_and_recovers_empty_revision() {
         let path = temp_path();
-        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path)).await.unwrap();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
         let first = store.bootstrap().await.unwrap();
         let second = store.bootstrap().await.unwrap();
         assert_eq!(first, second);
@@ -255,4 +288,5 @@ mod tests {
         assert!(recovered.catalogue().schemas().is_empty());
         let _ = std::fs::remove_file(path);
     }
+
 }

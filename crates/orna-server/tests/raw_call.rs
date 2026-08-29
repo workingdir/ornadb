@@ -4,8 +4,8 @@
 //! environment and caller-owned scratch state below `target`. They never
 //! start Docker, PostgreSQL, or any external service, and they never call a
 //! private API. Tests that execute a syntactically valid raw-call enforce a
-//! hard precondition that `/run/orna/default/orna.sock` is absent and fail
-//! before spawning if the path exists or cannot be inspected, so a regression
+//! hard precondition that the child process's fallback socket is absent and
+//! fail before spawning if it exists or cannot be inspected, so a regression
 //! can never contact a live local daemon. Linux `/proc` inspection is used
 //! only to bound readiness polling and to prove that no socket descriptor is
 //! opened before the input boundary closes the call.
@@ -16,7 +16,7 @@ mod support;
 
 use nix::{
     sys::signal::{Signal, kill},
-    unistd::Pid,
+    unistd::{Pid, geteuid},
 };
 use orna_core::{FunctionId, ParameterId};
 use std::{
@@ -32,7 +32,6 @@ use std::{
 };
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
-const FIXED_SOCKET: &str = "/run/orna/default/orna.sock";
 const INPUT_INVALID: &[u8] = b"orna: raw-call argument input is invalid\n";
 const CONNECTION_FAILED: &[u8] = b"local raw-call connection failed\n";
 const ORV1_TRUE: [u8; 26] = [
@@ -126,13 +125,20 @@ fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     pipe.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
+fn fallback_socket_path() -> PathBuf {
+    PathBuf::from("/tmp")
+        .join(format!(".orna-{}", geteuid().as_raw()))
+        .join("runtime/orna/default/orna.sock")
+}
 
 fn require_fixed_socket_absent() {
-    match fs::symlink_metadata(FIXED_SOCKET) {
+    let socket = fallback_socket_path();
+    match fs::symlink_metadata(&socket) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => panic!("fixed socket inspection failed: {error}"),
+        Err(error) => panic!("fallback socket inspection failed: {error}"),
         Ok(_) => panic!(
-            "the fixed socket {FIXED_SOCKET} exists; refusing to run against a live local daemon"
+            "the fallback socket {} exists; refusing to run against a live local daemon",
+            socket.display()
         ),
     }
 }

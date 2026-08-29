@@ -8,6 +8,7 @@ pub use frame::{
     InvocationClientResponse, InvocationEventBatch, InvocationEventRecord, MAX_CHANNEL_WINDOW,
     MAX_FRAME_PAYLOAD_LENGTH, MAX_RESOURCE_ARGUMENTS, MAX_RESOURCE_BATCH_ITEMS,
     MAX_RESOURCE_TOTAL_ITEMS, MAX_RESOURCE_WINDOW, ProtocolConnection, RawCall, RawCallClient,
+    RawCallClientError, RawCallClientResponse, ResourceAccepted, ResourceAcceptedFrame,
     ResourceArgument, ResourceCancel, ResourceCancelFrame, ResourceCancelReason,
     ResourceCancellationCode, ResourceCancelled, ResourceCancelledFrame, ResourceClientFrame,
     ResourceCompleted, ResourceCompletedFrame, ResourceConnectionError, ResourceCredit,
