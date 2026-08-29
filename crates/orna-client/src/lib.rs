@@ -22041,9 +22041,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
     }
 
     #[test]
-    fn source_introspection_executes_from_source_authored_client_function() {
+    fn source_introspection_exposes_parameters_and_function_references() {
         let prepared = prepared_client_source(
             "CREATE SCHEMA app; \
+             CREATE CLIENT FUNCTION app.target(p_value INTEGER) RETURNS INTEGER RETURN p_value; \
              CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
              RETURN sys.source.current();",
         );
@@ -22067,6 +22068,12 @@ CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
         .expect("the returned payload must decode as source metadata");
         assert_eq!(metadata.function(), function);
         assert_eq!(metadata.function_name(), "app.describe");
+        assert!(metadata.parameters().is_empty());
+        assert_eq!(metadata.references().len(), 1);
+        assert_eq!(
+            metadata.references()[0].target_name(),
+            "ValueType(TypeId(type:00000000000000000000000064))"
+        );
     }
 
     #[test]
