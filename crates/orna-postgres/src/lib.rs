@@ -4,6 +4,7 @@
 //! PostgreSQL implementation.
 
 mod kernel;
+mod storage;
 
 pub use kernel::*;
 
