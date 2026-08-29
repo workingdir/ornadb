@@ -14,6 +14,18 @@ mod source_diagnostics;
 mod source_diff;
 mod user_state;
 
+/// Renders source diagnostics in the stable machine-readable format.
+pub fn render_source_diagnostics(diagnostics: &[orna_compiler::CompilerDiagnostic]) -> Vec<u8> {
+    source_diagnostics::render_diagnostics(diagnostics)
+}
+/// Renders source diagnostics with source context for human terminal output.
+pub fn render_human_source_diagnostics(
+    parse_report: &orna_compiler::ParseReport,
+    diagnostics: &[orna_compiler::CompilerDiagnostic],
+    colour: bool,
+) -> Vec<u8> {
+    source_diagnostics::render_human_diagnostics(parse_report, diagnostics, colour)
+}
 pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
     EmbeddedEngineIdentity, EmbeddedHostError, EmbeddedHostPaths, EmbeddedPostmaster,
