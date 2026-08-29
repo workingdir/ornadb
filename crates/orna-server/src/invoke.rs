@@ -543,6 +543,7 @@ impl SharedInvokeBroker {
             .unwrap_or(ResourceTerminalProvenance::Uncommitted)
     }
 
+    #[cfg(test)]
     fn take_resource_terminal_provenance(
         &self,
         stream_id: u64,
@@ -563,6 +564,7 @@ impl SharedInvokeBroker {
     }
 }
 
+#[cfg(test)]
 fn remove_resource_terminal_provenance(
     provenance: &BrokerResourceProvenance,
     stream_id: u64,
