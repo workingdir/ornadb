@@ -227,6 +227,7 @@ fn server_capabilities() -> ServerCapabilities {
         }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
             ..CompletionOptions::default()
@@ -264,7 +265,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/references" => request_references(state, request),
         "textDocument/documentSymbol" => request_document_symbols(state, request),
         "textDocument/semanticTokens/full" => request_semantic_tokens_full(state, request),
-        "textDocument/semanticTokens/range" => request_semantic_tokens_range(state, request),
+        "textDocument/completion" => request_completion(state, request),
         "workspace/symbol" => request_workspace_symbols(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
