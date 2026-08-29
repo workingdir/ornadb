@@ -1988,14 +1988,19 @@ fn serves_semantic_tokens_document_symbols_and_completion() {
 
 #[test]
 fn serves_rich_hover_content() {
+    let fixture_root =
+        std::env::temp_dir().join(format!("orna-lsp-rich-hover-{}", std::process::id()));
+    let spec_directory = fixture_root.join("spec").join("spec");
+    fs::create_dir_all(&spec_directory).expect("spec fixture directory");
+    fs::write(spec_directory.join("orna.ebnf"), "start = 'fixture';\n").expect("spec fixture");
+    let document_path = fixture_root.join("rich-hover.orna");
+    fs::write(&document_path, VALID_SOURCE).expect("rich-hover fixture");
+    let uri = format!("file://{}", document_path.display());
+
     let mut client = Client::spawn();
     initialize(&mut client);
-    // The URI sits inside the workspace tree so the spec-bundle walk finds
-    // the grammar reference and hovers carry a Spec link.
-    let uri = format!(
-        "file://{}/../../rich-hover.orna",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    // The document sits beside a temporary spec bundle so hovers carry a
+    // deterministic Spec link without depending on a sibling checkout.
     open_document(&mut client, &uri, VALID_SOURCE, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -2218,6 +2223,7 @@ fn serves_rich_hover_content() {
     );
 
     client.shutdown();
+    fs::remove_dir_all(fixture_root).expect("remove rich-hover fixture");
 }
 
 #[test]

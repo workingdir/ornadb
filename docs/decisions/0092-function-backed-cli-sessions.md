@@ -47,9 +47,9 @@ DATABASE paths fail before a connection attempt.
 
 The public help surface is intentionally small: the default session, `invoke`,
 `inspect`, `source check|apply`, daemon mode, help, and version. Backend shell,
-raw recovery, package maintenance, runtime metadata, security administration,
-and state repair remain available behind explicit administrative/recovery
-paths but are not the normal user workflow.
+raw recovery, runtime metadata, security administration, and state repair remain
+available behind explicit administrative/recovery paths but are not the normal
+user workflow.
 
 Daemon output is Orna-owned status and error output. The linked storage
 engine's routine startup and shutdown messages do not reach the terminal.

@@ -4025,6 +4025,93 @@ fn validate_client_function_preflight(
         return_semantic_type: return_evidence.semantic_type,
         return_shape: function.return_shape(),
         return_location: return_evidence.location.clone(),
+    let (return_target, return_scalar) = match function.return_type() {
+        SemanticType::Scalar(scalar) => (
+            EvidenceTarget::Value(match scalar {
+                StandardScalar::Boolean => STD_BOOLEAN_TYPE_ID,
+                StandardScalar::Integer => STD_INTEGER_TYPE_ID,
+                StandardScalar::CharacterLargeObject => STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
+                _ => TypeId::new(),
+            }),
+            Some(scalar),
+        ),
+        capabilities: function.capabilities().to_vec(),
+    })
+}
+fn validate_generic_client_function(
+    function: &crate::CheckedClientFunction,
+    active: &ActiveDatabaseRevision,
+) -> Result<ValidatedClient, PrepareError> {
+    validate_existing_function(
+        function.id(),
+        function.name(),
+        FunctionDomain::Client,
+        active,
+    )?;
+    if matches!(
+        function.body(),
+        CheckedClientFunctionBody::StateBlock { states, .. } if !states.is_empty()
+    ) {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT state declarations require standard-backed preparation",
+        });
+    }
+    let (return_target, return_scalar) = match function.return_type() {
+        SemanticType::Scalar(scalar) => (EvidenceTarget::Value(TypeId::new()), Some(scalar)),
+        SemanticType::Named(target) => (EvidenceTarget::Named(target), None),
+        SemanticType::Reference { target } => (EvidenceTarget::ObjectReference(target), None),
+    };
+    let body = match function.body() {
+        CheckedClientFunctionBody::BooleanLiteral { value, .. } => {
+            ValidatedClientBody::BooleanLiteral(*value)
+        }
+        CheckedClientFunctionBody::Expression { expression } => {
+            ValidatedClientBody::Expression(expression.clone())
+        }
+        CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } => ValidatedClientBody::Procedural {
+            locals: locals.clone(),
+            statements: statements.clone(),
+            return_expression: return_expression.clone(),
+        },
+        CheckedClientFunctionBody::ControlFlow { locals, statements } => {
+            ValidatedClientBody::ControlFlow {
+                locals: locals.clone(),
+                statements: statements.clone(),
+            }
+        }
+        CheckedClientFunctionBody::StateBlock {
+            states,
+            return_expression,
+        } => ValidatedClientBody::StateBlock {
+            return_expression: return_expression.clone(),
+            states: states.clone(),
+        },
+        CheckedClientFunctionBody::ExternalContract { identity, .. } => {
+            ValidatedClientBody::ExternalContract(identity.clone())
+        }
+        #[cfg(test)]
+        CheckedClientFunctionBody::Unsupported => {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has an unsupported body",
+            });
+        }
+    };
+    Ok(ValidatedClient {
+        id: function.id(),
+        name: function.name().clone(),
+        location: function.location().clone(),
+        security: function.security(),
+        transaction: function.transaction(),
+        volatility: function.volatility(),
+        parameters: function.parameters().to_vec(),
+        return_target,
+        return_semantic_type: function.return_type(),
+        return_shape: function.return_shape(),
+        return_location: function.location().clone(),
         return_scalar,
         body,
         references: function.references().to_vec(),
@@ -6397,15 +6484,9 @@ impl<'a> CandidateBuilder<'a> {
             for checked in self.checked.server_functions() {
                 self.build_server_function(checked, object_types, enum_types, record_value_types)?;
             }
-            if self.checked.client_functions().iter().any(|function| {
-                matches!(
-                    function.body(),
-                    CheckedClientFunctionBody::StateBlock { states, .. } if !states.is_empty()
-                )
-            }) {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT state declarations require standard-backed preparation",
-                });
+            for checked in self.checked.client_functions() {
+                let validated = validate_generic_client_function(checked, self.active)?;
+                self.build_client_function(&validated)?;
             }
             return Ok(());
         };
