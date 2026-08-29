@@ -9882,7 +9882,6 @@ fn require_audit_value<T>(
     value.ok_or_else(|| audit_invariant(record, rule))
 }
 
-#[allow(dead_code)]
 fn require_invocation_audit_value<T>(
     value: Option<T>,
     record: &str,
