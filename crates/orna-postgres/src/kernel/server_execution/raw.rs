@@ -353,3 +353,79 @@ pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) 
         | ServerSelectError::ValueCodec { .. } => false,
     }
 }
+
+fn raw_target_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::RawTarget { function, rule })
+}
+
+pub(super) fn raw_result_type_is_supported(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> bool {
+    match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(scalar)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: scalar,
+            ..
+        } => raw_scalar_is_supported(scalar),
+        ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
+        ResolvedRuntimeType::CatalogueEnum(_)
+        | ResolvedRuntimeType::Record(_)
+        | ResolvedRuntimeType::Unsupported => false,
+    }
+}
+
+fn raw_runtime_value_is_supported(value: &RuntimeValue) -> bool {
+    match value {
+        RuntimeValue::Null(_) => false,
+        RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Reference { .. } => true,
+        RuntimeValue::Enum(_) | RuntimeValue::Record(_) => false,
+        _ => false,
+    }
+}
+
+fn normalise_raw_null(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    function: FunctionId,
+    resolved_type: ResolvedType,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let normalised = match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(scalar)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: scalar,
+            ..
+        } if raw_scalar_is_supported(scalar) => ResolvedType::scalar(scalar),
+        ResolvedRuntimeType::Reference(target) if catalogue.object_type_by_id(target).is_some() => {
+            ResolvedType::reference(target)
+        }
+        _ => {
+            return Err(raw_target_error(
+                function,
+                "raw SERVER execution produced a null outside the protocol-1 subset",
+            ));
+        }
+    };
+    RuntimeValue::null(normalised)
+        .map_err(ServerSelectError::ReturnedRows)
+        .map_err(server_error)
+}
+
+const fn raw_scalar_is_supported(scalar: StandardScalar) -> bool {
+    matches!(
+        scalar,
+        StandardScalar::Boolean
+            | StandardScalar::Integer
+            | StandardScalar::BigInt
+            | StandardScalar::Float
+            | StandardScalar::CharacterLargeObject
+            | StandardScalar::BinaryLargeObject
+    )
+}
