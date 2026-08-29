@@ -291,6 +291,7 @@ const NODE_ACTION: u8 = 12;
 const NODE_INSPECT: u8 = 13;
 const NODE_UNARY: u8 = 14;
 const NODE_BINARY: u8 = 15;
+const NODE_SOURCE_INTROSPECTION: u8 = 16;
 
 const INSPECT_OPERATION_SNAPSHOT: u8 = 1;
 const INSPECT_OPERATION_PROJECTION: u8 = 2;
@@ -739,7 +740,8 @@ pub enum ClientExpressionNode {
         /// The Boolean value.
         value: bool,
     },
-    /// A read of one declared parameter.
+    /// A read-only view of the enclosing function's source metadata.
+    SourceIntrospection,
     ParameterRead {
         /// The read parameter identity.
         parameter: ParameterId,
@@ -2936,6 +2938,7 @@ fn encode_control_flow_expression(
                 resource_count,
             )?;
         }
+        ClientExpressionNode::SourceIntrospection => writer.push(NODE_SOURCE_INTROSPECTION),
     }
     Ok(())
 }
@@ -3176,6 +3179,7 @@ fn decode_control_flow_expression(
                 right: Box::new(right),
             })
         }
+        NODE_SOURCE_INTROSPECTION => Ok(ClientExpressionNode::SourceIntrospection),
         NODE_EXTERNAL_CONTRACT => {
             let length = reader.u32()? as usize;
             let identity = std::str::from_utf8(reader.bytes(length)?)
@@ -3686,7 +3690,8 @@ fn validate_control_flow_expression_shape(
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => {}
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => {}
     }
     Ok(())
 }
@@ -3763,7 +3768,8 @@ fn expression_contains_inspect(node: &ClientExpressionNode) -> bool {
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => false,
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => false,
     }
 }
 
@@ -3881,7 +3887,8 @@ fn validate_external_contract_placement_inner(
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
-        | ClientExpressionNode::FieldPath { .. } => Ok(()),
+        | ClientExpressionNode::FieldPath { .. }
+        | ClientExpressionNode::SourceIntrospection => Ok(()),
     }
 }
 
@@ -4164,6 +4171,7 @@ fn encode_expression_node_with_resources(
             writer.extend(&length.to_be_bytes());
             writer.extend(bytes);
         }
+        ClientExpressionNode::SourceIntrospection => writer.push(NODE_SOURCE_INTROSPECTION),
         ClientExpressionNode::Unary { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_UNARY));
         }
@@ -4608,7 +4616,8 @@ fn validate_procedural_local_reads(
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => {}
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => {}
     }
     Ok(())
 }
@@ -4702,7 +4711,8 @@ fn validate_procedural_expression(
         | ClientExpressionNode::Boolean { .. }
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => {}
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => {}
         ClientExpressionNode::Action { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
         }
@@ -4764,7 +4774,8 @@ fn validate_resource_await_placement(
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => {}
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => {}
         ClientExpressionNode::Action { .. } => {
             return Err(ClientPlanError::InvalidExpressionNode(NODE_ACTION));
         }
@@ -5006,6 +5017,7 @@ fn decode_expression_node_with_resources(
                 identity: identity.to_owned(),
             })
         }
+        NODE_SOURCE_INTROSPECTION => Ok(ClientExpressionNode::SourceIntrospection),
         tag => Err(ClientPlanError::InvalidExpressionNode(tag)),
     }
 }
@@ -6064,6 +6076,7 @@ mod tests {
             ExpressionClientPlan::new(ClientExpressionNode::ExternalContract {
                 identity: "std.ui.window@1".to_owned(),
             }),
+            ExpressionClientPlan::new(ClientExpressionNode::SourceIntrospection),
         ];
         for plan in plans {
             let bytes = plan.encode().expect("the plan encodes");

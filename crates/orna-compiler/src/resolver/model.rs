@@ -1233,6 +1233,23 @@ pub(crate) enum CheckedClientExpression {
         /// The checked sealed operation and its nested target expression.
         operation: CheckedInspectOperation,
     },
+    /// A generic read-only view of the enclosing function's source metadata.
+    SourceIntrospection {
+        /// The source location of the intrinsic call.
+        location: SourceLocation,
+    },
+    /// Reads one bounded line from the active client session.
+    Input {
+        /// The source location of the input expression.
+        location: SourceLocation,
+    },
+    /// Evaluates one bounded CLI command through the active session.
+    Evaluate {
+        /// The command expression.
+        expression: Box<CheckedClientExpression>,
+        /// The source location of the evaluation expression.
+        location: SourceLocation,
+    },
     /// A text literal value.
     String {
         /// The unescaped text value.
