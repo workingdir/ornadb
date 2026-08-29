@@ -419,6 +419,14 @@ impl SessionBridge {
     }
 
     pub(crate) fn request_input(&self, root_invocation_id: InvocationId) -> Result<String, String> {
+        self.request_input_with_cancel(root_invocation_id, || false)
+    }
+
+    pub(crate) fn request_input_with_cancel(
+        &self,
+        root_invocation_id: InvocationId,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<String, String> {
         let request_invocation_id = InvocationId::new();
         let frame = SessionServerFrame::InputRequested(InputRequested {
             root_invocation_id: self.root_invocation_id,
@@ -444,10 +452,15 @@ impl SessionBridge {
 
         let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
         while waiting.response.is_none() && !waiting.closed {
+            if cancelled() {
+                waiting.closed = true;
+                break;
+            }
             waiting = self
                 .response_ready
-                .wait(waiting)
-                .expect("session bridge response wait");
+                .wait_timeout(waiting, Duration::from_millis(50))
+                .expect("session bridge response wait")
+                .0;
         }
         let Some(response) = waiting.response.take() else {
             return Err("client.input_unavailable".to_owned());
@@ -2787,7 +2800,7 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             .current_invocation
             .unwrap_or_else(|| context.parent_invocation_id());
         bridge
-            .request_input(root_invocation_id)
+            .request_input_with_cancel(root_invocation_id, || self.cancellation.is_requested())
             .map(RuntimeValue::Text)
     }
 
