@@ -51,8 +51,8 @@ use orna_core::{
         SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
         SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
         SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
-        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
-        SYS_INSPECT_UI_NODES_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
+        SYS_SOURCE_FUNCTION_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
@@ -9906,6 +9906,7 @@ fn validate_control_flow_expression_type(
             }
             Ok(None)
         }
+        ClientExpressionNode::SourceIntrospection => Ok(None),
         ClientExpressionNode::ExternalContract { .. } => Ok(None),
     }
 }
@@ -10378,6 +10379,93 @@ fn evaluate_expression_with_fuel(
             )?;
             Ok(value)
         }
+        ClientExpressionNode::SourceIntrospection => {
+            let Some(function) = active.catalogue().function_by_id(context.function()) else {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                )));
+            };
+            let Some(revision) = active
+                .function_revisions()
+                .iter()
+                .find(|candidate| candidate.id() == context.function_revision())
+            else {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                )));
+            };
+            let declaration = revision.declaration_origin();
+            let parameters = function
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    let value_type = parameter
+                        .resolved_type()
+                        .value_type()
+                        .ok_or_else(|| {
+                            Box::new(expression_error(
+                                context,
+                                ClientExpressionError::TypeMismatch,
+                            ))
+                        })?;
+                    Ok(orna_core::source_metadata::SourceParameterMetadata::new(
+                        parameter.id(),
+                        parameter.name(),
+                        parameter.ordinal(),
+                        value_type,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Box<ClientExecutionError>>>()?;
+            let references = active
+                .references()
+                .iter()
+                .filter(|reference| {
+                    reference.source_function() == context.function()
+                        && reference.source_revision() == context.function_revision()
+                })
+                .map(|reference| {
+                    orna_core::source_metadata::SourceReferenceMetadata::new(
+                        reference.ordinal(),
+                        reference.target(),
+                        format!("{:?}", reference.target()),
+                        reference.source_origin().source_unit(),
+                        reference.source_origin().byte_start(),
+                        reference.source_origin().byte_end(),
+                    )
+                })
+                .collect();
+            let metadata = orna_core::source_metadata::SourceFunctionMetadata::new(
+                function.id(),
+                revision.id(),
+                function.name().to_string(),
+                declaration.source_unit(),
+                declaration.byte_start(),
+                declaration.byte_end(),
+                revision.declaration_content_hash(),
+                parameters,
+                references,
+            )
+            .map_err(|_| {
+                Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                ))
+            })?;
+            let value = OpaqueValue::new_inspect_carrier(
+                active,
+                SYS_SOURCE_FUNCTION_TYPE_ID,
+                metadata.encode(),
+            )
+            .map_err(|_| {
+                Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InvalidCall,
+                ))
+            })?;
+            Ok(RuntimeValue::Opaque(value))
+        }
         ClientExpressionNode::ExternalContract { identity } => {
             if let Some(spec) = standard_ui_constructor_spec(active, context, identity) {
                 return evaluate_standard_ui_constructor(active, context, spec, arguments);
@@ -10576,16 +10664,14 @@ fn is_sealed_inspect_type(type_id: TypeId) -> bool {
     matches!(
         type_id,
         SYS_INSPECT_INVOCATION_TYPE_ID
-            | SYS_INSPECT_SNAPSHOT_TYPE_ID
-            | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-            | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-            | SYS_INSPECT_CALLS_TYPE_ID
-            | SYS_INSPECT_RESOURCES_TYPE_ID
-            | SYS_INSPECT_STATE_CELLS_TYPE_ID
-            | SYS_INSPECT_UI_NODES_TYPE_ID
-            | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-            | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-            | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+        | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+        | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+        | SYS_INSPECT_CALLS_TYPE_ID
+        | SYS_INSPECT_RESOURCES_TYPE_ID
+        | SYS_INSPECT_UI_NODES_TYPE_ID
+        | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+        | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+        | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
     )
 }
 
@@ -11858,7 +11944,8 @@ fn collect_client_expression_call_targets(
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::ExternalContract { .. } => {}
+        | ClientExpressionNode::ExternalContract { .. }
+        | ClientExpressionNode::SourceIntrospection => {}
     }
     Ok(())
 }
