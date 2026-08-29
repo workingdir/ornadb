@@ -28,6 +28,7 @@ use orna_compiler::{
 };
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
+    catalogue::FunctionDomain,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
     source::{SourceBundle, SourceUnit},
     state::{UserStateChange, UserStateWriteOutcome},
