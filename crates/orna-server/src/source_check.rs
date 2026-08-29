@@ -6,19 +6,19 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
+use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_library_v10_snapshot};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn checks_new_application_source_against_verified_v9_standard() {
-        let snapshot = retained_standard_library_v9_snapshot()
-            .and_then(verify_standard_library_v9_snapshot)
-            .expect("retained V9 standard must verify");
+    fn checks_new_application_source_against_verified_v10_standard() {
+        let snapshot = retained_standard_library_v10_snapshot()
+            .and_then(verify_standard_library_v10_snapshot)
+            .expect("retained V10 standard must verify");
         let standard =
-            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+            check_standard_library_source(&snapshot).expect("verified V10 source must check");
         let source = SourceBundle::new([SourceUnit::new(
             "application.orna",
             "CREATE SCHEMA app;\n\
@@ -31,17 +31,17 @@ mod tests {
         .expect("application source must form a bundle");
 
         let report = check_new_application(&source, &standard)
-            .expect("application source must be checked against V9");
+            .expect("application source must be checked against V10");
         assert_eq!(report.diagnostics(), &[]);
     }
 
     #[test]
-    fn checks_static_ui_source_fixture_against_verified_v9_standard() {
-        let snapshot = retained_standard_library_v9_snapshot()
-            .and_then(verify_standard_library_v9_snapshot)
-            .expect("retained V9 standard must verify");
+    fn checks_static_ui_source_fixture_against_verified_v10_standard() {
+        let snapshot = retained_standard_library_v10_snapshot()
+            .and_then(verify_standard_library_v10_snapshot)
+            .expect("retained V10 standard must verify");
         let standard =
-            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+            check_standard_library_source(&snapshot).expect("verified V10 source must check");
         let source = SourceBundle::new([SourceUnit::new(
             "static_ui_dogfood.orna",
             include_str!("../tests/fixtures/static_ui_dogfood.orna"),
@@ -49,17 +49,17 @@ mod tests {
         .expect("static UI application source must form a bundle");
 
         let report = check_new_application(&source, &standard)
-            .expect("static UI application source must be checked against V9");
+            .expect("static UI application source must be checked against V10");
         assert_eq!(report.diagnostics(), &[]);
     }
 
     #[test]
-    fn checks_client_inspector_source_fixture_against_verified_v9_standard() {
-        let snapshot = retained_standard_library_v9_snapshot()
-            .and_then(verify_standard_library_v9_snapshot)
-            .expect("retained V9 standard must verify");
+    fn checks_client_inspector_source_fixture_against_verified_v10_standard() {
+        let snapshot = retained_standard_library_v10_snapshot()
+            .and_then(verify_standard_library_v10_snapshot)
+            .expect("retained V10 standard must verify");
         let standard =
-            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+            check_standard_library_source(&snapshot).expect("verified V10 source must check");
         let source = SourceBundle::new([SourceUnit::new(
             "client_inspector_dogfood.orna",
             include_str!("../tests/fixtures/client_inspector_dogfood.orna"),
@@ -67,17 +67,17 @@ mod tests {
         .expect("client Inspector application source must form a bundle");
 
         let report = check_new_application(&source, &standard)
-            .expect("client Inspector application source must be checked against V9");
+            .expect("client Inspector application source must be checked against V10");
         assert_eq!(report.diagnostics(), &[]);
     }
 
     #[test]
     fn rejects_retained_table_presenter_as_a_client_resource_target() {
-        let snapshot = retained_standard_library_v9_snapshot()
-            .and_then(verify_standard_library_v9_snapshot)
-            .expect("retained V9 standard must verify");
+        let snapshot = retained_standard_library_v10_snapshot()
+            .and_then(verify_standard_library_v10_snapshot)
+            .expect("retained V10 standard must verify");
         let standard =
-            check_standard_library_source(&snapshot).expect("verified V9 source must check");
+            check_standard_library_source(&snapshot).expect("verified V10 source must check");
         let source = SourceBundle::new([SourceUnit::new(
             "resource.orna",
             "CREATE SCHEMA app;\n\
@@ -133,8 +133,8 @@ pub(super) fn run_with_output(
         Ok(bundle) if bundle.len() == 1 => bundle,
         _ => return SourceCheckResult::Usage,
     };
-    let snapshot = match retained_standard_library_v9_snapshot()
-        .and_then(verify_standard_library_v9_snapshot)
+    let snapshot = match retained_standard_library_v10_snapshot()
+        .and_then(verify_standard_library_v10_snapshot)
     {
         Ok(snapshot) => snapshot,
         Err(_) => return write_standard_failure(output),
