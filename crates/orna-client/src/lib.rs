@@ -2721,6 +2721,41 @@ fn stream_item_descriptor(expected: ResolvedType) -> Option<TypeDescriptor> {
         ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
     }
 }
+fn source_metadata_type_id(
+    active: &ActiveDatabaseRevision,
+    resolved_type: ResolvedType,
+) -> Option<TypeId> {
+    match resolved_type {
+        ResolvedType::Value(type_id)
+        | ResolvedType::Named(type_id)
+        | ResolvedType::Reference { target: type_id } => Some(type_id),
+        ResolvedType::Scalar(scalar) => {
+            let contract = match scalar {
+                StandardScalar::Boolean => "orna.kernel.value.boolean@1",
+                StandardScalar::Integer => "orna.kernel.value.integer@1",
+                StandardScalar::BigInt => "orna.kernel.value.bigint@1",
+                StandardScalar::Float => "orna.kernel.value.float@1",
+                StandardScalar::Decimal => "orna.kernel.value.decimal@1",
+                StandardScalar::CharacterLargeObject => {
+                    "orna.kernel.value.character-large-object@1"
+                }
+                StandardScalar::BinaryLargeObject => "orna.kernel.value.binary-large-object@1",
+                StandardScalar::Uuid => "orna.kernel.value.uuid@1",
+                StandardScalar::Date => "orna.kernel.value.date@1",
+                StandardScalar::Time => "orna.kernel.value.time@1",
+                StandardScalar::Timestamp => "orna.kernel.value.timestamp@1",
+                StandardScalar::Duration => "orna.kernel.value.duration@1",
+                StandardScalar::Void => return None,
+            };
+            active
+                .catalogue()
+                .value_types()
+                .iter()
+                .find(|definition| definition.representation_contract() == contract)
+                .map(|definition| definition.id())
+        }
+    }
+}
 
 fn supported_stream_item_descriptor(
     active: &ActiveDatabaseRevision,
@@ -10440,9 +10475,7 @@ fn evaluate_expression_with_fuel(
                 .parameters()
                 .iter()
                 .map(|parameter| {
-                    let value_type = parameter
-                        .resolved_type()
-                        .value_type()
+                    let type_id = source_metadata_type_id(active, parameter.resolved_type())
                         .ok_or_else(|| {
                             Box::new(expression_error(
                                 context,
@@ -10453,7 +10486,7 @@ fn evaluate_expression_with_fuel(
                         parameter.id(),
                         parameter.name(),
                         parameter.ordinal(),
-                        value_type,
+                        type_id,
                     ))
                 })
                 .collect::<Result<Vec<_>, Box<ClientExecutionError>>>()?;
