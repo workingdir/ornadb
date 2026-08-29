@@ -416,9 +416,8 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
-            STANDARD_LIBRARY_V10_REVISION_ID | STANDARD_LIBRARY_V9_REVISION_ID => {
-                check_standard_library_source_v9(snapshot)
-            }
+            STANDARD_LIBRARY_V10_REVISION_ID => check_standard_library_source_v10(snapshot),
+            STANDARD_LIBRARY_V9_REVISION_ID => check_standard_library_source_v9(snapshot),
             STANDARD_LIBRARY_V8_REVISION_ID => check_standard_library_source_v8(snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
             STANDARD_LIBRARY_V6_REVISION_ID => check_standard_library_source_v6(snapshot),
@@ -1283,6 +1282,339 @@ fn check_standard_library_source_v9(
     })
 }
 
+/// Checks the source-authored CLI session function retained by V10.
+pub fn check_standard_cli_repl(
+    declaration: &ClientFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    stored_unit: &StoredSourceUnit,
+) -> Result<CheckedStandardExecutable, StandardLibraryCheckError> {
+    let expected_schema =
+        QualifiedSemanticName::new(["std", "cli"]).expect("the fixed CLI schema is valid");
+    let expected_function =
+        QualifiedSemanticName::new(["std", "cli", "repl"]).expect("the fixed CLI function is valid");
+    let expected_ui =
+        QualifiedSemanticName::new(["std", "ui", "ui"]).expect("the fixed UI type is valid");
+    if stored_unit.id() != STD_CLI_SOURCE_UNIT_ID
+        || stored_unit.logical_path() != "std/cli.orna"
+        || declaration.external
+        || declaration.runtime_contract.is_some()
+        || !declaration.capabilities.is_empty()
+        || declaration.parameters.len() != 0
+        || unquoted_semantic_name(&declaration.name)? != expected_function
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let FunctionReturnType::Single(result_type) = &declaration.return_type else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if !matches!(
+        result_type,
+        TypeSpecification::Named(name)
+            if unquoted_semantic_name(name)? == expected_ui
+                && resolved_standard_type_id(result_type, catalogue) == Some(STD_UI_TYPE_ID)
+    ) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let Some(ClientExpression::Call {
+        callee: evaluate_callee,
+        arguments: evaluate_arguments,
+        ..
+    }) = declaration.body.as_expression()
+    else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if semantic_name(evaluate_callee)
+        != QualifiedSemanticName::new(["std", "cli", "evaluate"])
+            .expect("the fixed CLI evaluate intrinsic is valid")
+        || evaluate_arguments.len() != 1
+        || evaluate_arguments[0].name.is_some()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let ClientExpression::Call {
+        callee: input_callee,
+        arguments: input_arguments,
+        ..
+    } = &evaluate_arguments[0].value
+    else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if semantic_name(input_callee)
+        != QualifiedSemanticName::new(["std", "cli", "input"])
+            .expect("the fixed CLI input intrinsic is valid")
+        || !input_arguments.is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let schema = catalogue
+        .schema_by_id(STD_CLI_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    if schema.name() != &expected_schema {
+        return Err(StandardLibraryCheckError::SchemaNameMismatch {
+            actual: schema.name().clone(),
+        });
+    }
+    let function = catalogue
+        .function_by_id(STD_CLI_REPL_FUNCTION_ID)
+        .ok_or(StandardLibraryCheckError::MissingFunction)?;
+    if function.name() != &expected_function
+        || function.domain() != FunctionDomain::Client
+        || function.security() != CatalogueFunctionSecurity::Invoker
+        || function.transaction().is_some()
+        || function.volatility() != CatalogueFunctionVolatility::Volatile
+        || function.current_revision() != STD_CLI_REPL_FUNCTION_REVISION_ID
+        || !function.parameters().is_empty()
+        || function.return_type() != &FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID))
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    if origins.len() != 2 {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let source_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        SourceOrigin::new(stored_unit.id(), start, end)
+            .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+    };
+    let expected_schema_origin = source_origin(
+        &orna_syntax::parse(stored_unit.content())
+            .schemas()
+            .first()
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?
+            .span,
+    )?;
+    let expected_function_origin = source_origin(&declaration.span)?;
+    let schema_origin = origins
+        .iter()
+        .find(|origin| origin.identity() == DefinitionIdentity::Schema(STD_CLI_SCHEMA_ID))
+        .map(DefinitionOrigin::source)
+        .ok_or(StandardLibraryCheckError::MissingSchemaOrigin)?;
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID)
+        })
+        .map(DefinitionOrigin::source)
+        .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?;
+    if schema_origin != expected_schema_origin
+        || function_origin != expected_function_origin
+        || origins.iter().any(|origin| {
+            !matches!(
+                origin.identity(),
+                DefinitionIdentity::Schema(STD_CLI_SCHEMA_ID)
+                    | DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID)
+            )
+        })
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let result_origin = source_origin(result_type.span())?;
+    let references = vec![DefinitionReference::new(
+        STD_CLI_REPL_FUNCTION_ID,
+        STD_CLI_REPL_FUNCTION_REVISION_ID,
+        0,
+        DefinitionReferenceTarget::ValueType(STD_UI_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        result_origin,
+    )];
+    let plan = ExpressionClientPlan::new(ClientExpressionNode::Evaluate {
+        expression: Box::new(ClientExpressionNode::Input),
+    });
+    let payload = plan
+        .encode()
+        .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let artifact_hash =
+        artifact_payload_digest(&payload).map_err(|source| StandardLibraryCheckError::Digest {
+            source,
+        })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        CLIENT_PLAN_FORMAT,
+        plan.format_version(),
+        payload,
+        artifact_hash,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    let declaration_bytes = &stored_unit.content().as_bytes()
+        [function_origin.byte_start() as usize..function_origin.byte_end() as usize];
+    let declaration_content_hash = function_declaration_digest(declaration_bytes)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        function,
+        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
+        &artifact,
+        &[],
+        &references,
+    )
+    .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let revision = FunctionRevisionRecord::new(
+        STD_CLI_REPL_FUNCTION_ID,
+        STD_CLI_REPL_FUNCTION_REVISION_ID,
+        STD_CLI_REPL_REVISION_NUMBER,
+        function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY,
+        artifact,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let executable = StandardExecutable::new(
+        STD_CLI_REPL_FUNCTION_ID,
+        revision,
+        references.clone(),
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+    Ok(CheckedStandardExecutable {
+        function_id: STD_CLI_REPL_FUNCTION_ID,
+        parameter_ids: Vec::new(),
+        revision_id: STD_CLI_REPL_FUNCTION_REVISION_ID,
+        revision_number: STD_CLI_REPL_REVISION_NUMBER,
+        declaration_origin: function_origin,
+        declaration_content_hash,
+        semantic_hash,
+        semantic_hash_version: FunctionSemanticHashVersion::Version2,
+        language_version: orna_artifact::client_plan::LANGUAGE_VERSION_IDENTITY.to_owned(),
+        artifact: executable.revision().artifact().clone(),
+        references,
+        schema_origin,
+        function_origin,
+        parameter_origins: Vec::new(),
+    })
+}
+
+fn check_standard_library_source_v10(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let source_units = snapshot.source().units();
+    let executables = snapshot.executables();
+    if source_units.len() != 10 {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    }
+    if executables.len() != 12 {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: executables.len(),
+        });
+    }
+    let expected_functions = [
+        STD_INVOKE_ECHO_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        STD_UI_WINDOW_FUNCTION_ID,
+        STD_UI_TEXT_FUNCTION_ID,
+        STD_UI_BUTTON_FUNCTION_ID,
+        STD_UI_PANEL_FUNCTION_ID,
+        STD_UI_ROW_FUNCTION_ID,
+        STD_UI_COLUMN_FUNCTION_ID,
+        STD_UI_TEXT_INPUT_FUNCTION_ID,
+        STD_UI_TABS_FUNCTION_ID,
+        STD_CLI_REPL_FUNCTION_ID,
+    ];
+    if executables
+        .iter()
+        .map(StandardExecutable::function)
+        .ne(expected_functions)
+    {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    let cli_unit = source_units
+        .last()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let cli_origins = snapshot
+        .origins()
+        .iter()
+        .filter(|origin| origin.source().source_unit() == STD_CLI_SOURCE_UNIT_ID)
+        .cloned()
+        .collect::<Vec<_>>();
+    let parent_origins = snapshot
+        .origins()
+        .iter()
+        .filter(|origin| origin.source().source_unit() != STD_CLI_SOURCE_UNIT_ID)
+        .cloned()
+        .collect::<Vec<_>>();
+    let parent_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        snapshot.catalogue().revision(),
+        snapshot
+            .catalogue()
+            .schemas()
+            .iter()
+            .filter(|schema| schema.id() != STD_CLI_SCHEMA_ID)
+            .cloned()
+            .collect(),
+        snapshot.catalogue().object_types().to_vec(),
+        snapshot.catalogue().value_types().to_vec(),
+        snapshot.catalogue().type_bindings().to_vec(),
+        snapshot
+            .catalogue()
+            .functions()
+            .iter()
+            .filter(|function| function.id() != STD_CLI_REPL_FUNCTION_ID)
+            .cloned()
+            .collect(),
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let (mut families, mut checked_executables) = check_standard_library_source_v9_parts(
+        &source_units[..9],
+        &parent_catalogue,
+        &parent_origins,
+        &executables[..11],
+    )?;
+    let cli_bundle = SourceBundle::new([SourceUnit::new(
+        cli_unit.logical_path(),
+        cli_unit.content(),
+    )])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let cli_report = parse_bundle(&cli_bundle);
+    if !cli_report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: cli_report.diagnostics().to_vec(),
+        });
+    }
+    let [parsed_cli] = cli_report.units() else {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    };
+    if parsed_cli.source_text() != cli_unit.content()
+        || parsed_cli.source_text() != parsed_cli.syntax_text()
+        || parsed_cli.parsed().schemas().len() != 1
+        || parsed_cli.parsed().client_functions().len() != 1
+        || !parsed_cli.parsed().server_functions().is_empty()
+        || !parsed_cli.parsed().object_types().is_empty()
+        || !parsed_cli.parsed().enum_types().is_empty()
+        || !parsed_cli.parsed().primitive_value_types().is_empty()
+        || !parsed_cli.parsed().opaque_value_types().is_empty()
+        || !parsed_cli.parsed().record_value_types().is_empty()
+        || !parsed_cli.parsed().field_renames().is_empty()
+        || !parsed_cli.parsed().type_exports().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let checked_cli = check_standard_cli_repl(
+        &parsed_cli.parsed().client_functions()[0],
+        snapshot.catalogue(),
+        &cli_origins,
+        cli_unit,
+    )?;
+    families.schemas.push(CheckedStandardSchema {
+        id: STD_CLI_SCHEMA_ID,
+        name: unquoted_semantic_name(&parsed_cli.parsed().schemas()[0].name)?,
+        origin: checked_cli.schema_origin(),
+    });
+    checked_executables.push(checked_cli);
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+        checked_executables,
+    })
+}
 fn check_standard_library_source_v9_parts(
     source_units: &[StoredSourceUnit],
     catalogue: &CatalogueSnapshot,
