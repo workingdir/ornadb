@@ -83,10 +83,6 @@ pub(super) struct RecoveredFunction {
 pub(super) struct RecoveredIntroduction {
     pub(super) catalogue_hash: Sha256Digest,
     pub(super) source: StoredSourceRevision,
-    #[allow(dead_code)]
-    catalogue_hash_version: CatalogueHashVersion,
-    #[allow(dead_code)]
-    standard_library_revision: Option<StandardLibraryRevisionId>,
 }
 
 struct RecoveredParameter {
@@ -1461,8 +1457,6 @@ async fn finish_revisions(
             RecoveredIntroduction {
                 catalogue_hash: header.catalogue_hash,
                 source,
-                catalogue_hash_version: header.catalogue_hash_version,
-                standard_library_revision: header.standard_library_revision,
             },
         );
     }
