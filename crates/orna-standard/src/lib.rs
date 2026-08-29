@@ -3395,31 +3395,276 @@ pub fn verify_standard_library_v9_snapshot(
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
+
+
 /// Source-independent facts required to recognise `orna.std/10`.
 #[derive(Clone, Debug)]
-pub struct StandardLibraryV10Manifest { catalogue: CatalogueSnapshot }
-impl StandardLibraryV10Manifest {
-    pub const fn standard_library_version(&self) -> &'static str { STANDARD_LIBRARY_V10_VERSION_IDENTITY }
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId { STANDARD_LIBRARY_V10_REVISION_ID }
-    pub const fn language_version(&self) -> &'static str { LANGUAGE_VERSION_IDENTITY }
-    pub const fn source_bundle(&self) -> SourceBundleId { STANDARD_SOURCE_V10_BUNDLE_ID }
-    pub const fn source_revision(&self) -> SourceRevisionId { STANDARD_SOURCE_V10_REVISION_ID }
-    pub const fn catalogue(&self) -> &CatalogueSnapshot { &self.catalogue }
+pub struct StandardLibraryV10Manifest {
+    catalogue: CatalogueSnapshot,
 }
-pub fn standard_library_v10_manifest() -> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
-    let v9 = standard_library_v9_manifest()?;
-    let mut schemas = v9.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(STD_CLI_SCHEMA_ID, semantic_name("std.cli", ["std", "cli"])?));
-    let mut functions = v9.catalogue().functions().to_vec();
-    functions.push(FunctionDefinition::new(STD_CLI_REPL_FUNCTION_ID, semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
-        FunctionDomain::Client, Vec::new(), FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-        STD_CLI_REPL_FUNCTION_REVISION_ID, FunctionSecurity::Invoker, None, FunctionVolatility::Volatile));
+
+impl StandardLibraryV10Manifest {
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V10_VERSION_IDENTITY
+    }
+
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V10_REVISION_ID
+    }
+
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V10_BUNDLE_ID
+    }
+
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V10_REVISION_ID
+    }
+
+    pub const fn types_source_unit(&self) -> SourceUnitId {
+        STD_TYPES_SOURCE_UNIT_ID
+    }
+
+    pub const fn invoke_source_unit(&self) -> SourceUnitId {
+        STD_INVOKE_SOURCE_UNIT_ID
+    }
+
+    pub const fn output_source_unit(&self) -> SourceUnitId {
+        STD_OUTPUT_SOURCE_UNIT_ID
+    }
+
+    pub const fn ui_source_unit(&self) -> SourceUnitId {
+        STD_UI_SOURCE_UNIT_ID
+    }
+
+    pub const fn json_source_unit(&self) -> SourceUnitId {
+        STD_JSON_SOURCE_UNIT_ID
+    }
+
+    pub const fn action_source_unit(&self) -> SourceUnitId {
+        STD_ACTION_SOURCE_UNIT_ID
+    }
+
+    pub const fn window_source_unit(&self) -> SourceUnitId {
+        STD_WINDOW_SOURCE_UNIT_ID
+    }
+
+    pub const fn data_source_unit(&self) -> SourceUnitId {
+        STD_DATA_SOURCE_UNIT_ID
+    }
+
+    pub const fn ui_constructors_source_unit(&self) -> SourceUnitId {
+        STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID
+    }
+
+    pub const fn cli_source_unit(&self) -> SourceUnitId {
+        STD_CLI_SOURCE_UNIT_ID
+    }
+
+    pub const fn cli_source_logical_path(&self) -> &'static str {
+        STD_CLI_SOURCE_LOGICAL_PATH
+    }
+
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds the append-only V10 catalogue over V9.
+pub fn standard_library_v10_manifest()
+-> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
+    let version_nine = standard_library_v9_manifest()?;
+    let mut schemas = version_nine.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_CLI_SCHEMA_ID,
+        semantic_name("std.cli", ["std", "cli"])?,
+    ));
+    let mut functions = version_nine.catalogue().functions().to_vec();
+    functions.push(FunctionDefinition::new(
+        STD_CLI_REPL_FUNCTION_ID,
+        semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
+        STD_CLI_REPL_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Volatile,
+    ));
     functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(STANDARD_CATALOGUE_V10_REVISION_ID, schemas,
-        v9.catalogue().object_types().to_vec(), v9.catalogue().value_types().to_vec(),
-        v9.catalogue().type_bindings().to_vec(), functions)
-        .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V10_REVISION_ID,
+        schemas,
+        version_nine.catalogue().object_types().to_vec(),
+        version_nine.catalogue().value_types().to_vec(),
+        version_nine.catalogue().type_bindings().to_vec(),
+        functions,
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
     Ok(StandardLibraryV10Manifest { catalogue })
+}
+
+/// Retains the source-authored V10 CLI session unit.
+pub fn retained_standard_library_v10_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    retained_standard_library_v10_snapshot_from_source(RETAINED_STANDARD_CLI_SOURCE)
+}
+
+/// Verifies the retained source-authored V10 CLI session snapshot.
+pub fn verify_standard_library_v10_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    if snapshot.catalogue().revision() != STANDARD_CATALOGUE_V10_REVISION_ID {
+        return Err(StandardLibraryError::CatalogueIdentityMismatch {
+            expected: STANDARD_CATALOGUE_V10_REVISION_ID,
+            actual: snapshot.catalogue().revision(),
+        });
+    }
+    if snapshot.source().bundle() != STANDARD_SOURCE_V10_BUNDLE_ID
+        || snapshot.source().id() != STANDARD_SOURCE_V10_REVISION_ID
+        || snapshot.source().parent() != Some(STANDARD_SOURCE_V9_REVISION_ID)
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    if snapshot.digest() != ACCEPTED_V10_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V10_STANDARD_LIBRARY_DIGEST,
+            actual: snapshot.digest(),
+        });
+    }
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
+}
+
+fn retained_standard_library_v10_snapshot_from_source(
+    cli_source: &str,
+) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let parent = retained_standard_library_v9_snapshot()?;
+    let manifest =
+        standard_library_v10_manifest().map_err(|source| StandardLibraryError::Manifest {
+            source,
+        })?;
+    let cli_content_hash = source_unit_content_digest(cli_source)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let cli_unit = StoredSourceUnit::new(
+        STD_CLI_SOURCE_UNIT_ID,
+        parent.source().units().len() as u32,
+        STD_CLI_SOURCE_LOGICAL_PATH,
+        cli_source,
+        cli_content_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let parsed = orna_syntax::parse(cli_source);
+    if !parsed.diagnostics().is_empty()
+        || parsed.syntax().text() != cli_source
+        || parsed.schemas().len() != 1
+        || parsed.client_functions().len() != 1
+        || !parsed.object_types().is_empty()
+        || !parsed.field_renames().is_empty()
+        || !parsed.server_functions().is_empty()
+        || !parsed.primitive_value_types().is_empty()
+        || !parsed.opaque_value_types().is_empty()
+        || !parsed.record_value_types().is_empty()
+        || !parsed.enum_types().is_empty()
+        || !parsed.type_exports().is_empty()
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        let end =
+            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+        SourceOrigin::new(STD_CLI_SOURCE_UNIT_ID, start, end)
+            .map_err(|source| StandardLibraryError::Revision { source })
+    };
+    let cli_origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(STD_CLI_SCHEMA_ID),
+            origin(&parsed.schemas()[0].span)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID),
+            origin(&parsed.client_functions()[0].span)?,
+        ),
+    ];
+    let checked = orna_compiler::check_standard_cli_repl(
+        &parsed.client_functions()[0],
+        manifest.catalogue(),
+        &cli_origins,
+        &cli_unit,
+    )
+    .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+    let revision = FunctionRevisionRecord::new(
+        checked.function_id(),
+        checked.revision_id(),
+        checked.revision_number(),
+        checked.declaration_origin(),
+        checked.declaration_content_hash(),
+        checked.semantic_hash(),
+        checked.language_version(),
+        checked.artifact().clone(),
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?
+    .with_semantic_hash_version(checked.semantic_hash_version());
+    let executable = StandardExecutable::new(
+        checked.function_id(),
+        revision,
+        checked.references().to_vec(),
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let mut units = parent.source().units().to_vec();
+    units.push(cli_unit);
+    let bundle_hash =
+        source_bundle_digest(&units).map_err(|source| StandardLibraryError::CanonicalHash {
+            source,
+        })?;
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V10_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V9_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V10_BUNDLE_ID,
+        STANDARD_SOURCE_V10_REVISION_ID,
+        Some(STANDARD_SOURCE_V9_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let mut origins = parent.origins().to_vec();
+    origins.extend(cli_origins);
+    let mut executables = parent.executables().to_vec();
+    executables.push(executable);
+    let provisional = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V10_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        source,
+        LANGUAGE_VERSION_IDENTITY,
+        manifest.catalogue().clone(),
+        executables,
+        origins,
+        Sha256Digest::from_bytes([0; 32]),
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let digest = calculate_standard_library_digest(&provisional)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V10_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        provisional.source().clone(),
+        LANGUAGE_VERSION_IDENTITY,
+        provisional.catalogue().clone(),
+        provisional.executables().to_vec(),
+        provisional.origins().to_vec(),
+        digest,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })
 }
 
 fn retained_standard_library_v6_snapshot_from_source(
