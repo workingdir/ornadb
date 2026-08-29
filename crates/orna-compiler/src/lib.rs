@@ -294,37 +294,6 @@ impl CompilerDiagnostic {
         &self.location
     }
 }
-#[cfg(test)]
-impl ByteSpan {
-    pub(crate) const fn test_new(start: usize, end: usize) -> Self {
-        Self { start, end }
-    }
-}
-
-#[cfg(test)]
-impl SourceLocation {
-    pub(crate) fn test_new(logical_path: impl Into<String>, span: ByteSpan) -> Self {
-        Self {
-            logical_path: logical_path.into(),
-            span,
-        }
-    }
-}
-
-#[cfg(test)]
-impl CompilerDiagnostic {
-    pub(crate) fn test_new(
-        code: DiagnosticCode,
-        message: impl Into<String>,
-        location: SourceLocation,
-    ) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            location,
-        }
-    }
-}
 
 /// One lossless source unit parsed by the compiler.
 #[derive(Clone, Debug)]
