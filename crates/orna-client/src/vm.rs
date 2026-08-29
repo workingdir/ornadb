@@ -712,8 +712,7 @@ fn expression_contains_external_contract(expression: &ClientExpressionNode) -> b
         | ClientExpressionNode::ParameterRead { .. }
         | ClientExpressionNode::LocalRead { .. }
         | ClientExpressionNode::FieldPath { .. }
-        | ClientExpressionNode::SourceIntrospection
-        | ClientExpressionNode::ExternalContract { .. } => false,
+        | ClientExpressionNode::SourceIntrospection => false,
     }
 }
 
