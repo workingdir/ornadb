@@ -593,7 +593,8 @@ pub const STANDARD_LIBRARY_V10_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes(reserved_id(10));
 pub const STANDARD_CATALOGUE_V10_REVISION_ID: CatalogueRevisionId =
     CatalogueRevisionId::from_bytes(reserved_id(10));
-pub const STANDARD_SOURCE_V10_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(10));
+pub const STANDARD_SOURCE_V10_BUNDLE_ID: SourceBundleId =
+    SourceBundleId::from_bytes(reserved_id(10));
 pub const STANDARD_SOURCE_V10_REVISION_ID: SourceRevisionId =
     SourceRevisionId::from_bytes(reserved_id(10));
 pub const STD_CLI_SOURCE_LOGICAL_PATH: &str = "std/cli.orna";
@@ -3434,7 +3435,6 @@ pub fn verify_standard_library_v9_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
-
 /// Source-independent facts required to recognise `orna.std/10`.
 #[derive(Clone, Debug)]
 pub struct StandardLibraryV10Manifest {
@@ -3581,10 +3581,8 @@ fn retained_standard_library_v10_snapshot_from_source(
     cli_source: &str,
 ) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
     let parent = retained_standard_library_v9_snapshot()?;
-    let manifest =
-        standard_library_v10_manifest().map_err(|source| StandardLibraryError::Manifest {
-            source,
-        })?;
+    let manifest = standard_library_v10_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
     let cli_content_hash = source_unit_content_digest(cli_source)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
     if cli_content_hash != ACCEPTED_V10_CLI_CONTENT_DIGEST {
@@ -3664,10 +3662,8 @@ fn retained_standard_library_v10_snapshot_from_source(
     }
     let mut units = parent.source().units().to_vec();
     units.push(cli_unit);
-    let bundle_hash =
-        source_bundle_digest(&units).map_err(|source| StandardLibraryError::CanonicalHash {
-            source,
-        })?;
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
     let revision_hash = source_revision_record_digest(
         STANDARD_SOURCE_V10_BUNDLE_ID,
         Some(STANDARD_SOURCE_V9_REVISION_ID),
@@ -5399,11 +5395,10 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations =
-        if is_accepted_v10_standard(standard)
-            || is_accepted_v9_standard(standard)
-            || is_accepted_v8_standard(standard)
-        {
+    let registrations = if is_accepted_v10_standard(standard)
+        || is_accepted_v9_standard(standard)
+        || is_accepted_v8_standard(standard)
+    {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -13130,7 +13125,8 @@ EXPORT TYPE std.action.Action AS std.Action;
             snapshot.source().units()[9].content_hash()
         );
         assert_eq!(
-            source_bundle_digest(snapshot.source().units()).expect("the V10 bundle digest is valid"),
+            source_bundle_digest(snapshot.source().units())
+                .expect("the V10 bundle digest is valid"),
             snapshot.source().bundle_hash()
         );
         assert_eq!(
@@ -13139,8 +13135,8 @@ EXPORT TYPE std.action.Action AS std.Action;
         );
         let verified = super::verify_standard_library_v10_snapshot(snapshot)
             .expect("the V10 snapshot verifies");
-        let checked = orna_compiler::check_standard_library_source(&verified)
-            .expect("the V10 source checks");
+        let checked =
+            orna_compiler::check_standard_library_source(&verified).expect("the V10 source checks");
         assert_eq!(checked.checked_executables().len(), 12);
     }
 }
