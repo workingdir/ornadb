@@ -437,7 +437,6 @@ pub fn check_standard_source(
     }
 }
 
-
 /// Checks retained standard source against its verified catalogue and origins.
 ///
 /// Version 1 keeps the original one-unit, type-only reconcile contract. The
