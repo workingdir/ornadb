@@ -206,6 +206,11 @@ impl QtRuntimeExecutor {
     }
 
     /// Requests terminal runtime shutdown through the supplied session.
+    ///
+    /// `RuntimeSession` owns the bounded native callback queue. Move its
+    /// snapshots into the adapter-owned queue before the shutdown request, then
+    /// retain terminal snapshots after both success and failure so callers can
+    /// observe every event and retry a failed shutdown.
     pub fn shutdown(&mut self) -> Result<(), RuntimeSessionError> {
         let pending = self.session.drain_events();
         self.note_surface_events(&pending);
