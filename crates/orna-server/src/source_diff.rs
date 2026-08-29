@@ -418,6 +418,7 @@ fn render_diff_document(
     Ok(document.into_bytes())
 }
 
+#[cfg(test)]
 fn render_change(
     change: &SemanticChange,
     candidate: &orna_core::catalogue::CatalogueSnapshot,
