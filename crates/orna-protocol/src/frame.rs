@@ -2879,6 +2879,8 @@ pub enum InvocationClientError {
     WrongSequence { expected: u64, actual: u64 },
     /// The event sequence wrapped.
     SequenceExhausted,
+    /// The client could not add more result credit without overflowing.
+    CreditOverflow,
     /// The frame payload consumed more result credit than the client granted.
     InsufficientCredit { available: u64, required: u64 },
     /// The first event was not `InvocationStarted`.
@@ -2903,6 +2905,7 @@ impl fmt::Display for InvocationClientError {
             Self::WrongChannel { .. } => "invocation server event uses the wrong channel",
             Self::WrongSequence { .. } => "invocation server event sequence is not contiguous",
             Self::SequenceExhausted => "invocation server event sequence is exhausted",
+            Self::CreditOverflow => "invocation result-value credit is exhausted",
             Self::RepeatedStarted => "invocation event repeated its Started event",
             Self::InsufficientCredit { .. } => "invocation server exceeded its result-value credit",
             Self::MissingStarted => "invocation event batch must begin with Started",
@@ -2952,9 +2955,23 @@ impl InvocationClient {
     pub const fn is_terminal(&self) -> bool {
         matches!(self.phase, InvocationClientPhase::Terminal)
     }
+    /// Adds result-value credit after a successful outbound window update.
+    ///
+    /// The initial startup window is already retained in the client's state.
+    /// Callers use this method only for additional `WINDOW_UPDATE` frames.
+    pub fn grant_result_credit(&mut self, credit: u64) -> Result<(), InvocationClientError> {
+        if credit == 0 {
+            return Err(InvocationClientError::WrongState);
+        }
+        self.remaining_result_credit = self
+            .remaining_result_credit
+            .checked_add(credit)
+            .ok_or(InvocationClientError::CreditOverflow)?;
+        Ok(())
+    }
 
     /// Starts stream 1 and returns the exact initial client frames in wire order.
-    pub fn start(request: RetainedInvokeRequest) -> (Self, [ClientFrame; 3]) {
+    pub fn start(request: RetainedInvokeRequest) -> (Self, [ClientFrame; 4]) {
         Self::start_on_stream(1, request).expect("stream 1 is valid")
     }
 
@@ -2966,7 +2983,7 @@ impl InvocationClient {
     pub fn start_on_stream(
         stream: u64,
         request: RetainedInvokeRequest,
-    ) -> Result<(Self, [ClientFrame; 3]), InvocationClientError> {
+    ) -> Result<(Self, [ClientFrame; 4]), InvocationClientError> {
         if stream == 0 {
             return Err(InvocationClientError::InvalidStream);
         }
@@ -2981,12 +2998,16 @@ impl InvocationClient {
                 remaining_result_credit: MAX_CHANNEL_WINDOW,
             },
             [
-                ClientFrame::CallInvokeRequest { stream, request },
+                ClientFrame::CallRawStart {
+                    stream,
+                    function: SYS_INVOKE_FUNCTION_ID,
+                },
                 ClientFrame::WindowUpdate {
                     stream,
                     channel: Channel::ResultValues,
                     credit: MAX_CHANNEL_WINDOW,
                 },
+                ClientFrame::CallInvokeRequest { stream, request },
                 ClientFrame::CallArgumentsComplete { stream },
             ],
         ))
@@ -12088,11 +12109,14 @@ mod tests {
             encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
         let (client, frames) = InvocationClient::start(retained.clone());
 
-        assert_eq!(frames.len(), 3);
-        assert!(matches!(
-            &frames[0],
-            ClientFrame::CallInvokeRequest { stream: 1, request } if request == &retained
-        ));
+        assert_eq!(frames.len(), 4);
+        assert_eq!(
+            frames[0],
+            ClientFrame::CallRawStart {
+                stream: 1,
+                function: SYS_INVOKE_FUNCTION_ID,
+            }
+        );
         assert_eq!(
             frames[1],
             ClientFrame::WindowUpdate {
@@ -12101,7 +12125,25 @@ mod tests {
                 credit: MAX_CHANNEL_WINDOW,
             }
         );
-        assert_eq!(frames[2], ClientFrame::CallArgumentsComplete { stream: 1 });
+        assert!(matches!(
+            &frames[2],
+            ClientFrame::CallInvokeRequest { stream: 1, request } if request == &retained
+        ));
+        assert_eq!(frames[3], ClientFrame::CallArgumentsComplete { stream: 1 });
+        let mut server = ProtocolConnection::new();
+        for (index, frame) in frames.iter().cloned().enumerate() {
+            let action = server
+                .receive_constructed(&active, &registry, frame)
+                .expect("server accepts invocation startup frame");
+            if index == 3 {
+                assert!(matches!(
+                    action,
+                    Some(ClientAction::InvokeDispatch { stream: 1, .. }),
+                ));
+            } else {
+                assert!(action.is_none());
+            }
+        }
         assert_eq!(
             InvocationClient::start_on_stream(0, retained),
             Err(InvocationClientError::InvalidStream),
@@ -12231,6 +12273,26 @@ mod tests {
         assert_eq!(
             client.receive_encoded(&active, &registry, &cancelled),
             Ok(InvocationClientResponse::Cancelled),
+        );
+    }
+    #[test]
+    fn invocation_client_tracks_additional_result_credit() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let retained =
+            encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+        let (mut client, _) = InvocationClient::start(retained);
+
+        client
+            .grant_result_credit(7)
+            .expect("additional result credit fits");
+        assert_eq!(
+            client.grant_result_credit(0),
+            Err(InvocationClientError::WrongState),
+        );
+        assert_eq!(
+            client.grant_result_credit(u64::MAX),
+            Err(InvocationClientError::CreditOverflow),
         );
     }
 }
