@@ -114,6 +114,13 @@ fn write_human_diagnostic(
     let source_line = render_source_line(line);
     let underline_end = end.min(line_end);
     let underline_width = display_column(&source[start..underline_end]).max(1);
+    let eof = end == source.len() && start == source.len();
+    let marker = format!(
+        "{}{}{}",
+        " ".repeat(display_column(&source[line_start..start])),
+        "^".repeat(underline_width),
+        if eof { " EOF" } else { "" }
+    );
     if colour {
         write!(output, "\x1b[1;31merror\x1b[0m")?;
     } else {
@@ -144,11 +151,6 @@ fn write_human_diagnostic(
     }
     output.write_all(b"   |\n")?;
     writeln!(output, "{line_number:>2} | {source_line}")?;
-    let marker = format!(
-        "{}{}",
-        " ".repeat(display_column(&source[line_start..start])),
-        "^".repeat(underline_width)
-    );
     if colour {
         writeln!(output, "   | \x1b[31m{marker}\x1b[0m")?;
     } else {
@@ -163,7 +165,6 @@ fn write_human_diagnostic(
     }
     Ok(())
 }
-
 fn render_source_line(line: &str) -> String {
     line.chars()
         .flat_map(|character| match character {
@@ -189,7 +190,6 @@ fn char_boundary_at_or_before(source: &str, offset: usize) -> usize {
     }
     boundary
 }
-
 fn char_boundary_at_or_after(source: &str, offset: usize) -> usize {
     let mut boundary = offset.min(source.len());
     while boundary < source.len() && !source.is_char_boundary(boundary) {
@@ -218,6 +218,7 @@ fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<(
     }
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
