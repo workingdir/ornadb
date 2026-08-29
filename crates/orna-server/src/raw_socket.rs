@@ -15,11 +15,14 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
+
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 use orna_client::ClientStateStore;
 #[cfg(test)]
@@ -5890,7 +5893,7 @@ mod tests {
         connection
             .receive(ResourceClientFrame::Request(request.clone()))
             .unwrap();
-        let (server, mut client) = UnixStream::pair().unwrap();
+        let (server, _client) = UnixStream::pair().unwrap();
         let (_reader, mut writer) = server.into_split();
         let (completion_sender, mut completion_receiver) =
             mpsc::channel::<(u64, ResourceDispatchCompletion)>(
@@ -6012,7 +6015,7 @@ mod tests {
         )
         .unwrap();
         let resources = LocalRawSocketResources::new();
-        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let (_shutdown_sender, shutdown) = watch::channel(false);
         let (server, mut client) = UnixStream::pair().unwrap();
         let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
             ResourceDispatch,
