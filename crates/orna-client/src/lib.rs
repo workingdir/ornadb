@@ -12317,7 +12317,8 @@ mod tests {
         ClientResourceStatus, ClientStateStore, ControlFlowBinaryOperator,
         DeterministicClientResourceExecutor, ResourceKind, action_target_result_type, capability,
         complete_client_action, decode_action_payload, encode_action_payload,
-        evaluate_client_function_with_executor, trigger_client_action,
+        evaluate_client_function_with_arguments, evaluate_client_function_with_executor,
+        trigger_client_action,
     };
     use orna_artifact::client_plan::{
         ActionTargetDomain, ClientExpressionNode, ControlFlowClientPlan, InspectProjection,
@@ -21970,6 +21971,110 @@ CREATE CLIENT FUNCTION app.factorial(p_n INTEGER) RETURNS INTEGER IS
 
         assert_eq!(result.value(), &RuntimeValue::Integer(6));
     }
+
+    #[test]
+    fn source_authored_integer_helpers_evaluate_through_generic_path() {
+        let prepared = prepared_client_source(
+            r#"CREATE SCHEMA math;
+CREATE CLIENT FUNCTION math.increment(p_value INTEGER) RETURNS INTEGER RETURN p_value + 1;
+CREATE CLIENT FUNCTION math.decrement(p_value INTEGER) RETURNS INTEGER RETURN p_value - 1;
+CREATE CLIENT FUNCTION math.is_zero(p_value INTEGER) RETURNS BOOLEAN RETURN p_value = 0;
+CREATE CLIENT FUNCTION math.min(p_left INTEGER, p_right INTEGER) RETURNS INTEGER IS
+  BEGIN
+    IF p_left < p_right THEN RETURN p_left; ELSE RETURN p_right; END IF;
+  END;
+CREATE CLIENT FUNCTION math.max(p_left INTEGER, p_right INTEGER) RETURNS INTEGER IS
+  BEGIN
+    IF p_left > p_right THEN RETURN p_left; ELSE RETURN p_right; END IF;
+  END;
+CREATE CLIENT FUNCTION math.clamp(p_value INTEGER, p_min INTEGER, p_max INTEGER) RETURNS INTEGER IS
+  BEGIN
+    IF p_value < p_min THEN RETURN p_min;
+    ELSE IF p_value > p_max THEN RETURN p_max; ELSE RETURN p_value; END IF;
+    END IF;
+  END;"#,
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let find = |name: &str| {
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| function.name().to_string() == name)
+                .expect("source-authored helper is present")
+                .id()
+        };
+        let argument = |function: FunctionId, ordinal: usize, value: RuntimeValue| {
+            FunctionArgument::new(
+                active.catalogue().function_by_id(function).unwrap().parameters()[ordinal].id(),
+                value,
+            )
+            .unwrap()
+        };
+        let value = |name: &str, arguments: Vec<FunctionArgument>| {
+            evaluate_client_function_with_arguments(
+                &active,
+                &authorise(active.pair(), find(name)),
+                &arguments,
+            )
+            .unwrap()
+            .value()
+            .clone()
+        };
+        assert_eq!(
+            value(
+                "math.increment",
+                vec![argument(find("math.increment"), 0, RuntimeValue::Integer(4))],
+            ),
+            RuntimeValue::Integer(5)
+        );
+        assert_eq!(
+            value(
+                "math.decrement",
+                vec![argument(find("math.decrement"), 0, RuntimeValue::Integer(4))],
+            ),
+            RuntimeValue::Integer(3)
+        );
+        assert_eq!(
+            value(
+                "math.is_zero",
+                vec![argument(find("math.is_zero"), 0, RuntimeValue::Integer(0))],
+            ),
+            RuntimeValue::Boolean(true)
+        );
+        assert_eq!(
+            value(
+                "math.min",
+                vec![
+                    argument(find("math.min"), 0, RuntimeValue::Integer(8)),
+                    argument(find("math.min"), 1, RuntimeValue::Integer(3)),
+                ],
+            ),
+            RuntimeValue::Integer(3)
+        );
+        assert_eq!(
+            value(
+                "math.max",
+                vec![
+                    argument(find("math.max"), 0, RuntimeValue::Integer(8)),
+                    argument(find("math.max"), 1, RuntimeValue::Integer(3)),
+                ],
+            ),
+            RuntimeValue::Integer(8)
+        );
+        assert_eq!(
+            value(
+                "math.clamp",
+                vec![
+                    argument(find("math.clamp"), 0, RuntimeValue::Integer(12)),
+                    argument(find("math.clamp"), 1, RuntimeValue::Integer(0)),
+                    argument(find("math.clamp"), 2, RuntimeValue::Integer(10)),
+                ],
+            ),
+            RuntimeValue::Integer(10)
+        );
+    }
+
     #[test]
     fn recursive_client_control_flow_stops_at_depth_limit() {
         let prepared = prepared_client_source_v6(
