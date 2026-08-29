@@ -3395,6 +3395,32 @@ pub fn verify_standard_library_v9_snapshot(
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
+/// Source-independent facts required to recognise `orna.std/10`.
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV10Manifest { catalogue: CatalogueSnapshot }
+impl StandardLibraryV10Manifest {
+    pub const fn standard_library_version(&self) -> &'static str { STANDARD_LIBRARY_V10_VERSION_IDENTITY }
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId { STANDARD_LIBRARY_V10_REVISION_ID }
+    pub const fn language_version(&self) -> &'static str { LANGUAGE_VERSION_IDENTITY }
+    pub const fn source_bundle(&self) -> SourceBundleId { STANDARD_SOURCE_V10_BUNDLE_ID }
+    pub const fn source_revision(&self) -> SourceRevisionId { STANDARD_SOURCE_V10_REVISION_ID }
+    pub const fn catalogue(&self) -> &CatalogueSnapshot { &self.catalogue }
+}
+pub fn standard_library_v10_manifest() -> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
+    let v9 = standard_library_v9_manifest()?;
+    let mut schemas = v9.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(STD_CLI_SCHEMA_ID, semantic_name("std.cli", ["std", "cli"])?));
+    let mut functions = v9.catalogue().functions().to_vec();
+    functions.push(FunctionDefinition::new(STD_CLI_REPL_FUNCTION_ID, semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
+        FunctionDomain::Client, Vec::new(), FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
+        STD_CLI_REPL_FUNCTION_REVISION_ID, FunctionSecurity::Invoker, None, FunctionVolatility::Volatile));
+    functions.sort_by_key(|function| function.id());
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(STANDARD_CATALOGUE_V10_REVISION_ID, schemas,
+        v9.catalogue().object_types().to_vec(), v9.catalogue().value_types().to_vec(),
+        v9.catalogue().type_bindings().to_vec(), functions)
+        .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    Ok(StandardLibraryV10Manifest { catalogue })
+}
 
 fn retained_standard_library_v6_snapshot_from_source(
     types_source: &str,
