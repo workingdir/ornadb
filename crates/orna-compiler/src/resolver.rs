@@ -7319,7 +7319,9 @@ fn client_expression_type_is_evaluable(
                 | StandardScalar::BinaryLargeObject
         ),
         SemanticType::Named(CheckedTypeId::Existing(type_id))
-            if is_sealed_inspect_type_id(type_id) || type_id == STD_UI_TYPE_ID =>
+            if is_sealed_inspect_type_id(type_id)
+                || type_id == SYS_SOURCE_FUNCTION_TYPE_ID
+                || type_id == STD_UI_TYPE_ID =>
         {
             true
         }
@@ -13467,8 +13469,11 @@ enum SubmittedType {
     RecordValue(CheckedTypeId),
 }
 
-fn sealed_inspect_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
+fn sealed_system_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
     match name.to_string().as_str() {
+        orna_core::system::SYS_SOURCE_FUNCTION_TYPE_NAME => {
+            Some(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID)
+        }
         orna_core::system::SYS_INSPECT_INVOCATION_TYPE_NAME => {
             Some(orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID)
         }
@@ -13507,6 +13512,10 @@ fn sealed_inspect_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
         }
         _ => None,
     }
+}
+
+fn sealed_inspect_type_id(name: &QualifiedSemanticName) -> Option<TypeId> {
+    sealed_system_type_id(name).filter(|type_id| *type_id != SYS_SOURCE_FUNCTION_TYPE_ID)
 }
 
 fn is_sealed_inspect_type_id(id: TypeId) -> bool {
@@ -13554,6 +13563,14 @@ fn resolve_application_type_with_named_standard(
 ) -> Option<ResolvedApplicationType> {
     match specification {
         TypeSpecification::Named(name) => {
+            if allow_standard_named
+                && let Some(type_id) = sealed_system_type_id(&semantic_name(name))
+            {
+                return Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::Named(CheckedTypeId::Existing(type_id)),
+                    standard_value_type: None,
+                });
+            }
             if allow_standard_named
                 && let Some(type_id) = sealed_inspect_type_id(&semantic_name(name))
             {
