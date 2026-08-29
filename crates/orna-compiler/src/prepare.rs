@@ -15363,6 +15363,24 @@ END;"#;
         let bundle = SourceBundle::new([SourceUnit::new("tasks.orna", source)]).unwrap();
         check(&bundle, base)
     }
+    #[test]
+    fn prepares_generic_client_expression_without_standard_catalogue() {
+        let active = empty_active();
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.add(p_value INTEGER) RETURNS INTEGER RETURN p_value + 1;";
+        let report = checked_report(source, active.catalogue());
+        assert!(report.diagnostics().is_empty(), "{:?}", report.diagnostics());
+        let prepared = prepare(&report, active.pair(), &active).unwrap();
+        let function = prepared
+            .candidate()
+            .function_by_name(&semantic_name(&["examples", "add"]))
+            .unwrap();
+        assert_eq!(function.domain(), FunctionDomain::Client);
+        assert_eq!(
+            function.return_type(),
+            &FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Integer)),
+        );
+        assert_eq!(prepared.new_function_revisions().len(), 1);
+    }
 
     type DistinctFixture = (
         crate::relational::DistinctQueryIr<TypeId, FieldId>,
