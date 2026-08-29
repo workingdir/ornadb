@@ -158,6 +158,51 @@ enum InvokeTransport {
     InProcess,
     UnixSocket(PathBuf),
 }
+/// Parses one bounded command entered through `std.cli.evaluate`.
+///
+/// The grammar deliberately reuses the installed CLI binding model:
+/// `qualified.function [--parameter=value ...]`. Values remain opaque strings
+/// until the authenticated invocation binder converts them against the target
+/// signature. Shell expansion and positional arguments are not supported.
+fn parse_session_command(command: &str) -> Result<InstalledInvokeRequest, String> {
+    let mut tokens = command.split_whitespace();
+    let target = tokens
+        .next()
+        .and_then(|value| parse_session_target(value))
+        .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
+    let mut arguments = Vec::new();
+    for token in tokens {
+        let pair = token
+            .strip_prefix("--")
+            .and_then(|value| value.split_once('='))
+            .filter(|(name, _)| !name.is_empty())
+            .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
+        arguments.push(CliArgumentInput::Friendly {
+            name: pair.0.to_owned(),
+            value: pair.1.to_owned(),
+        });
+    }
+    Ok(InstalledInvokeRequest::new(
+        target,
+        arguments,
+        None,
+        None,
+        true,
+        false,
+        Some(RuntimeFamily::Tty),
+    ))
+}
+
+fn parse_session_target(value: &str) -> Option<InvocationTarget> {
+    let mut parts = value.split('.');
+    let first = parts.next()?;
+    let rest = parts.collect::<Vec<_>>();
+    if first.is_empty() || rest.is_empty() || rest.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let name = QualifiedSemanticName::new(std::iter::once(first).chain(rest)).ok()?;
+    InvocationTarget::qualified_name(name).ok()
+}
 
 /// The media type of the `std.terminal.Document` sink: the ADR 0057 document
 /// layout is plain text, so the client sink consumes `text/plain`.
