@@ -15,15 +15,15 @@ pub(crate) mod relational;
 mod resolver;
 
 pub use prepare::{
-    PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
-    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
-    prepare_standard_application,
+    compile_standard_client_executables, PrepareError, PrepareStandardApplicationError,
+    PrepareStandardUpgradeError, PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
+    prepare_checked_standard_upgrade, prepare_standard_application,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolver::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
-    CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
+    CheckedClientBodyKind, CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedExpressionId,
     CheckedField, CheckedFieldId, CheckedFunctionId, CheckedObjectReferenceUse, CheckedObjectType,
     CheckedParameterId, CheckedSchema, CheckedSchemaId, CheckedServerFunction,
@@ -39,8 +39,6 @@ pub use resolver::{
     CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, NewApplicationCheckError,
     ProvisionalExpressionId, ProvisionalFieldId, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
-    STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_SCHEMA_ID,
     STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID,
     STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_CSV_ENCODE_FUNCTION_REVISION_ID, STD_CSV_ENCODE_PARAMETER_ID,
@@ -273,6 +271,37 @@ impl CompilerDiagnostic {
     /// Returns the source unit and byte span that produced this diagnostic.
     pub fn location(&self) -> &SourceLocation {
         &self.location
+    }
+}
+#[cfg(test)]
+impl ByteSpan {
+    pub(crate) const fn test_new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+}
+
+#[cfg(test)]
+impl SourceLocation {
+    pub(crate) fn test_new(logical_path: impl Into<String>, span: ByteSpan) -> Self {
+        Self {
+            logical_path: logical_path.into(),
+            span,
+        }
+    }
+}
+
+#[cfg(test)]
+impl CompilerDiagnostic {
+    pub(crate) fn test_new(
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        location: SourceLocation,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            location,
+        }
     }
 }
 
