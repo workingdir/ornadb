@@ -1432,6 +1432,18 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             .request_input(root_invocation_id)
             .map(RuntimeValue::Text)
     }
+    fn evaluate_command(
+        &mut self,
+        context: ClientExecutionContext,
+        command: &str,
+    ) -> Result<RuntimeValue, String> {
+        InstalledClientResourceExecutor::evaluate_command(self, context, command)
+    }
+    #[cfg(test)]
+    #[test]
+    fn trait_dispatches_dynamic_command_to_installed_executor() {
+        let _ = <Self as ClientResourceExecutor>::evaluate_command;
+    }
 
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
