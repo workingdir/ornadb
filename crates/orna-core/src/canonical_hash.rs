@@ -1985,6 +1985,7 @@ fn reference_target_exists(
         DefinitionReferenceTarget::ValueType(value_type)
             | DefinitionReferenceTarget::ObjectType(value_type)
             if is_sealed_inspect_type_id(value_type)
+                || value_type == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
     ) {
         return true;
     }

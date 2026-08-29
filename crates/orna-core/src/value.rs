@@ -33,8 +33,7 @@ use crate::{
         SYS_INSPECT_SNAPSHOT_TYPE_NAME, SYS_INSPECT_STATE_CELLS_REPRESENTATION_CONTRACT,
         SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_NAME,
         SYS_INSPECT_UI_NODES_REPRESENTATION_CONTRACT, SYS_INSPECT_UI_NODES_TYPE_ID,
-        SYS_INSPECT_UI_NODES_TYPE_NAME, SYS_SOURCE_FUNCTION_REPRESENTATION_CONTRACT,
-        SYS_SOURCE_FUNCTION_TYPE_ID, SYS_SOURCE_FUNCTION_TYPE_NAME,
+        SYS_INSPECT_UI_NODES_TYPE_NAME, SYS_SOURCE_FUNCTION_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
@@ -161,11 +160,6 @@ pub const INSPECT_CARRIER_CODEC_REGISTRATIONS: &[InspectCarrierCodecRegistration
         SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
         SYS_INSPECT_RUNTIME_BINDINGS_TYPE_NAME,
         SYS_INSPECT_RUNTIME_BINDINGS_REPRESENTATION_CONTRACT,
-    ),
-    InspectCarrierCodecRegistration::new(
-        SYS_SOURCE_FUNCTION_TYPE_ID,
-        SYS_SOURCE_FUNCTION_TYPE_NAME,
-        SYS_SOURCE_FUNCTION_REPRESENTATION_CONTRACT,
     ),
     InspectCarrierCodecRegistration::new(
         SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
@@ -2653,6 +2647,29 @@ impl OpaqueValue {
         Ok(Self {
             opaque_type,
             canonical_payload: payload.to_vec(),
+        })
+    }
+
+    /// Validates and constructs a source metadata carrier.
+    pub fn new_source_metadata_carrier(
+        active: &ActiveDatabaseRevision,
+        opaque_type: TypeId,
+        payload: impl AsRef<[u8]>,
+    ) -> Result<Self, OpaqueValueError> {
+        if opaque_type != SYS_SOURCE_FUNCTION_TYPE_ID {
+            return Err(OpaqueValueError::UnregisteredType { opaque_type });
+        }
+        let metadata = crate::source_metadata::SourceFunctionMetadata::decode(payload.as_ref())
+            .map_err(|_| OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type })?;
+        if metadata.function_revision() != active.catalogue().function_by_id(metadata.function()).map_or(
+            metadata.function_revision(),
+            |function| function.current_revision(),
+        ) {
+            return Err(OpaqueValueError::InspectCarrierRevisionMismatch { opaque_type });
+        }
+        Ok(Self {
+            opaque_type,
+            canonical_payload: payload.as_ref().to_vec(),
         })
     }
 
