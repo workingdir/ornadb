@@ -3856,40 +3856,81 @@ impl BrokerSessionDriver {
         })
     }
 
-    fn respond_to(
-        &mut self,
-        request: InputRequested,
-    ) -> Result<SessionClientFrame, SessionStateError> {
+    fn request(&mut self, request: InputRequested) -> Result<(), SessionStateError> {
         if request.root_invocation_id != self.root_invocation_id
             || request.call_stream != self.call_stream
         {
             return Err(SessionStateError::MismatchedIdentity);
         }
-        self.state.request(request.request_invocation_id)?;
-        let frame = match self.reader.read_line(&mut self.output, &request.prompt) {
-            Ok(TerminalInput::Line(line)) => SessionClientFrame::InputLine {
+        self.state.request(request.request_invocation_id)
+    }
+
+    fn respond(
+        &mut self,
+        request: InputRequested,
+        input: TerminalInput,
+    ) -> Result<SessionClientFrame, SessionStateError> {
+        let frame = match input {
+            TerminalInput::Line(line) => SessionClientFrame::InputLine {
                 root_invocation_id: self.root_invocation_id,
                 call_stream: self.call_stream,
                 request_invocation_id: request.request_invocation_id,
                 line,
             },
-            Ok(TerminalInput::Eof) => SessionClientFrame::InputEof {
+            TerminalInput::Eof => SessionClientFrame::InputEof {
                 root_invocation_id: self.root_invocation_id,
                 call_stream: self.call_stream,
                 request_invocation_id: request.request_invocation_id,
-            },
-            Err(error) => SessionClientFrame::InputFailed {
-                root_invocation_id: self.root_invocation_id,
-                call_stream: self.call_stream,
-                request_invocation_id: request.request_invocation_id,
-                error: terminal_input_error_code(&error).to_owned(),
             },
         };
         self.state.accept(&frame)?;
         Ok(frame)
     }
+
+    fn read_line(&mut self, prompt: &str) -> Result<TerminalInput, TerminalInputError> {
+        self.reader.read_line(&mut self.output, prompt)
+    }
 }
 
+fn session_input_error_frame(
+    root_invocation_id: InvocationId,
+    call_stream: u64,
+    request_invocation_id: InvocationId,
+    error: &TerminalInputError,
+) -> SessionClientFrame {
+    SessionClientFrame::InputFailed {
+        root_invocation_id,
+        call_stream,
+        request_invocation_id,
+        error: terminal_input_error_code(error).to_owned(),
+    }
+}
+
+async fn read_session_input(
+    request: InputRequested,
+    driver: Arc<Mutex<BrokerSessionDriver>>,
+) -> Result<SessionClientFrame, SessionStateError> {
+    let read = tokio::task::spawn_blocking(move || {
+        let mut driver = driver.lock().expect("session driver lock");
+        driver
+            .request(request.clone())?;
+        match driver.read_line(&request.prompt) {
+            Ok(input) => driver.respond(request, input),
+            Err(error) => {
+                let frame = session_input_error_frame(
+                    driver.root_invocation_id,
+                    driver.call_stream,
+                    request.request_invocation_id,
+                    &error,
+                );
+                driver.state.accept(&frame)?;
+                Ok(frame)
+            }
+        }
+    });
+    read.await
+        .map_err(|_| SessionStateError::WrongState)?
+}
 fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
     match error {
         TerminalInputError::Io(_) => "terminal.input_io",
@@ -3898,40 +3939,6 @@ fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
     }
 }
 
-async fn handle_shared_session_frame<W>(
-    frame: BrokerWireFrame,
-    stream: &mut W,
-    root: &Option<BrokerRootState>,
-    driver: &mut Option<BrokerSessionDriver>,
-) -> Result<(), ResourceTransportFailure>
-where
-    W: AsyncWrite + Unpin,
-{
-    let SessionServerFrame::InputRequested(request) =
-        decode_session_server_frame(&frame.bytes).map_err(|_| ResourceTransportFailure::Shape)?;
-    let Some(root_invocation_id) = root.as_ref().and_then(|state| state.invocation) else {
-        return Err(ResourceTransportFailure::Shape);
-    };
-    if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
-        return Err(ResourceTransportFailure::Shape);
-    }
-    let session_driver = match driver {
-        Some(driver) => driver,
-        slot @ None => {
-            *slot = Some(
-                BrokerSessionDriver::new(root_invocation_id, request.call_stream)
-                    .map_err(|_| ResourceTransportFailure::Shape)?,
-            );
-            slot.as_mut().expect("session driver inserted")
-        }
-    };
-    let response = session_driver
-        .respond_to(request)
-        .map_err(|_| ResourceTransportFailure::Shape)?;
-    let encoded =
-        encode_session_client_frame(&response).map_err(|_| ResourceTransportFailure::Shape)?;
-    write_shared_broker_frame(stream, &encoded).await
-}
 
 async fn run_shared_invoke_broker(
     stream: tokio::net::UnixStream,
@@ -3948,15 +3955,26 @@ async fn run_shared_invoke_broker(
     let mut resources: BTreeMap<u64, BrokerResourceState> = BTreeMap::new();
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
-    let mut session_driver = None;
+    let mut session_driver: Option<Arc<Mutex<BrokerSessionDriver>>> = None;
+    let mut pending_session_input:
+        Option<tokio::task::JoinHandle<Result<SessionClientFrame, SessionStateError>>> = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
             Frame(Option<Result<BrokerWireFrame, ResourceTransportFailure>>),
+            SessionInput(Result<SessionClientFrame, SessionStateError>),
         }
-        let next = tokio::select! {
-            command = commands.recv() => BrokerNext::Command(command),
-            frame = frames.recv() => BrokerNext::Frame(frame),
+        let next = if let Some(input) = pending_session_input.as_mut() {
+            tokio::select! {
+                command = commands.recv() => BrokerNext::Command(command),
+                frame = frames.recv() => BrokerNext::Frame(frame),
+                result = input => BrokerNext::SessionInput(result.unwrap_or(Err(SessionStateError::WrongState))),
+            }
+        } else {
+            tokio::select! {
+                command = commands.recv() => BrokerNext::Command(command),
+                frame = frames.recv() => BrokerNext::Frame(frame),
+            }
         };
         match next {
             BrokerNext::Command(Some(command)) => {
@@ -3979,11 +3997,58 @@ async fn run_shared_invoke_broker(
                 }
             }
             BrokerNext::Command(None) => break,
+            BrokerNext::SessionInput(result) => {
+                pending_session_input = None;
+                let response = match result {
+                    Ok(response) => response,
+                    Err(_) => break,
+                };
+                let encoded = match encode_session_client_frame(&response) {
+                    Ok(encoded) => encoded,
+                    Err(_) => break,
+                };
+                if write_shared_broker_frame(&mut stream, &encoded).await.is_err() {
+                    break;
+                }
+            }
             BrokerNext::Frame(Some(Ok(frame))) => {
-                let result = if wire_frame_is_session(&frame) {
-                    handle_shared_session_frame(frame, &mut stream, &root, &mut session_driver).await
+                if wire_frame_is_session(&frame) {
+                    if pending_session_input.is_some() {
+                        break;
+                    }
+                    let SessionServerFrame::InputRequested(request) =
+                        match decode_session_server_frame(&frame.bytes) {
+                            Ok(frame) => frame,
+                            Err(_) => break,
+                        };
+                    let Some(root_invocation_id) =
+                        root.as_ref().and_then(|state| state.invocation)
+                    else {
+                        break;
+                    };
+                    if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
+                        break;
+                    }
+                    let session_driver = match &session_driver {
+                        Some(driver) => Arc::clone(driver),
+                        None => {
+                            let driver = match BrokerSessionDriver::new(
+                                root_invocation_id,
+                                request.call_stream,
+                            ) {
+                                Ok(driver) => Arc::new(Mutex::new(driver)),
+                                Err(_) => break,
+                            };
+                            session_driver = Some(Arc::clone(&driver));
+                            driver
+                        }
+                    };
+                    pending_session_input = Some(tokio::spawn(read_session_input(
+                        request,
+                        session_driver,
+                    )));
                 } else {
-                    handle_shared_broker_frame(
+                    let result = handle_shared_broker_frame(
                         frame,
                         &mut stream,
                         &active,
@@ -3994,14 +4059,18 @@ async fn run_shared_invoke_broker(
                         &mut resource_tombstones,
                         &resource_terminal_provenance,
                     )
-                    .await
-                };
-                if result.is_err() {
-                    break;
+                    .await;
+                    if result.is_err() {
+                        break;
+                    }
                 }
             }
             BrokerNext::Frame(Some(Err(_))) | BrokerNext::Frame(None) => break,
         }
+    }
+    if let Some(input) = pending_session_input.take() {
+        input.abort();
+        let _ = input.await;
     }
     reader_task.abort();
     let _ = reader_task.await;
