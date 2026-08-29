@@ -15,8 +15,9 @@ pub(crate) mod relational;
 mod resolver;
 
 pub use prepare::{
-    PrepareStandardUpgradeError, PreparedStandardUpgrade, StandardUpgradeIdentity, prepare,
-    prepare_checked_standard_upgrade, prepare_standard_application,
+    PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
+    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
+    prepare_standard_application,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
@@ -46,7 +47,6 @@ pub use resolver::{
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
     STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
-    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
     STD_JSON_SOURCE_UNIT_ID, STD_JSON_VALUE_TYPE_ID, STD_OUTPUT_SOURCE_UNIT_ID,
     STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
     STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
