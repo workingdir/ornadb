@@ -1299,7 +1299,6 @@ pub fn check_standard_cli_repl(
         || declaration.external
         || declaration.runtime_contract.is_some()
         || !declaration.capabilities.is_empty()
-        || declaration.parameters.is_empty()
     {
         return Err(StandardLibraryCheckError::SourceMismatch);
     }
