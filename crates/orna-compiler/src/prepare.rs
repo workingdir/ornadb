@@ -1191,6 +1191,7 @@ fn checked_type_use_kind_tag(kind: crate::CheckedTypeUseKind) -> &'static str {
 }
 
 enum PreparationMode<'a> {
+    Generic,
     LegacyV1,
     StandardV1Match {
         declaration_evidence: DeclarationEvidence,
@@ -1321,6 +1322,7 @@ enum CandidateTypeProjection {
 /// The candidate lowering policy selected by preparation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateLoweringMode {
+    Generic,
     LegacyV1,
     StandardV1Match,
     StandardV2Plan,
@@ -1359,7 +1361,9 @@ impl CandidateLoweringMode {
         compatibility: StandardScalar,
     ) -> ResolvedType {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Scalar(compatibility),
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match => {
+                ResolvedType::Scalar(compatibility)
+            }
             Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
         }
     }
@@ -1387,6 +1391,7 @@ impl PreparationMode<'_> {
 
     fn candidate_lowering_mode(&self) -> CandidateLoweringMode {
         match self {
+            Self::Generic => CandidateLoweringMode::Generic,
             Self::LegacyV1 => CandidateLoweringMode::LegacyV1,
             Self::StandardV1Match { .. } => CandidateLoweringMode::StandardV1Match,
             Self::StandardV2Plan { .. } => CandidateLoweringMode::StandardV2Plan,
@@ -1438,7 +1443,7 @@ impl PreparationMode<'_> {
             | Self::StandardV2Plan {
                 signature_evidence, ..
             } => Some(signature_evidence),
-            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
         }
     }
 
@@ -1447,7 +1452,9 @@ impl PreparationMode<'_> {
         references: &[DefinitionReference],
     ) -> FunctionSemanticHashVersion {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => FunctionSemanticHashVersion::Version1,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
+                FunctionSemanticHashVersion::Version1
+            }
             Self::StandardV2Plan { .. } | Self::StandardV2 { .. }
                 if references.iter().any(|reference| {
                     matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
@@ -5952,7 +5959,7 @@ impl<'a> CandidateBuilder<'a> {
         catalogue_revision: CatalogueRevisionId,
     ) -> Self {
         let declaration_evidence = match &mode {
-            PreparationMode::LegacyV1 => None,
+            PreparationMode::Generic | PreparationMode::LegacyV1 => None,
             PreparationMode::StandardV1Match {
                 declaration_evidence,
                 ..
