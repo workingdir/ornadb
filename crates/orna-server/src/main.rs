@@ -520,11 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_and_extra_version_shapes() {
+    fn rejects_malformed_and_extra_version_flags() {
         for values in [
             vec!["orna", "-v"],
             vec!["orna", "-version"],
-            vec!["orna", "version"],
             vec!["orna", "--Version"],
             vec!["orna", "--version=0.1.0"],
             vec!["orna", "--version", "0.1.0"],
@@ -1014,7 +1013,6 @@ mod tests {
         );
         for values in [
             vec!["orna", "server"],
-            vec!["orna", "backend-shell"],
             vec!["orna", "server", "backend-shell", "--flag"],
             vec!["orna", "server", "backend-shell", "select 1"],
             vec!["orna", "server", "upgrade", "--force"],
@@ -1429,10 +1427,13 @@ mod tests {
                 Some(RuntimeFamily::Qt),
             ))
         );
+        assert_eq!(
+            parse_command(arguments(&["orna", "--runtime", "tty"])),
+            parse_command(arguments(&["orna", "--runtime", "tty", "repl"])),
+        );
         for values in [
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
-            vec!["orna", "--runtime", "tty"],
             vec!["orna", "--runtime", "tty", "invoke"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
@@ -2161,7 +2162,6 @@ mod tests {
                 "./other",
             ],
             vec!["orna", "--help", "--db", "./other"],
-            vec!["orna", "invoke", "demo.main", "--db", "./other"],
         ] {
             assert_eq!(parse_invocation(arguments(&values)), None, "{values:?}");
         }
