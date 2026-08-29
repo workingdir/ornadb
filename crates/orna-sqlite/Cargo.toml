@@ -1,0 +1,16 @@
+[package]
+name = "orna-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+orna-core = { path = "../orna-core" }
+orna-storage = { path = "../orna-storage" }
+turso = { version = "0.8.0-pre.7", default-features = false }
+tokio = { version = "1.53.1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
