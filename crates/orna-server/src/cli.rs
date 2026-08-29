@@ -16,28 +16,7 @@ use orna_core::{
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 
-pub(crate) const USAGE: &str = "Usage:
-  orna [OPTIONS] [URI]
-  orna [OPTIONS] [URI] invoke <function> [OPTIONS]
-  orna [OPTIONS] -d
-  orna --help
-  orna --version
-
-Commands:
-  invoke       Run one stored function.
-  repl          Open the function-backed REPL.
-  source       Check or apply Orna source.
-  inspect      Inspect a completed invocation.
-  raw-call     Make a low-level local call.
-  orna raw-call <canonical-function-id>
-
-Options:
-  --db <URI>   Select the database URI.
-  -d, --daemon Run the local server in the foreground.
-  --runtime <family>  Select tty or qt for invoke.
-  --color <auto|always|never>  Control terminal colour.
-  -h, --help   Show help.
-  -V, --version Show the version.";
+pub(crate) const USAGE: &str = "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
 pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line
 
