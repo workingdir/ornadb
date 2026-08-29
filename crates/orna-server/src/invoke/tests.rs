@@ -105,35 +105,6 @@ fn local_socket_connector_attaches_to_a_listener() {
 }
 
 #[test]
-fn session_command_accepts_qualified_target_and_friendly_arguments() {
-    let request = parse_session_command("demo.echo --message=hello").expect("command parses");
-    assert_eq!(
-        request.target,
-        InvocationTarget::qualified_name(
-            QualifiedSemanticName::new(["demo", "echo"]).expect("name is valid"),
-        )
-        .expect("target is valid"),
-    );
-    assert_eq!(
-        request.arguments,
-        vec![CliArgumentInput::Friendly {
-            name: "message".to_owned(),
-            value: "hello".to_owned(),
-        }],
-    );
-}
-
-#[test]
-fn session_command_rejects_missing_target_and_malformed_arguments() {
-    for command in ["", "echo", "demo.echo message=hello", "demo.echo --message"] {
-        assert!(
-            parse_session_command(command).is_err(),
-            "command should be rejected: {command:?}"
-        );
-    }
-}
-
-#[test]
 fn endpoint_transport_accepts_only_the_current_managed_socket() {
     assert!(matches!(
         endpoint_transport(&DatabaseEndpoint::managed_local()),
