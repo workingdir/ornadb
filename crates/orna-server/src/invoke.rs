@@ -40,17 +40,18 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    io::{self, IsTerminal, Write},
+    io::{self, BufReader, IsTerminal, Write},
     os::unix::net::UnixStream as StandardUnixStream,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::Duration,
 };
 
 use orna_client::{
-    ClientExternalContractRequest, ClientInspectOperation, ClientInspectRequest,
-    ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest, DatabaseEndpoint,
+    ClientExecutionContext, ClientExternalContractRequest, ClientInspectOperation,
+    ClientInspectRequest, ClientResourceCompletion, ClientResourceExecutor, ClientResourceRequest,
+    DatabaseEndpoint,
     QtRuntimeExecutor, RuntimeLibrary, RuntimeSession,
 };
 use orna_core::inspect::{
@@ -100,10 +101,14 @@ use orna_protocol::{
     ResourceArgument, ResourceCancel, ResourceCancellationCode, ResourceClientFrame,
     ResourceKind as ProtocolResourceKind, ResourceProtocolConnection, ResourceRequest,
     ResourceServerFrame, ResourceWindowUpdate, ServerFrame,
-    decode_constructed_invocation_event_frame, decode_constructed_server_frame,
-    decode_constructed_value, decode_resource_server_frame, encode_constructed_client_frame,
+    InputRequested, SessionClientFrame, SessionInputState, SessionServerFrame,
+    SessionStateError, SESSION_HEADER_LENGTH, SESSION_MARKER,
+    MAX_SESSION_FRAME_LENGTH, decode_constructed_invocation_event_frame, decode_constructed_server_frame,
+    decode_constructed_value, decode_resource_server_frame, decode_session_server_frame,
+    encode_constructed_client_frame, encode_session_client_frame,
     encode_constructed_value, encode_invoke_request, encode_resource_client_frame,
 };
+use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 use orna_standard::{
     BINARY_LARGE_OBJECT_TYPE_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_UI_TYPE_ID, STD_UI_WINDOW_RUNTIME_CONTRACT, registered_opaque_codecs,
@@ -111,6 +116,7 @@ use orna_standard::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 
 use crate::{
     EmbeddedHostError, LocalRawSocketResources, inspect_current_embedded_host,
@@ -378,9 +384,125 @@ enum ResourceTransportSource {
 pub(crate) struct SharedInvokeBroker {
     commands: UnboundedSender<BrokerCommand>,
     task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    session_bridge: Arc<Mutex<Option<Arc<SessionBridge>>>>,
     resource_expectations: BrokerResourceExpectations,
     next_resource_stream_id: std::sync::Arc<std::sync::Mutex<u64>>,
     resource_terminal_provenance: BrokerResourceProvenance,
+}
+
+pub(crate) struct SessionBridge {
+    root_invocation_id: InvocationId,
+    call_stream: u64,
+    outbound: UnboundedSender<SessionServerFrame>,
+    outbound_receiver: Mutex<UnboundedReceiver<SessionServerFrame>>,
+    outbound_notify: Notify,
+    waiting: Mutex<SessionBridgeWaiting>,
+    response_ready: Condvar,
+}
+
+struct SessionBridgeWaiting {
+    state: SessionInputState,
+    response: Option<SessionClientFrame>,
+    closed: bool,
+}
+
+impl SessionBridge {
+    pub(crate) fn new(
+        root_invocation_id: InvocationId,
+        call_stream: u64,
+    ) -> Result<Arc<Self>, SessionStateError> {
+        let state = SessionInputState::new(root_invocation_id, call_stream)?;
+        let (outbound, outbound_receiver) = mpsc::unbounded_channel();
+        Ok(Arc::new(Self {
+            root_invocation_id,
+            call_stream,
+            outbound,
+            outbound_receiver: Mutex::new(outbound_receiver),
+            outbound_notify: Notify::new(),
+            waiting: Mutex::new(SessionBridgeWaiting {
+                state,
+                response: None,
+                closed: false,
+            }),
+            response_ready: Condvar::new(),
+        }))
+    }
+
+    pub(crate) fn request_input(&self, root_invocation_id: InvocationId) -> Result<String, String> {
+        let request_invocation_id = InvocationId::new();
+        let frame = SessionServerFrame::InputRequested(InputRequested {
+            root_invocation_id: self.root_invocation_id,
+            call_stream: self.call_stream,
+            request_invocation_id,
+            prompt: String::new(),
+        });
+        {
+            let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
+            if waiting.closed || root_invocation_id != self.root_invocation_id {
+                return Err("client.input_unavailable".to_owned());
+            }
+            waiting
+                .state
+                .request(request_invocation_id)
+                .map_err(|_| "client.input_unavailable".to_owned())?;
+        }
+        if self.outbound.send(frame).is_err() {
+            self.close();
+            return Err("client.input_unavailable".to_owned());
+        }
+        self.outbound_notify.notify_one();
+
+        let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
+        while waiting.response.is_none() && !waiting.closed {
+            waiting = self
+                .response_ready
+                .wait(waiting)
+                .expect("session bridge response wait");
+        }
+        let Some(response) = waiting.response.take() else {
+            return Err("client.input_unavailable".to_owned());
+        };
+        match response {
+            SessionClientFrame::InputLine { line, .. } => Ok(line),
+            SessionClientFrame::InputEof { .. } => Err("client.input_eof".to_owned()),
+            SessionClientFrame::InputFailed { error, .. } => Err(error),
+        }
+    }
+
+    pub(crate) fn accept_response(&self, frame: SessionClientFrame) -> Result<(), SessionStateError> {
+        let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
+        if waiting.closed {
+            return Err(SessionStateError::WrongState);
+        }
+        waiting.state.accept(&frame)?;
+        waiting.response = Some(frame);
+        if waiting.state.is_closed() {
+            waiting.closed = true;
+        }
+        drop(waiting);
+        self.response_ready.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn close(&self) {
+        let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
+        waiting.closed = true;
+        drop(waiting);
+        self.response_ready.notify_all();
+    }
+
+    pub(crate) fn try_take_outbound(&self) -> Option<SessionServerFrame> {
+        self.outbound_receiver
+            .lock()
+            .expect("session bridge outbound lock")
+            .try_recv()
+            .ok()
+    }
+
+    pub(crate) async fn wait_for_outbound(&self) {
+        self.outbound_notify.notified().await;
+    }
+
 }
 
 /// Test-only authorisation state for manually driven installed resource
@@ -2664,6 +2786,21 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         self.current_invocation = Some(invocation);
     }
 
+    fn read_input(&mut self, context: ClientExecutionContext) -> Result<RuntimeValue, String> {
+        let Some(broker) = self.broker.as_ref() else {
+            return Err("client.input_unavailable".to_owned());
+        };
+        let Some(bridge) = broker.session_bridge() else {
+            return Err("client.input_unavailable".to_owned());
+        };
+        let root_invocation_id = self
+            .current_invocation
+            .unwrap_or_else(|| context.parent_invocation_id());
+        bridge
+            .request_input(root_invocation_id)
+            .map(RuntimeValue::Text)
+    }
+
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
             (self.inspect_kernel.clone(), self.inspect_session.clone())
@@ -3420,12 +3557,48 @@ enum ResourceFrameResult {
 }
 
 impl SharedInvokeBroker {
+    pub(crate) fn install_session_bridge(
+        &self,
+        root_invocation_id: InvocationId,
+        call_stream: u64,
+    ) -> Result<Arc<SessionBridge>, SessionStateError> {
+        let bridge = SessionBridge::new(root_invocation_id, call_stream)?;
+        let mut slot = self
+            .session_bridge
+            .lock()
+            .expect("shared session bridge lock");
+        if slot.is_some() {
+            return Err(SessionStateError::WrongState);
+        }
+        slot.replace(bridge.clone());
+        Ok(bridge)
+    }
+
+    pub(crate) fn session_bridge(&self) -> Option<Arc<SessionBridge>> {
+        self.session_bridge
+            .lock()
+            .expect("shared session bridge lock")
+            .clone()
+    }
+
+    fn clear_session_bridge(&self) {
+        let bridge = self
+            .session_bridge
+            .lock()
+            .expect("shared session bridge lock")
+            .take();
+        if let Some(bridge) = bridge {
+            bridge.close();
+        }
+    }
+
     fn pending() -> (Self, UnboundedReceiver<BrokerCommand>) {
         let (commands, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 commands,
                 task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                session_bridge: Arc::new(Mutex::new(None)),
                 resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 next_resource_stream_id: std::sync::Arc::new(std::sync::Mutex::new(1)),
                 resource_terminal_provenance: Arc::new(Mutex::new(BTreeMap::new())),
@@ -3481,6 +3654,7 @@ impl SharedInvokeBroker {
         if let Some(task) = task {
             let _ = task.await;
         }
+        self.clear_session_bridge();
         self.clear_resource_expectations();
         self.clear_resource_terminal_provenance();
     }
@@ -3513,29 +3687,59 @@ async fn read_shared_broker_frame<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let mut prefix = [0_u8; RESOURCE_MARKER.len()];
-    tokio::time::timeout(RESOURCE_FRAME_TIMEOUT, stream.read_exact(&mut prefix))
+    let mut header = vec![0_u8; SESSION_HEADER_LENGTH];
+    tokio::time::timeout(
+        RESOURCE_FRAME_TIMEOUT,
+        stream.read_exact(&mut header[..SESSION_MARKER.len()]),
+    )
         .await
         .map_err(|_| ResourceTransportFailure::Transport)?
         .map_err(|_| ResourceTransportFailure::Transport)?;
-    let resource = &prefix == RESOURCE_MARKER;
-    let header_length = if resource { RESOURCE_HEADER_LENGTH } else { 18 };
-    let mut header = prefix.to_vec();
-    header.resize(header_length, 0);
+    let session = &header[..SESSION_MARKER.len()] == SESSION_MARKER;
+    if !session {
+        tokio::time::timeout(
+            RESOURCE_FRAME_TIMEOUT,
+            stream.read_exact(&mut header[SESSION_MARKER.len()..RESOURCE_MARKER.len()]),
+        )
+        .await
+        .map_err(|_| ResourceTransportFailure::Transport)?
+        .map_err(|_| ResourceTransportFailure::Transport)?;
+    }
+    let resource = !session && &header[..RESOURCE_MARKER.len()] == RESOURCE_MARKER;
+    let header_length = if session {
+        SESSION_HEADER_LENGTH
+    } else if resource {
+        RESOURCE_HEADER_LENGTH
+    } else {
+        18
+    };
+    let consumed = if session {
+        SESSION_MARKER.len()
+    } else {
+        RESOURCE_MARKER.len()
+    };
     tokio::time::timeout(
         RESOURCE_FRAME_TIMEOUT,
-        stream.read_exact(&mut header[RESOURCE_MARKER.len()..]),
+        stream.read_exact(&mut header[consumed..header_length]),
     )
     .await
     .map_err(|_| ResourceTransportFailure::Transport)?
     .map_err(|_| ResourceTransportFailure::Transport)?;
-    let declared_offset = if resource { 17..21 } else { 14..18 };
+    let declared_offset = if session {
+        SESSION_HEADER_LENGTH - std::mem::size_of::<u32>()..SESSION_HEADER_LENGTH
+    } else if resource {
+        17..21
+    } else {
+        14..18
+    };
     let payload_length = u32::from_be_bytes(
         header[declared_offset]
             .try_into()
             .expect("shared broker frame header has a fixed length"),
     ) as usize;
-    if payload_length > MAX_FRAME_PAYLOAD_LENGTH {
+    if (session && payload_length > MAX_SESSION_FRAME_LENGTH - SESSION_HEADER_LENGTH)
+        || payload_length > MAX_FRAME_PAYLOAD_LENGTH
+    {
         return Err(ResourceTransportFailure::Shape);
     }
     let mut bytes = header;
@@ -3578,6 +3782,106 @@ where
         .map_err(|_| ResourceTransportFailure::Transport)
 }
 
+fn wire_frame_is_session(frame: &BrokerWireFrame) -> bool {
+    frame.bytes.len() >= SESSION_MARKER.len() && &frame.bytes[..SESSION_MARKER.len()] == SESSION_MARKER
+}
+
+struct BrokerSessionDriver {
+    reader: TerminalInputReader<BufReader<io::Stdin>>,
+    output: io::Stdout,
+    state: SessionInputState,
+    root_invocation_id: InvocationId,
+    call_stream: u64,
+}
+
+impl BrokerSessionDriver {
+    fn new(root_invocation_id: InvocationId, call_stream: u64) -> Result<Self, SessionStateError> {
+        Ok(Self {
+            reader: TerminalInputReader::new(BufReader::new(io::stdin())),
+            output: io::stdout(),
+            state: SessionInputState::new(root_invocation_id, call_stream)?,
+            root_invocation_id,
+            call_stream,
+        })
+    }
+
+    fn respond_to(
+        &mut self,
+        request: InputRequested,
+    ) -> Result<SessionClientFrame, SessionStateError> {
+        if request.root_invocation_id != self.root_invocation_id
+            || request.call_stream != self.call_stream
+        {
+            return Err(SessionStateError::MismatchedIdentity);
+        }
+        self.state.request(request.request_invocation_id)?;
+        let frame = match self.reader.read_line(&mut self.output, &request.prompt) {
+            Ok(TerminalInput::Line(line)) => SessionClientFrame::InputLine {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+                line,
+            },
+            Ok(TerminalInput::Eof) => SessionClientFrame::InputEof {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+            },
+            Err(error) => SessionClientFrame::InputFailed {
+                root_invocation_id: self.root_invocation_id,
+                call_stream: self.call_stream,
+                request_invocation_id: request.request_invocation_id,
+                error: terminal_input_error_code(&error).to_owned(),
+            },
+        };
+        self.state.accept(&frame)?;
+        Ok(frame)
+    }
+}
+
+fn terminal_input_error_code(error: &TerminalInputError) -> &'static str {
+    match error {
+        TerminalInputError::Io(_) => "terminal.input_io",
+        TerminalInputError::LineTooLong => "terminal.input_line_too_long",
+        TerminalInputError::InvalidUtf8 => "terminal.input_invalid_utf8",
+    }
+}
+
+async fn handle_shared_session_frame<W>(
+    frame: BrokerWireFrame,
+    stream: &mut W,
+    root: &Option<BrokerRootState>,
+    driver: &mut Option<BrokerSessionDriver>,
+) -> Result<(), ResourceTransportFailure>
+where
+    W: AsyncWrite + Unpin,
+{
+    let SessionServerFrame::InputRequested(request) =
+        decode_session_server_frame(&frame.bytes).map_err(|_| ResourceTransportFailure::Shape)?;
+    let Some(root_invocation_id) = root.as_ref().and_then(|state| state.invocation) else {
+        return Err(ResourceTransportFailure::Shape);
+    };
+    if request.root_invocation_id != root_invocation_id || request.call_stream == 0 {
+        return Err(ResourceTransportFailure::Shape);
+    }
+    let session_driver = match driver {
+        Some(driver) => driver,
+        slot @ None => {
+            *slot = Some(
+                BrokerSessionDriver::new(root_invocation_id, request.call_stream)
+                    .map_err(|_| ResourceTransportFailure::Shape)?,
+            );
+            slot.as_mut().expect("session driver inserted")
+        }
+    };
+    let response = session_driver
+        .respond_to(request)
+        .map_err(|_| ResourceTransportFailure::Shape)?;
+    let encoded =
+        encode_session_client_frame(&response).map_err(|_| ResourceTransportFailure::Shape)?;
+    write_shared_broker_frame(stream, &encoded).await
+}
+
 async fn run_shared_invoke_broker(
     stream: tokio::net::UnixStream,
     active: ActiveDatabaseRevision,
@@ -3593,6 +3897,7 @@ async fn run_shared_invoke_broker(
     let mut resources: BTreeMap<u64, BrokerResourceState> = BTreeMap::new();
     let mut resource_tombstones = BrokerResourceTombstones::new();
     let mut resource_high_water_mark = None;
+    let mut session_driver = None;
     loop {
         enum BrokerNext {
             Command(Option<BrokerCommand>),
@@ -3624,20 +3929,23 @@ async fn run_shared_invoke_broker(
             }
             BrokerNext::Command(None) => break,
             BrokerNext::Frame(Some(Ok(frame))) => {
-                if handle_shared_broker_frame(
-                    frame,
-                    &mut stream,
-                    &active,
-                    &registry,
-                    &mut root,
-                    &mut resources,
-                    resource_high_water_mark,
-                    &mut resource_tombstones,
-                    &resource_terminal_provenance,
-                )
-                .await
-                .is_err()
-                {
+                let result = if wire_frame_is_session(&frame) {
+                    handle_shared_session_frame(frame, &mut stream, &root, &mut session_driver).await
+                } else {
+                    handle_shared_broker_frame(
+                        frame,
+                        &mut stream,
+                        &active,
+                        &registry,
+                        &mut root,
+                        &mut resources,
+                        resource_high_water_mark,
+                        &mut resource_tombstones,
+                        &resource_terminal_provenance,
+                    )
+                    .await
+                };
+                if result.is_err() {
                     break;
                 }
             }
@@ -6840,9 +7148,10 @@ mod tests {
         EventRecord, InvocationEventBatch, InvocationEventRecord, ResourceAccepted,
         ResourceCancelled, ResourceCompleted, ResourceFailed, ResourceValues,
         decode_resource_client_frame, encode_constructed_server_frame,
-        encode_resource_server_frame,
+        encode_resource_server_frame, encode_session_server_frame,
     };
-    use orna_standard::{
+    use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
+use orna_standard::{
         STD_UI_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
     use std::io::{Read, Write};
@@ -6851,6 +7160,42 @@ mod tests {
     use std::{fs, os::unix::net::UnixListener, thread};
 
     const ENCODED_VALUE: &[u8] = b"ORV5-encoded-value";
+
+    #[test]
+    fn session_bridge_rejects_crossed_response_identity() {
+        let root = InvocationId::from_bytes([0x41; 16]);
+        let bridge = SessionBridge::new(root, 7).expect("session bridge creates");
+        let waiting_bridge = Arc::clone(&bridge);
+        let waiter = std::thread::spawn(move || waiting_bridge.request_input(root));
+        let request = loop {
+            if let Some(SessionServerFrame::InputRequested(request)) = bridge.try_take_outbound() {
+                break request;
+            }
+            std::thread::yield_now();
+        };
+        let crossed = SessionClientFrame::InputLine {
+            root_invocation_id: InvocationId::from_bytes([0x42; 16]),
+            call_stream: 7,
+            request_invocation_id: request.request_invocation_id,
+            line: "wrong root".to_owned(),
+        };
+        assert_eq!(
+            bridge.accept_response(crossed),
+            Err(SessionStateError::MismatchedIdentity)
+        );
+        bridge
+            .accept_response(SessionClientFrame::InputLine {
+                root_invocation_id: root,
+                call_stream: 7,
+                request_invocation_id: request.request_invocation_id,
+                line: "accepted".to_owned(),
+            })
+            .expect("matching response accepted");
+        assert_eq!(
+            waiter.join().expect("input waiter joins").expect("input succeeds"),
+            "accepted"
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn local_socket_connector_attaches_to_a_listener() {
@@ -6937,6 +7282,28 @@ mod tests {
             InvocationEventRecord::new(3, completed),
         ])
         .expect("event batch")
+    }
+
+    #[tokio::test]
+    async fn shared_broker_reader_preserves_session_tag_and_payload_boundary() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let request = SessionServerFrame::InputRequested(InputRequested {
+            root_invocation_id: InvocationId::from_bytes([0x51; 16]),
+            call_stream: 7,
+            request_invocation_id: InvocationId::from_bytes([0x52; 16]),
+            prompt: "orna> ".to_owned(),
+        });
+        let encoded = encode_session_server_frame(&request).expect("session request encodes");
+        client
+            .write_all(&encoded)
+            .await
+            .expect("session request writes");
+        let decoded = read_shared_broker_frame(&mut server).await.expect("frame reads");
+        assert!(!decoded.resource);
+        assert_eq!(
+            decode_session_server_frame(&decoded.bytes).expect("session request decodes"),
+            request
+        );
     }
 
     #[tokio::test]
