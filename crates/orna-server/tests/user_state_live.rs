@@ -28,12 +28,13 @@ use orna_compiler::{
 };
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
-    catalogue::FunctionDomain,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
     source::{SourceBundle, SourceUnit},
     state::{UserStateChange, UserStateWriteOutcome},
     value::RuntimeValue,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::catalogue::FunctionDomain;
 use orna_postgres::PostgresKernel;
 use orna_protocol::encode_constructed_value;
 use orna_server::{
