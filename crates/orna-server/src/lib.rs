@@ -1,3 +1,6 @@
+// Public host errors preserve the accepted typed subsystem layout.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::type_complexity)]
 //! Embedded PostgreSQL host and administrative interfaces for OrnaDB.
 
 mod backend_shell;

@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::iter_cloned_collect)]
 #![cfg(unix)]
 
 use std::{

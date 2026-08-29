@@ -1,3 +1,6 @@
+// EmbeddedHostError is a stable public error boundary. Its large variants are
+// intentional because callers receive the original typed subsystem failure.
+#![allow(clippy::result_large_err)]
 //! The embedded PostgreSQL instance boundary.
 
 use std::{

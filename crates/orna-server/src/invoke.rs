@@ -1,3 +1,13 @@
+#![allow(clippy::clone_on_copy)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::match_like_matches_macro)]
+// Invocation execution preserves the accepted error and carrier layouts.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+// Invocation operations return the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 //! In-process sealed `sys.invoke` command host (ADR 0056 step 3).
 //!
 //! This module runs one `orna invoke` command against the fixed private

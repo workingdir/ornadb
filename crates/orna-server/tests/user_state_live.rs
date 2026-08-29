@@ -1,3 +1,4 @@
+#![allow(clippy::redundant_field_names)]
 //! Live USER state service proof (ADR 0061 step 6).
 //!
 //! This suite drives the exact installed host flow through the

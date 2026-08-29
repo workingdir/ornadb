@@ -1,3 +1,6 @@
+// Local authentication preserves the accepted typed error boundary.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::result_large_err)]
 use std::{
     fmt, io,
     mem::{MaybeUninit, size_of},
