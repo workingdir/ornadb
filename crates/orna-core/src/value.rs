@@ -2659,17 +2659,18 @@ impl OpaqueValue {
         if opaque_type != SYS_SOURCE_FUNCTION_TYPE_ID {
             return Err(OpaqueValueError::UnregisteredType { opaque_type });
         }
-        let metadata = crate::source_metadata::SourceFunctionMetadata::decode(payload.as_ref())
-            .map_err(|_| OpaqueValueError::InvalidInspectCarrierEnvelope { opaque_type })?;
-        if metadata.function_revision() != active.catalogue().function_by_id(metadata.function()).map_or(
-            metadata.function_revision(),
-            |function| function.current_revision(),
-        ) {
-            return Err(OpaqueValueError::InspectCarrierRevisionMismatch { opaque_type });
+        let payload = payload.as_ref();
+        let metadata = crate::source_metadata::SourceFunctionMetadata::decode(payload)
+            .map_err(|_| OpaqueValueError::InvalidSourceMetadata { opaque_type })?;
+        let Some(function) = active.catalogue().function_by_id(metadata.function()) else {
+            return Err(OpaqueValueError::SourceFunctionUnavailable { opaque_type });
+        };
+        if function.current_revision() != metadata.function_revision() {
+            return Err(OpaqueValueError::SourceRevisionMismatch { opaque_type });
         }
         Ok(Self {
             opaque_type,
-            canonical_payload: payload.as_ref().to_vec(),
+            canonical_payload: payload.to_vec(),
         })
     }
 
@@ -2825,6 +2826,21 @@ pub enum OpaqueValueError {
         /// The carrier type whose provenance was rejected.
         opaque_type: TypeId,
     },
+    /// The source metadata carrier envelope is malformed or non-canonical.
+    InvalidSourceMetadata {
+        /// The carrier type whose metadata was rejected.
+        opaque_type: TypeId,
+    },
+    /// The source function is not present in the active catalogue.
+    SourceFunctionUnavailable {
+        /// The carrier type whose function was rejected.
+        opaque_type: TypeId,
+    },
+    /// The source metadata names a stale function revision.
+    SourceRevisionMismatch {
+        /// The carrier type whose revision was rejected.
+        opaque_type: TypeId,
+    },
     /// The complete opaque payload has the wrong exact length.
     WrongPayloadLength {
         /// The opaque type whose payload was rejected.
@@ -2900,6 +2916,15 @@ impl fmt::Display for OpaqueValueError {
             }
             Self::InspectCarrierRevisionMismatch { .. } => {
                 formatter.write_str("inspect carrier envelope revision does not match")
+            }
+            Self::InvalidSourceMetadata { .. } => {
+                formatter.write_str("source metadata carrier is invalid")
+            }
+            Self::SourceFunctionUnavailable { .. } => {
+                formatter.write_str("source metadata function is not active")
+            }
+            Self::SourceRevisionMismatch { .. } => {
+                formatter.write_str("source metadata function revision does not match")
             }
             Self::WrongPayloadLength { .. } => {
                 formatter.write_str("opaque value payload has the wrong length")
