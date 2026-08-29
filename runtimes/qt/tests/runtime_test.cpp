@@ -631,22 +631,32 @@ int main() {
     REQUIRE(capture(api, runtime, second_surface, after_retired_action_unbind).code == ORNA_STATUS_OK);
     REQUIRE(after_retired_action_unbind == second_owned_state);
 
-    const auto callbacks_before_shutdown = events.callbacks;
+    // A rejecting callback models a full bounded client event queue. A
+    // shutdown failure must remain retryable after the caller drains it.
+    const auto callbacks_before_failed_shutdown = events.callbacks;
+    const auto close_attempts_before_failed_shutdown = events.surface_close_attempts;
+    events.reject_surface_closed = true;
+    REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_INTERNAL);
+    REQUIRE(events.surface_close_attempts == close_attempts_before_failed_shutdown + 1);
+    REQUIRE(events.callbacks == callbacks_before_failed_shutdown + 1);
+    REQUIRE(events.surface_closed == 2);
+
+    events.reject_surface_closed = false;
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_OK);
     REQUIRE(events.surface_closed == 3);
     REQUIRE(events.closed_surfaces.size() == 3);
     REQUIRE(events.closed_surfaces[2] == second_surface);
-    REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
+    const auto callbacks_after_shutdown = events.callbacks;
     REQUIRE(api->request_shutdown(runtime).code == ORNA_STATUS_OK);
-    REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
+    REQUIRE(events.callbacks == callbacks_after_shutdown);
     REQUIRE(api->poll_event_loop(runtime, 0).code == ORNA_STATUS_FAILED);
-    REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
+    REQUIRE(events.callbacks == callbacks_after_shutdown);
 
     REQUIRE(api->create_surface(runtime, &surface_options, &second_surface).code == ORNA_STATUS_FAILED);
     REQUIRE(second_surface == 0);
     api->destroy(runtime);
-    REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
+    REQUIRE(events.callbacks == callbacks_after_shutdown);
     REQUIRE(api->poll_event_loop(runtime, 0).code == ORNA_STATUS_INVALID_ARGUMENT);
-    REQUIRE(events.callbacks == callbacks_before_shutdown + 1);
+    REQUIRE(events.callbacks == callbacks_after_shutdown);
     return 0;
 }
