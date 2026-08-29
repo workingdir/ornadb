@@ -16486,6 +16486,180 @@ fn checks_and_evaluates_accepted_ui_constructor_showcase_roots_offline() -> Test
 }
 
 #[test]
+fn checks_and_evaluates_accepted_static_studio_shell_offline() -> TestResult<()> {
+    let snapshot = verify_standard_library_v9_snapshot(retained_standard_library_v9_snapshot()?)?;
+    let standard = check_standard_library_source(&snapshot)?;
+    let base = offline_empty_version_two_active(standard.verified_snapshot())?;
+    let context = StandardApplicationCheckContext::try_new(base.catalogue(), &standard)?;
+    let source = SourceBundle::new([SourceUnit::new(
+        "fixtures/studio_static_app_dogfood.orna",
+        include_str!("fixtures/studio_static_app_dogfood.orna"),
+    )])?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "static Studio shell did not check: {:?}",
+            report.diagnostics()
+        )));
+    }
+    let prepared = prepare_standard_application(&report, base.pair(), &base)?;
+    let active = offline_active_from_prepared(&prepared)?;
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["studio_static_app", "main"])
+        .ok_or_else(|| failure("prepared static Studio shell is missing studio_static_app.main"))?;
+    let function_ids = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(FunctionDefinition::id)
+        .collect::<Vec<_>>();
+    let security = SecuritySnapshot::new(
+        active.pair(),
+        function_ids.iter().copied().collect(),
+        vec![Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        function_ids
+            .iter()
+            .copied()
+            .map(|function| ExecuteGrant::new(RAW_CLIENT_USER, function))
+            .collect(),
+    )?;
+    let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+    let authorisation = match security.authorise_execute(
+        &session,
+        InvocationTarget::new(function.id(), active.pair()),
+    ) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(reason) => {
+            return Err(failure(format!(
+                "static Studio shell authorisation was denied: {reason:?}"
+            )));
+        }
+    };
+
+    let window_calls = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+    let provider_window_calls = window_calls.clone();
+    let mut executor = orna_client::DeterministicClientResourceExecutor::new(
+        |_request: &ClientResourceRequest| -> Result<RuntimeValue, String> {
+            Err("static Studio shell used an unexpected resource executor".to_owned())
+        },
+    )
+    .with_external_contract(
+        move |request: &ClientExternalContractRequest| -> Result<RuntimeValue, String> {
+            provider_window_calls.set(provider_window_calls.get() + 1);
+            assert_eq!(
+                request.identity(),
+                orna_standard::STD_UI_WINDOW_RUNTIME_CONTRACT
+            );
+            assert_eq!(request.arguments().len(), 2);
+            assert_eq!(
+                request.arguments()[0].0,
+                orna_standard::STD_UI_WINDOW_TITLE_PARAMETER_ID
+            );
+            assert_eq!(
+                request.arguments()[0].1,
+                RuntimeValue::Text("Orna Studio".to_owned())
+            );
+            assert_eq!(
+                request.arguments()[1].0,
+                orna_standard::STD_UI_WINDOW_CONTENT_PARAMETER_ID
+            );
+            let RuntimeValue::Opaque(content) = &request.arguments()[1].1 else {
+                panic!("static Studio shell content was not an opaque UI value");
+            };
+            assert_eq!(content.opaque_type(), orna_standard::STD_UI_TYPE_ID);
+
+            let payload = content.canonical_payload();
+            let magic = orna_standard::UI_MAGIC.as_bytes();
+            let prefix_length = magic.len() + 4;
+            assert!(payload.starts_with(magic));
+            let body_length = u32::from_be_bytes(
+                payload[magic.len()..prefix_length]
+                    .try_into()
+                    .expect("the UI body length is exactly four bytes"),
+            ) as usize;
+            assert_eq!(payload.len(), prefix_length + body_length);
+            let body_bytes = &payload[prefix_length..];
+            let body: serde_json::Value =
+                serde_json::from_slice(body_bytes).expect("static Studio UI body must be JSON");
+            assert_eq!(
+                serde_json::to_vec(&body).expect("static Studio UI body must re-encode"),
+                body_bytes
+            );
+
+            let mut node = &body;
+            for (index, expected_contract) in ["std.ui.column", "std.ui.row", "std.ui.text"]
+                .iter()
+                .enumerate()
+            {
+                let contract = node
+                    .get("contract")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|contract| contract.get("id"))
+                    .and_then(serde_json::Value::as_str);
+                assert_eq!(contract, Some(*expected_contract));
+                assert_eq!(
+                    node.get("contract")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|contract| contract.get("name"))
+                        .and_then(serde_json::Value::as_str),
+                    Some(*expected_contract)
+                );
+                assert_eq!(
+                    node.get("contract")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|contract| contract.get("version"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("1.0")
+                );
+                if index < 2 {
+                    node = node
+                        .get("slots")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|slots| slots.get("content"))
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|children| children.first())
+                        .expect("static Studio container must have one content child");
+                }
+            }
+            Ok(RuntimeValue::Opaque(content.clone()))
+        },
+    );
+    let result = evaluate_client_function_with_arguments_and_executor(
+        &active,
+        &authorisation,
+        &[],
+        &mut executor,
+    )?;
+    require(
+        window_calls.get() == 1,
+        "static Studio shell did not reach std.ui.window exactly once",
+    )?;
+    let RuntimeValue::Opaque(ui) = result.value() else {
+        return Err(failure(
+            "static Studio shell did not return an opaque UI value",
+        ));
+    };
+    require(
+        ui.opaque_type() == orna_standard::STD_UI_TYPE_ID,
+        "static Studio shell returned the wrong opaque type",
+    )?;
+    let payload = ui.canonical_payload();
+    require(
+        payload.starts_with(orna_standard::UI_MAGIC.as_bytes()),
+        "static Studio shell returned a non-canonical UI frame",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn checks_and_prepares_server_function_dogfood_fixture_offline() -> TestResult<()> {
     let snapshot = verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot()?)?;
     let standard = check_standard_library_source(&snapshot)?;
