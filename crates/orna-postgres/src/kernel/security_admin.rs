@@ -544,7 +544,6 @@ impl SecurityAdminMutation {
                 )?;
                 Ok(self)
             }
-            _ => Ok(self),
         }
     }
 
