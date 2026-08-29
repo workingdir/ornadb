@@ -882,7 +882,7 @@ impl CheckedObjectType {
     }
 }
 
-/// A checked source bundle ready for a later semantic-diff and apply stage.
+/// A checked source bundle with resolved declarations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedBundle {
     pub(super) base_catalogue_revision: CatalogueRevisionId,
