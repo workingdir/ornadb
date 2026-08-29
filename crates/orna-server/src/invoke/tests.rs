@@ -1,3 +1,4 @@
+use super::inspect::*;
 use super::*;
 use orna_client::{
     ClientResourceInvocationContext, ClientResourceKey, ClientResourceRequest, ClientStateStore,
@@ -3623,7 +3624,7 @@ fn inspector_snapshot_row_rejects_zero_value_batch_count() {
     let target = InvocationId::from_bytes([0x17; 16]);
     let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
     let root_target = FunctionId::from_bytes([0x18; 16]);
-    let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
+    let mut row = row(INSPECT_SNAPSHOT_ROW_TAG, 0);
     row.extend_from_slice(&epoch.to_bytes());
     row.extend_from_slice(&target.to_bytes());
     row.extend_from_slice(&[0x18; 16]);
@@ -3639,21 +3640,21 @@ fn inspector_snapshot_row_rejects_zero_value_batch_count() {
     no_values.truncate(68);
     assert_eq!(no_values.len(), 68);
     assert_eq!(
-        super::decode_snapshot_row_payload(&no_values, 7),
+        decode_snapshot_row_payload(&no_values, 7),
         Ok((epoch, target, root_target))
     );
     assert_eq!(
-        super::decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, 7),
         Err("inspect.malformed_carrier".to_owned())
     );
     row[67..75].copy_from_slice(&1_u64.to_be_bytes());
     assert_eq!(
-        super::decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, 7),
         Ok((epoch, target, root_target))
     );
     row.push(0x19);
     assert_eq!(
-        super::decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, 7),
         Err("inspect.malformed_carrier".to_owned())
     );
 }
@@ -3664,7 +3665,7 @@ fn inspector_snapshot_row_rejects_forged_root_provenance() {
     let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
     let expected_root = FunctionId::from_bytes([0x18; 16]);
     let forged_root = FunctionId::from_bytes([0x19; 16]);
-    let mut row = super::row(INSPECT_SNAPSHOT_ROW_TAG, 0);
+    let mut row = row(INSPECT_SNAPSHOT_ROW_TAG, 0);
     row.extend_from_slice(&epoch.to_bytes());
     row.extend_from_slice(&target.to_bytes());
     row.extend_from_slice(&expected_root.to_bytes());
@@ -3673,8 +3674,7 @@ fn inspector_snapshot_row_rejects_forged_root_provenance() {
     row.push(0);
     row.push(0);
 
-    let (_, _, decoded_root) =
-        super::decode_snapshot_row_payload(&row, 7).expect("valid snapshot row");
+    let (_, _, decoded_root) = decode_snapshot_row_payload(&row, 7).expect("valid snapshot row");
     assert_eq!(
         require_inspect_root_provenance(expected_root, decoded_root),
         Ok(())
@@ -3682,7 +3682,7 @@ fn inspector_snapshot_row_rejects_forged_root_provenance() {
 
     row[41..57].copy_from_slice(&forged_root.to_bytes());
     let (_, _, decoded_root) =
-        super::decode_snapshot_row_payload(&row, 7).expect("forged root remains well-formed");
+        decode_snapshot_row_payload(&row, 7).expect("forged root remains well-formed");
     assert_eq!(
         require_inspect_root_provenance(expected_root, decoded_root),
         Err("inspect.epoch_mismatch".to_owned())
@@ -3696,19 +3696,19 @@ fn inspector_enriched_row_rejects_forged_root_provenance() {
     let target = InvocationId::from_bytes([0x10; 16]);
     let expected_root = FunctionId::from_bytes([0x11; 16]);
     let forged_root = FunctionId::from_bytes([0x12; 16]);
-    let mut payload = super::row(InspectCarrierKind::SecurityDecisions.tag(), 0);
-    super::id(&mut payload, &epoch.to_bytes());
-    super::id(&mut payload, &target.to_bytes());
-    super::id(&mut payload, &expected_root.to_bytes());
-    super::id(&mut payload, &active.pair().source().to_bytes());
-    super::id(&mut payload, &active.pair().catalogue().to_bytes());
+    let mut payload = row(InspectCarrierKind::SecurityDecisions.tag(), 0);
+    id(&mut payload, &epoch.to_bytes());
+    id(&mut payload, &target.to_bytes());
+    id(&mut payload, &expected_root.to_bytes());
+    id(&mut payload, &active.pair().source().to_bytes());
+    id(&mut payload, &active.pair().catalogue().to_bytes());
     payload.push(1);
     payload.push(0);
     payload.extend_from_slice(&[4, 1, 0, 2]);
 
-    let encoded = super::encode_inspect_row(&active, &registry, payload.clone())
+    let encoded = encode_inspect_row(&active, &registry, payload.clone())
         .expect("canonical enriched Inspector row");
-    let (_, _, decoded_root) = super::decode_enriched_inspect_row_target(
+    let (_, _, decoded_root) = decode_enriched_inspect_row_target(
         &active,
         &registry,
         &encoded,
@@ -3723,9 +3723,9 @@ fn inspector_enriched_row_rejects_forged_root_provenance() {
 
     let mut forged_payload = payload;
     forged_payload[41..57].copy_from_slice(&forged_root.to_bytes());
-    let forged_encoded = super::encode_inspect_row(&active, &registry, forged_payload)
+    let forged_encoded = encode_inspect_row(&active, &registry, forged_payload)
         .expect("forged root remains well-formed");
-    let (_, _, decoded_root) = super::decode_enriched_inspect_row_target(
+    let (_, _, decoded_root) = decode_enriched_inspect_row_target(
         &active,
         &registry,
         &forged_encoded,
@@ -3743,20 +3743,20 @@ fn inspector_enriched_row_rejects_forged_root_provenance() {
 fn inspector_enriched_row_rejects_zero_target() {
     let (active, registry) = inspect_test_context();
     let epoch = InspectEpochId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
-    let mut payload = super::row(InspectCarrierKind::SecurityDecisions.tag(), 0);
-    super::id(&mut payload, &epoch.to_bytes());
-    super::id(&mut payload, &[0; 16]);
-    super::id(&mut payload, &[0x11; 16]);
-    super::id(&mut payload, &active.pair().source().to_bytes());
-    super::id(&mut payload, &active.pair().catalogue().to_bytes());
+    let mut payload = row(InspectCarrierKind::SecurityDecisions.tag(), 0);
+    id(&mut payload, &epoch.to_bytes());
+    id(&mut payload, &[0; 16]);
+    id(&mut payload, &[0x11; 16]);
+    id(&mut payload, &active.pair().source().to_bytes());
+    id(&mut payload, &active.pair().catalogue().to_bytes());
     payload.push(1);
     payload.push(0);
     payload.extend_from_slice(&[4, 1, 0, 2]);
 
-    let encoded = super::encode_inspect_row(&active, &registry, payload)
-        .expect("canonical enriched Inspector row");
+    let encoded =
+        encode_inspect_row(&active, &registry, payload).expect("canonical enriched Inspector row");
     assert_eq!(
-        super::decode_enriched_inspect_row_target(
+        decode_enriched_inspect_row_target(
             &active,
             &registry,
             &encoded,
