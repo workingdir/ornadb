@@ -604,10 +604,22 @@ pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes(reserved_id(0x1C));
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
 const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
-const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
-const ACCEPTED_V10_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
-const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
-const ACCEPTED_V10_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x9b, 0x07, 0x77, 0x13, 0x7a, 0x77, 0xe2, 0x85, 0x5f, 0xcf, 0x84, 0x06, 0x61, 0xce, 0xfd, 0x98,
+    0x0c, 0xb0, 0x71, 0xa4, 0xc2, 0x64, 0xbc, 0x3c, 0x24, 0x81, 0x40, 0xfc, 0x7e, 0x7c, 0x5b, 0x00,
+]);
+const ACCEPTED_V10_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x22, 0x0b, 0x6f, 0x79, 0xa7, 0x77, 0x86, 0xb1, 0x5a, 0x1b, 0x71, 0x3e, 0x6a, 0x75, 0x36, 0x87,
+    0x84, 0x4d, 0x54, 0x58, 0xe9, 0x7a, 0x67, 0x52, 0xd9, 0xb1, 0x9e, 0xea, 0x1e, 0x7a, 0x17, 0x00,
+]);
+const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x3b, 0x04, 0x93, 0xa8, 0x6a, 0x14, 0xa0, 0xc5, 0x8a, 0x99, 0xac, 0x02, 0x90, 0x1e, 0x1d, 0x3d,
+    0x17, 0x4d, 0x8e, 0xf5, 0xa6, 0x7d, 0x23, 0x49, 0xe2, 0xa0, 0x54, 0x8f, 0x75, 0x68, 0x3f, 0x9a,
+]);
+const ACCEPTED_V10_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x9b, 0x72, 0xf3, 0x38, 0x8b, 0x46, 0xe5, 0x28, 0x42, 0x5a, 0x84, 0x1c, 0x5b, 0x90, 0x61, 0x65,
+    0xf7, 0x31, 0x61, 0xe9, 0x2c, 0x9f, 0x93, 0xe6, 0x01, 0x99, 0x81, 0x76, 0x10, 0x6d, 0xdb, 0xbd,
+]);
 const ACCEPTED_V9_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
 const ACCEPTED_V9_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
 const ACCEPTED_V9_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
@@ -13036,5 +13048,51 @@ EXPORT TYPE std.action.Action AS std.Action;
             .canonical_payload(),
             rows_payload
         );
+    }
+
+    #[test]
+    fn v10_cli_snapshot_retains_source_and_recomputes_digests() {
+        let snapshot = super::retained_standard_library_v10_snapshot()
+            .expect("the retained V10 source is valid");
+        assert_eq!(snapshot.source().units().len(), 10);
+        assert_eq!(
+            snapshot.source().parent(),
+            Some(super::STANDARD_SOURCE_V9_REVISION_ID)
+        );
+        assert_eq!(
+            snapshot.source().units()[9].logical_path(),
+            super::STD_CLI_SOURCE_LOGICAL_PATH
+        );
+        assert_eq!(
+            source_unit_content_digest(super::RETAINED_STANDARD_CLI_SOURCE)
+                .expect("the CLI source digest is valid"),
+            snapshot.source().units()[9].content_hash()
+        );
+        assert_eq!(
+            source_bundle_digest(snapshot.source().units()).expect("the V10 bundle digest is valid"),
+            snapshot.source().bundle_hash()
+        );
+        assert_eq!(
+            calculate_standard_library_digest(&snapshot).expect("the V10 digest recomputes"),
+            snapshot.digest()
+        );
+        let cli_executable = snapshot.executables().last().expect("the CLI executable");
+        println!("cli_content={:?}", snapshot.source().units()[9].content_hash().to_bytes());
+        println!(
+            "artifact={:?}",
+            cli_executable.revision().artifact().content_hash().to_bytes()
+        );
+        println!(
+            "semantic={:?}",
+            cli_executable.revision().semantic_hash().to_bytes()
+        );
+        println!("bundle={:?}", snapshot.source().bundle_hash().to_bytes());
+        println!("revision={:?}", snapshot.source().revision_hash().to_bytes());
+        println!("standard={:?}", snapshot.digest().to_bytes());
+        let verified = super::verify_standard_library_v10_snapshot(snapshot)
+            .expect("the V10 snapshot verifies");
+        let checked = orna_compiler::check_standard_library_source(&verified)
+            .expect("the V10 source checks");
+        assert_eq!(checked.checked_executables().len(), 12);
     }
 }
