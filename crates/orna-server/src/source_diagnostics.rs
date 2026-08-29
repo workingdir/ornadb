@@ -44,6 +44,19 @@ pub(crate) fn write_diagnostics(
     }
     Ok(())
 }
+fn display_column(text: &str) -> usize {
+    text.chars()
+        .map(|character| match character {
+            '\t' => 4,
+            '\r' => 0,
+            character if character.is_control() => {
+                format!("\\u{{{:04X}}}", character as u32).chars().count()
+            }
+            _ => 1,
+        })
+        .sum()
+}
+
 fn write_human_diagnostics(
     output: &mut impl Write,
     parse_report: &ParseReport,
@@ -199,7 +212,7 @@ mod tests {
     use super::*;
     use orna_core::source::{SourceBundle, SourceUnit};
 
-    fn broken_report() -> orna_compiler::CheckReport {
+    fn broken_report() -> orna_compiler::StandardApplicationCheckReport {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])
             .expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(

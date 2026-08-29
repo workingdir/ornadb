@@ -134,9 +134,8 @@ use orna_standard::{
     registered_opaque_codecs, retained_standard_library_snapshot,
     retained_standard_library_v2_snapshot, retained_standard_library_v3_snapshot,
     retained_standard_library_v6_snapshot, retained_standard_library_v9_snapshot,
-    verify_standard_library_snapshot,
-    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
-    verify_standard_library_v6_snapshot, verify_standard_library_v9_snapshot,
+    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
+    verify_standard_library_v3_snapshot, verify_standard_library_v6_snapshot,
     verify_standard_library_v9_snapshot,
 };
 use tokio::{
@@ -504,8 +503,8 @@ fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()> {
 }
 
 async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestResult<()> {
-    let expected = retained_standard_library_v9_snapshot()
-        .and_then(verify_standard_library_v9_snapshot)?;
+    let expected =
+        retained_standard_library_v9_snapshot().and_then(verify_standard_library_v9_snapshot)?;
     let expected_boolean_contract = expected
         .catalogue()
         .value_type_by_id(BOOLEAN_TYPE_ID)
@@ -16161,12 +16160,16 @@ fn exposes_checked_client_body_kind_for_rust_introspection() -> TestResult<()> {
     )])?;
     let report = check_standard_application(&source, &context);
     if !report.diagnostics().is_empty() {
-        return Err(failure(format!("introspection fixture did not check: {:?}", report.diagnostics())));
+        return Err(failure(format!(
+            "introspection fixture did not check: {:?}",
+            report.diagnostics()
+        )));
     }
-    let checked = report.checked_bundle().ok_or_else(|| failure("missing checked bundle"))?;
+    let checked = report
+        .checked_bundle()
+        .ok_or_else(|| failure("missing checked bundle"))?;
     let function = checked
         .client_functions()
-        .iter()
         .find(|function| function.name().parts() == ["introspection_demo", "compute"])
         .ok_or_else(|| failure("missing checked introspection function"))?;
     require(
