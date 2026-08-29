@@ -1472,6 +1472,12 @@ pub fn materialise_support_data(root: &Path) -> Result<MaterialisedSupport, Embe
     })
 }
 
+fn initialiser_log_path(data_directory: &Path) -> Result<PathBuf, EmbeddedHostError> {
+    data_directory
+        .parent()
+        .map(|generation_directory| generation_directory.join(INITIALISER_LOG_NAME))
+        .ok_or(EmbeddedHostError::InvalidInstanceState)
+}
 /// Initialises one new, empty PostgreSQL data directory through the linked engine entry.
 ///
 /// The caller must own the instance lock and must call this before it creates an asynchronous
@@ -1481,7 +1487,7 @@ pub fn initialise_embedded_cluster(
     data_directory: &Path,
 ) -> Result<(), EmbeddedHostError> {
     require_single_thread()?;
-    let log_path = data_directory.join(INITIALISER_LOG_NAME);
+    let log_path = initialiser_log_path(data_directory)?;
     let (read_fd, write_fd, log) = prepare_child_log(&log_path)?;
     let support_root = AbsolutePath::new(support_root)?;
     let data_directory = AbsolutePath::new(data_directory)?;
@@ -2179,6 +2185,18 @@ mod tests {
         assert_eq!(parsed.postmaster_pid, 11);
         assert_eq!(parsed.generation, GENERATION_NAME);
         assert!(parse_ready_record(format!("{record}extra = true\n").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn stores_initialiser_log_beside_the_cluster_directory() {
+        let data_directory = Path::new("/var/lib/orna/instances/default/generations/0001/data");
+        let log_path = initialiser_log_path(data_directory).expect("generation directory");
+
+        assert_eq!(
+            log_path,
+            PathBuf::from("/var/lib/orna/instances/default/generations/0001/orna-initialiser.log")
+        );
+        assert_ne!(log_path.parent(), Some(data_directory));
     }
 
     #[test]
