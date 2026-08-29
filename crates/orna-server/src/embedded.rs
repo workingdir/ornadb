@@ -11,7 +11,7 @@ use nix::{
     },
 };
 use orna_postgres::{
-    AbsolutePath, ControlData, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments,
+    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments,
     POSTGRESQL_LICENCE, SUPPORT_ARCHIVE, SUPPORT_MANIFEST,
 };
 use serde::Deserialize;
@@ -37,8 +37,8 @@ use std::{
 use tokio_postgres::{Config, NoTls};
 
 use crate::{
-    EmbeddedUpgradeError, LocalRawSocketServer, LocalRawSocketServerError,
-    OpenStandardDatabaseError, open_standard_database, start_local_raw_socket,
+    LocalRawSocketServer, LocalRawSocketServerError, OpenStandardDatabaseError,
+    open_standard_database, start_local_raw_socket,
 };
 
 #[path = "distribution.rs"]
@@ -60,7 +60,6 @@ const DEVELOPMENT_IDENT_MAP: &str = "orna_development";
 const DEVELOPMENT_LOCK_NAME: &str = "server.lock";
 const INSTANCE_LOCK_NAME: &str = "lock";
 const INSTANCE_MANIFEST_NAME: &str = "instance.toml";
-const UPGRADE_DIRECTORY_NAME: &str = "upgrade";
 const READY_NAME: &str = "ready";
 const GENERATION_NAME: &str = "0000000000000001";
 const INITIALISER_LOG_NAME: &str = "orna-initialiser.log";
@@ -73,9 +72,6 @@ const NORMAL_HBA_BYTES: &[u8] =
     b"local orna orna_kernel peer map=orna_default\nlocal all all reject\n";
 const IDENT_BYTES: &[u8] = b"orna_default orna orna_kernel\n";
 const POSTGRES_PORT: u16 = 5432;
-const POSTGRES_CONTROL_VERSION: u32 = 1800;
-const POSTGRES_CATALOGUE_VERSION: u32 = 202_506_291;
-const POSTGRES_CHECKSUM_VERSION: u32 = 1;
 const STARTUP_ATTEMPTS: usize = 600;
 const STARTUP_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_CHILD_LOG_BYTES: usize = 256 * 1024;
@@ -512,168 +508,27 @@ fn prepare_instance_state(
     })
 }
 
-pub(crate) fn upgrade_default_instance() -> Result<(), EmbeddedUpgradeError> {
-    let service = require_service_identity().map_err(|_| EmbeddedUpgradeError::ServiceIdentity)?;
-    let _package_lock = open_verified_lock(
-        Path::new(PACKAGE_LOCK_PATH),
-        0,
-        service.gid,
-        0o640,
-        nix::libc::F_RDLCK as i16,
-        LockKind::Package,
-    )
-    .map_err(|_| EmbeddedUpgradeError::PackageIncomplete)?;
-    require_file_bytes(
-        Path::new(PACKAGE_STATE_PATH),
-        0,
-        service.gid,
-        0o640,
-        PACKAGE_STATE_BYTES,
-    )
-    .map_err(|_| EmbeddedUpgradeError::PackageIncomplete)?;
-
-    let paths = EmbeddedHostPaths::production();
-    match fs::symlink_metadata(paths.state_root()) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(EmbeddedUpgradeError::InstanceNotInstalled);
-        }
-        Err(_) => return Err(EmbeddedUpgradeError::InvalidInstance),
-    }
-
-    verify_current_distribution().map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    validate_embedded_engine_manifest().map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    require_file_bytes(
-        Path::new(CONFIGURATION_PATH),
-        0,
-        0,
-        0o644,
-        CONFIGURATION_BYTES,
-    )
-    .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    require_directory(Path::new(INSTANCE_PARENT), service.uid, service.gid, 0o700)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    require_directory(paths.state_root(), service.uid, service.gid, 0o700)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let generation = paths.state_root().join("generations").join(GENERATION_NAME);
-    require_directory(
-        generation
-            .parent()
-            .ok_or(EmbeddedUpgradeError::InvalidInstance)?,
-        service.uid,
-        service.gid,
-        0o700,
-    )
-    .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    require_directory(&generation, service.uid, service.gid, 0o700)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let data_directory = generation.join("data");
-    require_directory(&data_directory, service.uid, service.gid, 0o700)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    verify_normal_data_directory(&data_directory)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    require_file_bytes(
-        &data_directory.join("PG_VERSION"),
-        service.uid,
-        service.gid,
-        0o600,
-        b"18\n",
-    )
-    .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let manifest = read_regular_file(
-        &paths.state_root().join(INSTANCE_MANIFEST_NAME),
-        service.uid,
-        service.gid,
-        0o600,
-    )
-    .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let manifest = parse_installed_instance_manifest(&manifest)?;
-    require_absent(&paths.state_root().join(UPGRADE_DIRECTORY_NAME))?;
-    let instance_lock = open_verified_file(
-        &paths.state_root().join(INSTANCE_LOCK_NAME),
-        service.uid,
-        service.gid,
-        0o600,
-        true,
-        LockKind::Instance,
-    )
-    .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let data_directory =
-        AbsolutePath::new(&data_directory).map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    let control = EmbeddedEngine::read_control(&data_directory)
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
-    validate_control_data(control)?;
-
-    match fs::symlink_metadata(Path::new(RUNTIME_ROOT).join(READY_NAME)) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        _ => return Err(EmbeddedUpgradeError::InstanceRunning),
-    }
-    acquire_upgrade_instance_lock(&instance_lock)?;
-
-    if manifest.engine == EmbeddedEngineIdentity::current().as_str() {
-        let _activation_committed = manifest.activation_committed;
-        Ok(())
-    } else {
-        Err(EmbeddedUpgradeError::UnsupportedEngine)
-    }
-}
-
-fn require_absent(path: &Path) -> Result<(), EmbeddedUpgradeError> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        _ => Err(EmbeddedUpgradeError::InvalidInstance),
-    }
-}
-
-fn acquire_upgrade_instance_lock(file: &fs::File) -> Result<(), EmbeddedUpgradeError> {
-    let lock = nix::libc::flock {
-        l_type: nix::libc::F_WRLCK as i16,
-        l_whence: nix::libc::SEEK_SET as i16,
-        l_start: 0,
-        l_len: 1,
-        l_pid: 0,
-    };
-    // SAFETY: the verified file and lock pointer remain live for the complete fcntl call.
-    if unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_SETLK, &lock) } == 0 {
-        Ok(())
-    } else {
-        Err(EmbeddedUpgradeError::InstanceRunning)
-    }
-}
-
-fn validate_control_data(control: ControlData) -> Result<(), EmbeddedUpgradeError> {
-    if control.system_identifier() == 0
-        || control.pg_control_version() != POSTGRES_CONTROL_VERSION
-        || control.catalog_version() != POSTGRES_CATALOGUE_VERSION
-        || control.state() > 6
-        || control.data_checksum_version() != POSTGRES_CHECKSUM_VERSION
-    {
-        return Err(EmbeddedUpgradeError::InvalidInstance);
-    }
-    Ok(())
-}
-
 fn parse_installed_instance_manifest(
     bytes: &[u8],
-) -> Result<InstalledInstanceManifest<'_>, EmbeddedUpgradeError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
+) -> Result<InstalledInstanceManifest<'_>, EmbeddedHostError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
     let mut lines = text.lines();
     if lines.next() != Some("format = 1")
         || lines.next() != Some("instance = \"default\"")
         || lines.next() != Some("generation = \"0000000000000001\"")
         || lines.next() != Some("postgresql_major = 18")
     {
-        return Err(EmbeddedUpgradeError::InvalidInstance);
+        return Err(EmbeddedHostError::InvalidInstanceState);
     }
     let engine = parse_ready_string(lines.next(), "engine = \"")
-        .map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
+        .map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
     let activation_committed = match lines.next() {
         Some("activation_committed = true") => true,
         Some("activation_committed = false") => false,
-        _ => return Err(EmbeddedUpgradeError::InvalidInstance),
+        _ => return Err(EmbeddedHostError::InvalidInstanceState),
     };
     if lines.next().is_some() || !text.ends_with('\n') || !is_sha256(engine) {
-        return Err(EmbeddedUpgradeError::InvalidInstance);
+        return Err(EmbeddedHostError::InvalidInstanceState);
     }
     Ok(InstalledInstanceManifest {
         engine,
@@ -2612,10 +2467,10 @@ mod tests {
                 "format = 1\ninstance = \"default\"\ngeneration = \"{GENERATION_NAME}\"\npostgresql_major = 18\nengine = \"{digest}\"\nactivation_committed = true\nextra = true\n"
             ),
         ] {
-            assert_eq!(
+            assert!(matches!(
                 parse_installed_instance_manifest(bytes.as_bytes()),
-                Err(EmbeddedUpgradeError::InvalidInstance)
-            );
+                Err(EmbeddedHostError::InvalidInstanceState)
+            ));
         }
     }
 
