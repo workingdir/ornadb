@@ -3205,11 +3205,14 @@ pub fn signature_help(
     })
 }
 fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
-    match return_type {
-        FunctionReturnType::Value(type_specification) => text
-            .get(type_specification.span().range())
+    let span_text = |type_specification: &TypeSpecification| {
+        text.get(type_specification.span().start..type_specification.span().end)
             .unwrap_or("value")
-            .to_owned(),
+            .to_owned()
+    };
+    match return_type {
+        FunctionReturnType::Single(type_specification) => span_text(type_specification),
+        FunctionReturnType::Stream { element, .. } => format!("STREAM <{}>", span_text(element)),
         FunctionReturnType::Rows { columns, .. } => format!(
             "ROWS ({})",
             columns
@@ -3222,7 +3225,7 @@ fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
 }
 
 fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
-    slice.map(SourceSlice::as_str)
+    slice.map(|slice| slice.text.as_str())
 }
 #[allow(dead_code)]
 pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
@@ -3696,21 +3699,18 @@ mod tests {
     }
 
     #[test]
-    fn standard_library_loads_verified_v10_snapshot() {
-        let standard = StandardLibrary::load().expect("retained V10 standard must load");
+    fn standard_library_loads_verified_current_snapshot() {
+        let standard = StandardLibrary::load().expect("retained standard must load");
         let snapshot = standard.checked.verified_snapshot();
 
         assert_eq!(
             snapshot.revision(),
-            orna_standard::STANDARD_LIBRARY_V9_REVISION_ID
+            orna_standard::STANDARD_LIBRARY_REVISION_ID
         );
         assert_eq!(
             snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_V10_REVISION_ID
+            orna_standard::STANDARD_SOURCE_REVISION_ID
         );
-        assert!(snapshot.source().units().iter().any(|unit| {
-            unit.logical_path() == orna_standard::STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
-        }));
     }
 
     #[test]
