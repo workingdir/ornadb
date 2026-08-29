@@ -99,7 +99,8 @@ impl ClientExecutionFuel {
 
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
-    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
+    STANDARD_CATALOGUE_V9_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
     STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
@@ -117,11 +118,13 @@ use orna_standard::{
 };
 
 pub mod capability;
+pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod vm;
+pub use endpoint::{DatabaseEndpoint, EndpointParseError, DEFAULT_REMOTE_PORT};
 
 pub use runtime_adapter::{QtRuntimeExecutor, RuntimeActionBinding};
 
@@ -8696,9 +8699,13 @@ fn evaluate_standard_ui_constructor(
             OpaqueValueError::ActiveStandardRequired,
         ));
     };
-    if standard.revision() != STANDARD_LIBRARY_V9_REVISION_ID
-        || standard.catalogue().revision() != STANDARD_CATALOGUE_V9_REVISION_ID
-    {
+    if !matches!(
+        standard.revision(),
+        STANDARD_LIBRARY_V9_REVISION_ID
+    ) || !matches!(
+        standard.catalogue().revision(),
+        STANDARD_CATALOGUE_V9_REVISION_ID
+    ) {
         return Err(invalid_ui_constructor_registry(
             context,
             RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot,
