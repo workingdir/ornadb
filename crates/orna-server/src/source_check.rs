@@ -6,11 +6,14 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
+use orna_standard::{
+    verify_standard_library_v9_snapshot,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
 
     #[test]
     fn checks_new_application_source_against_verified_v9_standard() {
@@ -111,6 +114,14 @@ pub(super) enum SourceCheckResult {
 }
 
 pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
+    run_with_human_output(path, output, false)
+}
+
+pub(super) fn run_with_human_output(
+    path: &str,
+    output: &mut impl Write,
+    human_output: bool,
+) -> SourceCheckResult {
     let bytes = match read_regular_file(path) {
         Ok(bytes) => bytes,
         Err(()) => {
@@ -153,12 +164,19 @@ pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
     if report.diagnostics().is_empty() {
         return SourceCheckResult::Success;
     }
-    if source_diagnostics::write_diagnostics(output, report.diagnostics()).is_err() {
+    let result = if human_output {
+        output.write_all(&source_diagnostics::render_human_diagnostics(
+            report.parse_report(),
+            report.diagnostics(),
+        ))
+    } else {
+        source_diagnostics::write_diagnostics(output, report.diagnostics())
+    };
+    if result.is_err() {
         return SourceCheckResult::Failure;
     }
     SourceCheckResult::Failure
 }
-
 fn read_regular_file(path: &str) -> Result<Vec<u8>, ()> {
     let mut file = fs::OpenOptions::new()
         .read(true)
