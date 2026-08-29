@@ -1,12 +1,11 @@
 # Architecture decision records
 
-OrnaDB has two accepted ADR series. The number is unique only within its
-series:
+OrnaDB has two accepted ADR series:
 
-* **spec ADR NNNN** is a canonical specification decision in
-  `spec/adrs/NNNN-*.md`.
-* **work ADR NNNN** is an implementation decision in
-  `work/docs/decisions/NNNN-*.md`.
+* **spec ADR NNNN** is a canonical specification decision in the sibling
+  `../spec/` checkout.
+* **work ADR NNNN** is an implementation decision in this repository's
+  `docs/decisions/` directory.
 
 Use the qualified form when referring to a decision: `spec ADR 0001` or
 `work ADR 0001`. Within a work decision file, an unqualified `ADR NNNN` means
