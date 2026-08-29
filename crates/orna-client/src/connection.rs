@@ -102,12 +102,22 @@ impl<S: Read + Write> InvocationConnection<S> {
     /// frames. Window updates, liveness pings, and cancellation are accepted;
     /// a second invocation start or argument frame is rejected.
     pub fn write_control(&mut self, frame: &ClientFrame) -> Result<(), InvocationConnectionError> {
+        let mut next_client = self.client.clone();
         match frame {
             ClientFrame::Ping { .. } => {}
-            ClientFrame::WindowUpdate { stream, .. } if *stream == self.client.stream() => {}
-            ClientFrame::CallCancel { stream } if *stream == self.client.stream() => {
-                let expected = self
-                    .client
+            ClientFrame::WindowUpdate {
+                stream,
+                channel,
+                credit,
+            } if *stream == next_client.stream() => {
+                if *channel == orna_protocol::Channel::ResultValues {
+                    next_client
+                        .grant_result_credit(*credit)
+                        .map_err(InvocationConnectionError::Client)?;
+                }
+            }
+            ClientFrame::CallCancel { stream } if *stream == next_client.stream() => {
+                let expected = next_client
                     .request_cancellation()
                     .map_err(InvocationConnectionError::Client)?;
                 if &expected != frame {
@@ -116,7 +126,9 @@ impl<S: Read + Write> InvocationConnection<S> {
             }
             _ => return Err(InvocationConnectionError::InvalidControlFrame),
         }
-        write_client_frame(&mut self.stream, &self.active, &self.registry, frame)
+        write_client_frame(&mut self.stream, &self.active, &self.registry, frame)?;
+        self.client = next_client;
+        Ok(())
     }
 
     /// Returns the invocation state owner.
