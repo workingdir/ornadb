@@ -25548,7 +25548,8 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
             | ClientExpressionNode::ParameterRead { .. }
             | ClientExpressionNode::LocalRead { .. }
             | ClientExpressionNode::FieldPath { .. }
-            | ClientExpressionNode::ExternalContract { .. } => {}
+            | ClientExpressionNode::ExternalContract { .. }
+            | ClientExpressionNode::SourceIntrospection => {}
         }
     }
 
