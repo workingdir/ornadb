@@ -5381,7 +5381,11 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v9_standard(standard) || is_accepted_v8_standard(standard) {
+    let registrations =
+        if is_accepted_v10_standard(standard)
+            || is_accepted_v9_standard(standard)
+            || is_accepted_v8_standard(standard)
+        {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -5619,6 +5623,18 @@ fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().bundle() == STANDARD_SOURCE_V4_BUNDLE_ID
         && standard.source().id() == STANDARD_SOURCE_V4_REVISION_ID
         && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
+fn is_accepted_v10_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V10_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V10_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V10_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V10_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V9_REVISION_ID)
+        && standard.source().units().len() == 10
+        && standard.source().units()[9].content_hash() == ACCEPTED_V10_CLI_CONTENT_DIGEST
+        && standard.source().revision_hash() == ACCEPTED_V10_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V10_STANDARD_LIBRARY_DIGEST
+}
+
         && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
 }
