@@ -72,11 +72,11 @@ just demo-suite
 
 ## Documentation
 
-See the [maintainer and operator documentation](docs/maintainer-runbook.md) for environment setup, packaging, runtime development, and operations. See [editor tooling](docs/editor-tooling.md) for editor-specific checks.
+See the [maintainer and operator documentation](docs/maintainer-runbook.md) for environment setup, runtime development, and operations. See [editor tooling](docs/editor-tooling.md) for editor-specific checks.
 
 ## Project layout
 
-The repository contains the Rust workspace, standard library declarations, runtimes, editor integrations, packaging, and repository tooling.
+The repository contains the Rust workspace, standard library declarations, runtimes, editor integrations, and repository tooling.
 
 ## License
 

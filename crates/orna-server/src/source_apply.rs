@@ -36,9 +36,9 @@ use orna_standard::{
 };
 use serde::Serialize;
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host, source_diagnostics};
+use crate::{EmbeddedHostError, inspect_current_embedded_host, source_diagnostics};
 
-/// The result of checking and applying one installed application source file.
+/// The result of checking and applying one local application source file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSourceApplyOutcome {
@@ -88,15 +88,11 @@ impl InstalledSourceApplySuccess {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSourceApplyHostFailure {
-    /// The process is not the installed Orna service account.
-    ServiceAccountRequired,
-    /// Package maintenance is incomplete or excludes new readers.
-    PackageIncomplete,
-    /// The default managed instance is absent.
+    /// The default local instance is absent.
     InstanceNotInstalled,
-    /// The default managed instance or its readiness evidence is invalid.
+    /// The default local instance or its readiness evidence is invalid.
     InstanceInvalid,
-    /// The running executable cannot verify the installed embedded engine.
+    /// The running executable cannot verify the local embedded engine.
     EngineInvalid,
 }
 
@@ -205,12 +201,6 @@ impl fmt::Display for InstalledSourceApplyError {
                 formatter.write_str("orna: source apply received an invalid source path")
             }
             Self::Host { failure, .. } => formatter.write_str(match failure {
-                InstalledSourceApplyHostFailure::ServiceAccountRequired => {
-                    "orna: source apply must run as the orna service account"
-                }
-                InstalledSourceApplyHostFailure::PackageIncomplete => {
-                    "orna: package maintenance is incomplete"
-                }
                 InstalledSourceApplyHostFailure::InstanceNotInstalled => {
                     "orna: the default Orna instance is not installed"
                 }
@@ -301,7 +291,7 @@ pub fn run_installed_source_apply(
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
     validate_source_path(path)?;
     let bundle = read_source_bundle(path)?;
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -415,16 +405,7 @@ fn validate_source_path(path: &str) -> Result<(), InstalledSourceApplyError> {
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
     let failure = match &source {
-        EmbeddedHostError::InvalidServiceIdentity => {
-            InstalledSourceApplyHostFailure::ServiceAccountRequired
-        }
-        EmbeddedHostError::InvalidPackageState => {
-            InstalledSourceApplyHostFailure::PackageIncomplete
-        }
-        EmbeddedHostError::Engine(_)
-        | EmbeddedHostError::InvalidEngineManifest
-        | EmbeddedHostError::MissingDistributionManifest
-        | EmbeddedHostError::InvalidDistributionManifest => {
+        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
             InstalledSourceApplyHostFailure::EngineInvalid
         }
         EmbeddedHostError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -826,21 +807,7 @@ mod tests {
             InstalledSourceApplyHostFailure,
             &str,
             &str,
-        ); 7] = [
-            (
-                "service identity",
-                || EmbeddedHostError::InvalidServiceIdentity,
-                InstalledSourceApplyHostFailure::ServiceAccountRequired,
-                "orna: source apply must run as the orna service account",
-                "Orna service identity is invalid",
-            ),
-            (
-                "package state",
-                || EmbeddedHostError::InvalidPackageState,
-                InstalledSourceApplyHostFailure::PackageIncomplete,
-                "orna: package maintenance is incomplete",
-                "private package detail",
-            ),
+        ); 4] = [
             (
                 "missing instance",
                 || {
@@ -866,13 +833,6 @@ mod tests {
                 InstalledSourceApplyHostFailure::EngineInvalid,
                 "orna: the embedded PostgreSQL engine is not valid",
                 "embedded PostgreSQL argument is not a C string",
-            ),
-            (
-                "distribution manifest",
-                || EmbeddedHostError::InvalidDistributionManifest,
-                InstalledSourceApplyHostFailure::EngineInvalid,
-                "orna: the embedded PostgreSQL engine is not valid",
-                "Orna distribution manifest is invalid",
             ),
             (
                 "instance verification",

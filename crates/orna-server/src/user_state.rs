@@ -1,8 +1,8 @@
 //! Active `orna state` access to the durable USER state service.
 //!
 //! This module runs one closed `orna state get|set` command against the
-//! selected local or packaged instance. The host derives the principal from
-//! the authenticated session: the local peer UID authenticated through
+//! selected local instance. The host derives the principal from the
+//! authenticated session: the local peer UID authenticated through
 //! [`PostgresKernel::authenticate_local_peer`]. A request never carries a
 //! principal identity.
 //!

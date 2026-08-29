@@ -1,19 +1,16 @@
-//! Fixed-service security administration for the installed Orna instance.
+//! Local security administration for the Orna instance.
 //!
 //! This module runs the closed `orna security` command family (ADR 0065).
-//! The `grant-execute` entry keeps the fixed-service
-//! [`run_installed_security_grant`] path; the administrative surface
-//! ([`run_installed_security_admin`]) runs one closed operation against the
-//! fixed private instance with the same host inspection and kernel access as
-//! `orna inspect` and `orna state`, and mirrors the `InstalledInspectError`
-//! failure and render path.
+//! The `grant-execute` entry keeps the fixed catalogue-health grant path; the
+//! administrative surface runs one closed operation against the local
+//! instance with the same host inspection and kernel access as `orna inspect`
+//! and `orna state`, and mirrors the `InstalledInspectError` failure and
+//! render path.
 //!
 //! The host derives the session from the authenticated local peer
 //! ([`PostgresKernel::authenticate_local_peer`]); the kernel is authoritative
-//! for the `SecurityAdmin`-privilege enforcement gate, and the host
-//! additionally checks the exact installed service identity through
-//! [`inspect_ready_embedded_host`] before dispatch, exactly like the
-//! fixed-service grant path.
+//! for the `SecurityAdmin`-privilege enforcement gate, and the host checks the
+//! local instance before dispatch.
 
 use std::{fmt, io, io::Write};
 
@@ -27,20 +24,16 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{EmbeddedHostError, inspect_current_embedded_host};
 
-/// A closed failure from the fixed-service execution-grant command.
+/// A closed failure from the fixed catalogue-health execution-grant command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecurityGrantError {
-    /// The caller does not have the exact installed Orna service identity.
-    ServiceAccountRequired,
-    /// Package maintenance has not committed the ready state.
-    PackageIncomplete,
-    /// The default managed instance is absent.
+    /// The default local instance is absent.
     InstanceNotInstalled,
-    /// The installed instance or its readiness evidence is invalid.
+    /// The local instance or its readiness evidence is invalid.
     InstanceInvalid,
-    /// The running executable cannot verify the installed embedded engine.
+    /// The running executable cannot verify the local embedded engine.
     EngineInvalid,
     /// The active revision could not be recovered.
     RecoveryFailed,
@@ -53,10 +46,6 @@ pub enum SecurityGrantError {
 impl fmt::Display for SecurityGrantError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::ServiceAccountRequired => {
-                "orna: security grant-execute must run as the orna service account"
-            }
-            Self::PackageIncomplete => "orna: package maintenance is incomplete",
             Self::InstanceNotInstalled => "orna: the default Orna instance is not installed",
             Self::InstanceInvalid => "orna: the default Orna instance is invalid",
             Self::EngineInvalid => "orna: the embedded PostgreSQL engine is not valid",
@@ -73,11 +62,11 @@ impl std::error::Error for SecurityGrantError {}
 
 /// Grants the fixed catalogue-health service permission for one active function.
 ///
-/// The host inspection retains the package and instance guards for the complete
-/// recovery and grant operation. The function identity has already been parsed
-/// from the exact canonical command argument by the command parser.
+/// The host inspection retains the instance guards for the complete recovery
+/// and grant operation. The function identity has already been parsed from
+/// the exact canonical command argument by the command parser.
 pub fn run_installed_security_grant(function: FunctionId) -> Result<(), SecurityGrantError> {
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -99,13 +88,7 @@ pub fn run_installed_security_grant(function: FunctionId) -> Result<(), Security
 
 fn map_host_error(error: EmbeddedHostError) -> SecurityGrantError {
     match error {
-        EmbeddedHostError::InvalidServiceIdentity => SecurityGrantError::ServiceAccountRequired,
-        EmbeddedHostError::InvalidPackageState => SecurityGrantError::PackageIncomplete,
-        EmbeddedHostError::Engine(_)
-        | EmbeddedHostError::InvalidEngineManifest
-        | EmbeddedHostError::MissingDistributionManifest
-        | EmbeddedHostError::InvalidDistributionManifest => SecurityGrantError::EngineInvalid,
-        EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
+        EmbeddedHostError::Io(source) if source.kind() == io::ErrorKind::NotFound => {
             SecurityGrantError::InstanceNotInstalled
         }
         _ => SecurityGrantError::InstanceInvalid,
@@ -297,13 +280,11 @@ impl fmt::Display for InstalledSecurityAdminError {
 
 impl std::error::Error for InstalledSecurityAdminError {}
 
-/// Runs one installed `orna security` command in-process.
+/// Runs one local `orna security` command in-process.
 ///
-/// The host inspection retains the package and instance guards for the
-/// complete authentication, operation, and rendering path; the calling
-/// process must hold the exact installed service identity, exactly like
-/// the fixed-service grant path. The kernel additionally gates every
-/// mutation on the `SecurityAdmin` privilege. The result record is
+/// The host inspection retains the local instance guards for the complete
+/// authentication, operation, and rendering path. The kernel additionally
+/// gates every mutation on the `SecurityAdmin` privilege. The result record is
 /// written to `stdout` as one JSON line; failures are returned to the CLI.
 ///
 /// # Errors
@@ -314,7 +295,7 @@ pub fn run_installed_security_admin(
     request: InstalledSecurityAdminRequest,
     stdout: &mut impl Write,
 ) -> Result<InstalledSecurityAdminOutcome, InstalledSecurityAdminError> {
-    let host = inspect_ready_embedded_host().map_err(map_admin_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_admin_host_error)?;
     let kernel = PostgresKernel::new(host.config().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -329,11 +310,11 @@ pub fn run_installed_security_admin(
     runtime.block_on(run_security_admin_with_kernel(kernel, request, stdout))
 }
 
-/// Runs one installed `orna security` command against a caller-supplied
+/// Runs one local `orna security` command against a caller-supplied
 /// kernel (ADR 0065 live-proof seam).
 ///
-/// The public entry [`run_installed_security_admin`] inspects the fixed
-/// private instance and delegates here; the live proof drives the exact
+/// The public entry [`run_installed_security_admin`] inspects the local
+/// instance and delegates here; the live proof drives the exact
 /// authenticate-operate-render path against the Compose PostgreSQL test
 /// kernel with the invoking process's local peer credentials.
 #[doc(hidden)]
@@ -594,21 +575,10 @@ fn write_admin_line(
 
 /// Maps one host inspection failure to the closed admin failure class.
 fn map_admin_host_error(error: EmbeddedHostError) -> InstalledSecurityAdminError {
-    match error {
-        EmbeddedHostError::InvalidServiceIdentity => InstalledSecurityAdminError::with_code(
-            InstalledSecurityAdminErrorKind::Internal,
-            "orna security must run as the exact installed Orna service account".to_owned(),
-            "security_admin:missing-service-identity",
-        ),
-        EmbeddedHostError::InvalidPackageState => InstalledSecurityAdminError::new(
-            InstalledSecurityAdminErrorKind::Internal,
-            "package maintenance is incomplete".to_owned(),
-        ),
-        _ => InstalledSecurityAdminError::new(
-            InstalledSecurityAdminErrorKind::Internal,
-            format!("the installed Orna instance could not be inspected: {error}"),
-        ),
-    }
+    InstalledSecurityAdminError::new(
+        InstalledSecurityAdminErrorKind::Internal,
+        format!("the local Orna instance could not be inspected: {error}"),
+    )
 }
 
 /// Maps one kernel failure to the closed admin failure class.

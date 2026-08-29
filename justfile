@@ -50,15 +50,7 @@ runtime-qt-test:
     cmake --build target/runtime-qt --parallel
     ctest --test-dir target/runtime-qt --output-on-failure
 
-# Run only the Qt visual smoke and leave its PNG in the build directory.
-runtime-qt-visual: runtime-qt-build
-    ctest --test-dir target/runtime-qt -R orna-runtime-qt-visual --output-on-failure
 
-# Build the separate Debian package for the fixed Qt runtime path.
-runtime-qt-package:
-    cmake -S runtimes/qt -B target/runtime-qt -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-    cmake --build target/runtime-qt --parallel
-    cpack --config target/runtime-qt/CPackConfig.cmake -G DEB
 
 # Run the Rust Qt runtime loader/session smoke test against an explicit shared library path.
 runtime-qt-rust-smoke runtime_path:
@@ -97,7 +89,7 @@ runtime-display-suite: runtime-qt-build
 
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
 # The canonical header is an external sibling input in this checkout; clean CI hosts without
-# ../spec cannot run this local gate until the packaging/checkout contract is resolved.
+# ../spec cannot run this local gate until the checkout contract is resolved.
 runtime-abi-header-check:
     gcc -std=c11 -fsyntax-only ../spec/spec/orna_runtime_abi_v1.h
 

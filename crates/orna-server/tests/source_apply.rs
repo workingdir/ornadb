@@ -1,4 +1,4 @@
-//! Behaviour tests for the installed `orna source apply` command boundary.
+//! Behaviour tests for the local `orna source apply` command boundary.
 //!
 //! These tests drive the compiled `orna` binary via `env!("CARGO_BIN_EXE_orna")`
 //! with a cleared environment and a caller-owned scratch directory below
@@ -6,9 +6,8 @@
 //! exact before/after deep snapshot of the scratch directory. No instance or
 //! database is started, so every test stays fail-closed without Docker.
 //!
-//! Hostile endpoint-environment authority is not tested here. The installed
-//! product scenario exercises the real service identity under the packaged
-//! executable.
+//! Hostile endpoint-environment authority is not tested here. The source reader
+//! and local-host rejection paths are exercised without starting a database.
 
 #![cfg(unix)]
 
@@ -248,21 +247,6 @@ fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Whether this test process runs with the exact installed `orna` account.
-///
-/// The guard exists so the wrong-identity boundary test can never apply to a
-/// real default database when the suite itself runs as the service account.
-/// If the account is absent or the lookup fails, the boundary may proceed.
-fn runs_as_the_orna_account() -> bool {
-    let Ok(Some(orna)) = nix::unistd::User::from_name("orna") else {
-        return false;
-    };
-    nix::unistd::getuid() == orna.uid
-        && nix::unistd::geteuid() == orna.uid
-        && nix::unistd::getgid() == orna.gid
-        && nix::unistd::getegid() == orna.gid
-}
-
 fn require_read_rejection(output: &Output) {
     assert_eq!(output.status.code(), Some(1), "status: {output:?}");
     assert!(
@@ -446,31 +430,5 @@ fn invalid_utf8_source_fails_closed() {
     assert_eq!(
         after, before,
         "invalid UTF-8 must leave the scratch directory unchanged"
-    );
-}
-
-#[test]
-fn valid_source_is_read_then_fails_at_the_service_account_boundary() {
-    if runs_as_the_orna_account() {
-        eprintln!("skipping service-account boundary: suite runs as the orna account");
-        return;
-    }
-    let directory = TestDirectory::new("service-account").expect("scratch directory");
-    let valid = directory.write("valid.orna", VALID_SOURCE);
-    let before = snapshot(directory.path()).expect("snapshot arranged scratch");
-    let output = run_source_apply(directory.path(), &valid).expect("bounded invocation");
-    assert_eq!(output.status.code(), Some(1), "status: {output:?}");
-    assert!(
-        output.stdout.is_empty(),
-        "service-account failure must emit no standard output"
-    );
-    assert_eq!(
-        output.stderr, b"orna: source apply must run as the orna service account\n",
-        "service-account failure must print the exact public diagnostic"
-    );
-    let after = snapshot(directory.path()).expect("snapshot scratch after invocation");
-    assert_eq!(
-        after, before,
-        "the command must leave the scratch directory unchanged"
     );
 }

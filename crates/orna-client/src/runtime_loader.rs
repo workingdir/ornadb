@@ -1,4 +1,4 @@
-//! Trusted loading and descriptor validation for the production Qt runtime.
+//! Trusted loading and descriptor validation for the Qt runtime.
 //!
 //! The ABI declarations in this module intentionally mirror
 //! `spec/spec/orna_runtime_abi_v1.h`.  The raw declarations are only used at
@@ -885,8 +885,8 @@ impl RuntimeLibrary {
         }
         // SAFETY: loading a native library executes its initializers.  This
         // loader is the explicit trust boundary for an installed,
-        // authenticated runtime package; no untrusted database path reaches
-        // this method.  See libloading 0.9.0's safety contract:
+        // authenticated runtime; no untrusted database path reaches this
+        // method.  See libloading 0.9.0's safety contract:
         // https://docs.rs/libloading/0.9.0/libloading/struct.Library.html
         // The owner is retained below for all copied symbols.
         let library = unsafe { Library::new(path.as_ref()) }
@@ -928,9 +928,9 @@ impl RuntimeLibrary {
             descriptor,
         })
     }
-    /// Loads the validated Qt runtime from fixed host package paths.
+    /// Loads the validated Qt runtime from the fixed system path.
     ///
-    /// Only package-owned absolute paths are considered. No database value,
+    /// Only the system-owned absolute path is considered. No database value,
     /// current-directory lookup, or user override participates in selection.
     pub fn load_installed_qt() -> Result<Self, RuntimeLoadError> {
         if !Path::new(INSTALLED_QT_RUNTIME_PATH).is_file() {

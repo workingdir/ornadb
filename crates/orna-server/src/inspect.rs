@@ -226,12 +226,12 @@ impl fmt::Display for InstalledInspectError {
 
 impl std::error::Error for InstalledInspectError {}
 
-/// Runs one installed `orna inspect` command in-process.
+/// Runs one local `orna inspect` command in-process.
 ///
-/// The host inspection retains the package and instance guards for the
-/// complete authentication, epoch resolution, projection, trace, and
-/// rendering operation. All result records are written to `stdout` as JSON
-/// lines; failures are returned to the CLI, which writes them to `stderr`.
+/// The host inspection retains the instance guards for the complete
+/// authentication, epoch resolution, projection, trace, and rendering
+/// operation. All result records are written to `stdout` as JSON lines;
+/// failures are returned to the CLI, which writes them to `stderr`.
 ///
 /// # Errors
 ///
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn host_errors_use_a_stable_runtime_code() {
-        let host = map_host_error(EmbeddedHostError::InvalidPackageState);
+        let host = map_host_error(EmbeddedHostError::InvalidInstanceState);
         assert_eq!(host.kind(), InstalledInspectErrorKind::Internal);
         assert_eq!(host.code(), Some("inspect.runtime_unavailable"));
         assert_eq!(
