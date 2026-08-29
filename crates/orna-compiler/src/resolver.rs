@@ -92,8 +92,8 @@ use orna_core::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FunctionDefinition, FunctionDomain,
-        FunctionReturn, FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain, FunctionReturn,
+        FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
         QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind, ValueTypeMutability,
