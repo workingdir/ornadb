@@ -599,12 +599,15 @@ pub const STANDARD_SOURCE_V10_REVISION_ID: SourceRevisionId =
 pub const STD_CLI_SOURCE_LOGICAL_PATH: &str = "std/cli.orna";
 pub const STD_CLI_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(11));
 pub const STD_CLI_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(10));
-pub const STD_CLI_REPL_FUNCTION_ID: orna_core::FunctionId =
-    orna_core::FunctionId::from_bytes(reserved_id(0x1C));
-pub const STD_CLI_REPL_FUNCTION_REVISION_ID: orna_core::FunctionRevisionId =
-    orna_core::FunctionRevisionId::from_bytes(reserved_id(0x1C));
+pub const STD_CLI_REPL_FUNCTION_ID: FunctionId = FunctionId::from_bytes(reserved_id(0x1C));
+pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes(reserved_id(0x1C));
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
 const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
+const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+const ACCEPTED_V10_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+const ACCEPTED_V10_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+const ACCEPTED_V10_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
 const ACCEPTED_V9_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
 const ACCEPTED_V9_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
 const ACCEPTED_V9_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
@@ -1994,6 +1997,49 @@ impl StandardLibraryV9Manifest {
         STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
     }
 
+/// The source-independent facts required to recognise `orna.std/10`.
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV10Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV10Manifest {
+    pub const fn standard_library_version(&self) -> &'static str { STANDARD_LIBRARY_V10_VERSION_IDENTITY }
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId { STANDARD_LIBRARY_V10_REVISION_ID }
+    pub const fn language_version(&self) -> &'static str { LANGUAGE_VERSION_IDENTITY }
+    pub const fn source_bundle(&self) -> SourceBundleId { STANDARD_SOURCE_V10_BUNDLE_ID }
+    pub const fn source_revision(&self) -> SourceRevisionId { STANDARD_SOURCE_V10_REVISION_ID }
+    pub const fn catalogue(&self) -> &CatalogueSnapshot { &self.catalogue }
+}
+
+/// Builds and validates the append-only V10 catalogue over V9.
+pub fn standard_library_v10_manifest() -> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
+    let version_nine = standard_library_v9_manifest()?;
+    let mut schemas = version_nine.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(STD_CLI_SCHEMA_ID, semantic_name("std.cli", ["std", "cli"])?));
+    let mut functions = version_nine.catalogue().functions().to_vec();
+    functions.push(FunctionDefinition::new(
+        STD_CLI_REPL_FUNCTION_ID,
+        semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
+        STD_CLI_REPL_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    ));
+    functions.sort_by_key(|function| function.id());
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V10_REVISION_ID,
+        schemas,
+        version_nine.catalogue().object_types().to_vec(),
+        version_nine.catalogue().value_types().to_vec(),
+        version_nine.catalogue().type_bindings().to_vec(),
+        functions,
+    ).map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    Ok(StandardLibraryV10Manifest { catalogue })
+}
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
