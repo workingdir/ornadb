@@ -6,7 +6,6 @@ use std::{
 use orna_protocol::CallFailure;
 
 mod cli;
-mod package_maintenance;
 mod source_check;
 
 use cli::{Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help};
@@ -27,15 +26,6 @@ use std::{ffi::OsString, path::PathBuf};
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    if let Some(result) = package_maintenance::run_if_selected(arguments.len()) {
-        return match result {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
-        };
-    }
     let Some(parsed) = parse_invocation(arguments) else {
         write_stderr_line(USAGE);
         return ExitCode::from(2);
@@ -91,13 +81,6 @@ fn main() -> ExitCode {
             }
         },
         Command::BackendShell => match orna_server::run_backend_shell() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
-        },
-        Command::Upgrade => match orna_server::run_embedded_upgrade() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 write_stderr_line(&error.to_string());
@@ -459,18 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_exact_server_commands() {
+    fn accepts_the_user_facing_server_commands() {
         assert_eq!(
             parse_command(arguments(&["orna", "server", "run"])),
-            Some(Command::Run)
+            Some(Command::Run),
         );
         assert_eq!(
             parse_command(arguments(&["orna", "server", "backend-shell"])),
-            Some(Command::BackendShell)
-        );
-        assert_eq!(
-            parse_command(arguments(&["orna", "server", "upgrade"])),
-            Some(Command::Upgrade)
+            Some(Command::BackendShell),
         );
     }
 
@@ -653,17 +632,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_global_runtime_override_on_server_upgrade() {
+    fn rejects_retired_server_upgrade_command() {
         assert_eq!(
-            parse_command(arguments(&[
-                "orna",
-                "--runtime",
-                "tty",
-                "server",
-                "upgrade"
-            ])),
+            parse_command(arguments(&["orna", "server", "upgrade"])),
             None,
-            "runtime override must be rejected for server upgrade"
+        );
+        assert_eq!(
+            parse_command(arguments(&["orna", "server", "upgrade", "--help"])),
+            None,
         );
     }
 
@@ -2006,10 +1982,6 @@ mod tests {
             (vec!["orna", "help", "server"], HelpTopic::Server),
             (vec!["orna", "help", "server", "run"], HelpTopic::ServerRun),
             (
-                vec!["orna", "help", "server", "upgrade"],
-                HelpTopic::ServerUpgrade,
-            ),
-            (
                 vec!["orna", "help", "server", "backend-shell"],
                 HelpTopic::ServerBackendShell,
             ),
@@ -2024,10 +1996,6 @@ mod tests {
             (
                 vec!["orna", "server", "run", "--help"],
                 HelpTopic::ServerRun,
-            ),
-            (
-                vec!["orna", "server", "upgrade", "--help"],
-                HelpTopic::ServerUpgrade,
             ),
             (
                 vec!["orna", "server", "backend-shell", "--help"],
