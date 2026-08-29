@@ -12,8 +12,7 @@ use lsp_types::{
 };
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
-use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot};
+use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
@@ -35,10 +34,9 @@ impl StandardLibrary {
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
-        let snapshot =
-            retained_standard_library_v9_snapshot().map_err(|error| error.to_string())?;
+        let snapshot = retained_standard_library_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_v9_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -77,27 +75,28 @@ pub fn check_document(
     let Some(standard) = standard else {
         return syntax_diagnostics(document, mapper);
     };
-    let bundle = match SourceBundle::new([SourceUnit::new(
-        document.logical_path(),
-        document.text.clone(),
-    )]) {
-        Ok(bundle) => bundle,
-        Err(_) => return syntax_diagnostics(document, mapper),
-    };
+    let logical_path = document.logical_path();
+    let bundle =
+        match SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())]) {
+            Ok(bundle) => bundle,
+            Err(_) => return syntax_diagnostics(document, mapper),
+        };
     let report = match check_new_application(&bundle, &standard.checked) {
         Ok(report) => report,
         Err(_) => return syntax_diagnostics(document, mapper),
     };
-    let logical_path = document.logical_path();
     report
         .diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper))
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri))
         .collect()
 }
-
-fn compiler_diagnostic(diagnostic: &CompilerDiagnostic, mapper: &PositionMapper<'_>) -> Diagnostic {
+fn compiler_diagnostic(
+    diagnostic: &CompilerDiagnostic,
+    mapper: &PositionMapper<'_>,
+    uri: &lsp_types::Uri,
+) -> Diagnostic {
     let span = SourceSpan {
         start: diagnostic.location().span().start(),
         end: diagnostic.location().span().end(),
@@ -111,10 +110,24 @@ fn compiler_diagnostic(diagnostic: &CompilerDiagnostic, mapper: &PositionMapper<
         code_description: None,
         source: Some("orna".to_owned()),
         message: diagnostic.message().to_owned(),
-        related_information: None,
+        related_information: Some(vec![DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: mapper.range(&span),
+            },
+            message: diagnostic_help(diagnostic),
+        }]),
         tags: None,
         data: None,
     }
+}
+
+fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
+    format!(
+        "{} {}",
+        diagnostic.code().as_str(),
+        diagnostic.code().summary()
+    )
 }
 
 /// Returns the outline symbols of one parsed document.

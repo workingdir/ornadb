@@ -23,18 +23,16 @@ use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    StandardLibraryError,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, StandardLibraryError,
     retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
     retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
     retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
     retained_standard_library_v7_snapshot, retained_standard_library_v8_snapshot,
-    retained_standard_library_v9_snapshot, retained_standard_library_v9_snapshot,
-    verify_standard_library_snapshot, verify_standard_library_v2_snapshot,
-    verify_standard_library_v3_snapshot, verify_standard_library_v4_snapshot,
-    verify_standard_library_v5_snapshot, verify_standard_library_v6_snapshot,
-    verify_standard_library_v7_snapshot, verify_standard_library_v8_snapshot,
-    verify_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
+    retained_standard_library_v9_snapshot, verify_standard_library_snapshot,
+    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+    verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
+    verify_standard_library_v6_snapshot, verify_standard_library_v7_snapshot,
+    verify_standard_library_v8_snapshot, verify_standard_library_v9_snapshot,
 };
 use serde::Serialize;
 
@@ -50,16 +48,28 @@ pub enum InstalledSourceApplyOutcome {
     Applied(InstalledSourceApplySuccess),
 }
 
-/// Ordered compiler diagnostics rendered with the source-check contract.
+/// Ordered compiler diagnostics rendered for machine and terminal output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSourceApplyDiagnostics {
     bytes: Vec<u8>,
+    human_bytes: Vec<u8>,
+    coloured_bytes: Vec<u8>,
 }
 
 impl InstalledSourceApplyDiagnostics {
     /// Returns the exact diagnostic lines, including their final line feeds.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the source-context diagnostic report without terminal colour.
+    pub fn human_bytes(&self) -> &[u8] {
+        &self.human_bytes
+    }
+
+    /// Returns the source-context diagnostic report with terminal colour.
+    pub fn coloured_bytes(&self) -> &[u8] {
+        &self.coloured_bytes
     }
 }
 
@@ -331,6 +341,16 @@ async fn apply_source_bundle(
         return Ok(InstalledSourceApplyOutcome::Diagnostics(
             InstalledSourceApplyDiagnostics {
                 bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
+                human_bytes: source_diagnostics::render_human_diagnostics(
+                    report.parse_report(),
+                    report.diagnostics(),
+                    false,
+                ),
+                coloured_bytes: source_diagnostics::render_human_diagnostics(
+                    report.parse_report(),
+                    report.diagnostics(),
+                    true,
+                ),
             },
         ));
     }
