@@ -38,8 +38,9 @@ use orna_core::{
     inspect_carrier::{InspectCarrierEnvelope, InspectCarrierKind},
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
-        Sha256Digest, StandardExecutable, VerifiedStandardLibrarySnapshot,
+        ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+        FunctionSemanticHashVersion, RevisionPair, Sha256Digest, StandardExecutable,
+        VerifiedStandardLibrarySnapshot,
     },
     security::{AuthenticatedSessionBinding, AuthorisedInvocation, InvocationTarget, TargetClass},
     state::{
@@ -2829,6 +2830,34 @@ fn source_metadata_type_id(
                 .find(|definition| definition.representation_contract() == contract)
                 .map(|definition| definition.id())
         }
+    }
+}
+
+fn source_metadata_body_kind(
+    artifact: &ExecutableArtifact,
+) -> orna_core::source_metadata::SourceBodyKind {
+    match artifact.version() {
+        EXPRESSION_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Expression,
+        PROCEDURAL_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Procedural,
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION => {
+            orna_core::source_metadata::SourceBodyKind::ControlFlow
+        }
+        STATE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::State,
+        OPAQUE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::ExternalContract,
+        _ => orna_core::source_metadata::SourceBodyKind::Unknown,
+    }
+}
+
+fn source_metadata_return_metadata(
+    active: &ActiveDatabaseRevision,
+    return_type: &FunctionReturn,
+) -> Option<orna_core::source_metadata::SourceReturnMetadata> {
+    match return_type {
+        FunctionReturn::Single(resolved_type) => source_metadata_type_id(active, *resolved_type)
+            .map(orna_core::source_metadata::SourceReturnMetadata::Single),
+        FunctionReturn::Stream(resolved_type) => source_metadata_type_id(active, *resolved_type)
+            .map(orna_core::source_metadata::SourceReturnMetadata::Stream),
+        FunctionReturn::Rows(_) => None,
     }
 }
 
@@ -10078,10 +10107,8 @@ fn static_control_flow_scalar_for_type(
     }
 }
 
-// Evaluator calls retain explicit context and state parameters for recursive semantics.
-#[allow(clippy::too_many_arguments)]
-// ClientExecutionError retains its accepted public context and source diagnostics.
-#[allow(clippy::result_large_err)]
+
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn evaluate_expression_with_fuel(
     active: &ActiveDatabaseRevision,
     expression: &ClientExpressionNode,
@@ -10585,7 +10612,9 @@ fn evaluate_expression_with_fuel(
                     )
                 })
                 .collect();
-            let metadata = orna_core::source_metadata::SourceFunctionMetadata::new(
+            let body_kind = source_metadata_body_kind(revision.artifact());
+            let return_metadata = source_metadata_return_metadata(active, function.return_type());
+            let metadata = orna_core::source_metadata::SourceFunctionMetadata::new_with_signature(
                 function.id(),
                 revision.id(),
                 function.name().to_string(),
@@ -10593,6 +10622,8 @@ fn evaluate_expression_with_fuel(
                 declaration.byte_start(),
                 declaration.byte_end(),
                 revision.declaration_content_hash(),
+                body_kind,
+                return_metadata,
                 parameters,
                 references,
             )
@@ -12313,8 +12344,7 @@ mod tests {
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
-            ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
+            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
             RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
             StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
