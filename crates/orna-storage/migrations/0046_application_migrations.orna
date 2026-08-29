@@ -42,10 +42,14 @@ MIGRATION 46 application_migrations {
 
     TABLE SQLITE _orna_kernel.catalogue_revisions {
         COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN parent_catalogue_revision_id BYTES NULL;
         COLUMN catalogue_hash BYTES NOT NULL;
 
         PRIMARY KEY (catalogue_revision_id);
         CHECK (octet_length(catalogue_revision_id) = 16);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (parent_catalogue_revision_id IS NULL OR length(parent_catalogue_revision_id) = 16);
         CHECK (octet_length(catalogue_hash) = 32);
     }
 
