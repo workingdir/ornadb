@@ -59,9 +59,9 @@ use orna_core::{
 };
 use orna_protocol::{ValueCodecError, decode_active_value, decode_rows, encode_active_value};
 use orna_standard::{
-    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STANDARD_LIBRARY_V8_REVISION_ID,
-    STANDARD_LIBRARY_V9_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID,
-    TERMINAL_DOCUMENT_MAGIC,
+    BYTE_STREAM_MAGIC, INTEGER_TYPE_ID, JSON_MAGIC, STANDARD_LIBRARY_V9_REVISION_ID,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_IO_BYTE_STREAM_TYPE_ID,
+    STD_TERMINAL_DOCUMENT_TYPE_ID, TERMINAL_DOCUMENT_MAGIC,
 };
 use tokio::sync::mpsc;
 use tokio_postgres::{
@@ -2913,9 +2913,12 @@ fn retained_terminal_table_target(
     let Some(standard) = active.catalogue_hash_context().standard() else {
         return Ok(None);
     };
-    if standard.revision() != STANDARD_LIBRARY_V8_REVISION_ID
-        && standard.revision() != STANDARD_LIBRARY_V9_REVISION_ID
-    {
+    if !matches!(
+        standard.revision(),
+        STANDARD_LIBRARY_V8_REVISION_ID
+            | STANDARD_LIBRARY_V9_REVISION_ID
+           
+    ) {
         return Ok(None);
     }
 

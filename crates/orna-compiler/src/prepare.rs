@@ -67,7 +67,8 @@ use orna_core::{
         DeployableRevision, DeployableRevisionContent, DeployableRevisionInput, ExecutableArtifact,
         ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
         FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair, Sha256Digest,
-        SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     system::INVOCATION_CARRIERS,
@@ -75,12 +76,13 @@ use orna_core::{
 };
 
 use crate::{
-    CheckReport, CheckedBundle, CheckedDefinitionReferenceTarget, CheckedExpressionId,
+    CheckReport, CheckedBundle, CheckedDefinitionReferenceTarget,
+    CheckedExpressionId,
     CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId, CheckedTypeId,
     CompilerDiagnostic, ConstantValue, ParseReport, STD_BOOLEAN_TYPE_ID,
     STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_INTEGER_TYPE_ID, SemanticType, SourceLocation,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
-    StandardApplicationContextError, check_standard_application,
+    StandardApplicationCheckContext, StandardApplicationCheckReport, StandardApplicationContextError,
+    check_standard_application,
 };
 use crate::{
     mutation::{
@@ -98,7 +100,7 @@ use crate::{
     },
 };
 
-/// One encoded SERVER artifact with the language version that defines it.
+/// One encoded CLIENT or SERVER artifact with the language version that defines it.
 #[derive(Clone)]
 struct PreparedFunctionArtifact {
     artifact: ExecutableArtifact,
