@@ -865,6 +865,17 @@ pub struct PhysicalPlan {
 }
 
 impl PhysicalPlan {
+    /// Constructs an empty physical plan for a historical baseline.
+    ///
+    /// The baseline records revision lineage when the database predates the
+    /// physical planner; it intentionally contains no replayable operations.
+    pub const fn empty() -> Self {
+        Self {
+            create_objects: Vec::new(),
+            add_field: None,
+        }
+    }
+
     /// Returns new durable object relations in candidate catalogue order.
     pub fn create_objects(&self) -> &[CreateObject] {
         &self.create_objects

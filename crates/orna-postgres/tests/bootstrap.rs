@@ -15,6 +15,7 @@ use orna_core::{
         FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
         ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
     },
+    physical::{PhysicalMigrationArtifact, PhysicalPlan},
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
         DefinitionReferenceKind, DefinitionReferenceTarget, ExecutableArtifact,
@@ -23,6 +24,7 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar},
 };
+use orna_storage::MigrationLedgerEntry;
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use sha2::{Digest, Sha256};
 use support::{TestDatabase, TestResult, failure, with_test_database};
@@ -306,9 +308,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "application_migrations",
         include_str!("../migrations/0046_application_migrations.sql"),
     ),
+    (
+        47,
+        "application migration ledger baseline",
+        include_str!("../migrations/0047_application_migration_ledger_baseline.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
+const APPLICATION_MIGRATION_LEDGER_BASELINE_STEP: &[u8] =
+    b"application-migration-ledger-baseline/v1";
 const HASH_CONTRACT_TABLES: &[&str] = &[
     "source_units",
     "source_bundles",
@@ -485,13 +494,13 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
 #[test]
 fn legacy_migration_epoch_is_order_contiguous() -> TestResult<()> {
     require(
-        MIGRATIONS.len() == 46,
+        MIGRATIONS.len() == 47,
         format!(
-            "migration registry has {} entries; expected 46",
+            "migration registry has {} entries; expected 47",
             MIGRATIONS.len()
         ),
     )?;
-    for (index, (version, _, _)) in MIGRATIONS[..45].iter().enumerate() {
+    for (index, (version, _, _)) in MIGRATIONS.iter().enumerate() {
         require(
             *version == (index + 1) as i64,
             format!(
@@ -530,6 +539,18 @@ fn write_reference_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
         "e831811c0f42d6f4b3ab2601cf480fabaaed03b5547e2615400b9eec4b6b53bf"
+    );
+}
+
+#[test]
+fn application_migration_baseline_checksum_binds_v46_and_v47_contracts() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(46, MIGRATIONS[45].2)),
+        "bcbe71c0c5d2c18890f1aacab9e09389ffdba3f2789f88f7e0df95562fad6685"
+    );
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(47, MIGRATIONS[46].2)),
+        "ac92c5acb0388c652ab130db481ad051f1b893e91d0d232e35001d5ffaa0345d"
     );
 }
 
@@ -1227,6 +1248,107 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
             "v21-v45 recovery does not preserve the active revision pair",
         )?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_backfills_the_legacy_application_migration_ledger() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let session = database.open().await?;
+        let setup_result = async {
+            seed_initial_catalogue_client(session.client()).await?;
+            apply_and_register_migrations(session.client(), &MIGRATIONS[1..45]).await?;
+            seed_legacy_child_revision_client(session.client()).await
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (setup_result, shutdown_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+            (Err(setup_error), Err(shutdown_error)) => {
+                return Err(failure(format!(
+                    "legacy child setup failed: {setup_error}; setup driver shutdown failed: {shutdown_error}"
+                )));
+            }
+        }
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+        let ledger = kernel.read_ledger().await?;
+        require(
+            ledger.len() == 1
+                && ledger[0].expected_base()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([2; 16]),
+                        CatalogueRevisionId::from_bytes([3; 16]),
+                    )
+                && ledger[0].candidate_pair()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x42; 16]),
+                        CatalogueRevisionId::from_bytes([0x43; 16]),
+                    ),
+            format!("legacy ledger baseline was not backfilled correctly: {ledger:?}"),
+        )?;
+        kernel.recover().await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_prepends_legacy_baseline_before_existing_ledger_suffix() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let session = database.open().await?;
+        let setup_result = async {
+            seed_initial_catalogue_client(session.client()).await?;
+            apply_and_register_migrations(session.client(), &MIGRATIONS[1..46]).await?;
+            seed_legacy_child_revision_client(session.client()).await?;
+            seed_legacy_grandchild_revision_client(session.client()).await
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (setup_result, shutdown_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+            (Err(setup_error), Err(shutdown_error)) => {
+                return Err(failure(format!(
+                    "legacy suffix setup failed: {setup_error}; setup driver shutdown failed: {shutdown_error}"
+                )));
+            }
+        }
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+        let ledger = kernel.read_ledger().await?;
+        require(
+            ledger.len() == 2
+                && ledger[0].expected_base()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([2; 16]),
+                        CatalogueRevisionId::from_bytes([3; 16]),
+                    )
+                && ledger[0].candidate_pair()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x42; 16]),
+                        CatalogueRevisionId::from_bytes([0x43; 16]),
+                    )
+                && ledger[1].expected_base()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x42; 16]),
+                        CatalogueRevisionId::from_bytes([0x43; 16]),
+                    )
+                && ledger[1].candidate_pair()
+                    == RevisionPair::new(
+                        SourceRevisionId::from_bytes([0x52; 16]),
+                        CatalogueRevisionId::from_bytes([0x53; 16]),
+                    ),
+            format!("legacy baseline was not prepended to the suffix: {ledger:?}"),
+        )?;
+        kernel.recover().await?;
         Ok(())
     })
     .await
@@ -5112,9 +5234,16 @@ async fn inspect_migrations(client: &Client) -> TestResult<()> {
 fn expected_migration_checksum(version: i64, sql: &str) -> Vec<u8> {
     let mut hash = Sha256::new();
     hash.update(sql.as_bytes());
-    if version == 4 {
-        hash.update(MIGRATION_DATA_STEP_SEPARATOR);
-        hash.update(CANONICAL_HASH_V1_EMPTY_SEED_STEP);
+    match version {
+        4 => {
+            hash.update(MIGRATION_DATA_STEP_SEPARATOR);
+            hash.update(CANONICAL_HASH_V1_EMPTY_SEED_STEP);
+        }
+        47 => {
+            hash.update(MIGRATION_DATA_STEP_SEPARATOR);
+            hash.update(APPLICATION_MIGRATION_LEDGER_BASELINE_STEP);
+        }
+        _ => {}
     }
     hash.finalize().to_vec()
 }
@@ -8364,6 +8493,153 @@ async fn seed_initial_catalogue_client(client: &Client) -> TestResult<()> {
         )
         .await?;
     Ok(())
+}
+
+async fn seed_legacy_child_revision_client(client: &Client) -> TestResult<()> {
+    seed_legacy_descendant_revision_client(
+        client,
+        SourceBundleId::from_bytes([0x41; 16]),
+        SourceRevisionId::from_bytes([0x42; 16]),
+        CatalogueRevisionId::from_bytes([0x43; 16]),
+        SourceRevisionId::from_bytes([2; 16]),
+        CatalogueRevisionId::from_bytes([3; 16]),
+        false,
+    )
+    .await
+}
+
+async fn seed_legacy_grandchild_revision_client(client: &Client) -> TestResult<()> {
+    seed_legacy_descendant_revision_client(
+        client,
+        SourceBundleId::from_bytes([0x51; 16]),
+        SourceRevisionId::from_bytes([0x52; 16]),
+        CatalogueRevisionId::from_bytes([0x53; 16]),
+        SourceRevisionId::from_bytes([0x42; 16]),
+        CatalogueRevisionId::from_bytes([0x43; 16]),
+        true,
+    )
+    .await
+}
+
+async fn seed_legacy_descendant_revision_client(
+    client: &Client,
+    bundle: SourceBundleId,
+    source: SourceRevisionId,
+    catalogue: CatalogueRevisionId,
+    parent_source: SourceRevisionId,
+    parent_catalogue: CatalogueRevisionId,
+    append_ledger: bool,
+) -> TestResult<()> {
+    let bundle_hash = source_bundle_digest(&[])?;
+    let source_hash = source_revision_record_digest(bundle, Some(parent_source), bundle_hash)?;
+    let catalogue_snapshot = CatalogueSnapshot::new(catalogue, Vec::new(), Vec::new())?;
+    let catalogue_hash = catalogue_digest(&catalogue_snapshot, &[], &[], &[], &[])?;
+    let bundle_bytes = bundle.to_bytes().to_vec();
+    let source_bytes = source.to_bytes().to_vec();
+    let catalogue_bytes = catalogue.to_bytes().to_vec();
+    let parent_source_bytes = parent_source.to_bytes().to_vec();
+    let parent_catalogue_bytes = parent_catalogue.to_bytes().to_vec();
+    let bundle_hash_bytes = bundle_hash.to_bytes().to_vec();
+    let source_hash_bytes = source_hash.to_bytes().to_vec();
+    let catalogue_hash_bytes = catalogue_hash.to_bytes().to_vec();
+
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+             VALUES ($1, $2)",
+            &[&bundle_bytes, &bundle_hash_bytes],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_revisions
+                (id, parent_source_revision_id, bundle_id, content_hash)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &source_bytes,
+                &parent_source_bytes,
+                &bundle_bytes,
+                &source_hash_bytes,
+            ],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_revisions
+                (id, source_revision_id, parent_catalogue_revision_id, content_hash)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &catalogue_bytes,
+                &source_bytes,
+                &parent_catalogue_bytes,
+                &catalogue_hash_bytes,
+            ],
+        )
+        .await?;
+    let copied_authorities = client
+        .execute(
+            "INSERT INTO _orna_kernel.invocation_target_authorities
+                (catalogue_revision_id, function_id, target_class,
+                 function_revision_id, standard_library_revision_id)
+             SELECT $1, function_id, target_class,
+                    function_revision_id, standard_library_revision_id
+             FROM _orna_kernel.invocation_target_authorities
+             WHERE catalogue_revision_id = $2",
+            &[&catalogue_bytes, &parent_catalogue_bytes],
+        )
+        .await?;
+    require(
+        copied_authorities > 0,
+        "legacy descendant fixture did not inherit invocation target authorities",
+    )?;
+    if append_ledger {
+        let artifact = PhysicalMigrationArtifact::from_plan(
+            RevisionPair::new(parent_source, parent_catalogue),
+            RevisionPair::new(source, catalogue),
+            &PhysicalPlan::empty(),
+        )?;
+        let entry = MigrationLedgerEntry::from_artifact(&artifact);
+        let ordinal = 0_i64;
+        let version = i64::from(entry.version());
+        let expected_source = entry.expected_base().source().to_bytes().to_vec();
+        let expected_catalogue = entry.expected_base().catalogue().to_bytes().to_vec();
+        let candidate_source = entry.candidate_pair().source().to_bytes().to_vec();
+        let candidate_catalogue = entry.candidate_pair().catalogue().to_bytes().to_vec();
+        let digest = entry.digest().to_bytes().to_vec();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.application_migrations
+                    (ordinal, format, version,
+                     expected_source_revision_id, expected_catalogue_revision_id,
+                     candidate_source_revision_id, candidate_catalogue_revision_id,
+                     canonical_bytes, digest)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &ordinal,
+                    &entry.format(),
+                    &version,
+                    &expected_source,
+                    &expected_catalogue,
+                    &candidate_source,
+                    &candidate_catalogue,
+                    &entry.canonical_bytes(),
+                    &digest,
+                ],
+            )
+            .await?;
+    }
+    let updated = client
+        .execute(
+            "UPDATE _orna_kernel.active_revision
+             SET source_revision_id = $1, catalogue_revision_id = $2
+             WHERE singleton = true",
+            &[&source_bytes, &catalogue_bytes],
+        )
+        .await?;
+    require(
+        updated == 1,
+        "legacy descendant fixture did not move the active revision pointer",
+    )
 }
 
 async fn reject_migration_history(

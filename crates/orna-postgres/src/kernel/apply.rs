@@ -384,13 +384,22 @@ async fn load_migration_ledger(
     Ok(entries)
 }
 
-async fn load_and_validate_migration_ledger(
+pub(crate) async fn load_and_validate_migration_ledger(
     transaction: &Transaction<'_>,
     active: Option<&ActiveDatabaseRevision>,
 ) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
     let entries = load_migration_ledger(transaction).await?;
     validate_ledger_chain(&entries, active)?;
-    validate_ledger_registries(transaction, &entries).await?;
+    validate_ledger_registries(transaction, &entries, true).await?;
+    Ok(entries)
+}
+
+pub(crate) async fn load_and_validate_migration_ledger_suffix(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let entries = load_migration_ledger(transaction).await?;
+    validate_ledger_chain(&entries, None)?;
+    validate_ledger_registries(transaction, &entries, false).await?;
     Ok(entries)
 }
 
@@ -427,10 +436,10 @@ fn validate_ledger_chain(
     }
     Ok(())
 }
-
 async fn validate_ledger_registries(
     transaction: &Transaction<'_>,
     entries: &[MigrationLedgerEntry],
+    require_root: bool,
 ) -> Result<(), PostgresKernelError> {
     let Some(first) = entries.first() else {
         return Ok(());
@@ -465,7 +474,7 @@ async fn validate_ledger_registries(
         "source parent identity must be null or 16 bytes",
     )?
     .map(SourceRevisionId::from_bytes);
-    if first_source_parent.is_some() {
+    if require_root && first_source_parent.is_some() {
         return Err(first_source_record
             .invariant("the first ledger expected source revision must be a root"));
     }
@@ -513,7 +522,7 @@ async fn validate_ledger_registries(
         "catalogue parent identity must be null or 16 bytes",
     )?
     .map(CatalogueRevisionId::from_bytes);
-    if first_catalogue_parent.is_some() {
+    if require_root && first_catalogue_parent.is_some() {
         return Err(first_catalogue_record
             .invariant("the first ledger expected catalogue revision must be a root"));
     }
