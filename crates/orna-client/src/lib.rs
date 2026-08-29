@@ -60,6 +60,8 @@ use orna_core::{
 /// The fixed amount of execution fuel granted to each root CLIENT
 /// evaluation.  A plan cannot increase or disable this limit.
 pub const DEFAULT_CLIENT_EXECUTION_FUEL: u64 = 100_000;
+/// The maximum command size accepted by the native session evaluator.
+const MAX_CLIENT_COMMAND_BYTES: usize = 16 * 1024;
 /// The largest number of queued stream items retained by one CLIENT resource.
 /// This matches the largest single completion batch, keeping one broker-sized
 /// batch available while requiring consumption before another batch is retained.
@@ -10503,9 +10505,80 @@ fn evaluate_expression_with_fuel(
             })?;
             Ok(RuntimeValue::Opaque(value))
         }
-        ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => Err(Box::new(
-            expression_error(context, ClientExpressionError::InvalidCall),
-        )),
+        ClientExpressionNode::Input => {
+            let Some(executor) = executor.as_deref_mut() else {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InputUnavailable,
+                )));
+            };
+            let value = executor.read_input(context).map_err(|_| {
+                Box::new(expression_error(
+                    context,
+                    ClientExpressionError::InputUnavailable,
+                ))
+            })?;
+            if matches!(&value, RuntimeValue::Text(_)) {
+                Ok(value)
+            } else {
+                Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                )))
+            }
+        }
+        ClientExpressionNode::Evaluate { expression } => {
+            let command = evaluate_expression_with_fuel(
+                active,
+                expression,
+                context,
+                lineage,
+                arguments,
+                declarations,
+                grants,
+                state,
+                depth,
+                principal,
+                executor,
+                local_environment,
+                fuel,
+            )?;
+            let RuntimeValue::Text(command) = command else {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                )));
+            };
+            if command.len() > MAX_CLIENT_COMMAND_BYTES {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::DynamicInvocation,
+                )));
+            }
+            let Some(executor) = executor.as_deref_mut() else {
+                return Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::DynamicInvocation,
+                )));
+            };
+            let value = executor.evaluate_command(context, &command).map_err(|_| {
+                Box::new(expression_error(
+                    context,
+                    ClientExpressionError::DynamicInvocation,
+                ))
+            })?;
+            if matches!(
+                &value,
+                RuntimeValue::Opaque(value) if value.opaque_type() == STD_UI_TYPE_ID
+            ) {
+                Ok(value)
+            } else {
+                Err(Box::new(expression_error(
+                    context,
+                    ClientExpressionError::TypeMismatch,
+                )))
+            }
+        }
         ClientExpressionNode::ExternalContract { identity } => {
             if let Some(spec) = standard_ui_constructor_spec(active, context, identity) {
                 return evaluate_standard_ui_constructor(active, context, spec, arguments);
@@ -12099,7 +12172,7 @@ mod tests {
         ClientResourceStatus, ClientStateStore, ControlFlowBinaryOperator,
         DeterministicClientResourceExecutor, ResourceKind, action_target_result_type, capability,
         complete_client_action, decode_action_payload, encode_action_payload,
-        trigger_client_action,
+        evaluate_client_function_with_executor, trigger_client_action,
     };
     use orna_artifact::client_plan::{
         ActionTargetDomain, ClientExpressionNode, ControlFlowClientPlan, InspectProjection,
@@ -12226,6 +12299,9 @@ mod tests {
                     self.pending_identity.take().unwrap_or(request).pending()
                 }
             }
+        }
+        fn read_input(&mut self, _context: ClientExecutionContext) -> Result<RuntimeValue, String> {
+            Ok(RuntimeValue::Text("from session".to_owned()))
         }
 
         fn cancel(&mut self, request: ClientResourceRequest) -> ClientResourceCompletion {
@@ -22976,6 +23052,21 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         assert_eq!(result.context().pair(), active.pair());
     }
 
+    #[test]
+    fn evaluates_native_session_input_expression() {
+        let prepared = prepared_client_source(
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.prompt() RETURNS TEXT RETURN std.cli.input();",
+        );
+        let active = active_from_prepared_candidate(&prepared);
+        let function = active.catalogue().functions()[0].id();
+        let authorisation = authorise(active.pair(), function);
+        let mut executor = RecordingActionExecutor::new(Some(RuntimeValue::Boolean(true)));
+
+        let result = evaluate_client_function_with_executor(&active, &authorisation, &mut executor)
+            .expect("native session input evaluates");
+
+        assert_eq!(result.value(), &RuntimeValue::Text("from session".to_owned()));
+    }
     #[test]
     fn evaluates_prepared_version_two_client_constants() {
         for (literal, expected) in [("TRUE", true), ("FALSE", false)] {
