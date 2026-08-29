@@ -108,6 +108,7 @@ use orna_core::{
         VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
+    system::SYS_SOURCE_FUNCTION_TYPE_ID,
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
@@ -6688,7 +6689,10 @@ fn client_expression_contains_await_or_resource(
             binding.ordinal == Some(*local)
                 && matches!(binding.kind, CheckedClientLocalKind::Resource(_))
         }),
-        CheckedClientExpression::String { .. }
+        CheckedClientExpression::SourceIntrospection { .. }
+        | CheckedClientExpression::Input { .. }
+        | CheckedClientExpression::Evaluate { .. }
+        | CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
         | CheckedClientExpression::Boolean { .. }
         | CheckedClientExpression::ParameterRead { .. }
@@ -6721,7 +6725,10 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
         | CheckedClientExpression::Parenthesized { expression, .. } => {
             client_expression_contains_inspect(expression)
         }
-        CheckedClientExpression::String { .. }
+        CheckedClientExpression::SourceIntrospection { .. }
+        | CheckedClientExpression::Input { .. }
+        | CheckedClientExpression::Evaluate { .. }
+        | CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
         | CheckedClientExpression::Boolean { .. }
         | CheckedClientExpression::ParameterRead { .. }
@@ -8883,6 +8890,32 @@ fn check_client_expression(
             arguments,
             span,
         } => {
+            if semantic_name(callee)
+                == QualifiedSemanticName::new(["sys", "source", "current"])
+                    .expect("sys.source.current is valid")
+            {
+                if !arguments.is_empty() {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        "sys.source.current takes no arguments",
+                        input.logical_path,
+                        span,
+                    ));
+                    return None;
+                }
+                return Some((
+                    CheckedClientExpression::SourceIntrospection {
+                        location: location(input.logical_path, span),
+                    },
+                    ClientExpressionType {
+                        semantic_type: SemanticType::Named(CheckedTypeId::Existing(
+                            SYS_SOURCE_FUNCTION_TYPE_ID,
+                        )),
+                        standard_value_type: None,
+                        result_shape: ClientExpressionResultShape::Value,
+                    },
+                ));
+            }
             let name = semantic_name(callee);
             if let Some(inspect) = check_inspect_call(
                 expression,

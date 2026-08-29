@@ -4384,9 +4384,7 @@ fn client_expression_locations<'a>(
         CheckedClientExpression::Inspect { operation } => {
             locations.push(operation.location());
             match operation {
-                CheckedInspectOperation::Snapshot {
-                    target, options, ..
-                } => {
+                CheckedInspectOperation::Snapshot { target, options, .. } => {
                     client_expression_locations(target, locations);
                     if let Some(options) = options {
                         client_expression_locations(options, locations);
@@ -4396,6 +4394,15 @@ fn client_expression_locations<'a>(
                     client_expression_locations(snapshot, locations);
                 }
             }
+        }
+        CheckedClientExpression::SourceIntrospection { location }
+        | CheckedClientExpression::Input { location } => locations.push(location),
+        CheckedClientExpression::Evaluate {
+            expression,
+            location,
+        } => {
+            locations.push(location);
+            client_expression_locations(expression, locations);
         }
         CheckedClientExpression::String { location, .. }
         | CheckedClientExpression::Integer { location, .. }
@@ -5817,22 +5824,20 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
             .arguments()
             .iter()
             .any(|(_, value)| client_expression_contains_action(value)),
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, value)| client_expression_contains_action(value)),
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot {
-                target, options, ..
-            } => {
+            CheckedInspectOperation::Snapshot { target, .. } => {
                 client_expression_contains_action(target)
-                    || options
-                        .as_deref()
-                        .is_some_and(client_expression_contains_action)
             }
             CheckedInspectOperation::Projection { snapshot, .. } => {
                 client_expression_contains_action(snapshot)
             }
         },
-        CheckedClientExpression::Call { arguments, .. } => arguments
-            .iter()
-            .any(|(_, value)| client_expression_contains_action(value)),
+        CheckedClientExpression::Evaluate { expression, .. } => {
+            client_expression_contains_action(expression)
+        }
         CheckedClientExpression::Concat { left, right, .. }
         | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_action(left) || client_expression_contains_action(right)
@@ -5841,7 +5846,9 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
         | CheckedClientExpression::Parenthesized { expression, .. } => {
             client_expression_contains_action(expression)
         }
-        CheckedClientExpression::String { .. }
+        CheckedClientExpression::Input { .. }
+        | CheckedClientExpression::SourceIntrospection { .. }
+        | CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
         | CheckedClientExpression::Boolean { .. }
         | CheckedClientExpression::ParameterRead { .. }
@@ -5853,47 +5860,27 @@ fn client_expression_contains_action(expression: &CheckedClientExpression) -> bo
 fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> bool {
     match expression {
         CheckedClientExpression::Inspect { .. } => true,
-        CheckedClientExpression::Await { expression, .. } => {
-            client_expression_contains_inspect(expression)
-        }
-        CheckedClientExpression::Call { arguments, .. } => arguments
-            .iter()
-            .any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Resource { operation } => operation
-            .arguments()
-            .iter()
-            .any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Action { operation } => operation
-            .arguments()
-            .iter()
-            .any(|(_, value)| client_expression_contains_inspect(value)),
-
-        CheckedClientExpression::Concat { left, right, .. }
-        | CheckedClientExpression::Binary { left, right, .. } => {
-            client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
-        }
-        CheckedClientExpression::Unary { expression, .. }
-        | CheckedClientExpression::Parenthesized { expression, .. } => {
-            client_expression_contains_inspect(expression)
-        }
-        CheckedClientExpression::String { .. }
-        | CheckedClientExpression::Integer { .. }
-        | CheckedClientExpression::Boolean { .. }
-        | CheckedClientExpression::ParameterRead { .. }
-        | CheckedClientExpression::LocalRead { .. }
-        | CheckedClientExpression::FieldPath { .. } => false,
+        CheckedClientExpression::Await { expression, .. }
+        | CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. }
+        | CheckedClientExpression::Evaluate { expression, .. } => client_expression_contains_inspect(expression),
+        CheckedClientExpression::Call { arguments, .. } => arguments.iter().any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Resource { operation } => operation.arguments().iter().any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Action { operation } => operation.arguments().iter().any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Concat { left, right, .. } | CheckedClientExpression::Binary { left, right, .. } => client_expression_contains_inspect(left) || client_expression_contains_inspect(right),
+        CheckedClientExpression::SourceIntrospection { .. } | CheckedClientExpression::Input { .. } | CheckedClientExpression::String { .. } | CheckedClientExpression::Integer { .. } | CheckedClientExpression::Boolean { .. } | CheckedClientExpression::ParameterRead { .. } | CheckedClientExpression::LocalRead { .. } | CheckedClientExpression::FieldPath { .. } => false,
     }
 }
 
 fn client_expression_contains_resource(expression: &CheckedClientExpression) -> bool {
     match expression {
-        CheckedClientExpression::Await { .. }
-        | CheckedClientExpression::Resource { .. }
-        | CheckedClientExpression::Action { .. } => true,
+        CheckedClientExpression::Await { expression, .. }
+        | CheckedClientExpression::Unary { expression, .. }
+        | CheckedClientExpression::Parenthesized { expression, .. } => {
+            client_expression_contains_resource(expression)
+        }
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot {
-                target, options, ..
-            } => {
+            CheckedInspectOperation::Snapshot { target, options, .. } => {
                 client_expression_contains_resource(target)
                     || options
                         .as_deref()
@@ -5906,15 +5893,17 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
         CheckedClientExpression::Call { arguments, .. } => arguments
             .iter()
             .any(|(_, argument)| client_expression_contains_resource(argument)),
+        CheckedClientExpression::Evaluate { expression, .. } => {
+            client_expression_contains_resource(expression)
+        }
+        CheckedClientExpression::Resource { .. } | CheckedClientExpression::Action { .. } => true,
         CheckedClientExpression::Concat { left, right, .. }
         | CheckedClientExpression::Binary { left, right, .. } => {
             client_expression_contains_resource(left) || client_expression_contains_resource(right)
         }
-        CheckedClientExpression::Unary { expression, .. }
-        | CheckedClientExpression::Parenthesized { expression, .. } => {
-            client_expression_contains_resource(expression)
-        }
-        CheckedClientExpression::String { .. }
+        CheckedClientExpression::SourceIntrospection { .. }
+        | CheckedClientExpression::Input { .. }
+        | CheckedClientExpression::String { .. }
         | CheckedClientExpression::Integer { .. }
         | CheckedClientExpression::Boolean { .. }
         | CheckedClientExpression::ParameterRead { .. }
@@ -7297,6 +7286,14 @@ impl<'a> CandidateBuilder<'a> {
                         .collect::<Result<Vec<_>, PrepareError>>()?,
                 }
             }
+            CheckedClientExpression::SourceIntrospection { .. } => {
+                ClientExpressionNode::SourceIntrospection
+            }
+            CheckedClientExpression::Input { .. } | CheckedClientExpression::Evaluate { .. } => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT session expressions are not supported in artefact plans",
+                });
+            }
             CheckedClientExpression::Unary {
                 operator,
                 expression,
@@ -7679,7 +7676,10 @@ impl<'a> CandidateBuilder<'a> {
                 }
                 calls.push((*function, location.clone()));
             }
-            CheckedClientExpression::Await { expression, .. } => {
+            CheckedClientExpression::Await { expression, .. }
+            | CheckedClientExpression::Unary { expression, .. }
+            | CheckedClientExpression::Parenthesized { expression, .. }
+            | CheckedClientExpression::Evaluate { expression, .. } => {
                 self.append_client_expression_call_references(expression, calls)?;
             }
             CheckedClientExpression::Resource { operation } => {
@@ -7708,11 +7708,10 @@ impl<'a> CandidateBuilder<'a> {
                 self.append_client_expression_call_references(left, calls)?;
                 self.append_client_expression_call_references(right, calls)?;
             }
-            CheckedClientExpression::Unary { expression, .. }
-            | CheckedClientExpression::Parenthesized { expression, .. } => {
-                self.append_client_expression_call_references(expression, calls)?;
-            }
-            CheckedClientExpression::String { .. }
+            CheckedClientExpression::Input { .. }
+            | CheckedClientExpression::Evaluate { .. }
+            | CheckedClientExpression::SourceIntrospection { .. }
+            | CheckedClientExpression::String { .. }
             | CheckedClientExpression::Integer { .. }
             | CheckedClientExpression::Boolean { .. }
             | CheckedClientExpression::ParameterRead { .. }
