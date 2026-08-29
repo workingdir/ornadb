@@ -2056,11 +2056,19 @@ mod tests {
     }
 
     #[test]
-    fn help_text_is_short_and_describes_the_session_workflow() {
+    fn help_text_describes_the_direct_session_commands() {
         let top_level = help_text(HelpTopic::TopLevel);
         assert!(top_level.contains("Orna command line"));
         assert!(top_level.contains("function-backed REPL"));
-        for command in ["invoke", "source", "inspect", "repl", "--daemon", "--db"] {
+        for command in [
+            "invoke",
+            "repl",
+            "source",
+            "inspect",
+            "--daemon",
+            "--db",
+            "--runtime",
+        ] {
             assert!(
                 top_level.contains(command),
                 "{command} is missing from top-level help",
@@ -2068,6 +2076,7 @@ mod tests {
         }
         assert!(!top_level.contains("security ..."));
         assert!(!top_level.contains("runtime ..."));
+        assert!(!top_level.contains("raw-call"));
         assert!(help_text(HelpTopic::Invoke).contains("--runtime <family>"));
         assert!(help_text(HelpTopic::State).contains("--value-file <path>"));
         assert!(help_text(HelpTopic::Inspect).contains("--projection <name>"));
@@ -2078,9 +2087,14 @@ mod tests {
     }
 
     #[test]
-    fn usage_diagnostic_keeps_the_stable_command_list() {
-        assert!(USAGE.starts_with("Usage:\n  orna\n"));
-        assert!(USAGE.contains("orna raw-call"));
+    fn usage_diagnostic_keeps_the_direct_command_list() {
+        assert!(USAGE.starts_with(
+            "Usage:\n  orna [OPTIONS] [URI]\n  orna [OPTIONS] [URI] invoke <function> [OPTIONS]\n",
+        ));
+        for command in ["invoke", "repl", "source", "inspect", "raw-call"] {
+            assert!(USAGE.contains(command));
+        }
+        assert!(USAGE.contains("orna raw-call <canonical-function-id>"));
         assert!(!USAGE.ends_with('\n'));
         assert_ne!(USAGE, HELP_TOP_LEVEL);
     }
@@ -2203,7 +2217,7 @@ mod tests {
 
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
-        assert!(coloured.contains("\x1b[1;36mHost Mode:\x1b[0m"));
+        assert!(coloured.contains("\x1b[1;36mCommands:\x1b[0m"));
         assert!(coloured.contains("function-backed REPL"));
     }
 }
