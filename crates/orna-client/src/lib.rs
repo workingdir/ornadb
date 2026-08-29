@@ -123,11 +123,13 @@ pub mod connection;
 pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
+pub mod session;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod vm;
 pub use connection::{InvocationConnection, InvocationConnectionError};
 pub use endpoint::{DEFAULT_REMOTE_PORT, DatabaseEndpoint, EndpointParseError};
+pub use session::{TerminalSessionDriver, TerminalSessionDriverError};
 
 pub use runtime_adapter::{QtRuntimeExecutor, RuntimeActionBinding};
 
