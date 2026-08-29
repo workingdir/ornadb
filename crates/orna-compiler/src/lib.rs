@@ -170,6 +170,36 @@ impl DiagnosticCode {
         }
     }
 
+    /// Returns the short, user-facing title for this diagnostic category.
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::UnexpectedToken => "unexpected syntax",
+            Self::UnterminatedSourceConstruct => "unterminated source construct",
+            Self::UnknownQualifiedName => "unknown name",
+            Self::DuplicateDefinition => "duplicate definition",
+            Self::TypeMismatch => "type mismatch",
+            Self::InvalidReferenceTarget => "invalid reference target",
+            Self::CapabilityRequirement => "unsupported capability",
+            Self::DomainIncompatible => "unsupported construct",
+        }
+    }
+
+    /// Returns a stable, user-facing next action for this diagnostic category.
+    pub const fn help(self) -> Option<&'static str> {
+        match self {
+            Self::UnexpectedToken => Some("check the syntax at this location"),
+            Self::UnterminatedSourceConstruct => {
+                Some("close the comment, quoted identifier, or string literal")
+            }
+            Self::UnknownQualifiedName => Some("check the name against the declarations in the source bundle"),
+            Self::DuplicateDefinition => Some("give each declaration a distinct semantic name"),
+            Self::TypeMismatch => Some("check the declared type and the value or expression"),
+            Self::InvalidReferenceTarget => Some("use REF only with an object type"),
+            Self::CapabilityRequirement => Some("use a supported client capability"),
+            Self::DomainIncompatible => Some("use this construct in its supported function domain"),
+        }
+    }
+
     /// Returns a short explanation of the diagnostic category.
     pub const fn summary(self) -> &'static str {
         match self {

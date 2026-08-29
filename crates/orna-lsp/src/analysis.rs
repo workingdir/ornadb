@@ -135,11 +135,17 @@ fn compiler_diagnostic(
 }
 
 fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
-    format!(
-        "{} {}",
+    let mut help = format!(
+        "{} {}: {}",
         diagnostic.code().as_str(),
+        diagnostic.code().title(),
         diagnostic.code().summary()
-    )
+    );
+    if let Some(next_step) = diagnostic.code().help() {
+        help.push_str(" Help: ");
+        help.push_str(next_step);
+    }
+    help
 }
 
 fn syntax_help(message: &str) -> String {
