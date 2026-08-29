@@ -1,4 +1,3 @@
-
 use super::*;
 
 const TRUE_BYTES: [u8; ENCODED_LENGTH] = *b"ORNACP\0\0\0\0\0\x01\x01\x01";
