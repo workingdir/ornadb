@@ -61,8 +61,10 @@ use orna_protocol::{
     InvocationEventRecord, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
     ResourceClientFrame, ResourceConnectionError, ResourceFrameDisposition, ResourceKind,
     ResourceProtocolConnection, ResourceRequest, ResourceServerFrame, ServerAction, ServerFrame,
+    SessionClientFrame, SessionCodecError, SESSION_HEADER_LENGTH, SESSION_MARKER,
     decode_active_client_frame, decode_catalogue_client_frame, decode_client_frame,
     decode_constructed_client_frame, decode_registered_client_frame, decode_resource_client_frame,
+    decode_session_client_frame, encode_session_server_frame,
     encode_active_server_frame, encode_catalogue_server_frame, encode_constructed_server_frame,
     encode_registered_server_frame, encode_resource_server_frame, encode_server_frame,
 };
@@ -387,6 +389,16 @@ pub enum LocalRawSocketError {
         /// The frame codec failure.
         source: FrameCodecError,
     },
+    /// A client session-control frame violated the bounded session codec.
+    Session {
+        /// The session frame codec failure.
+        source: SessionCodecError,
+    },
+    /// A client session-control response did not match the active request.
+    SessionState {
+        /// The session state-machine failure.
+        source: orna_protocol::SessionStateError,
+    },
     /// A decoded frame or server action violated the connection state machine.
     Connection {
         /// The state-machine failure.
@@ -428,6 +440,8 @@ impl fmt::Display for LocalRawSocketError {
             Self::ActiveRevision { .. } => "local raw socket active revision recovery failed",
             Self::OpaqueRegistry { .. } => "local raw socket opaque registry validation failed",
             Self::Frame { .. } => "local raw socket frame is invalid",
+            Self::Session { .. } => "local raw socket session frame is invalid",
+            Self::SessionState { .. } => "local raw socket session state is invalid",
             Self::Io { .. } => "local raw socket I/O failed",
             Self::Connection { .. } => "local raw socket state is invalid",
             Self::ResourceConnection { .. } => "local raw socket resource state is invalid",
@@ -449,6 +463,8 @@ impl Error for LocalRawSocketError {
             Self::OpaqueRegistry { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Frame { source } => Some(source),
+            Self::Session { source } => Some(source),
+            Self::SessionState { source } => Some(source),
             Self::Connection { source } => Some(source),
             Self::ResourceConnection { source } => Some(source),
             Self::ResourceCancellationAudit { source } => Some(source),
@@ -1050,6 +1066,10 @@ enum IncomingFrame {
         frame: ResourceClientFrame,
         reservation: PayloadReservation,
     },
+    Session {
+        frame: SessionClientFrame,
+        reservation: PayloadReservation,
+    },
 }
 
 struct DispatchCompletion {
@@ -1439,6 +1459,10 @@ trait DispatchService: Clone + Send + Sync + 'static {
     }
 
     fn cancelled(&self, _stream: u64) {}
+
+    fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
+        None
+    }
 }
 
 fn sealed_result_cancellation_won(
@@ -1455,6 +1479,10 @@ fn sealed_result_cancellation_won(
 }
 
 impl DispatchService for RawDispatchService {
+    fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
+        self.resource_broker.as_ref().and_then(SharedInvokeBroker::session_bridge)
+    }
+
     fn cancelled(&self, stream: u64) {
         if let Some(cancellation) = self
             .invoke_cancellations
@@ -1531,6 +1559,11 @@ impl DispatchService for RawDispatchService {
     ) -> StartedDispatch {
         let continuation = continuation.expect("sealed invocation preflight continuation");
         let invocation = continuation.invocation();
+        if let Some(broker) = &self.resource_broker {
+            broker
+                .install_session_bridge(invocation, stream)
+                .expect("one session bridge per authenticated root invocation");
+        }
         let dispatch_session = _session.clone();
         // The worker below uses a short-lived runtime; stream producers must
         // stay owned by this raw-socket driver runtime.
@@ -2462,6 +2495,11 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Ok(false) => break Ok(()),
             Err(error) => break Err(error),
         }
+        match flush_session_pending(&dispatcher, &mut writer, &mut shutdown).await {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(error),
+        }
 
         enum Next {
             Frame(Result<Option<IncomingFrame>, LocalRawSocketError>),
@@ -2471,6 +2509,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             SealedPull(Option<Result<SealedPullTaskResult, JoinError>>),
             Shutdown,
             Start,
+            SessionWake,
         }
 
         if *shutdown.borrow() {
@@ -2507,6 +2546,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                 tokio::select! {
                     biased;
                     _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                    _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                     frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
                     preflight = preflight_tasks.join_next(), if !preflight_tasks.is_empty() => {
                         Next::Preflight(preflight)
@@ -2530,6 +2570,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                     tokio::select! {
                         biased;
                         _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                        _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                         frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
                         preflight = preflight_tasks.join_next(), if !preflight_tasks.is_empty() => {
                             Next::Preflight(preflight)
@@ -2551,6 +2592,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                 preflight = preflight_tasks.join_next() => Next::Preflight(preflight),
                 completion = tasks.join_next(), if !tasks.is_empty() => {
                     Next::Completion(completion)
@@ -2566,6 +2608,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         } else if tasks.is_empty() && preflight_tasks.is_empty() {
             tokio::select! {
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                 frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
                 resource = resource_completion_receiver.recv() => Next::ResourceCompletion(resource),
                 sealed = sealed_pull_tasks.join_next(), if !sealed_pull_tasks.is_empty() => {
@@ -2576,6 +2619,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                 // A cancellation already decoded by the reader wins over a
                 // preflight that became ready in the same scheduler turn.
                 frame = frame_receiver.recv() => {
@@ -2594,6 +2638,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                _ = wait_for_session_outbound(dispatcher.session_bridge()) => Next::SessionWake,
                 completion = tasks.join_next(), if !tasks.is_empty() => {
                     Next::Completion(completion)
                 }
@@ -2636,6 +2681,18 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
                             &mut shutdown,
                         )
                         .await
+                    }
+                    IncomingFrame::Session { frame, reservation } => {
+                        drop(reservation);
+                        match dispatcher.session_bridge() {
+                            Some(bridge) => bridge
+                                .accept_response(frame)
+                                .map_err(|source| LocalRawSocketError::SessionState { source })
+                                .map(|()| true),
+                            None => Err(LocalRawSocketError::SessionState {
+                                source: orna_protocol::SessionStateError::WrongState,
+                            }),
+                        }
                     }
                     IncomingFrame::Resource { frame, reservation } => {
                         handle_resource_frame(
@@ -2742,6 +2799,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             }
             Next::SealedPull(None) => {}
             Next::Shutdown => break Ok(()),
+            Next::SessionWake => {},
             Next::Start => {
                 start_one_dispatch(&mut unstarted, &mut tasks);
             }
@@ -2750,6 +2808,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 
     reader_task.abort();
     let _ = reader_task.await;
+    if let Some(bridge) = dispatcher.session_bridge() {
+        bridge.close();
+    }
     // Close the socket before waiting for accepted dispatches. A started
     // spawn_blocking worker cannot be aborted safely, so the connection must
     // not remain open while its completion boundary is drained below.
@@ -4293,31 +4354,59 @@ async fn read_versioned_client_frame_with_mode<R: AsyncRead + Unpin>(
     resources: &LocalRawSocketResources,
     mode: FrameReadMode<'_>,
 ) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
-    let mut header = [0_u8; RESOURCE_HEADER_LENGTH];
+    let mut header = [0_u8; SESSION_HEADER_LENGTH];
     let Some(frame_deadline) =
-        read_header_before(stream, &mut header[..RESOURCE_MARKER.len()], mode).await?
+        read_header_before(stream, &mut header[..SESSION_MARKER.len()], mode).await?
     else {
         return Ok(None);
     };
-    let resource = &header[..RESOURCE_MARKER.len()] == RESOURCE_MARKER;
-    let header_length = if resource {
+    let session = &header[..SESSION_MARKER.len()] == SESSION_MARKER;
+    if !session {
+        read_exact_before(
+            stream,
+            &mut header[SESSION_MARKER.len()..RESOURCE_MARKER.len()],
+            frame_deadline,
+            LocalRawSocketError::FrameTimeout,
+        )
+        .await?;
+    }
+    let resource = !session && &header[..RESOURCE_MARKER.len()] == RESOURCE_MARKER;
+    let header_length = if session {
+        SESSION_HEADER_LENGTH
+    } else if resource {
         RESOURCE_HEADER_LENGTH
     } else {
         FRAME_HEADER_LENGTH
     };
+    let consumed = if session {
+        SESSION_MARKER.len()
+    } else {
+        RESOURCE_MARKER.len()
+    };
     read_exact_before(
         stream,
-        &mut header[RESOURCE_MARKER.len()..header_length],
+        &mut header[consumed..header_length],
         frame_deadline,
         LocalRawSocketError::FrameTimeout,
     )
     .await?;
-    let declared_offset = if resource { 17..21 } else { 14..18 };
+    let declared_offset = if session {
+        SESSION_HEADER_LENGTH - std::mem::size_of::<u32>()..SESSION_HEADER_LENGTH
+    } else if resource {
+        17..21
+    } else {
+        14..18
+    };
     let declared = u32::from_be_bytes(
         header[declared_offset]
             .try_into()
             .expect("fixed frame header"),
     ) as usize;
+    if session && declared > orna_protocol::MAX_SESSION_FRAME_LENGTH - SESSION_HEADER_LENGTH {
+        return Err(LocalRawSocketError::Session {
+            source: SessionCodecError::Oversize,
+        });
+    }
     if declared > MAX_FRAME_PAYLOAD_LENGTH {
         return Err(LocalRawSocketError::Frame {
             source: FrameCodecError::PayloadTooLarge {
@@ -4337,7 +4426,11 @@ async fn read_versioned_client_frame_with_mode<R: AsyncRead + Unpin>(
         LocalRawSocketError::FrameTimeout,
     )
     .await?;
-    if resource {
+    if session {
+        let frame = decode_session_client_frame(&encoded)
+            .map_err(|source| LocalRawSocketError::Session { source })?;
+        Ok(Some(IncomingFrame::Session { frame, reservation }))
+    } else if resource {
         let frame = version
             .decode_resource_client_frame(&encoded)
             .map_err(|source| LocalRawSocketError::Frame { source })?;
@@ -4411,6 +4504,33 @@ async fn read_exact_before<R: AsyncRead + Unpin>(
     Ok(())
 }
 
+async fn flush_session_pending<D: DispatchService>(
+    dispatcher: &D,
+    stream: &mut OwnedWriteHalf,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
+    let Some(bridge) = dispatcher.session_bridge() else {
+        return Ok(true);
+    };
+    while let Some(frame) = bridge.try_take_outbound() {
+        let encoded = encode_session_server_frame(&frame)
+            .map_err(|source| LocalRawSocketError::Session { source })?;
+        if !write_all_until_shutdown(stream, &encoded, shutdown).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn wait_for_session_outbound(
+    bridge: Option<Arc<crate::invoke::SessionBridge>>,
+) {
+    match bridge {
+        Some(bridge) => bridge.wait_for_outbound().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn write_server_frame(
     version: &RawProtocolVersion,
     stream: &mut OwnedWriteHalf,
@@ -4468,7 +4588,7 @@ mod tests {
         path::PathBuf,
         str::FromStr,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
         task::Poll,
@@ -4495,10 +4615,11 @@ mod tests {
     use orna_protocol::{
         Channel, ClientFrame, Event, MAX_RESOURCE_WINDOW, ResourceCancel, ResourceCancellationCode,
         ResourceClientFrame, ResourceKind, ResourceRequest, ResourceServerFrame,
-        ResourceWindowUpdate, ServerFrame, decode_catalogue_server_frame,
-        decode_constructed_server_frame, decode_resource_server_frame, decode_server_frame,
-        encode_catalogue_client_frame, encode_client_frame, encode_constructed_client_frame,
-        encode_invoke_request, encode_resource_client_frame,
+        ResourceWindowUpdate, ServerFrame, SessionClientFrame, SessionServerFrame,
+        decode_catalogue_server_frame, decode_constructed_server_frame, decode_resource_server_frame,
+        decode_server_frame, decode_session_server_frame, encode_catalogue_client_frame,
+        encode_client_frame, encode_constructed_client_frame, encode_invoke_request,
+        encode_resource_client_frame, encode_session_client_frame,
     };
     use orna_standard::{
         registered_opaque_codecs, retained_standard_library_snapshot,
@@ -4508,6 +4629,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::invoke::SessionBridge;
 
     const FUNCTION: FunctionId = FunctionId::from_bytes([1; 16]);
     const ENUM_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
@@ -5529,6 +5651,137 @@ mod tests {
         fn cancelled(&self, _stream: u64) {
             self.cancelled.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[derive(Clone)]
+    struct SessionBridgeDispatch {
+        bridge: Arc<SessionBridge>,
+        received: Arc<Mutex<Option<String>>>,
+    }
+
+    impl DispatchService for SessionBridgeDispatch {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            let bridge = Arc::clone(&self.bridge);
+            let received = Arc::clone(&self.received);
+            let invocation = InvocationId::from_bytes([0x9; 16]);
+            StartedDispatch {
+                accepted: ServerAction::Accepted { stream, invocation },
+                started: None,
+                start_gate: None,
+                future: Box::pin(async move {
+                    if let Ok(Ok(line)) =
+                        tokio::task::spawn_blocking(move || bridge.request_input(invocation)).await
+                    {
+                        *received.lock().expect("session input result lock") = Some(line);
+                    }
+                    DispatchCompletion {
+                        sealed_producer: None,
+                        sealed_invocation: None,
+                        sealed_next_event_sequence: 1,
+                        sealed_next_outer_sequence: 2,
+                        actions: VecDeque::from([ServerAction::Completed { stream }]),
+                        cancellation: ServerAction::Cancelled { stream },
+                        cancellation_token: None,
+                        start_gate: None,
+                        start_delivered: false,
+                        terminal_delivered: false,
+                        terminal_claimed: false,
+                        worker_completed: false,
+                        _guards: None,
+                    }
+                }),
+            }
+        }
+
+        fn session_bridge(&self) -> Option<Arc<SessionBridge>> {
+            Some(Arc::clone(&self.bridge))
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_driver_round_trips_session_input_on_one_socket() {
+        let root = InvocationId::from_bytes([0x9; 16]);
+        let bridge = SessionBridge::new(root, 1).expect("session bridge creates");
+        let received = Arc::new(Mutex::new(None));
+        let dispatcher = SessionBridgeDispatch {
+            bridge,
+            received: Arc::clone(&received),
+        };
+        let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let server_task = tokio::spawn(drive_authenticated_stream(
+            dispatcher,
+            test_session(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+
+        send_client_frame(
+            &mut client,
+            &ClientFrame::CallRawStart {
+                stream: 1,
+                function: FUNCTION,
+            },
+        )
+        .await;
+        send_client_frame(
+            &mut client,
+            &ClientFrame::CallArgumentsComplete { stream: 1 },
+        )
+        .await;
+        assert!(matches!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallAccepted {
+                stream: 1,
+                invocation
+            } if invocation == root
+        ));
+
+        let mut encoded = vec![0_u8; SESSION_HEADER_LENGTH];
+        client.read_exact(&mut encoded).await.expect("session request header");
+        let payload_length = u32::from_be_bytes(encoded[55..59].try_into().unwrap()) as usize;
+        encoded.resize(SESSION_HEADER_LENGTH + payload_length, 0);
+        client
+            .read_exact(&mut encoded[SESSION_HEADER_LENGTH..])
+            .await
+            .expect("session request payload");
+        let request = match decode_session_server_frame(&encoded).expect("session request decodes") {
+            SessionServerFrame::InputRequested(request) => request,
+        };
+        assert_eq!(request.root_invocation_id, root);
+        assert_eq!(request.call_stream, 1);
+
+        let response = SessionClientFrame::InputLine {
+            root_invocation_id: root,
+            call_stream: 1,
+            request_invocation_id: request.request_invocation_id,
+            line: "select 1".to_owned(),
+        };
+        client
+            .write_all(&encode_session_client_frame(&response).expect("session response encodes"))
+            .await
+            .expect("session response writes");
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+        assert_eq!(
+            received
+                .lock()
+                .expect("session input result lock")
+                .as_deref(),
+            Some("select 1")
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        server_task
+            .await
+            .expect("raw driver task")
+            .expect("raw driver closes");
     }
 
     #[derive(Clone)]
