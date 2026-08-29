@@ -3839,120 +3839,12 @@ fn validate_existing_server_parameters(
     Ok(())
 }
 
-fn validate_generic_client_function(
+fn validate_client_function_preflight(
     function: &crate::CheckedClientFunction,
     active: &ActiveDatabaseRevision,
+    standard: &crate::CheckedStandardLibrary,
+    return_evidence: &ValidatedClientReturn,
 ) -> Result<ValidatedClient, PrepareError> {
-    let return_type = function.return_type();
-    let return_scalar = match return_type {
-        SemanticType::Scalar(scalar) => Some(scalar),
-        SemanticType::Named(_) | SemanticType::Reference { .. } => None,
-    };
-    if function.domain() != FunctionDomain::Client {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function has an unsupported domain",
-        });
-    }
-    if function.security() != FunctionSecurity::Invoker {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function has an unsupported security mode",
-        });
-    }
-    if function.transaction().is_some() {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function has an unsupported transaction mode",
-        });
-    }
-    if function.volatility() != FunctionVolatility::Immutable {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function has an unsupported volatility mode",
-        });
-    }
-    if u32::try_from(function.references().len()).is_err() {
-        return Err(PrepareError::ReferenceCountExceedsU32 {
-            function: function.id(),
-            count: function.references().len(),
-        });
-    }
-    if function
-        .references()
-        .iter()
-        .any(|reference| !supports_definition_reference_kind(reference.kind()))
-    {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "checked CLIENT function contains an unsupported definition reference kind",
-        });
-    }
-    validate_existing_function(function.id(), function.name(), FunctionDomain::Client, active)?;
-    let body = match function.body() {
-        CheckedClientFunctionBody::BooleanLiteral { value, .. } => {
-            ValidatedClientBody::BooleanLiteral(*value)
-        }
-        CheckedClientFunctionBody::Expression { expression } => {
-            ValidatedClientBody::Expression(expression.clone())
-        }
-        CheckedClientFunctionBody::Procedural {
-            locals,
-            statements,
-            return_expression,
-        } => ValidatedClientBody::Procedural {
-            locals: locals.clone(),
-            statements: statements.clone(),
-            return_expression: return_expression.clone(),
-        },
-        CheckedClientFunctionBody::ControlFlow { locals, statements } => {
-            ValidatedClientBody::ControlFlow {
-                locals: locals.clone(),
-                statements: statements.clone(),
-            }
-        }
-        CheckedClientFunctionBody::StateBlock {
-            states,
-            return_expression,
-        } => {
-            if !states.is_empty() {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT state declarations require standard-backed preparation",
-                });
-            }
-            ValidatedClientBody::StateBlock {
-                return_expression: return_expression.clone(),
-                states: states.clone(),
-            }
-        }
-        CheckedClientFunctionBody::ExternalContract { identity, .. } => {
-            ValidatedClientBody::ExternalContract(identity.clone())
-        }
-        #[cfg(test)]
-        CheckedClientFunctionBody::Unsupported => {
-            return Err(PrepareError::InvalidCheckedBundle {
-                reason: "checked CLIENT function has an unsupported body",
-            });
-        }
-    };
-    Ok(ValidatedClient {
-        id: function.id(),
-        name: function.name().clone(),
-        location: function.location().clone(),
-        security: function.security(),
-        transaction: function.transaction(),
-        volatility: function.volatility(),
-        parameters: function.parameters().to_vec(),
-        return_target: match return_type {
-            SemanticType::Scalar(_) => EvidenceTarget::Unknown,
-            SemanticType::Named(target) => EvidenceTarget::Named(target),
-            SemanticType::Reference { target } => EvidenceTarget::ObjectReference(target),
-        },
-        return_semantic_type: return_type,
-        return_shape: function.return_shape(),
-        return_location: function.location().clone(),
-        return_scalar,
-        body,
-        references: function.references().to_vec(),
-        capabilities: function.capabilities().to_vec(),
-    })
-}
-
     if function.domain() != FunctionDomain::Client {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "checked CLIENT function has an unsupported domain",
