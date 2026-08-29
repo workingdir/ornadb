@@ -597,6 +597,7 @@ async fn recover_client(
         .map_err(PostgresKernelError::Database)?;
 
     let active = recover_active_revision(&transaction).await?;
+    let _ = super::apply::load_and_validate_migration_ledger(&transaction, Some(&active)).await?;
     crate::security::recover_invocation_audit_events(&transaction, &active).await?;
     crate::inspect::recover_inspect_relations(&transaction, &active).await?;
 
