@@ -137,6 +137,7 @@ impl ClientVmArtifactIdentity {
     /// This constructor validates bounded metadata and the closed version
     /// vocabulary. It does not itself prove that the tuple belongs to an
     /// active revision; [`ClientVmAdmission::admit`] performs that comparison.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         function: [u8; 16],
         function_revision: [u8; 16],
