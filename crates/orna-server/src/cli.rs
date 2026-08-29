@@ -300,6 +300,31 @@ where
     })
 }
 
+fn is_command_name(value: &OsStr) -> bool {
+    value.to_str().is_some_and(|value| {
+        matches!(
+            value,
+            "--color"
+                | "--db"
+                | "--runtime"
+                | "--daemon"
+                | "-d"
+                | "--help"
+                | "--version"
+                | "help"
+                | "server"
+                | "runtime"
+                | "source"
+                | "raw-call"
+                | "invoke"
+                | "state"
+                | "inspect"
+                | "security"
+                | "repl"
+        )
+    })
+}
+
 fn default_repl_command(runtime: Option<orna_server::RuntimeFamily>) -> Option<Command> {
     Some(Command::Invoke(InvokeArguments {
         target: parse_qualified_name("std.cli.repl")?,
