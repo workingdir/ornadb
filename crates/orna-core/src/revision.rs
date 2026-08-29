@@ -2329,7 +2329,9 @@ fn validate_resolved_type_slot(
                 );
             }
             CatalogueHashContext::Version2 { standard } => {
-                if is_sealed_inspect_type_id(value_type) {
+                if is_sealed_inspect_type_id(value_type)
+                    || value_type == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
+                {
                     return Ok(());
                 }
                 let Some(value_type_definition) = standard.catalogue().value_type_by_id(value_type)
@@ -3330,6 +3332,7 @@ fn reference_target_exists(
         DefinitionReferenceTarget::ValueType(type_id)
             | DefinitionReferenceTarget::ObjectType(type_id)
             if is_sealed_inspect_type_id(type_id)
+                || type_id == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
     ) {
         return true;
     }

@@ -5152,10 +5152,11 @@ impl IdentityMap {
 
     fn type_id(&self, id: CheckedTypeId) -> Result<TypeId, PrepareError> {
         if let CheckedTypeId::Existing(type_id) = id
-            && is_sealed_inspect_type_id(type_id)
+            && (is_sealed_inspect_type_id(type_id)
+                || type_id == orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID)
         {
-            // Sealed Inspector carriers are fixed transient system identities,
-            // not application catalogue entries.
+            // Sealed system carriers use fixed identities and do not belong to
+            // the application catalogue.
             return Ok(type_id);
         }
         copied(&self.types, id, "checked type has no durable identity")
