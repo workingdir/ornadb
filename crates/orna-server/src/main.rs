@@ -7,6 +7,7 @@ use orna_protocol::CallFailure;
 
 mod cli;
 mod source_check;
+mod source_diagnostics;
 
 use cli::{Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help};
 
@@ -22,6 +23,7 @@ use orna_core::{
     invocation_binding::CliArgumentInput,
     security::CATALOGUE_HEALTH_FUNCTION_ID,
 };
+#[cfg(test)]
 use std::{ffi::OsString, path::PathBuf};
 
 fn main() -> ExitCode {
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
                 color.enabled(terminal),
             ) {
                 source_check::SourceCheckResult::Success => ExitCode::SUCCESS,
+                source_check::SourceCheckResult::Failure => ExitCode::from(1),
                 source_check::SourceCheckResult::Usage => {
                     let _ = writeln!(stderr, "{USAGE}");
                     ExitCode::from(2)
@@ -132,6 +135,10 @@ fn main() -> ExitCode {
             }
             Ok(_) => {
                 write_stderr_line("orna: source apply returned an unsupported result");
+                ExitCode::from(1)
+            }
+            Err(error) => {
+                write_stderr_line(&error.to_string());
                 ExitCode::from(1)
             }
         },

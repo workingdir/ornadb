@@ -48,7 +48,7 @@ impl ColorChoice {
         }
     }
 
-    fn enabled(self, terminal: bool) -> bool {
+    pub(crate) fn enabled(self, terminal: bool) -> bool {
         match self {
             Self::Auto => terminal,
             Self::Always => true,
