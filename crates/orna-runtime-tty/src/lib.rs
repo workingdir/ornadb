@@ -145,33 +145,69 @@ impl std::error::Error for RuntimeTtyError {
     }
 }
 
+struct FrameCursor<'a> {
+    payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> FrameCursor<'a> {
+    fn new(payload: &'a [u8], magic: &[u8]) -> Result<Self, RuntimeTtyError> {
+        let header_end = magic
+            .len()
+            .checked_add(LENGTH_PREFIX_LEN)
+            .ok_or(RuntimeTtyError::InvalidFrameLength)?;
+        if payload.len() < header_end || !payload.starts_with(magic) {
+            return Err(if payload.starts_with(magic) {
+                RuntimeTtyError::InvalidFrameLength
+            } else {
+                RuntimeTtyError::InvalidMagic
+            });
+        }
+        Ok(Self {
+            payload,
+            offset: magic.len(),
+        })
+    }
+
+    fn length(&mut self) -> Result<usize, RuntimeTtyError> {
+        let bytes: [u8; LENGTH_PREFIX_LEN] = self
+            .take(LENGTH_PREFIX_LEN)?
+            .try_into()
+            .expect("the length prefix is exactly four bytes");
+        Ok(u32::from_be_bytes(bytes) as usize)
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], RuntimeTtyError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(RuntimeTtyError::InvalidFrameLength)?;
+        let bytes = self
+            .payload
+            .get(self.offset..end)
+            .ok_or(RuntimeTtyError::InvalidFrameLength)?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn require_finished(&self) -> Result<(), RuntimeTtyError> {
+        if self.offset == self.payload.len() {
+            Ok(())
+        } else {
+            Err(RuntimeTtyError::InvalidFrameLength)
+        }
+    }
+}
+
 /// Validates one document payload and returns its body.
 fn decode_document(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
-    let prefix_len = DOCUMENT_MAGIC
-        .len()
-        .checked_add(LENGTH_PREFIX_LEN)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    if payload.len() < prefix_len || !payload.starts_with(DOCUMENT_MAGIC) {
-        return Err(if payload.starts_with(DOCUMENT_MAGIC) {
-            RuntimeTtyError::InvalidFrameLength
-        } else {
-            RuntimeTtyError::InvalidMagic
-        });
-    }
-    let body_len = u32::from_be_bytes(
-        payload[DOCUMENT_MAGIC.len()..prefix_len]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
+    let mut frame = FrameCursor::new(payload, DOCUMENT_MAGIC)?;
+    let body_len = frame.length()?;
     if body_len > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
         return Err(RuntimeTtyError::InvalidFrameLength);
     }
-    let body = payload
-        .get(prefix_len..)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    if body.len() != body_len {
-        return Err(RuntimeTtyError::InvalidFrameLength);
-    }
+    let body = frame.take(body_len)?;
+    frame.require_finished()?;
     let text = std::str::from_utf8(body).map_err(|_| RuntimeTtyError::InvalidUtf8)?;
     if text.chars().any(is_control) {
         return Err(RuntimeTtyError::ControlCharacter);
@@ -184,45 +220,18 @@ fn decode_document(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
 
 /// Validates one byte-stream payload and returns its body.
 fn decode_byte_stream(payload: &[u8]) -> Result<&[u8], RuntimeTtyError> {
-    let magic_end = BYTE_STREAM_MAGIC
-        .len()
-        .checked_add(LENGTH_PREFIX_LEN)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    if payload.len() < magic_end || !payload.starts_with(BYTE_STREAM_MAGIC) {
-        return Err(if payload.starts_with(BYTE_STREAM_MAGIC) {
-            RuntimeTtyError::InvalidFrameLength
-        } else {
-            RuntimeTtyError::InvalidMagic
-        });
-    }
-    let media_type_len = u32::from_be_bytes(
-        payload[BYTE_STREAM_MAGIC.len()..magic_end]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
+    let mut frame = FrameCursor::new(payload, BYTE_STREAM_MAGIC)?;
+    let media_type_len = frame.length()?;
     if media_type_len == 0 {
         return Err(RuntimeTtyError::InvalidMediaType);
     }
-    let media_type_end = magic_end
-        .checked_add(media_type_len)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    let body_length_start = media_type_end
-        .checked_add(LENGTH_PREFIX_LEN)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    let body = payload
-        .get(body_length_start..)
-        .ok_or(RuntimeTtyError::InvalidFrameLength)?;
-    let body_len = u32::from_be_bytes(
-        payload[media_type_end..body_length_start]
-            .try_into()
-            .expect("the length prefix is exactly four bytes"),
-    ) as usize;
+    frame.take(media_type_len)?;
+    let body_len = frame.length()?;
     if body_len > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
         return Err(RuntimeTtyError::InvalidFrameLength);
     }
-    if body.len() != body_len {
-        return Err(RuntimeTtyError::InvalidFrameLength);
-    }
+    let body = frame.take(body_len)?;
+    frame.require_finished()?;
     Ok(body)
 }
 

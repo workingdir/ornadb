@@ -21,6 +21,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 
+use crate::artifact_codec::{DecodeError, Reader, Writer};
+
 /// The stable public identity of this artifact format.
 pub const FORMAT_IDENTITY: &str = "orna.server-mutation-plan";
 /// The Orna language version whose semantics this artifact version executes.
@@ -231,7 +233,7 @@ impl ServerMutationPlan {
         } else {
             None
         };
-        let assignment_count = reader.count("assignments", MAX_ASSIGNMENTS)?;
+        let assignment_count = decode_count(&mut reader, "assignments", MAX_ASSIGNMENTS)?;
         let mut assignments = Vec::with_capacity(assignment_count);
         for _ in 0..assignment_count {
             assignments.push(FieldAssignment {
@@ -332,7 +334,7 @@ fn decode_versioned_header(reader: &mut Reader<'_>) -> Result<u32, ServerMutatio
     if reader.array::<8>()? != MAGIC {
         return Err(ServerMutationPlanError::InvalidMagic);
     }
-    reader.u32()
+    Ok(reader.u32()?)
 }
 
 fn collect_assignments(
@@ -768,6 +770,15 @@ pub enum ServerMutationPlanError {
     Truncated,
     /// The artifact contains bytes after a complete plan.
     TrailingBytes,
+}
+
+impl From<DecodeError> for ServerMutationPlanError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Truncated => Self::Truncated,
+            DecodeError::TrailingBytes => Self::TrailingBytes,
+        }
+    }
 }
 
 impl fmt::Display for ServerMutationPlanError {
@@ -1272,18 +1283,18 @@ fn decode_expression(
         reader,
         allow_record && tag == RECORD_CONSTRUCTOR_EXPRESSION_TAG,
     )?;
-    let nullable = reader.boolean("expression nullability")?;
+    let nullable = decode_boolean(reader, "expression nullability")?;
     let kind = match tag {
         PARAMETER_EXPRESSION_TAG => MutationExpressionKind::Parameter {
             owner: reader.function_id()?,
             parameter: reader.parameter_id()?,
         },
         BOOLEAN_EXPRESSION_TAG => MutationExpressionKind::BooleanLiteral {
-            value: reader.boolean("literal")?,
+            value: decode_boolean(reader, "literal")?,
         },
         TYPED_NULL_EXPRESSION_TAG => MutationExpressionKind::TypedNull,
         RECORD_CONSTRUCTOR_EXPRESSION_TAG if allow_record => {
-            let field_count = reader.count("record fields", MAX_RECORD_FIELDS)?;
+            let field_count = decode_count(reader, "record fields", MAX_RECORD_FIELDS)?;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 fields.push(decode_record_field_expression(reader)?);
@@ -1313,7 +1324,7 @@ fn decode_record_field_expression(
     let field = reader.field_id()?;
     let tag = reader.u8()?;
     let resolved_type = decode_resolved_type(reader, tag == PARAMETER_EXPRESSION_TAG)?;
-    let nullable = reader.boolean("record field nullability")?;
+    let nullable = decode_boolean(reader, "record field nullability")?;
     validate_nullability("record field", false, nullable)?;
     let kind = match tag {
         PARAMETER_EXPRESSION_TAG => RecordFieldExpressionKind::Parameter {
@@ -1321,7 +1332,7 @@ fn decode_record_field_expression(
             parameter: reader.parameter_id()?,
         },
         BOOLEAN_EXPRESSION_TAG => RecordFieldExpressionKind::BooleanLiteral {
-            value: reader.boolean("record literal")?,
+            value: decode_boolean(reader, "record literal")?,
         },
         tag => {
             return Err(ServerMutationPlanError::InvalidEnumTag {
@@ -1423,136 +1434,31 @@ fn validate_artifact_size(size: usize) -> Result<(), ServerMutationPlanError> {
     }
 }
 
-struct Writer {
-    bytes: Vec<u8>,
-}
-
-impl Writer {
-    fn new() -> Self {
-        Self { bytes: Vec::new() }
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-    }
-
-    fn u8(&mut self, value: u8) {
-        self.bytes.push(value);
-    }
-
-    fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn boolean(&mut self, value: bool) {
-        self.u8(u8::from(value));
-    }
-
-    fn type_id(&mut self, value: TypeId) {
-        self.bytes(&value.to_bytes());
-    }
-
-    fn field_id(&mut self, value: FieldId) {
-        self.bytes(&value.to_bytes());
-    }
-
-    fn function_id(&mut self, value: FunctionId) {
-        self.bytes(&value.to_bytes());
-    }
-
-    fn parameter_id(&mut self, value: ParameterId) {
-        self.bytes(&value.to_bytes());
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.bytes
+fn decode_boolean(
+    reader: &mut Reader<'_>,
+    context: &'static str,
+) -> Result<bool, ServerMutationPlanError> {
+    match reader.u8()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(ServerMutationPlanError::InvalidBoolean { context, value }),
     }
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
+fn decode_count(
+    reader: &mut Reader<'_>,
+    kind: &'static str,
+    maximum: u32,
+) -> Result<usize, ServerMutationPlanError> {
+    let count = reader.u32()? as usize;
+    if count > maximum as usize {
+        return Err(ServerMutationPlanError::CollectionLimit {
+            kind,
+            count,
+            maximum,
+        });
     }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8], ServerMutationPlanError> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(ServerMutationPlanError::Truncated)?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(ServerMutationPlanError::Truncated)?;
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], ServerMutationPlanError> {
-        self.take(LENGTH)?
-            .try_into()
-            .map_err(|_| ServerMutationPlanError::Truncated)
-    }
-
-    fn u8(&mut self) -> Result<u8, ServerMutationPlanError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, ServerMutationPlanError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-
-    fn boolean(&mut self, context: &'static str) -> Result<bool, ServerMutationPlanError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            value => Err(ServerMutationPlanError::InvalidBoolean { context, value }),
-        }
-    }
-
-    fn count(
-        &mut self,
-        kind: &'static str,
-        maximum: u32,
-    ) -> Result<usize, ServerMutationPlanError> {
-        let count = self.u32()? as usize;
-        if count > maximum as usize {
-            return Err(ServerMutationPlanError::CollectionLimit {
-                kind,
-                count,
-                maximum,
-            });
-        }
-        Ok(count)
-    }
-
-    fn type_id(&mut self) -> Result<TypeId, ServerMutationPlanError> {
-        Ok(TypeId::from_bytes(self.array()?))
-    }
-
-    fn field_id(&mut self) -> Result<FieldId, ServerMutationPlanError> {
-        Ok(FieldId::from_bytes(self.array()?))
-    }
-
-    fn function_id(&mut self) -> Result<FunctionId, ServerMutationPlanError> {
-        Ok(FunctionId::from_bytes(self.array()?))
-    }
-
-    fn parameter_id(&mut self) -> Result<ParameterId, ServerMutationPlanError> {
-        Ok(ParameterId::from_bytes(self.array()?))
-    }
-
-    fn require_finished(&self) -> Result<(), ServerMutationPlanError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(ServerMutationPlanError::TrailingBytes)
-        }
-    }
+    Ok(count)
 }
 
 #[cfg(test)]

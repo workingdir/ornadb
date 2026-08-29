@@ -21,6 +21,8 @@ use std::fmt;
 
 use orna_core::{ParameterId, TypeId};
 
+use crate::parameter_artifact::{self, ParameterArtifactCodecError, ParameterArtifactFormat};
+
 /// The stable public identity of this artifact format.
 pub const FORMAT_IDENTITY: &str = "orna.server-csv-encode";
 /// The Orna language version whose semantics this artifact version executes.
@@ -30,9 +32,16 @@ pub const FORMAT_VERSION: u32 = 1;
 /// The exact first eight bytes of every server csv-encode artifact.
 pub const MAGIC: [u8; 8] = *b"ORNACSV\0";
 /// The exact encoded length in bytes of one version-1 artifact.
-pub const PAYLOAD_LEN: usize = 44;
+pub const PAYLOAD_LEN: usize = parameter_artifact::PAYLOAD_LEN;
 /// The maximum accepted encoded artifact size.
-pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_ARTIFACT_BYTES: usize = parameter_artifact::MAX_ARTIFACT_BYTES;
+
+struct CsvEncodeFormat;
+
+impl ParameterArtifactFormat for CsvEncodeFormat {
+    const MAGIC: [u8; 8] = MAGIC;
+    const VERSION: u32 = FORMAT_VERSION;
+}
 
 /// A checked server csv-encode artifact.
 ///
@@ -70,14 +79,8 @@ impl CsvEncodePlan {
 
     /// Encodes this model into the canonical version-1 artifact bytes.
     pub fn encode(&self) -> Result<Vec<u8>, CsvEncodePlanError> {
-        let mut writer = Writer::with_capacity(PAYLOAD_LEN);
-        writer.bytes(&MAGIC);
-        writer.u32(FORMAT_VERSION);
-        writer.parameter_id(self.parameter);
-        writer.type_id(self.value_type);
-        let bytes = writer.finish();
-        validate_artifact_size(bytes.len())?;
-        Ok(bytes)
+        parameter_artifact::encode::<CsvEncodeFormat>(self.parameter, self.value_type)
+            .map_err(CsvEncodePlanError::from_codec)
     }
 
     /// Decodes exactly one canonical version-1 artifact.
@@ -92,34 +95,12 @@ impl CsvEncodePlan {
         expected_parameter: ParameterId,
         expected_type: TypeId,
     ) -> Result<Self, CsvEncodePlanError> {
-        validate_artifact_size(bytes.len())?;
-        let mut reader = Reader::new(bytes);
-        let magic = reader.array::<8>()?;
-        if magic != MAGIC {
-            return Err(CsvEncodePlanError::InvalidMagic);
-        }
-        let version = reader.u32()?;
-        if version != FORMAT_VERSION {
-            return Err(CsvEncodePlanError::UnsupportedVersion(version));
-        }
-        let parameter = reader.parameter_id()?;
-        if parameter != expected_parameter {
-            return Err(CsvEncodePlanError::UnexpectedParameter {
-                actual: parameter,
-                expected: expected_parameter,
-            });
-        }
-        let value_type = reader.type_id()?;
-        if value_type != expected_type {
-            return Err(CsvEncodePlanError::UnexpectedType {
-                actual: value_type,
-                expected: expected_type,
-            });
-        }
-        reader.require_finished()?;
+        let decoded =
+            parameter_artifact::decode::<CsvEncodeFormat>(bytes, expected_parameter, expected_type)
+                .map_err(CsvEncodePlanError::from_codec)?;
         Ok(Self {
-            parameter,
-            value_type,
+            parameter: decoded.parameter(),
+            value_type: decoded.value_type(),
         })
     }
 }
@@ -197,94 +178,24 @@ impl fmt::Display for CsvEncodePlanError {
 
 impl std::error::Error for CsvEncodePlanError {}
 
-fn validate_artifact_size(size: usize) -> Result<(), CsvEncodePlanError> {
-    if size > MAX_ARTIFACT_BYTES {
-        Err(CsvEncodePlanError::ArtifactSizeLimit {
-            size,
-            maximum: MAX_ARTIFACT_BYTES,
-        })
-    } else {
-        Ok(())
-    }
-}
-
-struct Writer {
-    bytes: Vec<u8>,
-}
-
-impl Writer {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-    }
-
-    fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn parameter_id(&mut self, id: ParameterId) {
-        self.bytes(&id.to_bytes());
-    }
-
-    fn type_id(&mut self, id: TypeId) {
-        self.bytes(&id.to_bytes());
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], CsvEncodePlanError> {
-        let bytes = self.take(LENGTH)?;
-        bytes.try_into().map_err(|_| CsvEncodePlanError::Truncated)
-    }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8], CsvEncodePlanError> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(CsvEncodePlanError::Truncated)?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(CsvEncodePlanError::Truncated)?;
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn u32(&mut self) -> Result<u32, CsvEncodePlanError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-
-    fn parameter_id(&mut self) -> Result<ParameterId, CsvEncodePlanError> {
-        Ok(ParameterId::from_bytes(self.array()?))
-    }
-
-    fn type_id(&mut self) -> Result<TypeId, CsvEncodePlanError> {
-        Ok(TypeId::from_bytes(self.array()?))
-    }
-
-    fn require_finished(&self) -> Result<(), CsvEncodePlanError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(CsvEncodePlanError::TrailingBytes)
+impl CsvEncodePlanError {
+    fn from_codec(error: ParameterArtifactCodecError) -> Self {
+        match error {
+            ParameterArtifactCodecError::InvalidMagic => Self::InvalidMagic,
+            ParameterArtifactCodecError::UnsupportedVersion(version) => {
+                Self::UnsupportedVersion(version)
+            }
+            ParameterArtifactCodecError::UnexpectedParameter { actual, expected } => {
+                Self::UnexpectedParameter { actual, expected }
+            }
+            ParameterArtifactCodecError::UnexpectedType { actual, expected } => {
+                Self::UnexpectedType { actual, expected }
+            }
+            ParameterArtifactCodecError::ArtifactSizeLimit { size, maximum } => {
+                Self::ArtifactSizeLimit { size, maximum }
+            }
+            ParameterArtifactCodecError::Truncated => Self::Truncated,
+            ParameterArtifactCodecError::TrailingBytes => Self::TrailingBytes,
         }
     }
 }
