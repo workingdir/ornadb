@@ -8,10 +8,11 @@
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    MarkedString, NumberOrString, Position, SymbolKind,
+    NumberOrString, Position, SymbolKind,
 };
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
+use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
@@ -3185,17 +3186,15 @@ pub fn signature_help(
             parameters: Some(
                 parameters
                     .iter()
-                    .map(|parameter| {
-                        lsp_types::ParameterInformation::new(
-                            lsp_types::ParameterLabel::Simple(parameter.name.text.clone()),
-                            parameter.documentation.as_ref().map(|documentation| {
-                                lsp_types::Documentation::String(
-                                    documentation_text(Some(documentation))
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                )
-                            }),
-                        )
+                    .map(|parameter| lsp_types::ParameterInformation {
+                        label: lsp_types::ParameterLabel::Simple(parameter.name.text.clone()),
+                        documentation: parameter.documentation.as_ref().map(|documentation| {
+                            lsp_types::Documentation::String(
+                                documentation_text(Some(documentation))
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                            )
+                        }),
                     })
                     .collect(),
             ),
@@ -3204,6 +3203,26 @@ pub fn signature_help(
         active_signature: Some(0),
         active_parameter: Some(active_parameter as u32),
     })
+}
+fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
+    match return_type {
+        FunctionReturnType::Value(type_specification) => text
+            .get(type_specification.span().range())
+            .unwrap_or("value")
+            .to_owned(),
+        FunctionReturnType::Rows { columns, .. } => format!(
+            "ROWS ({})",
+            columns
+                .iter()
+                .map(|column| column.name.text.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
+    slice.map(SourceSlice::as_str)
 }
 #[allow(dead_code)]
 pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
