@@ -1,4 +1,4 @@
-//! The host-only native PostgreSQL escape hatch.
+//! The host-only native PostgreSQL escape hatch for the local server.
 
 use std::{
     fmt,
@@ -8,7 +8,7 @@ use std::{
 
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
-use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+use crate::{EmbeddedHostError, inspect_current_embedded_host};
 
 #[path = "backend_protocol.rs"]
 mod backend_protocol;
@@ -25,13 +25,9 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub enum BackendShellError {
     /// One or more standard streams are not interactive terminals.
     TerminalRequired,
-    /// The caller does not have the exact unprivileged Orna service identity.
-    ServiceAccountRequired,
-    /// Package maintenance is incomplete or excludes new readers.
-    PackageIncomplete,
-    /// The default managed instance has not been installed.
+    /// The default local instance has not been started.
     InstanceNotInstalled,
-    /// The installed instance or its readiness evidence is inconsistent.
+    /// The local instance or its readiness evidence is inconsistent.
     InstanceInvalid,
     /// The running executable cannot supply the instance's embedded engine.
     EngineInvalid,
@@ -45,10 +41,6 @@ impl fmt::Display for BackendShellError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::TerminalRequired => "orna: backend-shell must be run in an interactive terminal",
-            Self::ServiceAccountRequired => {
-                "orna: backend-shell must run as the orna service account"
-            }
-            Self::PackageIncomplete => "orna: package maintenance is incomplete",
             Self::InstanceNotInstalled => "orna: the default Orna instance is not installed",
             Self::InstanceInvalid => "orna: the default Orna instance is invalid",
             Self::EngineInvalid => "orna: the embedded PostgreSQL engine is not valid",
@@ -65,7 +57,7 @@ pub fn run_backend_shell() -> Result<(), BackendShellError> {
     if !terminals_are_interactive() {
         return Err(BackendShellError::TerminalRequired);
     }
-    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let host = inspect_current_embedded_host().map_err(map_host_error)?;
     let _interrupt_handler = InterruptHandler::install()?;
     let mut session = BackendSession::connect(host.config())?;
     terminal_loop(&mut session)
@@ -77,13 +69,7 @@ fn terminals_are_interactive() -> bool {
 
 fn map_host_error(error: EmbeddedHostError) -> BackendShellError {
     match error {
-        EmbeddedHostError::InvalidServiceIdentity => BackendShellError::ServiceAccountRequired,
-        EmbeddedHostError::InvalidPackageState => BackendShellError::PackageIncomplete,
-        EmbeddedHostError::Engine(_)
-        | EmbeddedHostError::InvalidEngineManifest
-        | EmbeddedHostError::MissingDistributionManifest
-        | EmbeddedHostError::InvalidDistributionManifest => BackendShellError::EngineInvalid,
-        EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
+        EmbeddedHostError::Io(source) if source.kind() == io::ErrorKind::NotFound => {
             BackendShellError::InstanceNotInstalled
         }
         _ => BackendShellError::InstanceInvalid,
@@ -193,14 +179,6 @@ mod tests {
             (
                 BackendShellError::TerminalRequired,
                 "orna: backend-shell must be run in an interactive terminal",
-            ),
-            (
-                BackendShellError::ServiceAccountRequired,
-                "orna: backend-shell must run as the orna service account",
-            ),
-            (
-                BackendShellError::PackageIncomplete,
-                "orna: package maintenance is incomplete",
             ),
             (
                 BackendShellError::InstanceNotInstalled,

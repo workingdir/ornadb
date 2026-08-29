@@ -461,10 +461,6 @@ fn piped_input_and_hostile_environment_have_no_authority() {
         ],
         [
             (
-                OsString::from("ORNA_PACKAGE_MAINTENANCE"),
-                OsString::from("begin"),
-            ),
-            (
                 OsString::from("ORNA_SERVER_POSTGRES_URL"),
                 OsString::from("postgresql://hostile.invalid/wrong"),
             ),

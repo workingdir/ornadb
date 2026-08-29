@@ -12,7 +12,7 @@ SUPPORT_BUILDER := $(CURDIR)/support_bundle.py
 MANIFEST_BUILDER := $(CURDIR)/engine_manifest.py
 LIFECYCLE_PROBE := $(CURDIR)/lifecycle_probe.c
 LIFECYCLE_VERIFIER := $(CURDIR)/verify_lifecycle.py
-IMAGE := orna-postgresql-engine:debian12-amd64-1
+IMAGE := orna-postgresql-engine:bookworm-amd64-1
 SOURCE_DATE_EPOCH := 1778528675
 LIFECYCLE_UID := 61018
 LIFECYCLE_GID := 61018
@@ -56,7 +56,7 @@ CONFIGURE_FLAGS := \
 
 help:
 	@printf '%s\n' \
-		'PostgreSQL embedded-engine build; Docker-isolated build/verifier summary, not fresh native Debian 12 host proof for ADR 0019' \
+		'PostgreSQL embedded-engine build; Docker-isolated build/verifier summary' \
 		'' \
 		'  make -C postgresql verify-inputs' \
 		'  make -C postgresql prepare-source TARGET_ROOT=<absolute-repo-target-path>' \
@@ -79,18 +79,18 @@ verify-inputs:
 		printf '%s\n' '[postgresql] error: the upstream checkout is not clean' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/debian12_host_preflight.py postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
@@ -323,7 +323,7 @@ lifecycle: archives
 		chown --reference=/proof/output /proof/tmp/lifecycle-probe; \
 		chmod 0500 /proof/tmp/lifecycle-probe; \
 		rm -rf -- /proof/lifecycle'; \
-	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary passed below $${target_root}/output; not fresh native Debian 12 host proof for ADR 0019"
+	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary passed below $${target_root}/output"
 
 verify-lifecycle:
 	@target_root='$(TARGET_ROOT)'; \
@@ -342,11 +342,11 @@ verify-lifecycle:
 	done < <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
 	cmp "$${one}/tmp/lifecycle-probe" "$${two}/tmp/lifecycle-probe"; \
 	python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$${one}" "$(IMAGE)"; \
-	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary reproduced twice below $${target_root}; not fresh native Debian 12 host proof for ADR 0019"
+	printf '%s\n' "[postgresql] Docker-isolated build/verifier summary reproduced twice below $${target_root}"
 
 manifest: lifecycle
 	@python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$(TARGET_ROOT)" "$(IMAGE)"
-	@printf '%s\n' "[postgresql] recorded Docker-isolated build/verifier summary below $(TARGET_ROOT)/output; not fresh native Debian 12 host proof for ADR 0019"
+	@printf '%s\n' "[postgresql] recorded Docker-isolated build/verifier summary below $(TARGET_ROOT)/output"
 
 update-source:
 	@reference='$(POSTGRESQL_REF)'; \

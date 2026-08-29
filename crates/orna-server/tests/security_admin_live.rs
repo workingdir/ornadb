@@ -454,9 +454,9 @@ async fn proves_installed_security_admin_end_to_end() -> TestResult<()> {
             "disable_principal must complete",
         )?;
 
-        // The injected-kernel seam starts after the installed-host inspection;
-        // hostile service/package endpoint checks belong to the offline CLI
-        // boundary and are intentionally not claimed by this proof.
+        // The injected-kernel seam starts after the local-host inspection;
+        // hostile endpoint checks belong to the offline CLI boundary and are
+        // intentionally not claimed by this proof.
         let snapshot = kernel(&database)
             .recover_security_snapshot()
             .await

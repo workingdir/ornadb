@@ -5571,12 +5571,12 @@ const fn server_resource_failure_code(failure: orna_protocol::CallFailure) -> &'
     }
 }
 
-/// Runs one installed sealed `orna invoke` command in-process.
+/// Runs one local sealed `orna invoke` command in-process.
 ///
-/// The host inspection retains the package and instance guards for the
-/// complete recovery, authentication, dispatch, and rendering operation. All
-/// result values are written to `stdout`; every diagnostic, denial, and bind
-/// failure is written to `stderr`.
+/// The host inspection retains the instance guards for the complete recovery,
+/// authentication, dispatch, and rendering operation. All result values are
+/// written to `stdout`; every diagnostic, denial, and bind failure is written
+/// to `stderr`.
 ///
 /// # Errors
 ///
