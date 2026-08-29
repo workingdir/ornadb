@@ -4,7 +4,8 @@
 //! PostgreSQL implementation.
 
 mod kernel;
-mod storage;
+#[path = "storage.rs"]
+mod revision_storage;
 
 pub use kernel::*;
 
