@@ -30,6 +30,7 @@ use tokio_postgres::{Client, Row};
 
 const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "active_revision",
+    "application_migrations",
     "catalogue_enum_types",
     "catalogue_expressions",
     "catalogue_fields",
@@ -300,6 +301,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "inspect snapshot observer context",
         include_str!("../migrations/0045_inspect_snapshot_observer_context.sql"),
     ),
+    (
+        46,
+        "application_migrations",
+        include_str!("../migrations/0046_application_migrations.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -472,6 +478,27 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
     );
     for (kind, expected) in SUPPORTED_REFERENCE_KINDS {
         assert_eq!(supported_reference_kind_sql(*kind)?, *expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_migration_epoch_is_order_contiguous() -> TestResult<()> {
+    require(
+        MIGRATIONS.len() == 46,
+        format!(
+            "migration registry has {} entries; expected 46",
+            MIGRATIONS.len()
+        ),
+    )?;
+    for (index, (version, _, _)) in MIGRATIONS[..45].iter().enumerate() {
+        require(
+            *version == (index + 1) as i64,
+            format!(
+                "legacy migration at index {index} is version {version}; expected {}",
+                index + 1
+            ),
+        )?;
     }
     Ok(())
 }
