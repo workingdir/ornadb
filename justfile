@@ -56,6 +56,11 @@ runtime-qt-test:
 runtime-qt-rust-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
 
+
+# Prove adapter shutdown drains a full callback queue before native shutdown.
+runtime-qt-shutdown-queue-smoke runtime_path:
+    QT_QPA_PLATFORM=offscreen cargo run --locked -p orna-client --example runtime_qt_shutdown_queue_smoke -- {{runtime_path}}
+
 # Run the Studio shell demo once against an explicit Qt runtime path.
 studio-qt-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example studio_demo -- {{runtime_path}} --smoke
