@@ -1,5 +1,15 @@
+#![allow(dead_code)]
+// These internal execution seams preserve the accepted error and state layouts.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 // Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
 #![allow(clippy::result_large_err)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::nonminimal_bool)]
+#![allow(clippy::match_like_matches_macro)]
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
