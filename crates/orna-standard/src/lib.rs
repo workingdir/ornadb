@@ -1996,50 +1996,6 @@ impl StandardLibraryV9Manifest {
     pub const fn ui_constructors_source_logical_path(&self) -> &'static str {
         STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH
     }
-
-/// The source-independent facts required to recognise `orna.std/10`.
-#[derive(Clone, Debug)]
-pub struct StandardLibraryV10Manifest {
-    catalogue: CatalogueSnapshot,
-}
-
-impl StandardLibraryV10Manifest {
-    pub const fn standard_library_version(&self) -> &'static str { STANDARD_LIBRARY_V10_VERSION_IDENTITY }
-    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId { STANDARD_LIBRARY_V10_REVISION_ID }
-    pub const fn language_version(&self) -> &'static str { LANGUAGE_VERSION_IDENTITY }
-    pub const fn source_bundle(&self) -> SourceBundleId { STANDARD_SOURCE_V10_BUNDLE_ID }
-    pub const fn source_revision(&self) -> SourceRevisionId { STANDARD_SOURCE_V10_REVISION_ID }
-    pub const fn catalogue(&self) -> &CatalogueSnapshot { &self.catalogue }
-}
-
-/// Builds and validates the append-only V10 catalogue over V9.
-pub fn standard_library_v10_manifest() -> Result<StandardLibraryV10Manifest, StandardLibraryManifestError> {
-    let version_nine = standard_library_v9_manifest()?;
-    let mut schemas = version_nine.catalogue().schemas().to_vec();
-    schemas.push(SchemaDefinition::new(STD_CLI_SCHEMA_ID, semantic_name("std.cli", ["std", "cli"])?));
-    let mut functions = version_nine.catalogue().functions().to_vec();
-    functions.push(FunctionDefinition::new(
-        STD_CLI_REPL_FUNCTION_ID,
-        semantic_name("std.cli.repl", ["std", "cli", "repl"])?,
-        FunctionDomain::Client,
-        Vec::new(),
-        FunctionReturn::Single(ResolvedType::value(STD_UI_TYPE_ID)),
-        STD_CLI_REPL_FUNCTION_REVISION_ID,
-        FunctionSecurity::Invoker,
-        None,
-        FunctionVolatility::Immutable,
-    ));
-    functions.sort_by_key(|function| function.id());
-    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        STANDARD_CATALOGUE_V10_REVISION_ID,
-        schemas,
-        version_nine.catalogue().object_types().to_vec(),
-        version_nine.catalogue().value_types().to_vec(),
-        version_nine.catalogue().type_bindings().to_vec(),
-        functions,
-    ).map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
-    Ok(StandardLibraryV10Manifest { catalogue })
-}
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
