@@ -1,10 +1,9 @@
-//! Offline process-boundary tests for the installed `orna source diff` command.
+//! Offline process-boundary tests for the local `orna source diff` command.
 //!
-//! These tests invoke the real binary, but never start the installed host or
-//! connect to PostgreSQL. The source reader must reject every invalid input
-//! before host inspection; a valid V1 source must then reach the service
-//! account guard. Every invocation is bounded and checks that its scratch
-//! directory remains unchanged.
+//! These tests invoke the real binary without starting the local host or
+//! connecting to PostgreSQL. The source reader must reject every invalid
+//! input before host inspection. Every invocation is bounded and checks that
+//! its scratch directory remains unchanged.
 
 #![cfg(unix)]
 
@@ -200,16 +199,6 @@ fn wait_bounded(mut child: Child) -> io::Result<Output> {
     })
 }
 
-fn runs_as_the_orna_account() -> bool {
-    let Ok(Some(orna)) = nix::unistd::User::from_name("orna") else {
-        return false;
-    };
-    nix::unistd::getuid() == orna.uid
-        && nix::unistd::geteuid() == orna.uid
-        && nix::unistd::getgid() == orna.gid
-        && nix::unistd::getegid() == orna.gid
-}
-
 fn assert_read_failure(output: &Output, expected_stderr: &[u8]) {
     assert_eq!(output.status.code(), Some(1), "status: {output:?}");
     assert!(
@@ -278,28 +267,5 @@ fn source_read_rejections_fail_closed_before_host() {
         snapshot(directory.path()).expect("snapshot scratch after read failures"),
         before,
         "source read failures must leave the scratch directory unchanged"
-    );
-}
-
-#[test]
-fn valid_v1_source_reaches_service_account_boundary() {
-    if runs_as_the_orna_account() {
-        eprintln!("skipping service-account boundary: suite runs as the orna account");
-        return;
-    }
-    let directory = TestDirectory::new("service-account").expect("scratch directory");
-    let valid = directory.write("valid.orna", VALID_V1_SOURCE);
-    let before = snapshot(directory.path()).expect("snapshot valid source scratch");
-    let output = run_source_diff(directory.path(), &valid).expect("bounded valid source");
-    assert_eq!(output.status.code(), Some(1), "status: {output:?}");
-    assert!(output.stdout.is_empty(), "host failure must emit no stdout");
-    assert_eq!(
-        output.stderr,
-        b"orna: source diff must run as the orna service account\n"
-    );
-    assert_eq!(
-        snapshot(directory.path()).expect("snapshot scratch after host rejection"),
-        before,
-        "service-account rejection must leave the scratch directory unchanged"
     );
 }

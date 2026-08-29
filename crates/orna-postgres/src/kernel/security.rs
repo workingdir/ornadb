@@ -3640,8 +3640,8 @@ impl PostgresKernel {
     /// Provisions the deterministic local USER authority for one operating-system UID.
     ///
     /// This path is for the user-owned local server profile. It retains the
-    /// production catalogue-health identity, but does not grant the local user
-    /// security administration or alter the packaged service path.
+    /// catalogue-health identity, but does not grant the local user security
+    /// administration or alter local peer authentication.
     pub async fn provision_local_user(
         &self,
         uid: u32,

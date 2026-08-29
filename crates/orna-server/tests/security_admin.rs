@@ -1,4 +1,4 @@
-//! Behaviour tests for the installed `orna security grant-execute` command
+//! Behaviour tests for the local `orna security grant-execute` command
 //! boundary.
 //!
 //! These tests drive the compiled `orna` binary via `env!("CARGO_BIN_EXE_orna")`
@@ -6,15 +6,6 @@
 //! `target/`. They assert observable process output, exit codes, and an
 //! exact before/after deep snapshot of the scratch directory. No instance or
 //! database is started, so every test stays fail-closed without Docker.
-//!
-//! What is proved: the listed representative malformed command shapes
-//! produce the exact global usage and leave the caller-owned scratch tree
-//! unchanged, and one valid canonical identity reaches the wrong-service-
-//! identity host boundary with the exact closed diagnostic. What is not
-//! proved here: the live grant success path, the absence of database or
-//! security-row changes, and hostile endpoint-environment rejection. Those
-//! require the installed product with a live embedded instance and are not
-//! claimed by this file.
 
 #![cfg(unix)]
 
@@ -236,21 +227,6 @@ fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Whether this test process runs with the exact installed `orna` account.
-///
-/// The guard exists so the valid-identity boundary test can never reach a
-/// real default database when the suite itself runs as the service account.
-/// If the account is absent or the lookup fails, the boundary may proceed.
-fn runs_as_the_orna_account() -> bool {
-    let Ok(Some(orna)) = nix::unistd::User::from_name("orna") else {
-        return false;
-    };
-    nix::unistd::getuid() == orna.uid
-        && nix::unistd::geteuid() == orna.uid
-        && nix::unistd::getgid() == orna.gid
-        && nix::unistd::getegid() == orna.gid
-}
-
 #[test]
 fn malformed_command_shapes_all_fail_closed_with_exact_usage() {
     let directory = TestDirectory::new("usage").expect("scratch directory");
@@ -339,38 +315,4 @@ fn malformed_command_shapes_all_fail_closed_with_exact_usage() {
             "arguments {arguments:?} must leave the scratch directory unchanged"
         );
     }
-}
-
-#[test]
-fn valid_canonical_identity_reaches_the_service_account_boundary() {
-    if runs_as_the_orna_account() {
-        eprintln!("skipping service-account boundary: suite runs as the orna account");
-        return;
-    }
-    let directory = TestDirectory::new("service-account").expect("scratch directory");
-    let before = snapshot(directory.path()).expect("snapshot empty scratch");
-    let canonical = FunctionId::from_bytes([0x44; 16]).canonical();
-    let output = run_orna(
-        directory.path(),
-        &[
-            OsString::from("security"),
-            OsString::from("grant-execute"),
-            OsString::from(canonical),
-        ],
-    )
-    .expect("bounded invocation");
-    assert_eq!(output.status.code(), Some(1), "status: {output:?}");
-    assert!(
-        output.stdout.is_empty(),
-        "service-account failure must emit no standard output or prompt"
-    );
-    assert_eq!(
-        output.stderr, b"orna: security grant-execute must run as the orna service account\n",
-        "service-account failure must print the exact public diagnostic"
-    );
-    let after = snapshot(directory.path()).expect("snapshot scratch after invocation");
-    assert_eq!(
-        after, before,
-        "the command must leave the scratch directory unchanged"
-    );
 }

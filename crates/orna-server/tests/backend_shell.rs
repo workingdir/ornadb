@@ -16,8 +16,7 @@ use std::{
 };
 
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
-const SERVICE_ACCOUNT_REQUIRED: &[u8] =
-    b"orna: backend-shell must run as the orna service account\n";
+const INSTANCE_INVALID: &[u8] = b"orna: the default Orna instance is invalid\n";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -248,10 +247,6 @@ fn hostile_client_environment_cannot_select_a_program_or_connection() {
             ),
             (OsString::from("PGHOST"), OsString::from("elsewhere")),
             (OsString::from("PGPASSWORD"), OsString::from("secret")),
-            (
-                OsString::from("ORNA_PACKAGE_MAINTENANCE"),
-                OsString::from("complete"),
-            ),
             (OsString::from("HOME"), directory.0.clone().into_os_string()),
         ],
         &directory.0,
@@ -260,6 +255,6 @@ fn hostile_client_environment_cannot_select_a_program_or_connection() {
     .expect("shell process");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, SERVICE_ACCOUNT_REQUIRED);
+    assert_eq!(output.stderr, INSTANCE_INVALID);
     assert!(!marker.exists());
 }

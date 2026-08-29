@@ -1,8 +1,8 @@
 //! Active `orna state` access to the durable USER state service.
 //!
 //! This module runs one closed `orna state get|set` command against the
-//! selected local or packaged instance. The host derives the principal from
-//! the authenticated session: the local peer UID authenticated through
+//! selected local instance. The host derives the principal from the
+//! authenticated session: the local peer UID authenticated through
 //! [`PostgresKernel::authenticate_local_peer`]. A request never carries a
 //! principal identity.
 //!
@@ -124,21 +124,6 @@ fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Whether this test process runs with the exact installed `orna` account.
-///
-/// The guard exists so the valid-identity boundary test can never reach a
-/// real default database when the suite itself runs as the service account.
-/// If the account is absent or the lookup fails, the boundary may proceed.
-fn runs_as_the_orna_account() -> bool {
-    let Ok(Some(orna)) = nix::unistd::User::from_name("orna") else {
-        return false;
-    };
-    nix::unistd::getuid() == orna.uid
-        && nix::unistd::geteuid() == orna.uid
-        && nix::unistd::getgid() == orna.gid
-        && nix::unistd::getegid() == orna.gid
-}
-
 #[test]
 fn malformed_state_shapes_all_fail_closed_with_exact_usage() {
     let directory = TestDirectory::new("usage").expect("scratch directory");
@@ -206,12 +191,8 @@ fn malformed_state_shapes_all_fail_closed_with_exact_usage() {
 }
 
 #[test]
-fn valid_state_shapes_reach_the_active_host_boundary() {
-    if runs_as_the_orna_account() {
-        eprintln!("skipping service-account boundary: suite runs as the orna account");
-        return;
-    }
-    let directory = TestDirectory::new("service-account").expect("scratch directory");
+fn valid_state_shapes_reach_the_missing_instance_boundary() {
+    let directory = TestDirectory::new("missing-instance").expect("scratch directory");
     let canonical = FunctionId::from_bytes([0x44; 16]).canonical();
     let slot = orna_core::StateSlotId::from_bytes([0x45; 16]).canonical();
     let value_type = orna_core::TypeId::from_bytes([0x46; 16]).canonical();
@@ -229,12 +210,12 @@ fn valid_state_shapes_reach_the_active_host_boundary() {
     assert_eq!(get.status.code(), Some(7), "status: {get:?}");
     assert!(
         get.stdout.is_empty(),
-        "service-account failure must emit no standard output or prompt"
+        "missing-instance failure must emit no standard output or prompt"
     );
     assert_eq!(
         get.stderr,
         b"orna state: the Orna instance is not available: embedded PostgreSQL instance state is invalid\n",
-        "service-account failure must print the exact public diagnostic"
+        "missing-instance failure must print the exact public diagnostic"
     );
 
     let set = run_orna(
@@ -259,15 +240,14 @@ fn valid_state_shapes_reach_the_active_host_boundary() {
     assert_eq!(set.status.code(), Some(7), "status: {set:?}");
     assert!(
         set.stdout.is_empty(),
-        "service-account failure must emit no standard output or prompt"
+        "missing-instance failure must emit no standard output or prompt"
     );
     assert_eq!(
         set.stderr,
         b"orna state: the Orna instance is not available: embedded PostgreSQL instance state is invalid\n",
-        "service-account failure must print the exact public diagnostic"
+        "missing-instance failure must print the exact public diagnostic"
     );
 }
-
 /// The authenticated adapter stages a complete multi-instance response before
 /// replacing the caller-owned store: valid cells load together, while a
 /// foreign context or duplicate identity leaves the prior context and values
