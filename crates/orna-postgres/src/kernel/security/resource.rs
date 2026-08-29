@@ -1,5 +1,10 @@
 //! Authenticated SERVER resource producer interface.
 
+use super::resource_stream::{
+    bind_authenticated_resource_arguments, finish_direct_resource_failure,
+    resource_target_security_is_supported, resource_target_shape_is_supported,
+    resource_values_from_server_result, run_authenticated_server_resource_producer_task,
+};
 use super::*;
 
 /// The owned result of one authenticated SERVER resource request.

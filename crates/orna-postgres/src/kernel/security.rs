@@ -33,16 +33,15 @@ pub use resource::{
 };
 
 pub use resource_cancellation::ResourceCancellation;
-use resource_stream::{
-    bind_authenticated_resource_arguments, execute_sealed_server_after_audit,
-    finish_direct_resource_failure, resource_target_security_is_supported,
-    resource_target_shape_is_supported, resource_values_from_server_result,
-    run_authenticated_server_resource_producer_task, sealed_server_target_is_mutation,
-    start_sealed_server_stream_producer,
-};
 #[cfg(test)]
 use resource_stream::{
-    classify_sealed_server_error, sealed_server_result_kind, sealed_server_stream_completed_event,
+    bind_authenticated_resource_arguments, classify_sealed_server_error,
+    resource_target_shape_is_supported, resource_values_from_server_result,
+    sealed_server_result_kind, sealed_server_stream_completed_event,
+};
+use resource_stream::{
+    execute_sealed_server_after_audit, resource_target_security_is_supported,
+    sealed_server_target_is_mutation, start_sealed_server_stream_producer,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
