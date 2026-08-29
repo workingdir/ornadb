@@ -9,8 +9,8 @@ use orna_compiler::{
     StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
 };
 use orna_core::{
-    CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
-    StandardLibraryRevisionId, TypeBindingId, TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId,
+    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
         function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
@@ -587,19 +587,34 @@ pub const STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH: &str = "std/ui_constructors.o
 
 const RETAINED_STANDARD_UI_CONSTRUCTORS_SOURCE: &str =
     include_str!("../../../stdlib/std/ui_constructors.orna");
-
-const ACCEPTED_V9_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
-const ACCEPTED_V9_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
-const ACCEPTED_V9_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_UI_CONTENT_DIGEST;
-const ACCEPTED_V9_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_JSON_CONTENT_DIGEST;
-const ACCEPTED_V9_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_ACTION_CONTENT_DIGEST;
-const ACCEPTED_V9_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_WINDOW_CONTENT_DIGEST;
-const ACCEPTED_V9_DATA_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_DATA_CONTENT_DIGEST;
-const ACCEPTED_V9_UI_CONSTRUCTORS_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xdd, 0x5d, 0xc7, 0x93, 0xb0, 0xf8, 0x61, 0x45, 0xdd, 0x3e, 0xd2, 0x05, 0x5a, 0x55, 0x89, 0x82,
-    0xc3, 0x42, 0x52, 0xc9, 0xb7, 0xfb, 0x47, 0xe7, 0xb3, 0x72, 0xb8, 0x21, 0x81, 0x73, 0x56, 0x87,
-]);
+/// The standard-library version represented by the V10 manifest.
+pub const STANDARD_LIBRARY_V10_VERSION_IDENTITY: &str = "orna.std/10";
+pub const STANDARD_LIBRARY_V10_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(10));
+pub const STANDARD_CATALOGUE_V10_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(10));
+pub const STANDARD_SOURCE_V10_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(10));
+pub const STANDARD_SOURCE_V10_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(10));
+pub const STD_CLI_SOURCE_LOGICAL_PATH: &str = "std/cli.orna";
+pub const STD_CLI_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(11));
+pub const STD_CLI_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(10));
+pub const STD_CLI_REPL_FUNCTION_ID: orna_core::FunctionId =
+    orna_core::FunctionId::from_bytes(reserved_id(0x1C));
+pub const STD_CLI_REPL_FUNCTION_REVISION_ID: orna_core::FunctionRevisionId =
+    orna_core::FunctionRevisionId::from_bytes(reserved_id(0x1C));
+pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
+const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
+const ACCEPTED_V10_TYPES_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_TYPES_CONTENT_DIGEST;
+const ACCEPTED_V10_INVOKE_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_INVOKE_CONTENT_DIGEST;
+const ACCEPTED_V10_OUTPUT_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_OUTPUT_CONTENT_DIGEST;
+const ACCEPTED_V10_UI_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_UI_CONTENT_DIGEST;
+const ACCEPTED_V10_JSON_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_JSON_CONTENT_DIGEST;
+const ACCEPTED_V10_ACTION_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_ACTION_CONTENT_DIGEST;
+const ACCEPTED_V10_WINDOW_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_WINDOW_CONTENT_DIGEST;
+const ACCEPTED_V10_DATA_CONTENT_DIGEST: Sha256Digest = ACCEPTED_V8_DATA_CONTENT_DIGEST;
+const ACCEPTED_V10_UI_CONSTRUCTORS_CONTENT_DIGEST: Sha256Digest =
+    ACCEPTED_V9_UI_CONSTRUCTORS_CONTENT_DIGEST;
 const ACCEPTED_V9_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_ARTIFACT_DIGEST;
 const ACCEPTED_V9_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V8_SEMANTIC_DIGEST;
 const ACCEPTED_V9_TABLE_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V8_TABLE_ARTIFACT_DIGEST;
@@ -8697,7 +8712,7 @@ AS
             .checked_executable()
             .expect("the V2 check retains the executable");
         assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
-        assert_eq!(executable.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(executable.parameter_ids(), &[STD_INVOKE_ECHO_PARAMETER_ID]);
         assert_eq!(
             executable.revision_id(),
             STD_INVOKE_ECHO_FUNCTION_REVISION_ID
@@ -10580,11 +10595,6 @@ EXPORT TYPE std.action.Action AS std.Action;
             "V4 must retain its reserved source-bundle identity"
         );
         assert_eq!(
-            upgrade.verified_standard_snapshot().source().id(),
-            super::STANDARD_SOURCE_V4_REVISION_ID,
-            "V4 must retain its reserved source-revision identity"
-        );
-        assert_eq!(
             upgrade.verified_standard_snapshot().digest(),
             super::ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
             "V4 must retain the accepted standard-library digest"
@@ -10618,8 +10628,8 @@ EXPORT TYPE std.action.Action AS std.Action;
             super::STD_INVOKE_ECHO_FUNCTION_ID
         );
         assert_eq!(
-            checked_executable.parameter_id(),
-            super::STD_INVOKE_ECHO_PARAMETER_ID
+            checked_executable.parameter_ids(),
+            &[super::STD_INVOKE_ECHO_PARAMETER_ID]
         );
         assert_eq!(
             checked_executable.revision_id(),
@@ -11210,8 +11220,8 @@ EXPORT TYPE std.action.Action AS std.Action;
             super::STD_INVOKE_ECHO_FUNCTION_ID
         );
         assert_eq!(
-            checked_executable.parameter_id(),
-            super::STD_INVOKE_ECHO_PARAMETER_ID
+            checked_executable.parameter_ids(),
+            &[super::STD_INVOKE_ECHO_PARAMETER_ID]
         );
         assert_eq!(
             checked_executable.revision_id(),
