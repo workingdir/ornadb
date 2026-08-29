@@ -137,7 +137,6 @@ use orna_standard::{
     verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
     verify_standard_library_v6_snapshot, verify_standard_library_v9_snapshot,
-    verify_standard_library_v9_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16165,6 +16164,7 @@ fn exposes_checked_client_body_kind_for_rust_introspection() -> TestResult<()> {
     }
     let checked = report.checked_bundle().ok_or_else(|| failure("missing checked bundle"))?;
     let function = checked
+        .checked_bundle()
         .client_functions()
         .iter()
         .find(|function| function.name().parts() == ["introspection_demo", "compute"])
