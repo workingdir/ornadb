@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/orna-artifact", "crates/orna-client", "crates/orna-compiler", "crates/orna-core", "crates/orna-lsp", "crates/orna-postgres", "crates/orna-protocol", "crates/orna-runtime-tty", "crates/orna-server", "crates/orna-standard", "crates/orna-storage"]
 resolver = "3"
 
 [workspace.package]
