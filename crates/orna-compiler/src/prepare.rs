@@ -1410,7 +1410,9 @@ impl PreparationMode<'_> {
 
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
-            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
+                CatalogueHashContext::version_one()
+            }
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
@@ -6027,12 +6029,32 @@ fn client_expression_contains_inspect(expression: &CheckedClientExpression) -> b
         CheckedClientExpression::Await { expression, .. }
         | CheckedClientExpression::Unary { expression, .. }
         | CheckedClientExpression::Parenthesized { expression, .. }
-        | CheckedClientExpression::Evaluate { expression, .. } => client_expression_contains_inspect(expression),
-        CheckedClientExpression::Call { arguments, .. } => arguments.iter().any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Resource { operation } => operation.arguments().iter().any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Action { operation } => operation.arguments().iter().any(|(_, value)| client_expression_contains_inspect(value)),
-        CheckedClientExpression::Concat { left, right, .. } | CheckedClientExpression::Binary { left, right, .. } => client_expression_contains_inspect(left) || client_expression_contains_inspect(right),
-        CheckedClientExpression::SourceIntrospection { .. } | CheckedClientExpression::Input { .. } | CheckedClientExpression::String { .. } | CheckedClientExpression::Integer { .. } | CheckedClientExpression::Boolean { .. } | CheckedClientExpression::ParameterRead { .. } | CheckedClientExpression::LocalRead { .. } | CheckedClientExpression::FieldPath { .. } => false,
+        | CheckedClientExpression::Evaluate { expression, .. } => {
+            client_expression_contains_inspect(expression)
+        }
+        CheckedClientExpression::Call { arguments, .. } => arguments
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Resource { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Action { operation } => operation
+            .arguments()
+            .iter()
+            .any(|(_, value)| client_expression_contains_inspect(value)),
+        CheckedClientExpression::Concat { left, right, .. }
+        | CheckedClientExpression::Binary { left, right, .. } => {
+            client_expression_contains_inspect(left) || client_expression_contains_inspect(right)
+        }
+        CheckedClientExpression::SourceIntrospection { .. }
+        | CheckedClientExpression::Input { .. }
+        | CheckedClientExpression::String { .. }
+        | CheckedClientExpression::Integer { .. }
+        | CheckedClientExpression::Boolean { .. }
+        | CheckedClientExpression::ParameterRead { .. }
+        | CheckedClientExpression::LocalRead { .. }
+        | CheckedClientExpression::FieldPath { .. } => false,
     }
 }
 
@@ -6044,7 +6066,9 @@ fn client_expression_contains_resource(expression: &CheckedClientExpression) -> 
             client_expression_contains_resource(expression)
         }
         CheckedClientExpression::Inspect { operation } => match operation {
-            CheckedInspectOperation::Snapshot { target, options, .. } => {
+            CheckedInspectOperation::Snapshot {
+                target, options, ..
+            } => {
                 client_expression_contains_resource(target)
                     || options
                         .as_deref()
@@ -8246,9 +8270,11 @@ impl<'a> CandidateBuilder<'a> {
         if matches!(self.mode, PreparationMode::Generic) {
             return match validated.return_semantic_type {
                 SemanticType::Scalar(_) => Ok(CandidateResolvedType::LegacyScalar(
-                    validated.return_scalar.ok_or(PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT scalar return has no compatibility type",
-                    })?,
+                    validated
+                        .return_scalar
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "checked CLIENT scalar return has no compatibility type",
+                        })?,
                 )),
                 SemanticType::Named(target) => Ok(CandidateResolvedType::Named(
                     self.client_named_type_id(target)?,

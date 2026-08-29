@@ -254,9 +254,10 @@ pub fn admit_client_function(
                         .map(|requirement| {
                             if let CapabilityArgumentSource::Parameter(parameter) =
                                 requirement.argument()
-                                && !definition.parameters().iter().any(|candidate| {
-                                    candidate.name() == parameter
-                                })
+                                && !definition
+                                    .parameters()
+                                    .iter()
+                                    .any(|candidate| candidate.name() == parameter)
                             {
                                 return Err(ClientVmAdmissionError::SemanticRejected);
                             }

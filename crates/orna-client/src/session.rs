@@ -9,8 +9,8 @@ use std::{
 use orna_protocol::{decode_session_client_frame, encode_session_server_frame};
 
 use orna_protocol::{
-    decode_session_server_frame, encode_session_client_frame, InputRequested, SessionClientFrame,
-    SessionCodecError, SessionInputState, SessionServerFrame, SessionStateError,
+    InputRequested, SessionClientFrame, SessionCodecError, SessionInputState, SessionServerFrame,
+    SessionStateError, decode_session_server_frame, encode_session_client_frame,
 };
 use orna_runtime_tty::{TerminalInput, TerminalInputError, TerminalInputReader};
 

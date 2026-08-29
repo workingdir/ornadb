@@ -52,8 +52,8 @@ use orna_core::{
         SYS_INSPECT_INVOCATION_TYPE_ID, SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID,
         SYS_INSPECT_RESOURCES_TYPE_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
         SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID, SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
-        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
-        SYS_SOURCE_FUNCTION_TYPE_ID,
+        SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
+        SYS_INSPECT_UI_NODES_TYPE_ID, SYS_SOURCE_FUNCTION_TYPE_ID,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{ConstructedValueKind, FunctionArgument, OpaqueValue, OpaqueValueError, RuntimeValue},
@@ -102,8 +102,8 @@ impl ClientExecutionFuel {
 
 use orna_standard::{
     ACTION_MAGIC, BINARY_LARGE_OBJECT_TYPE_ID, RegisteredOpaqueCodecsError,
-    STANDARD_CATALOGUE_V10_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID,
-    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_ACTION_TYPE_ID,
+    STANDARD_CATALOGUE_V9_REVISION_ID, STANDARD_CATALOGUE_V10_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID, STD_ACTION_TYPE_ID,
     STD_UI_BUTTON_ENABLED_PARAMETER_ID, STD_UI_BUTTON_FUNCTION_ID,
     STD_UI_BUTTON_FUNCTION_REVISION_ID, STD_UI_BUTTON_LABEL_PARAMETER_ID,
     STD_UI_BUTTON_RUNTIME_CONTRACT, STD_UI_COLUMN_CONTENT_PARAMETER_ID, STD_UI_COLUMN_FUNCTION_ID,
@@ -125,9 +125,9 @@ pub mod connection;
 pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
-pub mod session;
 pub mod runtime_adapter;
 pub mod runtime_loader;
+pub mod session;
 pub mod vm;
 pub use connection::{InvocationConnection, InvocationConnectionError};
 pub use endpoint::{DEFAULT_REMOTE_PORT, DatabaseEndpoint, EndpointParseError};
@@ -2778,17 +2778,17 @@ fn source_reference_target_name(
             .catalogue()
             .object_type_by_id(owner)
             .and_then(|definition| {
-                definition
-                    .field_by_id(field)
-                    .map(|field_definition| format!("{}.{}", definition.name(), field_definition.name()))
+                definition.field_by_id(field).map(|field_definition| {
+                    format!("{}.{}", definition.name(), field_definition.name())
+                })
             })
             .or_else(|| {
                 standard_catalogue
                     .and_then(|catalogue| catalogue.object_type_by_id(owner))
                     .and_then(|definition| {
-                        definition
-                            .field_by_id(field)
-                            .map(|field_definition| format!("{}.{}", definition.name(), field_definition.name()))
+                        definition.field_by_id(field).map(|field_definition| {
+                            format!("{}.{}", definition.name(), field_definition.name())
+                        })
                     })
             }),
         DefinitionReferenceTarget::Expression(id) => Some(format!("expression:{id:?}")),
@@ -2861,7 +2861,6 @@ fn source_metadata_return_metadata(
         FunctionReturn::Rows(_) => None,
     }
 }
-
 
 fn supported_stream_item_descriptor(
     active: &ActiveDatabaseRevision,
@@ -10108,7 +10107,6 @@ fn static_control_flow_scalar_for_type(
     }
 }
 
-
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn evaluate_expression_with_fuel(
     active: &ActiveDatabaseRevision,
@@ -10920,14 +10918,14 @@ fn is_sealed_inspect_type(type_id: TypeId) -> bool {
     matches!(
         type_id,
         SYS_INSPECT_INVOCATION_TYPE_ID
-        | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
-        | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
-        | SYS_INSPECT_CALLS_TYPE_ID
-        | SYS_INSPECT_RESOURCES_TYPE_ID
-        | SYS_INSPECT_UI_NODES_TYPE_ID
-        | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
-        | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
-        | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+            | SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | SYS_INSPECT_CALLS_TYPE_ID
+            | SYS_INSPECT_RESOURCES_TYPE_ID
+            | SYS_INSPECT_UI_NODES_TYPE_ID
+            | SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
     )
 }
 
@@ -12346,7 +12344,8 @@ mod tests {
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
+            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
+            ExecutableArtifactKind, FunctionRevisionRecord, FunctionSemanticHashVersion,
             RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
             StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
@@ -22128,10 +22127,9 @@ CREATE CLIENT FUNCTION app.owner() RETURNS std.Action AS
         let RuntimeValue::Opaque(value) = result.value() else {
             panic!("source introspection must return an opaque metadata value");
         };
-        let metadata = orna_core::source_metadata::SourceFunctionMetadata::decode(
-            value.canonical_payload(),
-        )
-        .expect("the returned payload must decode as source metadata");
+        let metadata =
+            orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
+                .expect("the returned payload must decode as source metadata");
         assert_eq!(metadata.function(), function);
         assert_eq!(metadata.function_name(), "app.describe");
         assert!(metadata.parameters().is_empty());
@@ -23272,7 +23270,10 @@ CREATE CLIENT FUNCTION app.owner() RETURNS INTEGER IS
         let result = evaluate_client_function_with_executor(&active, &authorisation, &mut executor)
             .expect("native session input evaluates");
 
-        assert_eq!(result.value(), &RuntimeValue::Text("from session".to_owned()));
+        assert_eq!(
+            result.value(),
+            &RuntimeValue::Text("from session".to_owned())
+        );
     }
     #[test]
     fn evaluates_prepared_version_two_client_constants() {
