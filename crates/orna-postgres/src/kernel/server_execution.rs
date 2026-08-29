@@ -3,8 +3,9 @@
 //! This module accepts only a recovered active revision and a canonical server
 //! plan. It never derives SQL from semantic names or accepts caller SQL.
 
-// Result APIs intentionally preserve the accepted public `PostgresKernelError` layout.
+// Server execution preserves the accepted error and presentation layouts.
 #![allow(clippy::result_large_err)]
+#![allow(clippy::large_enum_variant)]
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -2963,11 +2964,11 @@ fn sealed_result_rows(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
 ) -> Result<ResultRows, SealedPresentationError> {
-    if let RuntimeValue::Opaque(opaque) = &value {
-        if opaque.opaque_type() == STD_DATA_ROWS_TYPE_ID {
-            return decode_rows(active, registry, opaque.canonical_payload())
-                .map_err(|_| SealedPresentationError::NoPath);
-        }
+    if let RuntimeValue::Opaque(opaque) = &value
+        && opaque.opaque_type() == STD_DATA_ROWS_TYPE_ID
+    {
+        return decode_rows(active, registry, opaque.canonical_payload())
+            .map_err(|_| SealedPresentationError::NoPath);
     }
     let RuntimeType::Flat(resolved_type) = value.runtime_type() else {
         return Err(SealedPresentationError::NoPath);
