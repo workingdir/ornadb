@@ -3569,6 +3569,9 @@ fn retained_standard_library_v10_snapshot_from_source(
         })?;
     let cli_content_hash = source_unit_content_digest(cli_source)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if cli_content_hash != ACCEPTED_V10_CLI_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     let cli_unit = StoredSourceUnit::new(
         STD_CLI_SOURCE_UNIT_ID,
         parent.source().units().len() as u32,
@@ -3636,6 +3639,11 @@ fn retained_standard_library_v10_snapshot_from_source(
         checked.references().to_vec(),
     )
     .map_err(|source| StandardLibraryError::Revision { source })?;
+    if checked.artifact().content_hash() != ACCEPTED_V10_CLI_ARTIFACT_DIGEST
+        || checked.semantic_hash() != ACCEPTED_V10_CLI_SEMANTIC_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     let mut units = parent.source().units().to_vec();
     units.push(cli_unit);
     let bundle_hash =
@@ -3648,6 +3656,11 @@ fn retained_standard_library_v10_snapshot_from_source(
         bundle_hash,
     )
     .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V10_SOURCE_BUNDLE_DIGEST
+        || revision_hash != ACCEPTED_V10_SOURCE_REVISION_DIGEST
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     let source = StoredSourceRevision::new(
         STANDARD_SOURCE_V10_BUNDLE_ID,
         STANDARD_SOURCE_V10_REVISION_ID,
@@ -3674,6 +3687,12 @@ fn retained_standard_library_v10_snapshot_from_source(
     .map_err(|source| StandardLibraryError::Revision { source })?;
     let digest = calculate_standard_library_digest(&provisional)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if digest != ACCEPTED_V10_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::AcceptedDigestMismatch {
+            expected: ACCEPTED_V10_STANDARD_LIBRARY_DIGEST,
+            actual: digest,
+        });
+    }
     StandardLibrarySnapshot::new_with_executables(
         STANDARD_LIBRARY_V10_REVISION_ID,
         StandardLibraryDigestVersion::Version2,
@@ -13084,19 +13103,6 @@ EXPORT TYPE std.action.Action AS std.Action;
             calculate_standard_library_digest(&snapshot).expect("the V10 digest recomputes"),
             snapshot.digest()
         );
-        let cli_executable = snapshot.executables().last().expect("the CLI executable");
-        println!("cli_content={:?}", snapshot.source().units()[9].content_hash().to_bytes());
-        println!(
-            "artifact={:?}",
-            cli_executable.revision().artifact().content_hash().to_bytes()
-        );
-        println!(
-            "semantic={:?}",
-            cli_executable.revision().semantic_hash().to_bytes()
-        );
-        println!("bundle={:?}", snapshot.source().bundle_hash().to_bytes());
-        println!("revision={:?}", snapshot.source().revision_hash().to_bytes());
-        println!("standard={:?}", snapshot.digest().to_bytes());
         let verified = super::verify_standard_library_v10_snapshot(snapshot)
             .expect("the V10 snapshot verifies");
         let checked = orna_compiler::check_standard_library_source(&verified)
