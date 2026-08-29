@@ -203,6 +203,53 @@ impl RuntimeFamily {
     }
 }
 
+/// Parses one bounded command entered through `std.cli.evaluate`.
+///
+/// The command grammar reuses the installed CLI binding model:
+/// `qualified.function [--parameter=value ...]`. Values remain opaque strings
+/// until the authenticated invocation binder converts them against the target
+/// signature. Shell expansion and positional arguments are not supported.
+fn parse_session_command(command: &str) -> Result<InstalledInvokeRequest, String> {
+    let mut tokens = command.split_whitespace();
+    let target = tokens
+        .next()
+        .and_then(parse_session_target)
+        .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
+    let arguments = tokens
+        .map(|token| {
+            token
+                .strip_prefix("--")
+                .and_then(|value| value.split_once('='))
+                .filter(|(name, _)| !name.is_empty())
+                .map(|(name, value)| CliArgumentInput::Friendly {
+                    name: name.to_owned(),
+                    value: value.to_owned(),
+                })
+                .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(InstalledInvokeRequest::new(
+        target,
+        arguments,
+        None,
+        None,
+        true,
+        false,
+        Some(RuntimeFamily::Tty),
+    ))
+}
+
+fn parse_session_target(value: &str) -> Option<InvocationTarget> {
+    let mut parts = value.split('.');
+    let first = parts.next()?;
+    let rest = parts.collect::<Vec<_>>();
+    if first.is_empty() || rest.is_empty() || rest.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let name = QualifiedSemanticName::new(std::iter::once(first).chain(rest)).ok()?;
+    InvocationTarget::qualified_name(name).ok()
+}
+
 /// One complete installed `orna invoke` command request (ADR 0056).
 ///
 /// The command parser (step 4) strips option prefixes and splits
@@ -224,6 +271,7 @@ pub struct InstalledInvokeRequest {
     pub no_progress: bool,
     /// Print the plan instead of dispatching (`--explain`).
     pub explain: bool,
+
     /// The `--runtime <family>` override, when present; absent selects the
     /// deterministic default runtime (ADR 0063).
     pub runtime: Option<RuntimeFamily>,
@@ -7163,6 +7211,35 @@ use orna_standard::{
     use std::{fs, os::unix::net::UnixListener, thread};
 
     const ENCODED_VALUE: &[u8] = b"ORV5-encoded-value";
+
+    #[test]
+    fn session_command_accepts_qualified_target_and_friendly_arguments() {
+        let request = parse_session_command("demo.echo --message=hello").expect("command parses");
+        assert_eq!(
+            request.target,
+            InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["demo", "echo"]).expect("name is valid"),
+            )
+            .expect("target is valid"),
+        );
+        assert_eq!(
+            request.arguments,
+            vec![CliArgumentInput::Friendly {
+                name: "message".to_owned(),
+                value: "hello".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn session_command_rejects_missing_target_and_malformed_arguments() {
+        for command in ["", "echo", "demo.echo message=hello", "demo.echo --message"] {
+            assert!(
+                parse_session_command(command).is_err(),
+                "command should be rejected: {command:?}"
+            );
+        }
+    }
 
     #[test]
     fn session_bridge_rejects_crossed_response_identity() {
