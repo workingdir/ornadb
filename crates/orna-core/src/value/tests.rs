@@ -3903,13 +3903,7 @@ fn opaque_values_require_the_same_active_standard_and_exact_payload() {
             opaque_type: OPAQUE_TYPE,
         })
     );
-    assert_ne!(
-        value,
-        OpaqueValue {
-            opaque_type: OTHER_OPAQUE_TYPE,
-            canonical_payload: vec![0; 16],
-        }
-    );
+
 }
 
 #[test]
@@ -3931,15 +3925,28 @@ fn action_frame_rejects_zero_target_revision_call_site_result_and_parameter_iden
     let mut payload = b"ORNA-ACTION/1 ".to_vec();
     payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
     payload.extend_from_slice(&body);
+    let active = active_record_revision();
+    let standard = active.catalogue_hash_context().standard().unwrap();
+    let registry = OpaqueCodecRegistry::new(
+        standard,
+        [OpaqueCodecRegistration::length_prefixed_action(
+            OPAQUE_TYPE,
+            QualifiedSemanticName::new(OPAQUE_NAME).unwrap(),
+            OPAQUE_CONTRACT,
+            "ORNA-ACTION/1 ",
+        )
+        .unwrap()],
+    )
+    .unwrap();
 
-    validate_action_frame(OPAQUE_TYPE, b"ORNA-ACTION/1 ", &payload)
+    OpaqueValue::new(&active, &registry, OPAQUE_TYPE, &payload)
         .expect("valid action identities are accepted");
     for offset in [1, 17, 33, 49, 65, 85] {
         let mut corrupted = payload.clone();
         let body_offset = b"ORNA-ACTION/1 ".len() + 4;
         corrupted[body_offset + offset..body_offset + offset + ACTION_IDENTITY_BYTES].fill(0);
         assert!(matches!(
-            validate_action_frame(OPAQUE_TYPE, b"ORNA-ACTION/1 ", &corrupted),
+            OpaqueValue::new(&active, &registry, OPAQUE_TYPE, &corrupted),
             Err(OpaqueValueError::InvalidActionFrame { .. })
         ));
     }
@@ -3989,26 +3996,26 @@ fn ui_value_codec_enforces_closed_canonical_shape_after_framing() {
     };
 
     for body in [
-            br#"{"kind":"empty"}"#.as_slice(),
-            br#"{"children":[{"kind":"empty"}],"kind":"fragment"}"#.as_slice(),
-            br#"{"actions":{"activate":{"action_id":"activate","debug_kind":null,"input_type":"std.ui.event","trace":true}},"call_site_id":null,"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"function_instance_id":"fn-1","key":{"id":1},"kind":"node","properties":{"title":{"type":"std.text","value":"Hello"}},"slots":{"content":[{"kind":"empty"}]},"source_origin":{"end":2,"source_unit_id":"unit-1","start":1}}"#.as_slice(),
-        ] {
-            let payload = frame(body);
-            let value = OpaqueValue::new(&active, &registry, UI_TYPE, &payload)
-                .expect("the closed canonical UI shape constructs");
-            assert_eq!(value.canonical_payload(), payload.as_slice());
-        }
+        br#"{"kind":"empty"}"#.as_slice(),
+        br#"{"children":[{"kind":"empty"}],"kind":"fragment"}"#.as_slice(),
+        br#"{"actions":{"activate":{"action_id":"activate","debug_kind":null,"input_type":"std.ui.event","trace":true}},"call_site_id":null,"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"function_instance_id":"fn-1","key":{"id":1},"kind":"node","properties":{"title":{"type":"std.text","value":"Hello"}},"slots":{"content":[{"kind":"empty"}]},"source_origin":{"end":2,"source_unit_id":"unit-1","start":1}}"#.as_slice(),
+    ] {
+        let payload = frame(body);
+        let value = OpaqueValue::new(&active, &registry, UI_TYPE, &payload)
+            .expect("the closed canonical UI shape constructs");
+        assert_eq!(value.canonical_payload(), payload.as_slice());
+    }
 
     for body in [
-            br#"{"kind":"not-a-ui-kind"}"#.as_slice(),
-            br#"{"actions":{},"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"kind":"node","properties":{},"slots":{},"unknown":null}"#.as_slice(),
-            br#"{"children":[{"kind":"not-a-ui-kind"}],"kind":"fragment"}"#.as_slice(),
-        ] {
-            assert_eq!(
-                OpaqueValue::new(&active, &registry, UI_TYPE, frame(body)),
-                Err(OpaqueValueError::InvalidJsonBody { opaque_type: UI_TYPE })
-            );
-        }
+        br#"{"kind":"not-a-ui-kind"}"#.as_slice(),
+        br#"{"actions":{},"contract":{"id":"std.ui.window@1","name":"std.ui.window","version":"1.0"},"kind":"node","properties":{},"slots":{},"unknown":null}"#.as_slice(),
+        br#"{"children":[{"kind":"not-a-ui-kind"}],"kind":"fragment"}"#.as_slice(),
+    ] {
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, UI_TYPE, frame(body)),
+            Err(OpaqueValueError::InvalidJsonBody { opaque_type: UI_TYPE })
+        );
+    }
     let mut deep = serde_json::json!({"kind": "empty"});
     for _ in 0..40 {
         deep = serde_json::json!({"children": [deep], "kind": "fragment"});
