@@ -177,16 +177,14 @@ fn render_source_line(line: &str) -> String {
         .collect()
 }
 fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&'static str> {
-    match diagnostic.code().as_str() {
-        "ORNA0001" if diagnostic.message().contains("schema name") => {
-            Some("write a schema name before the semicolon")
+    diagnostic.code().help().or_else(|| {
+        match diagnostic.code().as_str() {
+            "ORNA0001" if diagnostic.message().contains("schema name") => {
+                Some("write a schema name before the semicolon")
+            }
+            _ => None,
         }
-        "ORNA0002" => Some("close the comment, quoted identifier, or string literal"),
-        "ORNA0101" => Some("check the name against the declarations in the source bundle"),
-        "ORNA0103" => Some("give each declaration a distinct semantic name"),
-        "ORNA0201" => Some("check the declared type and the value or expression"),
-        _ => None,
-    }
+    })
 }
 fn char_boundary_at_or_before(source: &str, offset: usize) -> usize {
     let mut boundary = offset.min(source.len());
