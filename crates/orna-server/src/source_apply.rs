@@ -501,8 +501,6 @@ pub(super) fn select_accepted_standard(
                 .and_then(verify_standard_library_v8_snapshot),
             STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
                 .and_then(verify_standard_library_v9_snapshot),
-            STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
-                .and_then(verify_standard_library_v9_snapshot),
             _ => return Err(StandardSelectionError::UnknownRevision),
         };
 

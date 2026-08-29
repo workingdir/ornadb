@@ -6,8 +6,8 @@
 use std::{error::Error, fmt, future::Future};
 
 use orna_core::{
-    revision::{ActiveDatabaseRevision, DeployableRevision},
     CatalogueRevisionId, SourceRevisionId,
+    revision::{ActiveDatabaseRevision, DeployableRevision},
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapRevision {
@@ -22,10 +22,14 @@ impl BootstrapRevision {
     }
 
     /// Returns the active source revision identity.
-    pub const fn source(&self) -> SourceRevisionId { self.source }
+    pub const fn source(&self) -> SourceRevisionId {
+        self.source
+    }
 
     /// Returns the active catalogue revision identity.
-    pub const fn catalogue(&self) -> CatalogueRevisionId { self.catalogue }
+    pub const fn catalogue(&self) -> CatalogueRevisionId {
+        self.catalogue
+    }
 }
 
 /// Backend-neutral revision lifecycle failure.
@@ -37,7 +41,9 @@ pub enum StorageError<E> {
 
 impl<E: fmt::Display> fmt::Display for StorageError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self { Self::Backend(error) => write!(f, "storage backend error: {error}") }
+        match self {
+            Self::Backend(error) => write!(f, "storage backend error: {error}"),
+        }
     }
 }
 
@@ -49,13 +55,20 @@ pub trait RevisionStore {
     type Error: Error + Send + Sync + 'static;
 
     /// Bootstraps durable state and returns the seeded active pair.
-    fn bootstrap(&self) -> impl Future<Output = Result<BootstrapRevision, StorageError<Self::Error>>> + Send;
+    fn bootstrap(
+        &self,
+    ) -> impl Future<Output = Result<BootstrapRevision, StorageError<Self::Error>>> + Send;
 
     /// Recovers the complete active durable revision.
-    fn recover(&self) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send;
+    fn recover(
+        &self,
+    ) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send;
 
     /// Atomically applies one compiler-produced candidate revision.
-    fn apply(&self, candidate: &DeployableRevision) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send;
+    fn apply(
+        &self,
+        candidate: &DeployableRevision,
+    ) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send;
 }
 
 #[cfg(test)]
