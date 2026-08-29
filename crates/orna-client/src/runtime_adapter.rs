@@ -207,11 +207,15 @@ impl QtRuntimeExecutor {
 
     /// Requests terminal runtime shutdown through the supplied session.
     pub fn shutdown(&mut self) -> Result<(), RuntimeSessionError> {
-        self.session.shutdown()?;
-        let events = self.session.drain_events();
-        self.note_surface_events(&events);
-        self.pending_events.extend(events);
-        Ok(())
+        let pending = self.session.drain_events();
+        self.note_surface_events(&pending);
+        self.pending_events.extend(pending);
+
+        let result = self.session.shutdown();
+        let terminal = self.session.drain_events();
+        self.note_surface_events(&terminal);
+        self.pending_events.extend(terminal);
+        result
     }
 }
 
