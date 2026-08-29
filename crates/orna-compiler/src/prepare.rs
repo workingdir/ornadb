@@ -343,7 +343,12 @@ fn prepare_with_allocator(
     }
 
     preflight(report.parse_report(), checked, active)?;
-    let identities = IdentityMap::build_legacy(checked, active, &mut allocations)?;
+    let generic = !checked.client_functions().is_empty();
+    let identities = if generic {
+        IdentityMap::build_generic(checked, active, &mut allocations)?
+    } else {
+        IdentityMap::build_legacy(checked, active, &mut allocations)?
+    };
     let source = PreparedSource::new(
         report.parse_report(),
         expected_base.source(),
@@ -355,7 +360,11 @@ fn prepare_with_allocator(
         active,
         identities,
         source,
-        PreparationMode::LegacyV1,
+        if generic {
+            PreparationMode::Generic
+        } else {
+            PreparationMode::LegacyV1
+        },
         allocations.catalogue_revision(),
     )
     .build()
@@ -1191,6 +1200,7 @@ fn checked_type_use_kind_tag(kind: crate::CheckedTypeUseKind) -> &'static str {
 }
 
 enum PreparationMode<'a> {
+    Generic,
     LegacyV1,
     StandardV1Match {
         declaration_evidence: DeclarationEvidence,
@@ -1321,6 +1331,7 @@ enum CandidateTypeProjection {
 /// The candidate lowering policy selected by preparation mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateLoweringMode {
+    Generic,
     LegacyV1,
     StandardV1Match,
     StandardV2Plan,
@@ -1359,7 +1370,9 @@ impl CandidateLoweringMode {
         compatibility: StandardScalar,
     ) -> ResolvedType {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Scalar(compatibility),
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match => {
+                ResolvedType::Scalar(compatibility)
+            }
             Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
         }
     }
@@ -1387,6 +1400,7 @@ impl PreparationMode<'_> {
 
     fn candidate_lowering_mode(&self) -> CandidateLoweringMode {
         match self {
+            Self::Generic => CandidateLoweringMode::Generic,
             Self::LegacyV1 => CandidateLoweringMode::LegacyV1,
             Self::StandardV1Match { .. } => CandidateLoweringMode::StandardV1Match,
             Self::StandardV2Plan { .. } => CandidateLoweringMode::StandardV2Plan,
@@ -1396,17 +1410,16 @@ impl PreparationMode<'_> {
 
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
             }
         }
     }
-
     fn durable_standard_catalogue(&self) -> Option<&CatalogueSnapshot> {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
             Self::StandardV2Plan { standard, .. } | Self::StandardV2 { standard, .. } => {
                 Some(standard.verified_snapshot().catalogue())
             }
@@ -1415,7 +1428,7 @@ impl PreparationMode<'_> {
 
     fn standard_preflight(&self) -> Option<&StandardPreflight> {
         match self {
-            Self::LegacyV1 => None,
+            Self::Generic | Self::LegacyV1 => None,
             Self::StandardV1Match {
                 standard_preflight, ..
             }
@@ -1436,7 +1449,7 @@ impl PreparationMode<'_> {
             | Self::StandardV2Plan {
                 signature_evidence, ..
             } => Some(signature_evidence),
-            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
         }
     }
 
@@ -1445,7 +1458,9 @@ impl PreparationMode<'_> {
         references: &[DefinitionReference],
     ) -> FunctionSemanticHashVersion {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match { .. } => FunctionSemanticHashVersion::Version1,
+            Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
+                FunctionSemanticHashVersion::Version1
+            }
             Self::StandardV2Plan { .. } | Self::StandardV2 { .. }
                 if references.iter().any(|reference| {
                     matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
@@ -4031,6 +4046,109 @@ fn validate_client_function_preflight(
         capabilities: function.capabilities().to_vec(),
     })
 }
+fn validate_generic_client_function(
+    function: &crate::CheckedClientFunction,
+    active: &ActiveDatabaseRevision,
+) -> Result<ValidatedClient, PrepareError> {
+    if function.domain() != FunctionDomain::Client {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported domain",
+        });
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported security mode",
+        });
+    }
+    if function.transaction().is_some() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported transaction mode",
+        });
+    }
+    if function.volatility() != FunctionVolatility::Immutable {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported volatility mode",
+        });
+    }
+    validate_existing_function(
+        function.id(),
+        function.name(),
+        FunctionDomain::Client,
+        active,
+    )?;
+    let return_scalar = match function.return_type() {
+        SemanticType::Scalar(scalar) => Some(scalar),
+        SemanticType::Named(_) | SemanticType::Reference { .. } => None,
+    };
+    let body = match function.body() {
+        CheckedClientFunctionBody::BooleanLiteral { value, .. } => {
+            ValidatedClientBody::BooleanLiteral(*value)
+        }
+        CheckedClientFunctionBody::Expression { expression } => {
+            ValidatedClientBody::Expression(expression.clone())
+        }
+        CheckedClientFunctionBody::Procedural {
+            locals,
+            statements,
+            return_expression,
+        } => ValidatedClientBody::Procedural {
+            locals: locals.clone(),
+            statements: statements.clone(),
+            return_expression: return_expression.clone(),
+        },
+        CheckedClientFunctionBody::ControlFlow { locals, statements } => {
+            ValidatedClientBody::ControlFlow {
+                locals: locals.clone(),
+                statements: statements.clone(),
+            }
+        }
+        CheckedClientFunctionBody::StateBlock {
+            states,
+            return_expression,
+        } => {
+            if !states.is_empty() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT state declarations require standard-backed preparation",
+                });
+            }
+            ValidatedClientBody::StateBlock {
+                return_expression: return_expression.clone(),
+                states: states.clone(),
+            }
+        }
+        CheckedClientFunctionBody::ExternalContract { identity, .. } => {
+            ValidatedClientBody::ExternalContract(identity.clone())
+        }
+        #[cfg(test)]
+        CheckedClientFunctionBody::Unsupported => {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has an unsupported body",
+            });
+        }
+    };
+    Ok(ValidatedClient {
+        id: function.id(),
+        name: function.name().clone(),
+        location: function.location().clone(),
+        security: function.security(),
+        transaction: function.transaction(),
+        volatility: function.volatility(),
+        parameters: function.parameters().to_vec(),
+        return_target: match function.return_type() {
+            SemanticType::Scalar(_) => EvidenceTarget::Unknown,
+            SemanticType::Named(target) => EvidenceTarget::Named(target),
+            SemanticType::Reference { target } => EvidenceTarget::ObjectReference(target),
+        },
+        return_semantic_type: function.return_type(),
+        return_shape: function.return_shape(),
+        return_location: function.location().clone(),
+        return_scalar,
+        body,
+        references: function.references().to_vec(),
+        capabilities: function.capabilities().to_vec(),
+    })
+}
+
 fn validate_existing_function(
     id: CheckedFunctionId,
     name: &orna_core::catalogue::QualifiedSemanticName,
@@ -4384,7 +4502,9 @@ fn client_expression_locations<'a>(
         CheckedClientExpression::Inspect { operation } => {
             locations.push(operation.location());
             match operation {
-                CheckedInspectOperation::Snapshot { target, options, .. } => {
+                CheckedInspectOperation::Snapshot {
+                    target, options, ..
+                } => {
                     client_expression_locations(target, locations);
                     if let Some(options) = options {
                         client_expression_locations(options, locations);
@@ -4671,6 +4791,13 @@ impl IdentityMap {
     ) -> Result<Self, PrepareError> {
         Self::build(checked, active, allocations, None, true)
     }
+    fn build_generic(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        allocations: &mut CandidateAllocator,
+    ) -> Result<Self, PrepareError> {
+        Self::build(checked, active, allocations, None, true)
+    }
 
     fn build_standard(
         checked: &CheckedBundle,
@@ -4842,6 +4969,42 @@ impl IdentityMap {
             None => {
                 for function in checked.server_functions() {
                     Self::map_server_function(&mut result, function, true, allow_provisional)?;
+                }
+                for function in checked.client_functions() {
+                    let function_id = match function.id() {
+                        CheckedFunctionId::Existing(id) => id,
+                        CheckedFunctionId::Provisional(_) if allow_provisional => FunctionId::new(),
+                        CheckedFunctionId::Provisional(_) => {
+                            return Err(PrepareError::InvalidCheckedBundle {
+                                reason: "matched active source contains a provisional function",
+                            });
+                        }
+                    };
+                    insert_unique(
+                        &mut result.functions,
+                        function.id(),
+                        function_id,
+                        "duplicate checked function",
+                    )?;
+                    for parameter in function.parameters() {
+                        let parameter_id = match parameter.id() {
+                            CheckedParameterId::Existing(id) => id,
+                            CheckedParameterId::Provisional(_) if allow_provisional => {
+                                ParameterId::new()
+                            }
+                            CheckedParameterId::Provisional(_) => {
+                                return Err(PrepareError::InvalidCheckedBundle {
+                                    reason: "matched active source contains a provisional parameter",
+                                });
+                            }
+                        };
+                        insert_consistent(
+                            &mut result.parameters,
+                            parameter.id(),
+                            parameter_id,
+                            "checked parameter identity maps inconsistently",
+                        )?;
+                    }
                 }
             }
             Some(function_identities) => {
@@ -5950,7 +6113,7 @@ impl<'a> CandidateBuilder<'a> {
         catalogue_revision: CatalogueRevisionId,
     ) -> Self {
         let declaration_evidence = match &mode {
-            PreparationMode::LegacyV1 => None,
+            PreparationMode::Generic | PreparationMode::LegacyV1 => None,
             PreparationMode::StandardV1Match {
                 declaration_evidence,
                 ..
@@ -6397,15 +6560,9 @@ impl<'a> CandidateBuilder<'a> {
             for checked in self.checked.server_functions() {
                 self.build_server_function(checked, object_types, enum_types, record_value_types)?;
             }
-            if self.checked.client_functions().iter().any(|function| {
-                matches!(
-                    function.body(),
-                    CheckedClientFunctionBody::StateBlock { states, .. } if !states.is_empty()
-                )
-            }) {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT state declarations require standard-backed preparation",
-                });
+            for checked in self.checked.client_functions() {
+                let validated = validate_generic_client_function(checked, self.active)?;
+                self.build_client_function(&validated)?;
             }
             return Ok(());
         };
@@ -6430,7 +6587,7 @@ impl<'a> CandidateBuilder<'a> {
                     )?;
                 }
                 FunctionDomain::Client => {
-                    let validated = self.validated_client(owner)?.clone();
+                    let validated = self.validated_client(owner)?;
                     self.build_client_function(&validated)?;
                 }
             }
@@ -6680,7 +6837,9 @@ impl<'a> CandidateBuilder<'a> {
             CandidateTypeProjection::Durable,
         )?;
         let prepared_artifact = self.client_artifact(validated)?;
-        let initial_references = if self.mode.signature_evidence().is_some() {
+        let initial_references = if self.mode.signature_evidence().is_some()
+            || matches!(self.mode, PreparationMode::Generic)
+        {
             self.client_function_references(function_id, initial_revision, validated)?
         } else {
             Vec::new()
@@ -7872,7 +8031,7 @@ impl<'a> CandidateBuilder<'a> {
                     function, revision, ordinal, target, kind, origin,
                 ));
             }
-        } else {
+        } else if !matches!(validated.return_target, EvidenceTarget::Unknown) {
             let return_target = match validated.return_target {
                 EvidenceTarget::Value(type_id) => DefinitionReferenceTarget::ValueType(type_id),
                 EvidenceTarget::Named(type_id) => {
@@ -7881,11 +8040,7 @@ impl<'a> CandidateBuilder<'a> {
                 EvidenceTarget::ObjectReference(type_id) => {
                     DefinitionReferenceTarget::ObjectType(self.identities.type_id(type_id)?)
                 }
-                EvidenceTarget::Unknown => {
-                    return Err(PrepareError::InvalidCheckedBundle {
-                        reason: "checked CLIENT return type has no durable identity",
-                    });
-                }
+                EvidenceTarget::Unknown => unreachable!(),
             };
             references.push(DefinitionReference::new(
                 function,
@@ -8045,7 +8200,18 @@ impl<'a> CandidateBuilder<'a> {
             .collect()
     }
 
-    fn validated_client(&self, owner: CheckedFunctionId) -> Result<&ValidatedClient, PrepareError> {
+    fn validated_client(&self, owner: CheckedFunctionId) -> Result<ValidatedClient, PrepareError> {
+        if matches!(self.mode, PreparationMode::Generic) {
+            let checked = self
+                .checked
+                .client_functions()
+                .iter()
+                .find(|function| function.id() == owner)
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function is absent from the checked bundle",
+                })?;
+            return validate_generic_client_function(checked, self.active);
+        }
         let Some(standard_preflight) = self.mode.standard_preflight() else {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT function requires standard preparation evidence",
@@ -8054,6 +8220,7 @@ impl<'a> CandidateBuilder<'a> {
         standard_preflight
             .clients
             .get(&owner)
+            .cloned()
             .ok_or(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT function has no exact validated return evidence",
             })
@@ -8076,6 +8243,21 @@ impl<'a> CandidateBuilder<'a> {
         validated: &ValidatedClient,
         consume_evidence: bool,
     ) -> Result<CandidateResolvedType, PrepareError> {
+        if matches!(self.mode, PreparationMode::Generic) {
+            return match validated.return_semantic_type {
+                SemanticType::Scalar(_) => Ok(CandidateResolvedType::LegacyScalar(
+                    validated.return_scalar.ok_or(PrepareError::InvalidCheckedBundle {
+                        reason: "checked CLIENT scalar return has no compatibility type",
+                    })?,
+                )),
+                SemanticType::Named(target) => Ok(CandidateResolvedType::Named(
+                    self.client_named_type_id(target)?,
+                )),
+                SemanticType::Reference { target } => Ok(CandidateResolvedType::Reference(
+                    self.identities.type_id(target)?,
+                )),
+            };
+        }
         let evidence = if let Some(declaration_evidence) = &self.declaration_evidence {
             let kind = crate::CheckedTypeUseKind::Return {
                 owner: validated.id,

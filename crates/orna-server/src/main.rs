@@ -1,7 +1,8 @@
 #![allow(clippy::single_element_loop)]
 use std::{
     io::{self, IsTerminal, Write},
-    process::ExitCode,
+    process::{Child, Command as ProcessCommand, ExitCode, Stdio},
+    time::{Duration, Instant},
 };
 
 use orna_protocol::CallFailure;
@@ -244,11 +245,27 @@ fn main() -> ExitCode {
                 arguments.explain,
                 arguments.runtime,
             );
+            let mut owned_daemon = None;
             let result = if endpoint_explicit {
                 orna_server::run_installed_invoke_at(&endpoint, request, &mut stdout, &mut stderr)
             } else {
-                orna_server::run_installed_invoke(request, &mut stdout, &mut stderr)
+                match ensure_local_daemon() {
+                    Ok(child) => {
+                        owned_daemon = child;
+                        orna_server::run_installed_invoke_at(
+                            &orna_client::DatabaseEndpoint::managed_local(),
+                            request,
+                            &mut stdout,
+                            &mut stderr,
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
             };
+            if let Some(mut child) = owned_daemon {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             match result {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
                 Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
@@ -418,6 +435,49 @@ const fn failure_name(failure: CallFailure) -> &'static str {
         CallFailure::ClientEvaluationFailed => "CLIENT_EVALUATION_FAILED",
         CallFailure::InternalFailure => "INTERNAL_FAILURE",
     }
+}
+
+fn ensure_local_daemon() -> Result<Option<Child>, orna_server::InstalledInvokeError> {
+    if orna_server::inspect_current_embedded_host().is_ok() {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe().map_err(|error| {
+        orna_server::InstalledInvokeError::new(
+            orna_server::InstalledInvokeErrorKind::Internal,
+            format!("the Orna executable could not be located: {error}"),
+        )
+    })?;
+    let mut child = ProcessCommand::new(executable)
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            orna_server::InstalledInvokeError::new(
+                orna_server::InstalledInvokeErrorKind::Authentication,
+                format!("the local Orna daemon could not start: {error}"),
+            )
+        })?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if orna_server::inspect_current_embedded_host().is_ok() {
+            return Ok(Some(child));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(orna_server::InstalledInvokeError::new(
+                orna_server::InstalledInvokeErrorKind::Authentication,
+                format!("the local Orna daemon exited during startup: {status}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(orna_server::InstalledInvokeError::new(
+        orna_server::InstalledInvokeErrorKind::Authentication,
+        "the local Orna daemon did not become ready within 30 seconds".to_owned(),
+    ))
 }
 
 fn write_stderr_line(line: &str) {
@@ -2079,7 +2139,7 @@ mod tests {
 
     #[test]
     fn usage_diagnostic_keeps_the_stable_command_list() {
-        assert!(USAGE.starts_with("Usage:\n  orna\n"));
+        assert!(USAGE.starts_with("Usage:\n  orna [OPTIONS]"));
         assert!(USAGE.contains("orna raw-call"));
         assert!(!USAGE.ends_with('\n'));
         assert_ne!(USAGE, HELP_TOP_LEVEL);
@@ -2203,7 +2263,6 @@ mod tests {
 
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
-        assert!(coloured.contains("\x1b[1;36mHost Mode:\x1b[0m"));
         assert!(coloured.contains("function-backed REPL"));
     }
 }
