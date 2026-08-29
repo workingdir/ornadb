@@ -2765,7 +2765,6 @@ impl CheckedStandardTerminalPresentTable {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedStandardExecutable {
     pub(super) function_id: FunctionId,
-    pub(super) parameter_id: ParameterId,
     pub(super) parameter_ids: Vec<ParameterId>,
     pub(super) revision_id: FunctionRevisionId,
     pub(super) revision_number: u64,
@@ -2778,7 +2777,6 @@ pub struct CheckedStandardExecutable {
     pub(super) references: Vec<DefinitionReference>,
     pub(super) schema_origin: SourceOrigin,
     pub(super) function_origin: SourceOrigin,
-    pub(super) parameter_origin: SourceOrigin,
     pub(super) parameter_origins: Vec<SourceOrigin>,
 }
 
@@ -2788,10 +2786,6 @@ impl CheckedStandardExecutable {
         self.function_id
     }
 
-    /// Returns the fixed `std.invoke.echo.p_value` parameter identity.
-    pub const fn parameter_id(&self) -> ParameterId {
-        self.parameter_id
-    }
     /// Returns all parameter identities in declaration order.
     pub fn parameter_ids(&self) -> &[ParameterId] {
         &self.parameter_ids
@@ -2852,10 +2846,6 @@ impl CheckedStandardExecutable {
         self.function_origin
     }
 
-    /// Returns the checked `p_value INTEGER` parameter declaration origin.
-    pub const fn parameter_origin(&self) -> SourceOrigin {
-        self.parameter_origin
-    }
     /// Returns all parameter declaration origins in declaration order.
     pub fn parameter_origins(&self) -> &[SourceOrigin] {
         &self.parameter_origins

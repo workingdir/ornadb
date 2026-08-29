@@ -2075,10 +2075,6 @@ fn checked_standard_executable_from_record(
         .iter()
         .map(|parameter| parameter.id())
         .collect::<Vec<_>>();
-    let parameter_id = parameter_ids
-        .first()
-        .copied()
-        .ok_or(StandardLibraryCheckError::MissingParameter)?;
     let parameter_origins = parameter_ids
         .iter()
         .map(|parameter| {
@@ -2100,22 +2096,9 @@ fn checked_standard_executable_from_record(
         .find(|origin| origin.identity() == DefinitionIdentity::Function(function_id))
         .ok_or(StandardLibraryCheckError::PresenterMissingFunctionOrigin)?
         .source();
-    let parameter_origin = origins
-        .iter()
-        .find(|origin| {
-            origin.identity()
-                == DefinitionIdentity::Parameter {
-                    owner: function_id,
-                    parameter: parameter_id,
-                }
-        })
-        .ok_or(StandardLibraryCheckError::PresenterMissingParameterOrigin)?
-        .source();
     let revision = record.revision();
     Ok(CheckedStandardExecutable {
         function_id,
-        parameter_id,
-
         parameter_ids,
         revision_id: revision.id(),
         revision_number: revision.revision_number(),
@@ -2129,7 +2112,6 @@ fn checked_standard_executable_from_record(
         parameter_origins,
         schema_origin,
         function_origin,
-        parameter_origin,
     })
 }
 
@@ -2354,7 +2336,6 @@ fn reconcile_standard_window_executable(
     }
     let mut checked_executable =
         checked_standard_executable_from_record(&expected, catalogue, origins, schema_origin)?;
-    checked_executable.parameter_id = checked.title_parameter_id();
     checked_executable.parameter_ids =
         vec![checked.title_parameter_id(), checked.content_parameter_id()];
     Ok(checked_executable)
@@ -4197,7 +4178,6 @@ fn reconcile_standard_invoke_executable(
 
     let checked_executable = CheckedStandardExecutable {
         function_id: checked.function_id(),
-        parameter_id: checked.parameter_id(),
         parameter_ids: vec![checked.parameter_id()],
         revision_id: checked.revision_id(),
         revision_number: STD_INVOKE_ECHO_REVISION_NUMBER,
@@ -4210,7 +4190,6 @@ fn reconcile_standard_invoke_executable(
         references: checked.references().to_vec(),
         schema_origin,
         function_origin,
-        parameter_origin,
         parameter_origins: vec![parameter_origin],
     };
 
@@ -27493,7 +27472,7 @@ mod tests {
 
         let executable = checked.checked_executable().unwrap();
         assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
-        assert_eq!(executable.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(executable.parameter_ids(), &[STD_INVOKE_ECHO_PARAMETER_ID]);
         assert_eq!(
             executable.revision_id(),
             STD_INVOKE_ECHO_FUNCTION_REVISION_ID
@@ -27547,7 +27526,7 @@ mod tests {
             executable.declaration_origin()
         );
         assert_eq!(
-            executable.parameter_origin().source_unit(),
+            executable.parameter_origins()[0].source_unit(),
             STD_INVOKE_SOURCE_UNIT_ID
         );
         let stored_schema_origin = verified
@@ -28749,8 +28728,8 @@ mod tests {
         assert_eq!(checked.type_bindings().len(), 2);
 
         let executable = checked.checked_executable().unwrap();
+        assert_eq!(executable.parameter_ids(), &[STD_INVOKE_ECHO_PARAMETER_ID]);
         assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
-        assert_eq!(executable.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
         assert_eq!(
             executable.revision_id(),
             STD_INVOKE_ECHO_FUNCTION_REVISION_ID
