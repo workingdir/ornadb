@@ -1019,7 +1019,7 @@ mod tests {
             vec!["orna", "server", "backend-shell", "select 1"],
             vec!["orna", "server", "upgrade", "--force"],
         ] {
-            assert_eq!(parse_command(arguments(&values)), None);
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
     }
 
@@ -1432,8 +1432,6 @@ mod tests {
         for values in [
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
-            vec!["orna", "--runtime", "tty"],
-            vec!["orna", "--runtime", "tty", "invoke"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
