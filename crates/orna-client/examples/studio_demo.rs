@@ -59,10 +59,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         host.poll_runtime(1)?;
         let events = host.drain_runtime_events();
         let (closed, action_id) = consume_runtime_events(&host, events, surface);
-        if !closed {
-            if let Some(action_id) = action_id.as_deref() {
-                let _ = apply_action_feedback(&mut host, surface, action_id)?;
-            }
+        if !closed && let Some(action_id) = action_id.as_deref() {
+            let _ = apply_action_feedback(&mut host, surface, action_id)?;
         }
         println!("studio_demo: smoke poll complete");
         closed
@@ -73,10 +71,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             host.poll_runtime(50)?;
             let events = host.drain_runtime_events();
             let (next_closed, action_id) = consume_runtime_events(&host, events, surface);
-            if !next_closed {
-                if let Some(action_id) = action_id.as_deref() {
-                    let _ = apply_action_feedback(&mut host, surface, action_id)?;
-                }
+            if !next_closed && let Some(action_id) = action_id.as_deref() {
+                let _ = apply_action_feedback(&mut host, surface, action_id)?;
             }
             closed = next_closed;
         }
