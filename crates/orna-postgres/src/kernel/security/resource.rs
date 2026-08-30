@@ -1,12 +1,41 @@
 //! Authenticated SERVER resource producer interface.
 
+use super::resource_producer::{
+    ResourceProducerCommand, ResourceProducerFailureStage, ResourceProducerLifecycle,
+    ResourceProducerPull, ResourceProducerReady, ResourceProducerStartGuard,
+};
 use super::resource_stream::{
     bind_authenticated_resource_arguments, finish_direct_resource_failure,
     resource_target_security_is_supported, resource_target_shape_is_supported,
     resource_values_from_server_result, run_authenticated_server_resource_producer_task,
 };
 use super::*;
+pub(super) const MAX_RESOURCE_CREDIT: u64 = 1024 * 1024 * 1024;
 
+#[cfg(feature = "test-hooks")]
+struct AuthenticatedResourceTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn pause_after_authenticated_resource_validation(
+    test_barrier: Option<&AuthenticatedResourceTestBarrier>,
+) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct AuthenticatedResourceTestBarrier;
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_authenticated_resource_validation(
+    _test_barrier: Option<&AuthenticatedResourceTestBarrier>,
+) {
+}
 /// The owned result of one authenticated SERVER resource request.
 ///
 /// A successful result contains the server-generated nested invocation identity

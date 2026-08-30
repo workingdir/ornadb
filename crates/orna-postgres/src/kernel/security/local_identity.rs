@@ -1,4 +1,5 @@
 use super::*;
+const LOCAL_HEALTH_UID: u32 = u32::MAX;
 
 const LOCAL_USER_PRINCIPAL_DOMAIN: &[u8] = b"ornadb.local-user.v1\0";
 pub(super) fn local_user_principal_id(uid: u32) -> PrincipalId {
