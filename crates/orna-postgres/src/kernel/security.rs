@@ -19,6 +19,8 @@ mod authenticated_select;
 mod authentication;
 #[path = "security/client_evaluation.rs"]
 mod client_evaluation;
+#[path = "security/inspect_capture.rs"]
+mod inspect_capture;
 #[path = "security/local_identity.rs"]
 mod local_identity;
 #[path = "security/persistence.rs"]
@@ -37,6 +39,10 @@ mod resource_producer;
 mod resource_stream;
 #[path = "security/revision_guard.rs"]
 mod revision_guard;
+#[path = "security/sealed_audit.rs"]
+mod sealed_audit;
+#[path = "security/sealed_events.rs"]
+mod sealed_events;
 #[path = "security/sealed_invocation.rs"]
 mod sealed_invocation;
 #[path = "security/target_resolution.rs"]
@@ -53,6 +59,9 @@ pub(crate) use audit_writer::{
 use audit_writer::{
     resource_audit_invariant, resource_parent_invocation_is_owned_in_transaction,
     validate_resource_audit_lineage, validate_resource_lineage, validate_resource_state_context,
+};
+use inspect_capture::{
+    capture_completed_resource_inspect_snapshot, capture_sealed_invocation_snapshot,
 };
 use local_identity::append_client_capability_audit;
 pub(crate) use local_identity::security_snapshots_match;
@@ -84,6 +93,15 @@ use resource_stream::{
 };
 use revision_guard::lock_active_revision_for_resource;
 pub(crate) use revision_guard::{lock_active_revision, require_complete_function_set};
+use sealed_audit::{
+    append_allowed_invocation_audit, append_allowed_invocation_audit_evidence,
+    append_linked_invocation_audit, append_sealed_denied_audit, append_unresolved_invocation_audit,
+};
+pub(crate) use sealed_events::sealed_completed_events;
+use sealed_events::{
+    finish_sealed_failure, sealed_completed_events_from_values, sealed_failure_events,
+    sealed_failure_result,
+};
 pub(crate) use sealed_invocation::InvocationAuditDecision;
 use sealed_invocation::{
     PreparedSealedTarget, SealedInvocationFailureClass, SealedInvocationPreparedOutcome,
@@ -1013,347 +1031,6 @@ fn finish_authenticated_dispatch_session<T>(
 ) -> Result<T, PostgresKernelError> {
     shutdown?;
     operation
-}
-
-/// Builds the exact sealed Event sequence for one completed invocation.
-///
-/// The batch carries `InvocationStarted(0)`, an optional non-empty
-/// `ValueBatch(1)`, and `InvocationCompleted` as one contiguous outer record
-/// sequence. A server adapter delivers this batch on the `RESULT_VALUES`
-/// channel and then completes the call.
-///
-/// ADR 0057 step 7 passes either the canonical echo value (no output
-/// requirement) or the presented opaque value in the final `ValueBatch`.
-pub(crate) fn sealed_completed_events(
-    _principal: PrincipalId,
-    invocation: InvocationId,
-    value: RuntimeValue,
-) -> Result<InvocationEventBatch, PostgresKernelError> {
-    sealed_completed_events_from_values(_principal, invocation, vec![value])
-}
-
-/// Builds completed events from validated SERVER result values.
-fn sealed_completed_events_from_values(
-    _principal: PrincipalId,
-    invocation: InvocationId,
-    values: Vec<RuntimeValue>,
-) -> Result<InvocationEventBatch, PostgresKernelError> {
-    let started = InvokeEvent::new(
-        invocation,
-        0,
-        InvocationEventBody::Started {
-            visible_principal: None,
-        },
-    )
-    .map_err(PostgresKernelError::InvocationCarrier)?;
-    let mut records = vec![InvocationEventRecord::new(1, started)];
-    let mut sequence = 1;
-    if !values.is_empty() {
-        let values = values
-            .into_iter()
-            .map(|value| InvokeValue::new(value).map_err(PostgresKernelError::InvocationCarrier))
-            .collect::<Result<Vec<_>, _>>()?;
-        let batch = InvokeEvent::new(
-            invocation,
-            sequence,
-            InvocationEventBody::value_batch(None, values)
-                .map_err(PostgresKernelError::InvocationCarrier)?,
-        )
-        .map_err(PostgresKernelError::InvocationCarrier)?;
-        records.push(InvocationEventRecord::new(2, batch));
-        sequence += 1;
-    }
-    let completed = InvokeEvent::new(
-        invocation,
-        sequence,
-        InvocationEventBody::Completed {
-            duration_nanoseconds: 0,
-        },
-    )
-    .map_err(PostgresKernelError::InvocationCarrier)?;
-    records.push(InvocationEventRecord::new(sequence + 1, completed));
-    InvocationEventBatch::new(records).map_err(PostgresKernelError::SealedInvocation)
-}
-
-fn sealed_failure_events(
-    invocation: InvocationId,
-    failure: SealedInvocationFailureClass,
-) -> Result<InvocationEventBatch, PostgresKernelError> {
-    let (phase, code, message, retryability) = match failure {
-        SealedInvocationFailureClass::Bind => (
-            InvocationFailurePhase::Bind,
-            "INVOKE_BIND_FAILED",
-            "invocation arguments were not accepted",
-            InvocationRetryability::No,
-        ),
-        SealedInvocationFailureClass::Target => (
-            InvocationFailurePhase::Target,
-            "INVOKE_TARGET_FAILED",
-            "invocation target failed",
-            InvocationRetryability::Unknown,
-        ),
-        SealedInvocationFailureClass::Internal => (
-            InvocationFailurePhase::Internal,
-            "INVOKE_INTERNAL_FAILURE",
-            "invocation could not complete",
-            InvocationRetryability::Unknown,
-        ),
-    };
-    let started = InvokeEvent::new(
-        invocation,
-        0,
-        InvocationEventBody::Started {
-            visible_principal: None,
-        },
-    )
-    .map_err(PostgresKernelError::InvocationCarrier)?;
-    let failure = InvocationFailure::new(phase, code, message, None, retryability)
-        .map_err(PostgresKernelError::InvocationCarrier)?;
-    let failed = InvokeEvent::new(invocation, 1, InvocationEventBody::Failed(failure))
-        .map_err(PostgresKernelError::InvocationCarrier)?;
-    InvocationEventBatch::new(vec![
-        InvocationEventRecord::new(1, started),
-        InvocationEventRecord::new(2, failed),
-    ])
-    .map_err(PostgresKernelError::SealedInvocation)
-}
-
-fn sealed_failure_result(
-    invocation: InvocationId,
-    failure: SealedInvocationFailureClass,
-) -> Result<SealedInvocationResult, PostgresKernelError> {
-    let events = sealed_failure_events(invocation, failure)?;
-    Ok(SealedInvocationResult::Failed { invocation, events })
-}
-
-async fn finish_sealed_failure(
-    transaction: Transaction<'_>,
-    invocation: InvocationId,
-    failure: SealedInvocationFailureClass,
-) -> Result<SealedInvocationResult, PostgresKernelError> {
-    let events = sealed_failure_events(invocation, failure)?;
-    let _ = transaction.rollback().await;
-    Ok(SealedInvocationResult::Failed { invocation, events })
-}
-
-/// Captures the structural epoch for one completed authenticated resource.
-///
-/// Resource requests do not carry an independent client offer. The nested
-/// invocation therefore records no runtime-binding rows, while the immutable
-/// invocation and trace carriers remain available to the Inspector.
-async fn capture_completed_resource_inspect_snapshot(
-    transaction: &Transaction<'_>,
-    active: &ActiveDatabaseRevision,
-    authenticated_session: &AuthenticatedSession,
-    invocation: InvocationId,
-    root_target: Option<InvocationTarget>,
-) -> Result<InspectEpochId, PostgresKernelError> {
-    let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
-        PostgresKernelError::DurableInvariant {
-            relation: "_orna_kernel.active_revision",
-            record: active.pair().catalogue().canonical(),
-            rule: "completed resource capture requires the verified standard snapshot",
-        }
-    })?;
-    let registry =
-        registered_opaque_codecs(standard).map_err(|_| PostgresKernelError::DurableInvariant {
-            relation: "_orna_kernel.standard_library_revisions",
-            record: standard.revision().canonical(),
-            rule: "completed resource capture requires the verified codec registry",
-        })?;
-    let root_target = root_target.ok_or_else(|| {
-        sealed_target_invariant(active, "completed resource producer must retain its target")
-    })?;
-    let events = sealed_completed_events_from_values(
-        authenticated_session.principal(),
-        invocation,
-        Vec::new(),
-    )?;
-    crate::inspect::capture_inspect_snapshot_in_transaction(
-        transaction,
-        active,
-        &registry,
-        authenticated_session,
-        invocation,
-        InspectSnapshotOptions::structural(),
-        authenticated_session.principal(),
-        root_target.function(),
-        InspectOutcomeKind::Allowed,
-        &events,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-}
-
-/// Captures one inspection epoch and its trace rows for a completed sealed
-/// invocation in the caller's protected transaction.
-///
-/// ADR 0064 wires capture into the sealed dispatch: after the protected
-/// decision and before/at execution, the produced Event batch becomes the
-/// durable trace rows and one immutable snapshot epoch. v1 retains typed
-/// state values in the protected epoch so a later `INSPECT VALUES` projection
-/// can reveal them without reading mutable USER state; the projection still
-/// redacts them unless the classifier is granted. Denied, bind-failed, and
-/// presentation-failed invocations produce no Event batch and therefore no
-/// epoch.
-#[allow(clippy::too_many_arguments)]
-async fn capture_sealed_invocation_snapshot(
-    transaction: &Transaction<'_>,
-    active: &ActiveDatabaseRevision,
-    registry: &OpaqueCodecRegistry,
-    authenticated_session: &AuthenticatedSession,
-    invocation: InvocationId,
-    root_target: FunctionId,
-    events: &InvocationEventBatch,
-    client_offer: &InvocationClientOffer,
-    loaded_user_state_cells: Option<&[UserStateCell]>,
-    output_requirement: Option<&InvocationOutputRequirement>,
-) -> Result<InspectEpochId, PostgresKernelError> {
-    crate::inspect::capture_inspect_snapshot_in_transaction(
-        transaction,
-        active,
-        registry,
-        authenticated_session,
-        invocation,
-        // Retain typed values in the immutable epoch. The installed
-        // projection applies the independent `Values` classifier.
-        InspectSnapshotOptions::new(true, false, false, false),
-        authenticated_session.principal(),
-        root_target,
-        InspectOutcomeKind::Allowed,
-        events,
-        Some(client_offer),
-        None,
-        loaded_user_state_cells,
-        output_requirement,
-    )
-    .await
-}
-
-/// Appends the allowed `EXECUTE` security evidence and the linked allowed
-/// invocation decision for one protected sealed decision.
-///
-/// The protected decision already allowed the invocation. This step re-runs
-/// the pure authorisation to obtain the immutable decision evidence, appends
-/// it, and links the invocation-audit row to that exact evidence.
-async fn append_allowed_invocation_audit(
-    transaction: &Transaction<'_>,
-    security: &SecuritySnapshot,
-    authenticated_session: &AuthenticatedSession,
-    target: InvocationTarget,
-    invocation: InvocationId,
-) -> Result<(), PostgresKernelError> {
-    let authorisation = match authorise_sealed_target(security, authenticated_session, target) {
-        ExecuteDecision::Allowed(authorisation) => authorisation,
-        ExecuteDecision::Denied(_) => {
-            return Err(PostgresKernelError::DurableInvariant {
-                relation: "active security snapshot",
-                record: target.function().canonical(),
-                rule: "allowed sealed invocation must re-authorise its pinned target",
-            });
-        }
-    };
-    let event_id = append_security_audit_event(
-        transaction,
-        SecurityAuditDecision::execute_allowed(&authorisation),
-    )
-    .await?;
-    append_linked_invocation_audit(transaction, invocation, event_id).await
-}
-
-async fn append_allowed_invocation_audit_evidence(
-    transaction: &Transaction<'_>,
-    authorisation: &AuthorisedInvocation,
-    invocation: InvocationId,
-) -> Result<(), PostgresKernelError> {
-    let event_id = append_security_audit_event(
-        transaction,
-        SecurityAuditDecision::execute_allowed(authorisation),
-    )
-    .await?;
-    append_linked_invocation_audit(transaction, invocation, event_id).await
-}
-
-/// Appends the denied `EXECUTE` evidence and linked denied invocation
-/// decision for one sealed target-level denial.
-///
-/// When the private denial reason cannot be re-derived without disclosing a
-/// protected fact, only the closed unresolved invocation decision is
-/// appended.
-async fn append_sealed_denied_audit(
-    transaction: &Transaction<'_>,
-    security: &SecuritySnapshot,
-    authenticated_session: &AuthenticatedSession,
-    active: &ActiveDatabaseRevision,
-    selector: &InvocationRequestTarget,
-    invocation: InvocationId,
-) -> Result<(), PostgresKernelError> {
-    let Some(target) = resolve_sealed_target(active, selector) else {
-        return append_unresolved_invocation_audit(transaction, authenticated_session, invocation)
-            .await;
-    };
-    let security_target = sealed_security_target(active, target);
-    let reason = match authorise_sealed_target(security, authenticated_session, security_target) {
-        ExecuteDecision::Denied(reason) => reason,
-        ExecuteDecision::Allowed(_) => {
-            // The protected denial came from a private rule that must not
-            // disclose a target fact. Record the closed unresolved denial.
-            return append_unresolved_invocation_audit(
-                transaction,
-                authenticated_session,
-                invocation,
-            )
-            .await;
-        }
-    };
-    let event_id = append_security_audit_event(
-        transaction,
-        SecurityAuditDecision::execute_denied(authenticated_session, security_target, reason),
-    )
-    .await?;
-    append_linked_invocation_audit(transaction, invocation, event_id).await
-}
-
-/// Loads one appended security audit event and links it to the invocation
-/// decision through the closed `EXECUTE` evidence contract.
-async fn append_linked_invocation_audit(
-    transaction: &Transaction<'_>,
-    invocation: InvocationId,
-    event_id: SecurityAuditEventId,
-) -> Result<(), PostgresKernelError> {
-    let events = load_security_audit_events(transaction).await?;
-    let event = events
-        .iter()
-        .find(|event| event.id() == event_id)
-        .ok_or_else(|| PostgresKernelError::DurableInvariant {
-            relation: "_orna_kernel.security_audit_events",
-            record: event_id.canonical(),
-            rule: "appended security audit evidence must recover in the same transaction",
-        })?;
-    append_invocation_audit_event(
-        transaction,
-        InvocationAuditDecision::from_execute_evidence(invocation, event)?,
-    )
-    .await?;
-    Ok(())
-}
-
-/// Appends the closed unresolved denied invocation decision for one sealed
-/// request that never reached a durable target.
-async fn append_unresolved_invocation_audit(
-    transaction: &Transaction<'_>,
-    authenticated_session: &AuthenticatedSession,
-    invocation: InvocationId,
-) -> Result<(), PostgresKernelError> {
-    append_invocation_audit_event(
-        transaction,
-        InvocationAuditDecision::unresolved_denied(invocation, authenticated_session.principal()),
-    )
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]
