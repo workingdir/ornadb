@@ -31,6 +31,8 @@ mod recovery;
 mod resource;
 #[path = "security/resource_cancellation.rs"]
 mod resource_cancellation;
+#[path = "security/resource_producer.rs"]
+mod resource_producer;
 #[path = "security/resource_stream.rs"]
 mod resource_stream;
 #[path = "security/revision_guard.rs"]
@@ -66,6 +68,10 @@ pub use resource::{
 };
 
 pub use resource_cancellation::ResourceCancellation;
+pub(crate) use resource_producer::{
+    ResourceProducerCancelled, ResourceProducerCommand, ResourceProducerCompleted,
+    ResourceProducerExit, ResourceProducerFailed, ResourceProducerPull,
+};
 #[cfg(test)]
 use resource_stream::{
     bind_authenticated_resource_arguments, classify_sealed_server_error,
@@ -98,10 +104,6 @@ use target_resolution::{
     resolve_resource_target, resolve_sealed_target, sealed_security_target,
     sealed_target_invariant, sealed_target_security_is_supported,
 };
-
-const MAX_RESOURCE_CREDIT: u64 = 1024 * 1024 * 1024;
-
-const LOCAL_HEALTH_UID: u32 = u32::MAX;
 
 use orna_artifact::client_plan::{CAPABILITY_FORMAT_VERSION, CapabilityClientPlan, ResourceKind};
 use orna_client::{
@@ -190,113 +192,6 @@ use crate::{
     server_runtime::{configure_and_recover, runtime_types_match},
     state::load_user_state_in_transaction,
 };
-
-enum ResourceProducerReady {
-    Accepted(AuthenticatedServerResourceAccepted),
-    Failed {
-        stream_id: u64,
-        request_id: InvocationId,
-        failure: CallFailure,
-    },
-}
-
-/// Requests cancellation if startup is dropped before the worker publishes
-/// acceptance or a pre-acceptance failure. The worker must not be aborted here:
-/// it owns the reserved request finalizer.
-struct ResourceProducerStartGuard {
-    cancellation: ResourceCancellation,
-    armed: bool,
-}
-
-impl ResourceProducerStartGuard {
-    fn new(cancellation: ResourceCancellation) -> Self {
-        Self {
-            cancellation,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ResourceProducerStartGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancellation.request_cancel();
-        }
-    }
-}
-
-/// Internal command sent to the task which owns the transaction.
-#[derive(Debug)]
-pub(crate) enum ResourceProducerCommand {
-    Pull(ResourceProducerPull),
-}
-
-#[derive(Debug)]
-pub(crate) struct ResourceProducerPull {
-    pub(crate) credit: ResourceCredit,
-    pub(crate) response:
-        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
-}
-
-/// The task exit used to finalize audit and transaction state.
-pub(crate) enum ResourceProducerExit {
-    Completed(ResourceProducerCompleted),
-    Cancelled(ResourceProducerCancelled),
-    Failed(ResourceProducerFailed),
-    SealedFailed(ResourceProducerSealedFailed),
-}
-
-pub(crate) struct ResourceProducerCompleted {
-    pub(crate) response:
-        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
-    pub(crate) final_batch_sequence: u64,
-    pub(crate) total_items: u64,
-    pub(crate) total_bytes: u64,
-}
-
-pub(crate) struct ResourceProducerCancelled {
-    pub(crate) response: Option<
-        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
-    >,
-}
-
-pub(crate) struct ResourceProducerFailed {
-    pub(crate) response: Option<
-        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
-    >,
-    pub(crate) error: PostgresKernelError,
-}
-pub(crate) struct ResourceProducerSealedFailed {
-    response: Option<
-        tokio::sync::oneshot::Sender<Result<AuthenticatedServerResourceEvent, PostgresKernelError>>,
-    >,
-    failure: SealedInvocationFailureClass,
-}
-
-#[derive(Default)]
-struct ResourceProducerLifecycle {
-    invocation: Option<InvocationId>,
-    target: Option<InvocationTarget>,
-    acceptance_committed: bool,
-    failure: Option<CallFailure>,
-    cancelled: bool,
-    terminal_commit_started: bool,
-    acceptance_commit_attempted: bool,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResourceProducerFailureStage {
-    None,
-    PreAcceptance,
-    PostAcceptance,
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
-    PostAcceptanceAudit,
-    PostAcceptanceAuditCancellation,
-    PostAcceptanceCancelledExitAudit,
-}
 
 impl PostgresKernel {
     /// Dispatches one sealed `sys.invoke` Request inside one transaction.
@@ -1100,31 +995,6 @@ impl PostgresKernel {
         .await;
         finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
     }
-}
-
-#[cfg(feature = "test-hooks")]
-struct AuthenticatedResourceTestBarrier {
-    reached: std::sync::Arc<tokio::sync::Barrier>,
-    resume: std::sync::Arc<tokio::sync::Barrier>,
-}
-
-#[cfg(feature = "test-hooks")]
-async fn pause_after_authenticated_resource_validation(
-    test_barrier: Option<&AuthenticatedResourceTestBarrier>,
-) {
-    if let Some(test_barrier) = test_barrier {
-        test_barrier.reached.wait().await;
-        test_barrier.resume.wait().await;
-    }
-}
-
-#[cfg(not(feature = "test-hooks"))]
-struct AuthenticatedResourceTestBarrier;
-
-#[cfg(not(feature = "test-hooks"))]
-async fn pause_after_authenticated_resource_validation(
-    _test_barrier: Option<&AuthenticatedResourceTestBarrier>,
-) {
 }
 
 pub(crate) fn finish_security_session<T>(
