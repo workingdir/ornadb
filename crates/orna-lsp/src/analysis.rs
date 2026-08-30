@@ -7,10 +7,13 @@
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    NumberOrString, Position, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol, Hover,
+    Location, NumberOrString, Position, SymbolKind,
 };
-use orna_compiler::{CompilerDiagnostic, check_standard_library_source};
+use orna_compiler::{
+    CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
+    SourceLocation, check_standard_library_source,
+};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
@@ -50,29 +53,45 @@ impl StandardLibrary {
 /// This path needs no standard library and is used when the verified
 /// standard snapshot cannot be loaded.
 pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let parse = orna_syntax::parse(&document.text);
-    parse
+    let logical_path = document.logical_path();
+    if let Ok(bundle) =
+        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
+    {
+        let report = orna_compiler::parse_bundle(&bundle);
+        return report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
+            .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
+            .collect();
+    }
+
+    orna_syntax::parse(&document.text)
         .diagnostics()
         .iter()
-        .map(|diagnostic| Diagnostic {
-            range: mapper.range(&diagnostic.span),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String(diagnostic.code.to_owned())),
-            code_description: None,
-            source: Some("orna".to_owned()),
-            message: diagnostic.message.clone(),
-            related_information: Some(vec![DiagnosticRelatedInformation {
-                location: Location {
-                    uri: document.uri.clone(),
-                    range: mapper.range(&diagnostic.span),
-                },
-                message: syntax_help(diagnostic.message.as_str()),
-            }]),
-            tags: None,
-            data: None,
+        .map(|diagnostic| {
+            let help = syntax_help(diagnostic.message.as_str());
+            Diagnostic {
+                range: mapper.range(&diagnostic.span),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String(diagnostic.code.to_owned())),
+                code_description: None,
+                source: Some("orna".to_owned()),
+                message: format!("{}\n\nhelp: {help}", diagnostic.message),
+                related_information: None,
+                tags: None,
+                data: Some(serde_json::json!({
+                    "severity": "error",
+                    "primaryLabel": "unexpected syntax",
+                    "help": help,
+                    "notes": [],
+                    "related": [],
+                })),
+            }
         })
         .collect()
 }
+
 pub fn check_document(
     document: &Document,
     standard: Option<&StandardLibrary>,
@@ -101,60 +120,96 @@ pub fn check_document(
         .diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri))
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
         .collect()
 }
+
 fn compiler_diagnostic(
     diagnostic: &CompilerDiagnostic,
     mapper: &PositionMapper<'_>,
     uri: &lsp_types::Uri,
+    logical_path: &str,
 ) -> Diagnostic {
-    let span = SourceSpan {
-        start: diagnostic.location().span().start(),
-        end: diagnostic.location().span().end(),
-    };
+    let span = compiler_span(diagnostic.location());
+    let related_information = diagnostic
+        .related()
+        .iter()
+        .filter(|related| related.location().logical_path() == logical_path)
+        .map(|related| DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: mapper.range(&compiler_span(related.location())),
+            },
+            message: related.message().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let related_data = diagnostic
+        .related()
+        .iter()
+        .map(|related| {
+            serde_json::json!({
+                "path": related.location().logical_path(),
+                "start": related.location().span().start(),
+                "end": related.location().span().end(),
+                "label": related.message(),
+            })
+        })
+        .collect::<Vec<_>>();
+
     Diagnostic {
         range: mapper.range(&span),
-        severity: Some(DiagnosticSeverity::ERROR),
+        severity: Some(match diagnostic.severity() {
+            CompilerDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+            CompilerDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+        }),
         code: Some(NumberOrString::String(
             diagnostic.code().as_str().to_owned(),
         )),
         code_description: None,
         source: Some("orna".to_owned()),
-        message: diagnostic.message().to_owned(),
-        related_information: Some(vec![DiagnosticRelatedInformation {
-            location: Location {
-                uri: uri.clone(),
-                range: mapper.range(&span),
-            },
-            message: diagnostic_help(diagnostic),
-        }]),
-        tags: None,
-        data: None,
+        message: diagnostic_message(diagnostic),
+        related_information: (!related_information.is_empty()).then_some(related_information),
+        tags: (diagnostic.code() == DiagnosticCode::UnreachableCode)
+            .then_some(vec![DiagnosticTag::UNNECESSARY]),
+        data: Some(serde_json::json!({
+            "severity": diagnostic.severity().as_str(),
+            "title": diagnostic.code().title(),
+            "summary": diagnostic.code().summary(),
+            "primaryLabel": diagnostic.primary_label(),
+            "help": diagnostic.help(),
+            "notes": diagnostic.notes(),
+            "related": related_data,
+        })),
     }
 }
 
-fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
-    let mut help = format!(
-        "{} {}: {}",
-        diagnostic.code().as_str(),
-        diagnostic.code().title(),
-        diagnostic.code().summary()
-    );
-    if let Some(next_step) = diagnostic.code().help() {
-        help.push_str(" Help: ");
-        help.push_str(next_step);
+fn compiler_span(location: &SourceLocation) -> SourceSpan {
+    SourceSpan {
+        start: location.span().start(),
+        end: location.span().end(),
     }
-    help
 }
 
-fn syntax_help(message: &str) -> String {
+fn diagnostic_message(diagnostic: &CompilerDiagnostic) -> String {
+    let mut message = diagnostic.message().to_owned();
+    if let Some(help) = diagnostic.help() {
+        message.push_str("\n\nhelp: ");
+        message.push_str(help);
+    }
+    for note in diagnostic.notes() {
+        message.push_str("\n\nnote: ");
+        message.push_str(note);
+    }
+    message
+}
+
+fn syntax_help(message: &str) -> &'static str {
     if message.contains("expected a name") {
-        "Add the missing name at this location.".to_owned()
+        "Add the missing name at this location."
     } else if message.contains("expected") {
-        "Add the expected token or close the current construct.".to_owned()
+        "Add the expected token or close the current construct."
     } else {
-        "Review the syntax at this location.".to_owned()
+        "Review the syntax at this location."
     }
 }
 
@@ -3680,11 +3735,13 @@ fn client_field_path_at_byte(
 #[cfg(test)]
 mod tests {
     use super::{
-        StandardLibrary, completion_at, declaration_at, hover, references,
-        type_owner_name_from_source,
+        StandardLibrary, check_document, completion_at, declaration_at, hover, references,
+        syntax_diagnostics, type_owner_name_from_source,
     };
     use crate::documents::{Document, PositionMapper};
-    use lsp_types::{Hover, HoverContents, Position, Range};
+    use lsp_types::{
+        DiagnosticSeverity, DiagnosticTag, Hover, HoverContents, NumberOrString, Position, Range,
+    };
 
     fn hover_at(text: &str, byte: usize) -> Option<Hover> {
         let document = Document::new("file:///hover.orna".parse().unwrap(), text.to_owned(), 1);
@@ -3712,6 +3769,121 @@ mod tests {
         assert_eq!(
             snapshot.source().id(),
             orna_standard::STANDARD_SOURCE_V11_REVISION_ID
+        );
+    }
+
+    #[test]
+    fn syntax_diagnostics_publish_compiler_metadata() {
+        let text = "CREATE SCHEMA ;";
+        let document = Document::new("file:///syntax.orna".parse().unwrap(), text.to_owned(), 1);
+        let mapper = PositionMapper::new(text);
+
+        let diagnostics = syntax_diagnostics(&document, &mapper);
+
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("ORNA0001".to_owned()))
+        );
+        assert!(diagnostic.message.contains("help:"));
+        assert_eq!(diagnostic.related_information, None);
+        let data = diagnostic
+            .data
+            .as_ref()
+            .expect("structured diagnostic data");
+        assert_eq!(data["severity"], "error");
+        assert_eq!(data["title"], "unexpected syntax");
+        assert_eq!(data["summary"], "The source contains invalid syntax.");
+        assert_eq!(data["primaryLabel"], "unexpected syntax");
+    }
+
+    #[test]
+    fn duplicate_diagnostics_publish_the_first_definition() {
+        let standard = StandardLibrary::load().expect("retained V11 standard must load");
+        let text = "CREATE SCHEMA app;\nCREATE SCHEMA app;";
+        let document = Document::new(
+            "file:///duplicate.orna".parse().unwrap(),
+            text.to_owned(),
+            1,
+        );
+        let mapper = PositionMapper::new(text);
+
+        let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("ORNA0103".to_owned()))
+        );
+        let related = diagnostic
+            .related_information
+            .as_ref()
+            .expect("duplicate diagnostic has related information");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].message, "first defined here");
+        assert_eq!(related[0].location.range.start, Position::new(0, 14));
+        assert_eq!(related[0].location.range.end, Position::new(0, 17));
+        let data = diagnostic
+            .data
+            .as_ref()
+            .expect("structured diagnostic data");
+        assert_eq!(data["primaryLabel"], "redefined here");
+        assert_eq!(
+            data["help"],
+            "rename one of the definitions or remove the duplicate"
+        );
+        assert_eq!(data["related"][0]["label"], "first defined here");
+    }
+
+    #[test]
+    fn unreachable_code_is_a_warning_with_an_unnecessary_tag() {
+        let standard = StandardLibrary::load().expect("retained V11 standard must load");
+        let text = "CREATE SCHEMA app;\n\
+                    CREATE CLIENT FUNCTION app.unreachable()\n\
+                    RETURNS BOOLEAN\n\
+                    IS\n\
+                    BEGIN\n\
+                        RETURN TRUE;\n\
+                        LET ignored := FALSE;\n\
+                    END;";
+        let document = Document::new("file:///warning.orna".parse().unwrap(), text.to_owned(), 1);
+        let mapper = PositionMapper::new(text);
+
+        let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("ORNA0401".to_owned()))
+        );
+        assert_eq!(diagnostic.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+        assert_eq!(diagnostic.range.start, Position::new(6, 0));
+        let related = diagnostic
+            .related_information
+            .as_ref()
+            .expect("warning has return-cause information");
+        assert_eq!(related[0].location.range.start, Position::new(5, 0));
+        assert_eq!(
+            related[0].message,
+            "this statement returns from the function"
+        );
+        assert!(diagnostic.message.contains("help:"));
+        assert!(diagnostic.message.contains("note:"));
+        let data = diagnostic
+            .data
+            .as_ref()
+            .expect("structured diagnostic data");
+        assert_eq!(data["severity"], "warning");
+        assert_eq!(data["primaryLabel"], "unreachable code");
+        assert_eq!(
+            data["notes"][0],
+            "unreachable statements are still checked but can never execute"
         );
     }
 

@@ -382,9 +382,9 @@ fn prepare_with_allocator(
     active: &ActiveDatabaseRevision,
     mut allocations: CandidateAllocator,
 ) -> Result<DeployableRevision, PrepareError> {
-    if !report.diagnostics().is_empty() || report.checked_bundle().is_none() {
+    if report.has_errors() || report.checked_bundle().is_none() {
         return Err(PrepareError::CheckNotComplete {
-            diagnostic_count: report.diagnostics().len(),
+            diagnostic_count: report.error_count(),
         });
     }
     if expected_base != active.pair() {
@@ -477,9 +477,9 @@ fn prepare_standard_application_with_seed(
             diagnostic_count: report.diagnostics().len(),
         });
     };
-    if !report.diagnostics().is_empty() {
+    if report.has_errors() {
         return Err(PrepareStandardApplicationError::CheckNotComplete {
-            diagnostic_count: report.diagnostics().len(),
+            diagnostic_count: report.error_count(),
         });
     }
     if expected_base != active.pair() {
