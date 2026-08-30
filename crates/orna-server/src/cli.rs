@@ -27,7 +27,7 @@ Usage:
   orna [OPTIONS] [URI] invoke <function> [OPTIONS]
   orna [OPTIONS] -d
 
-Common Commands:
+Commands:
   invoke ...   Run one stored function.
   repl ...     Open the function-backed REPL.
   inspect ...  Inspect a completed invocation.
