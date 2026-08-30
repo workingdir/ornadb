@@ -15,9 +15,6 @@ use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_libr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_standard::{
-        retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
-    };
 
     #[test]
     fn checks_new_application_source_against_verified_v10_standard() {
