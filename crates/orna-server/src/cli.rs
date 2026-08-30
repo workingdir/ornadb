@@ -466,6 +466,16 @@ where
                 .is_none()
                 .then_some(Command::Help(HelpTopic::Runtime)),
             Some(value) if value == OsStr::new("describe") => {
+                if args
+                    .peek()
+                    .is_some_and(|value| value == OsStr::new("--help"))
+                {
+                    let _ = args.next();
+                    return args
+                        .next()
+                        .is_none()
+                        .then_some(Command::Help(HelpTopic::Runtime));
+                }
                 let path = PathBuf::from(args.next()?);
                 args.next()
                     .is_none()
