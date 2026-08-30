@@ -56,17 +56,13 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 const SERVER_FUNCTION_FIXTURE: &[u8] = include_bytes!("fixtures/server_function_dogfood.orna");
 
-/// A caller-owned scratch directory below the repository `target/` directory.
+/// A caller-owned scratch directory below the system temporary directory.
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn new(label: &str) -> io::Result<Self> {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("server crate remains below crates");
-        let path = repository.join("target").join(format!(
-            "sqlite-backend-test-{}-{}-{label}",
+        let path = std::env::temp_dir().join(format!(
+            "orna-sqlite-test-{}-{}-{label}",
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
