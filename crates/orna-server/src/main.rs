@@ -2074,10 +2074,11 @@ mod tests {
                 "{command} is missing from top-level help",
             );
         }
-        assert!(top_level.contains("security ..."));
-        assert!(top_level.contains("raw-call ..."));
         assert!(top_level.contains("Operational Commands:"));
         assert!(top_level.contains("server ..."));
+        assert!(top_level.contains("security ..."));
+        assert!(top_level.contains("raw-call ..."));
+        assert!(!top_level.contains("runtime ..."));
         assert!(help_text(HelpTopic::Invoke).contains("--runtime <family>"));
         assert!(help_text(HelpTopic::State).contains("--value-file <path>"));
         assert!(help_text(HelpTopic::Inspect).contains("--projection <name>"));
