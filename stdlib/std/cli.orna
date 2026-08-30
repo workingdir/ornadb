@@ -1,0 +1,5 @@
+CREATE SCHEMA std.cli;
+
+CREATE CLIENT FUNCTION std.cli.repl ()
+RETURNS std.ui.UI
+RETURN std.cli.evaluate(std.cli.input());

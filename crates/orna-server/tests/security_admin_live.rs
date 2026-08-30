@@ -11,8 +11,6 @@
 
 #![cfg(unix)]
 
-mod support;
-
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 

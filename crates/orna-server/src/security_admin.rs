@@ -1,3 +1,5 @@
+// Security administration returns the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 //! Local security administration for the Orna instance.
 //!
 //! This module runs the closed `orna security` command family (ADR 0065).

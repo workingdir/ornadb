@@ -1293,7 +1293,7 @@ mod tests {
         let first = encode_value(&RuntimeValue::Boolean(true)).unwrap();
         let second = encode_value(&RuntimeValue::Integer(7)).unwrap();
         let mut malformed = first.clone();
-        malformed.extend([b'O', b'R', b'V', b'2']);
+        malformed.extend(*b"ORV2");
         let mut truncated = first.clone();
         truncated.extend(&second[..second.len() - 1]);
         let mut trailing = first.clone();

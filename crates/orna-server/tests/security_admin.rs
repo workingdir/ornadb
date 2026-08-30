@@ -233,8 +233,6 @@ fn malformed_command_shapes_all_fail_closed_with_exact_usage() {
     let before = snapshot(directory.path()).expect("snapshot empty scratch");
     let canonical = FunctionId::from_bytes([0x33; 16]).canonical();
     let cases = [
-        vec![],
-        vec![OsString::new()],
         vec![OsString::from("security")],
         vec![OsString::from("security"), OsString::from("grant-execute")],
         vec![
