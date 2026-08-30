@@ -34,6 +34,27 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
 }
 
 #[test]
+fn legacy_migration_epoch_is_order_contiguous() -> TestResult<()> {
+    require(
+        MIGRATIONS.len() == 47,
+        format!(
+            "migration registry has {} entries; expected 47",
+            MIGRATIONS.len()
+        ),
+    )?;
+    for (index, (version, _, _)) in MIGRATIONS.iter().enumerate() {
+        require(
+            *version == (index + 1) as i64,
+            format!(
+                "legacy migration at index {index} is version {version}; expected {}",
+                index + 1
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn registered_migration_sql_has_no_procedural_language_dependency() -> TestResult<()> {
     require(!MIGRATIONS.is_empty(), "migration registry is empty")?;
 
@@ -60,6 +81,18 @@ fn write_reference_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
         "e831811c0f42d6f4b3ab2601cf480fabaaed03b5547e2615400b9eec4b6b53bf"
+    );
+}
+
+#[test]
+fn application_migration_baseline_checksum_binds_v46_and_v47_contracts() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(46, MIGRATIONS[45].2)),
+        "bcbe71c0c5d2c18890f1aacab9e09389ffdba3f2789f88f7e0df95562fad6685"
+    );
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(47, MIGRATIONS[46].2)),
+        "ac92c5acb0388c652ab130db481ad051f1b893e91d0d232e35001d5ffaa0345d"
     );
 }
 

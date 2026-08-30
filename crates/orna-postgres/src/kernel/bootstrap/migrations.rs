@@ -2,12 +2,12 @@
 
 use super::*;
 
-use std::collections::HashSet;
 use orna_core::{
     physical::{PhysicalMigrationArtifact, PhysicalPlan},
     revision::RevisionPair,
 };
 use orna_storage::MigrationLedgerEntry;
+use std::collections::HashSet;
 
 pub(super) struct Migration {
     pub(super) version: i64,
@@ -623,16 +623,18 @@ async fn backfill_application_migration_ledger(
             ));
         };
         for (offset, entry) in existing_ledger.iter().enumerate() {
-            let expected_index = start.checked_add(offset).ok_or(
-                PostgresKernelError::CatalogueInvariant(
-                    "legacy revision path index exceeds platform limits",
-                ),
-            )?;
-            let expected_base = reverse_path.get(expected_index).ok_or(
-                PostgresKernelError::CatalogueInvariant(
-                    "existing migration ledger starts beyond legacy revision ancestry",
-                ),
-            )?;
+            let expected_index =
+                start
+                    .checked_add(offset)
+                    .ok_or(PostgresKernelError::CatalogueInvariant(
+                        "legacy revision path index exceeds platform limits",
+                    ))?;
+            let expected_base =
+                reverse_path
+                    .get(expected_index)
+                    .ok_or(PostgresKernelError::CatalogueInvariant(
+                        "existing migration ledger starts beyond legacy revision ancestry",
+                    ))?;
             let candidate = reverse_path.get(expected_index + 1).ok_or(
                 PostgresKernelError::CatalogueInvariant(
                     "existing migration ledger extends beyond legacy revision ancestry",
@@ -782,4 +784,3 @@ fn optional_id_bytes(
         .map(|bytes| exact_id_bytes(bytes, message))
         .transpose()
 }
-

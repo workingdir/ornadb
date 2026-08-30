@@ -47,7 +47,7 @@ use orna_core::{
     },
     state::{
         UserStateCell, UserStateChange, UserStateError, UserStateKey, UserStateWriteOutcome,
-        UserStateWriteResult, apply_change,
+        UserStateWriteResult, apply_change, is_sealed_inspect_runtime_value,
     },
     system::system_function_by_id,
     types::{ResolvedType, StandardScalar},
@@ -666,9 +666,15 @@ impl SqliteRevisionStore {
 
     /// Loads every durable USER-state cell for one authenticated principal
     /// and root scope.
+    ///
+    /// The caller supplies the active and security snapshots used for
+    /// authentication. Both are revalidated, together with the session
+    /// binding, inside the read transaction before any cell is returned.
     pub async fn load_user_state(
         &self,
-        principal: PrincipalId,
+        active: &ActiveDatabaseRevision,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
         root_function: orna_core::FunctionId,
         state_profile: &str,
     ) -> Result<Vec<UserStateCell>, SqliteError> {
@@ -679,6 +685,16 @@ impl SqliteRevisionStore {
         )
         .await?;
         let result = async {
+            let current_active = load_active_from(&transaction).await?;
+            let current_security = load_security_snapshot(&transaction, &current_active).await?;
+            validate_pinned_context(
+                active,
+                security,
+                session,
+                &current_active,
+                &current_security,
+            )?;
+            let principal = session.principal();
             let mut rows = transaction
                 .query(
                     "SELECT function_id, function_instance_key, state_slot_id,
@@ -709,6 +725,12 @@ impl SqliteRevisionStore {
                     .map_err(|_| SqliteError::InvalidPersistedData("USER state value encoding"))?;
                 let value_type =
                     TypeId::from_bytes(id16(row.get::<Vec<u8>>(4)?, "USER state value type id")?);
+                if is_sealed_inspect_type_id(value_type) || is_sealed_inspect_runtime_value(&value)
+                {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "USER state cannot expose sealed Inspector values",
+                    ));
+                }
                 let revision = u64::try_from(row.get::<i64>(5)?)
                     .map_err(|_| SqliteError::InvalidPersistedData("USER state revision"))?;
                 let key = UserStateKey::new(
@@ -758,9 +780,15 @@ impl SqliteRevisionStore {
     }
 
     /// Applies one authenticated USER-state change atomically.
+    ///
+    /// The active revision, security snapshot, and authenticated session are
+    /// revalidated in the same write transaction before the current cell is
+    /// read or changed.
     pub async fn write_user_state(
         &self,
-        principal: PrincipalId,
+        active: &ActiveDatabaseRevision,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
         change: &UserStateChange,
     ) -> Result<UserStateWriteResult, SqliteError> {
         let mut connection = self.connection.lock().await;
@@ -770,6 +798,16 @@ impl SqliteRevisionStore {
         )
         .await?;
         let result = async {
+            let current_active = load_active_from(&transaction).await?;
+            let current_security = load_security_snapshot(&transaction, &current_active).await?;
+            validate_pinned_context(
+                active,
+                security,
+                session,
+                &current_active,
+                &current_security,
+            )?;
+            let principal = session.principal();
             let mut rows = transaction
                 .query(
                     "SELECT function_id, function_instance_key, state_slot_id,
@@ -803,6 +841,12 @@ impl SqliteRevisionStore {
                     .map_err(|_| SqliteError::InvalidPersistedData("USER state value encoding"))?;
                 let value_type =
                     TypeId::from_bytes(id16(row.get::<Vec<u8>>(4)?, "USER state value type id")?);
+                if is_sealed_inspect_type_id(value_type) || is_sealed_inspect_runtime_value(&value)
+                {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "USER state cannot expose sealed Inspector values",
+                    ));
+                }
                 let revision = u64::try_from(row.get::<i64>(5)?)
                     .map_err(|_| SqliteError::InvalidPersistedData("USER state revision"))?;
                 let key = UserStateKey::new(
@@ -1195,12 +1239,30 @@ impl SqliteRevisionStore {
 
     /// Records redacted invocation evidence without arguments, results, or
     /// resource payloads.
+    ///
+    /// The write is serialized in an immediate transaction so a replay cannot
+    /// race the immutable-content check.
     pub async fn record_invocation_audit(
         &self,
         event: &SqliteInvocationAuditEvent,
     ) -> Result<(), SqliteError> {
-        let connection = self.connection.lock().await;
-        Self::record_invocation_audit_on(&connection, event).await
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = Self::record_invocation_audit_on(&transaction, event).await;
+        match result {
+            Ok(()) => {
+                transaction.commit().await?;
+                Ok(())
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
     }
 
     async fn record_invocation_audit_on(
@@ -1214,15 +1276,7 @@ impl SqliteRevisionStore {
                   effective_principal_id, authorising_principal_id, function_id,
                   source_revision_id, catalogue_revision_id, error_code)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT (invocation_id) DO UPDATE SET
-                     outcome = excluded.outcome,
-                     session_principal_id = excluded.session_principal_id,
-                     effective_principal_id = excluded.effective_principal_id,
-                     authorising_principal_id = excluded.authorising_principal_id,
-                     function_id = excluded.function_id,
-                     source_revision_id = excluded.source_revision_id,
-                     catalogue_revision_id = excluded.catalogue_revision_id,
-                     error_code = excluded.error_code",
+                 ON CONFLICT (invocation_id) DO NOTHING",
                 [
                     Value::Blob(event.invocation.to_bytes().to_vec()),
                     Value::Text(event.outcome.clone()),
@@ -1249,12 +1303,95 @@ impl SqliteRevisionStore {
                 ],
             )
             .await?;
-        if changed != 1 {
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
             return Err(SqliteError::InvalidPersistedData(
-                "invocation audit write affected an unexpected number of rows",
+                "invocation audit insert affected an unexpected number of rows",
             ));
         }
-        Ok(())
+
+        let mut rows = connection
+            .query(
+                "SELECT outcome, session_principal_id, effective_principal_id,
+                        authorising_principal_id, function_id, source_revision_id,
+                        catalogue_revision_id, error_code
+                 FROM orna_invocation_audit_events
+                 WHERE invocation_id = ?1",
+                [Value::Blob(event.invocation.to_bytes().to_vec())],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Err(SqliteError::InvalidPersistedData(
+                "invocation audit row disappeared during immutable check",
+            ));
+        };
+        let existing = SqliteInvocationAuditEvent {
+            invocation: event.invocation,
+            outcome: row.get(0)?,
+            session_principal: PrincipalId::from_bytes(id16(
+                row.get::<Vec<u8>>(1)?,
+                "invocation audit session principal",
+            )?),
+            effective_principal: row
+                .get::<Option<Vec<u8>>>(2)?
+                .map(|bytes| id16(bytes, "invocation audit effective principal"))
+                .transpose()?
+                .map(PrincipalId::from_bytes),
+            authorising_principal: row
+                .get::<Option<Vec<u8>>>(3)?
+                .map(|bytes| id16(bytes, "invocation audit authorising principal"))
+                .transpose()?
+                .map(PrincipalId::from_bytes),
+            function: row
+                .get::<Option<Vec<u8>>>(4)?
+                .map(|bytes| id16(bytes, "invocation audit function"))
+                .transpose()?
+                .map(orna_core::FunctionId::from_bytes),
+            source_revision: row
+                .get::<Option<Vec<u8>>>(5)?
+                .map(|bytes| id16(bytes, "invocation audit source revision"))
+                .transpose()?
+                .map(SourceRevisionId::from_bytes),
+            catalogue_revision: row
+                .get::<Option<Vec<u8>>>(6)?
+                .map(|bytes| id16(bytes, "invocation audit catalogue revision"))
+                .transpose()?
+                .map(CatalogueRevisionId::from_bytes),
+            error_code: row.get(7)?,
+        };
+        drop(rows);
+
+        if existing == *event {
+            return Ok(());
+        }
+        if existing.outcome == "allowed"
+            && matches!(event.outcome.as_str(), "completed" | "failed")
+            && same_invocation_facts(&existing, event)
+        {
+            let changed = connection
+                .execute(
+                    "UPDATE orna_invocation_audit_events
+                     SET outcome = ?1, error_code = ?2
+                     WHERE invocation_id = ?3 AND outcome = 'allowed'",
+                    [
+                        Value::Text(event.outcome.clone()),
+                        event
+                            .error_code
+                            .as_ref()
+                            .map_or(Value::Null, |value| Value::Text(value.clone())),
+                        Value::Blob(event.invocation.to_bytes().to_vec()),
+                    ],
+                )
+                .await?;
+            if changed == 1 {
+                return Ok(());
+            }
+        }
+        Err(SqliteError::Domain(
+            "invocation audit evidence is immutable or has an invalid transition".to_owned(),
+        ))
     }
 
     /// Loads one redacted invocation evidence record.
@@ -1354,8 +1491,23 @@ impl SqliteRevisionStore {
         &self,
         record: &SqliteInspectSnapshotRecord,
     ) -> Result<(), SqliteError> {
-        let connection = self.connection.lock().await;
-        Self::record_inspect_snapshot_on(&connection, record).await
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = Self::record_inspect_snapshot_on(&transaction, record).await;
+        match result {
+            Ok(()) => {
+                transaction.commit().await?;
+                Ok(())
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
     }
 
     async fn record_inspect_snapshot_on(
@@ -1369,13 +1521,7 @@ impl SqliteRevisionStore {
                  (epoch_id, invocation_id, owner_principal_id,
                   source_revision_id, catalogue_revision_id, summary_bytes)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT (invocation_id) DO UPDATE SET
-                     epoch_id = excluded.epoch_id,
-                     owner_principal_id = excluded.owner_principal_id,
-                     source_revision_id = excluded.source_revision_id,
-                     catalogue_revision_id = excluded.catalogue_revision_id,
-                     summary_bytes = excluded.summary_bytes,
-                     recorded_at = CURRENT_TIMESTAMP",
+                 ON CONFLICT (invocation_id) DO NOTHING",
                 [
                     Value::Blob(record.epoch.to_bytes().to_vec()),
                     Value::Blob(record.invocation.to_bytes().to_vec()),
@@ -1386,59 +1532,134 @@ impl SqliteRevisionStore {
                 ],
             )
             .await?;
-        if changed != 1 {
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
             return Err(SqliteError::InvalidPersistedData(
-                "inspection summary write affected an unexpected number of rows",
+                "inspection summary insert affected an unexpected number of rows",
             ));
         }
-        Ok(())
-    }
-
-    /// Loads an exact inspection epoch or the latest epoch for an invocation.
-    pub async fn load_inspect_snapshot(
-        &self,
-        invocation: InvocationId,
-        epoch: Option<InspectEpochId>,
-    ) -> Result<Option<SqliteInspectSnapshotRecord>, SqliteError> {
-        let connection = self.connection.lock().await;
-        let (sql, params): (&str, Vec<Value>) = match epoch {
-            Some(epoch) => (
-                "SELECT epoch_id, owner_principal_id, source_revision_id,
-                        catalogue_revision_id, summary_bytes
+        let mut rows = connection
+            .query(
+                "SELECT epoch_id, invocation_id, owner_principal_id,
+                        source_revision_id, catalogue_revision_id, summary_bytes
                  FROM orna_inspect_snapshots
-                 WHERE invocation_id = ?1 AND epoch_id = ?2",
-                vec![
-                    Value::Blob(invocation.to_bytes().to_vec()),
-                    Value::Blob(epoch.to_bytes().to_vec()),
+                 WHERE invocation_id = ?1 OR epoch_id = ?2",
+                [
+                    Value::Blob(record.invocation.to_bytes().to_vec()),
+                    Value::Blob(record.epoch.to_bytes().to_vec()),
                 ],
-            ),
-            None => (
-                "SELECT epoch_id, owner_principal_id, source_revision_id,
-                        catalogue_revision_id, summary_bytes
-                 FROM orna_inspect_snapshots
-                 WHERE invocation_id = ?1
-                 ORDER BY rowid DESC LIMIT 1",
-                vec![Value::Blob(invocation.to_bytes().to_vec())],
-            ),
-        };
-        let mut rows = connection.query(sql, params).await?;
+            )
+            .await?;
         let Some(row) = rows.next().await? else {
-            return Ok(None);
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection summary row disappeared during immutable check",
+            ));
         };
-        Ok(Some(SqliteInspectSnapshotRecord {
+        let existing = SqliteInspectSnapshotRecord {
             epoch: InspectEpochId::from_bytes(id16(row.get(0)?, "inspection epoch")?),
-            invocation,
-            owner: PrincipalId::from_bytes(id16(row.get(1)?, "inspection owner")?),
+            invocation: InvocationId::from_bytes(id16(row.get(1)?, "inspection invocation")?),
+            owner: PrincipalId::from_bytes(id16(row.get(2)?, "inspection owner")?),
             source_revision: SourceRevisionId::from_bytes(id16(
-                row.get(2)?,
+                row.get(3)?,
                 "inspection source revision",
             )?),
             catalogue_revision: CatalogueRevisionId::from_bytes(id16(
-                row.get(3)?,
+                row.get(4)?,
                 "inspection catalogue revision",
             )?),
-            summary: row.get(4)?,
-        }))
+            summary: row.get(5)?,
+        };
+        if existing == *record {
+            return Ok(());
+        }
+        Err(SqliteError::Domain(
+            "inspection summary evidence is immutable".to_owned(),
+        ))
+    }
+
+    /// Reads one inspection snapshot and, optionally, its trace from one
+    /// pinned active/security/session transaction.
+    ///
+    /// The active pair and security digest are checked before any evidence is
+    /// selected. Trace and snapshot rows therefore cannot be combined across a
+    /// revision or authenticated-session change.
+    pub async fn read_inspect_at(
+        &self,
+        active: &ActiveDatabaseRevision,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
+        invocation: InvocationId,
+        epoch: Option<InspectEpochId>,
+        after_sequence: u64,
+        include_trace: bool,
+    ) -> Result<
+        (
+            Option<SqliteInspectSnapshotRecord>,
+            Vec<SqliteInspectTraceEvent>,
+        ),
+        SqliteError,
+    > {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = async {
+            let current_active = load_active_from(&transaction).await?;
+            let current_security = load_security_snapshot(&transaction, &current_active).await?;
+            validate_pinned_context(
+                active,
+                security,
+                session,
+                &current_active,
+                &current_security,
+            )?;
+            let snapshot = load_inspect_snapshot_on(&transaction, invocation, epoch).await?;
+            if let Some(snapshot) = snapshot.as_ref() {
+                if snapshot.source_revision != active.pair().source()
+                    || snapshot.catalogue_revision != active.pair().catalogue()
+                {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "inspection snapshot is not pinned to the active revision",
+                    ));
+                }
+            }
+            let events = if include_trace {
+                load_inspect_trace_events_on(&transaction, invocation, after_sequence).await?
+            } else {
+                Vec::new()
+            };
+            Ok((snapshot, events))
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                transaction.commit().await?;
+                Ok(value)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
+    }
+
+    /// Loads an exact inspection epoch or the latest epoch for an invocation
+    /// under one pinned active/security/session context.
+    pub async fn load_inspect_snapshot(
+        &self,
+        active: &ActiveDatabaseRevision,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
+        invocation: InvocationId,
+        epoch: Option<InspectEpochId>,
+    ) -> Result<Option<SqliteInspectSnapshotRecord>, SqliteError> {
+        self.read_inspect_at(active, security, session, invocation, epoch, 0, false)
+            .await
+            .map(|(snapshot, _)| snapshot)
     }
 
     /// Persists one bounded redacted inspection trace event.
@@ -1446,8 +1667,23 @@ impl SqliteRevisionStore {
         &self,
         event: &SqliteInspectTraceEvent,
     ) -> Result<(), SqliteError> {
-        let connection = self.connection.lock().await;
-        Self::record_inspect_trace_event_on(&connection, event).await
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = Self::record_inspect_trace_event_on(&transaction, event).await;
+        match result {
+            Ok(()) => {
+                transaction.commit().await?;
+                Ok(())
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
     }
 
     async fn record_inspect_trace_event_on(
@@ -1462,11 +1698,7 @@ impl SqliteRevisionStore {
                 "INSERT INTO orna_inspect_trace_events
                  (invocation_id, sequence, kind, payload_bytes, observer_invocation_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (invocation_id, sequence) DO UPDATE SET
-                     kind = excluded.kind,
-                     payload_bytes = excluded.payload_bytes,
-                     observer_invocation_id = excluded.observer_invocation_id,
-                     recorded_at = CURRENT_TIMESTAMP",
+                 ON CONFLICT (invocation_id, sequence) DO NOTHING",
                 [
                     Value::Blob(event.invocation.to_bytes().to_vec()),
                     Value::Integer(sequence),
@@ -1478,53 +1710,70 @@ impl SqliteRevisionStore {
                 ],
             )
             .await?;
-        if changed != 1 {
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
             return Err(SqliteError::InvalidPersistedData(
-                "inspection trace write affected an unexpected number of rows",
+                "inspection trace insert affected an unexpected number of rows",
             ));
         }
-        Ok(())
-    }
-
-    /// Loads bounded trace events after a resume sequence.
-    pub async fn load_inspect_trace_events(
-        &self,
-        invocation: InvocationId,
-        after_sequence: u64,
-    ) -> Result<Vec<SqliteInspectTraceEvent>, SqliteError> {
-        let after = i64::try_from(after_sequence)
-            .map_err(|_| SqliteError::Domain("inspection trace sequence overflow".to_owned()))?;
-        let connection = self.connection.lock().await;
         let mut rows = connection
             .query(
-                "SELECT sequence, kind, payload_bytes, observer_invocation_id
+                "SELECT kind, payload_bytes, observer_invocation_id
                  FROM orna_inspect_trace_events
-                 WHERE invocation_id = ?1 AND sequence > ?2
-                 ORDER BY sequence",
+                 WHERE invocation_id = ?1 AND sequence = ?2",
                 [
-                    Value::Blob(invocation.to_bytes().to_vec()),
-                    Value::Integer(after),
+                    Value::Blob(event.invocation.to_bytes().to_vec()),
+                    Value::Integer(sequence),
                 ],
             )
             .await?;
-        let mut events = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let sequence = u64::try_from(row.get::<i64>(0)?)
-                .map_err(|_| SqliteError::InvalidPersistedData("inspection trace sequence"))?;
-            let observer_invocation = row
-                .get::<Option<Vec<u8>>>(3)?
+        let Some(row) = rows.next().await? else {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace row disappeared during immutable check",
+            ));
+        };
+        let existing = SqliteInspectTraceEvent {
+            invocation: event.invocation,
+            sequence: event.sequence,
+            kind: row.get(0)?,
+            payload: row.get(1)?,
+            observer_invocation: row
+                .get::<Option<Vec<u8>>>(2)?
                 .map(|bytes| id16(bytes, "inspection observer invocation"))
                 .transpose()?
-                .map(InvocationId::from_bytes);
-            events.push(SqliteInspectTraceEvent {
-                invocation,
-                sequence,
-                kind: row.get(1)?,
-                payload: row.get(2)?,
-                observer_invocation,
-            });
+                .map(InvocationId::from_bytes),
+        };
+        if existing == *event {
+            return Ok(());
         }
-        Ok(events)
+        Err(SqliteError::Domain(
+            "inspection trace evidence is immutable".to_owned(),
+        ))
+    }
+
+    /// Loads bounded trace events after a resume sequence under one pinned
+    /// active/security/session context.
+    pub async fn load_inspect_trace_events(
+        &self,
+        active: &ActiveDatabaseRevision,
+        security: &SecuritySnapshot,
+        session: &AuthenticatedSession,
+        invocation: InvocationId,
+        after_sequence: u64,
+    ) -> Result<Vec<SqliteInspectTraceEvent>, SqliteError> {
+        self.read_inspect_at(
+            active,
+            security,
+            session,
+            invocation,
+            None,
+            after_sequence,
+            true,
+        )
+        .await
+        .map(|(_, events)| events)
     }
 
     /// Persists one redacted USER-state operation record.
@@ -2149,6 +2398,155 @@ fn storage_error_to_sqlite(error: StorageError<SqliteError>) -> SqliteError {
         StorageError::Backend(error) => error,
         StorageError::InvalidRequest(error) => SqliteError::Domain(error.to_string()),
     }
+}
+
+fn validate_pinned_context(
+    active: &ActiveDatabaseRevision,
+    security: &SecuritySnapshot,
+    session: &AuthenticatedSession,
+    current_active: &ActiveDatabaseRevision,
+    current_security: &SecuritySnapshot,
+) -> Result<(), SqliteError> {
+    if security.revision() != active.pair() {
+        return Err(SqliteError::Domain(
+            "the supplied SQLite security snapshot is not pinned to the active revision".to_owned(),
+        ));
+    }
+    if current_active.pair() != active.pair() {
+        return Err(SqliteError::Domain(
+            "the active SQLite revision changed before the operation".to_owned(),
+        ));
+    }
+    if current_security.revision() != active.pair()
+        || current_security.security_context_digest() != security.security_context_digest()
+    {
+        return Err(SqliteError::Domain(
+            "the SQLite security snapshot changed before the operation".to_owned(),
+        ));
+    }
+    current_security
+        .bind_authenticated_session(session.principal(), session.active_roles().to_vec())
+        .map_err(|error| {
+            SqliteError::Domain(format!(
+                "the authenticated SQLite session is no longer valid: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
+fn is_sealed_inspect_type_id(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        orna_core::system::SYS_INSPECT_INVOCATION_TYPE_ID
+            | orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID
+            | orna_core::system::SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID
+            | orna_core::system::SYS_INSPECT_TRACE_EVENT_TYPE_ID
+            | orna_core::system::SYS_INSPECT_INVOCATION_NODES_TYPE_ID
+            | orna_core::system::SYS_INSPECT_CALLS_TYPE_ID
+            | orna_core::system::SYS_INSPECT_RESOURCES_TYPE_ID
+            | orna_core::system::SYS_INSPECT_STATE_CELLS_TYPE_ID
+            | orna_core::system::SYS_INSPECT_UI_NODES_TYPE_ID
+            | orna_core::system::SYS_INSPECT_PRESENTATION_CANDIDATES_TYPE_ID
+            | orna_core::system::SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID
+            | orna_core::system::SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID
+    )
+}
+
+fn same_invocation_facts(
+    left: &SqliteInvocationAuditEvent,
+    right: &SqliteInvocationAuditEvent,
+) -> bool {
+    left.invocation == right.invocation
+        && left.session_principal == right.session_principal
+        && left.effective_principal == right.effective_principal
+        && left.authorising_principal == right.authorising_principal
+        && left.function == right.function
+        && left.source_revision == right.source_revision
+        && left.catalogue_revision == right.catalogue_revision
+}
+
+async fn load_inspect_snapshot_on(
+    connection: &Connection,
+    invocation: InvocationId,
+    epoch: Option<InspectEpochId>,
+) -> Result<Option<SqliteInspectSnapshotRecord>, SqliteError> {
+    let (sql, params): (&str, Vec<Value>) = match epoch {
+        Some(epoch) => (
+            "SELECT epoch_id, owner_principal_id, source_revision_id,
+                    catalogue_revision_id, summary_bytes
+             FROM orna_inspect_snapshots
+             WHERE invocation_id = ?1 AND epoch_id = ?2",
+            vec![
+                Value::Blob(invocation.to_bytes().to_vec()),
+                Value::Blob(epoch.to_bytes().to_vec()),
+            ],
+        ),
+        None => (
+            "SELECT epoch_id, owner_principal_id, source_revision_id,
+                    catalogue_revision_id, summary_bytes
+             FROM orna_inspect_snapshots
+             WHERE invocation_id = ?1
+             ORDER BY rowid DESC LIMIT 1",
+            vec![Value::Blob(invocation.to_bytes().to_vec())],
+        ),
+    };
+    let mut rows = connection.query(sql, params).await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    Ok(Some(SqliteInspectSnapshotRecord {
+        epoch: InspectEpochId::from_bytes(id16(row.get(0)?, "inspection epoch")?),
+        invocation,
+        owner: PrincipalId::from_bytes(id16(row.get(1)?, "inspection owner")?),
+        source_revision: SourceRevisionId::from_bytes(id16(
+            row.get(2)?,
+            "inspection source revision",
+        )?),
+        catalogue_revision: CatalogueRevisionId::from_bytes(id16(
+            row.get(3)?,
+            "inspection catalogue revision",
+        )?),
+        summary: row.get(4)?,
+    }))
+}
+
+async fn load_inspect_trace_events_on(
+    connection: &Connection,
+    invocation: InvocationId,
+    after_sequence: u64,
+) -> Result<Vec<SqliteInspectTraceEvent>, SqliteError> {
+    let after = i64::try_from(after_sequence)
+        .map_err(|_| SqliteError::Domain("inspection trace sequence overflow".to_owned()))?;
+    let mut rows = connection
+        .query(
+            "SELECT sequence, kind, payload_bytes, observer_invocation_id
+             FROM orna_inspect_trace_events
+             WHERE invocation_id = ?1 AND sequence > ?2
+             ORDER BY sequence",
+            [
+                Value::Blob(invocation.to_bytes().to_vec()),
+                Value::Integer(after),
+            ],
+        )
+        .await?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let sequence = u64::try_from(row.get::<i64>(0)?)
+            .map_err(|_| SqliteError::InvalidPersistedData("inspection trace sequence"))?;
+        let observer_invocation = row
+            .get::<Option<Vec<u8>>>(3)?
+            .map(|bytes| id16(bytes, "inspection observer invocation"))
+            .transpose()?
+            .map(InvocationId::from_bytes);
+        events.push(SqliteInspectTraceEvent {
+            invocation,
+            sequence,
+            kind: row.get(1)?,
+            payload: row.get(2)?,
+            observer_invocation,
+        });
+    }
+    Ok(events)
 }
 
 async fn load_security_snapshot(

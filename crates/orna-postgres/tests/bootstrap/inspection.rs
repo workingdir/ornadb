@@ -2124,6 +2124,9 @@ pub(super) fn expected_migration_checksum(version: i64, sql: &str) -> Vec<u8> {
     if version == 4 {
         hash.update(MIGRATION_DATA_STEP_SEPARATOR);
         hash.update(CANONICAL_HASH_V1_EMPTY_SEED_STEP);
+    } else if version == 47 {
+        hash.update(MIGRATION_DATA_STEP_SEPARATOR);
+        hash.update(APPLICATION_MIGRATION_LEDGER_BASELINE_STEP);
     }
     hash.finalize().to_vec()
 }

@@ -3864,8 +3864,8 @@ fn migration_artifact_recovery_rejects_bad_header_tags_and_trailing_bytes() {
     let expected_base = artifact.expected_base();
     let candidate_pair = artifact.candidate_pair();
     let decode = |bytes: Vec<u8>| {
-        let digest = crate::canonical_hash::artifact_payload_digest(&bytes)
-            .expect("test artifact digest");
+        let digest =
+            crate::canonical_hash::artifact_payload_digest(&bytes).expect("test artifact digest");
         PhysicalMigrationArtifact::from_canonical_bytes(
             expected_base,
             candidate_pair,
@@ -4141,4 +4141,3 @@ fn migration_artifact_propagates_unsupported_physical_planning() {
         ))
     );
 }
-
