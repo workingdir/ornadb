@@ -1,0 +1,19 @@
+CREATE SCHEMA app;
+
+CREATE CLIENT FUNCTION app.incremented() RETURNS INTEGER
+RETURN std.math.increment(4);
+
+CREATE CLIENT FUNCTION app.decremented() RETURNS INTEGER
+RETURN std.math.decrement(4);
+
+CREATE CLIENT FUNCTION app.zero_check() RETURNS BOOLEAN
+RETURN std.math.is_zero(0);
+
+CREATE CLIENT FUNCTION app.minimum() RETURNS INTEGER
+RETURN std.math.min(2, 5);
+
+CREATE CLIENT FUNCTION app.maximum() RETURNS INTEGER
+RETURN std.math.max(2, 5);
+
+CREATE CLIENT FUNCTION app.clamped() RETURNS INTEGER
+RETURN std.math.clamp(12, 0, 10);

@@ -86,6 +86,6 @@ if [[ ! -f "${ready_file}" ]]; then
     exit 1
 fi
 
-printf '%s\n' '[local-cli-demo] invoking std.invoke.echo with p_value=7'
+printf '%s\n' '[local-cli-demo] invoking std.invoke.echo with p_value=7 through the managed local socket'
 XDG_STATE_HOME="${state_home}" XDG_RUNTIME_DIR="${runtime_home}" \
-    "${repository_root}/target/debug/orna" invoke std.invoke.echo --arg p_value=7
+    "${repository_root}/target/debug/orna" --db orna://local/default invoke std.invoke.echo --arg p_value=7
