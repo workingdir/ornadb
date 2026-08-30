@@ -172,6 +172,10 @@ fn retained_verified_standard_snapshot(
             orna_standard::retained_standard_library_v10_snapshot()
                 .and_then(orna_standard::verify_standard_library_v10_snapshot)
         }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V11_REVISION_ID => {
+            orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
+        }
         _ => Err(StandardLibraryError::Unavailable),
     }
 }
@@ -232,10 +236,16 @@ async fn bootstrap_latest_standard(
         orna_standard::prepare_standard_upgrade_v8_to_v9,
     )
     .await?;
-    let (_, expected) = apply_standard_upgrade_step(
+    let (active, _) = apply_standard_upgrade_step(
         kernel,
         &active,
         orna_standard::prepare_standard_upgrade_v9_to_v10,
+    )
+    .await?;
+    let (_, expected) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v10_to_v11,
     )
     .await?;
     Ok(expected)
