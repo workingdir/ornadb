@@ -26,6 +26,7 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::StandardLibraryError;
+use orna_storage::{ApplicationRevisionStore, StorageError};
 
 use crate::{
     EmbeddedHostError, inspect_current_embedded_host,
@@ -277,7 +278,9 @@ async fn diff_source_bundle(
     kernel: PostgresKernel,
     bundle: SourceBundle,
 ) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
-    let active = kernel.recover().await.map_err(map_recovery_error)?;
+    let active = ApplicationRevisionStore::recover(&kernel)
+        .await
+        .map_err(map_storage_recovery_error)?;
     let installed = active
         .catalogue_hash_context()
         .standard()
@@ -402,6 +405,15 @@ fn digest_hex(digest: orna_core::revision::Sha256Digest) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+pub(crate) fn render_prepared_source_diff(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    candidate: &orna_core::revision::DeployableRevision,
+) -> Result<Vec<u8>, InstalledSourceDiffError> {
+    let diff = orna_core::catalogue_diff::catalogue_diff(active.catalogue(), candidate.candidate());
+    let revision_changes = function_revision_changes(active, candidate);
+    render_diff_document(active, candidate, &diff, &revision_changes)
 }
 
 fn render_diff_document(
@@ -1097,6 +1109,17 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
             InstalledSourceDiffError::Recovery { source }
         }
         source => InstalledSourceDiffError::Recovery { source },
+    }
+}
+
+fn map_storage_recovery_error(
+    error: StorageError<PostgresKernelError>,
+) -> InstalledSourceDiffError {
+    match error {
+        StorageError::Backend(source) => map_recovery_error(source),
+        StorageError::InvalidRequest(source) => InstalledSourceDiffError::Recovery {
+            source: PostgresKernelError::InvalidLedgerRequest(source),
+        },
     }
 }
 

@@ -1,5 +1,6 @@
 //! Resolved Orna type descriptors.
 
+use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
 use crate::TypeId;
@@ -14,14 +15,14 @@ pub const MAX_TYPE_DESCRIPTOR_NODES: usize = 256;
 ///
 /// Checked constructors own all recursive limit accounting. A descriptor does
 /// not by itself admit the type in a catalogue or execution position.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TypeDescriptor {
     node: TypeDescriptorNode,
     depth: usize,
     node_count: usize,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 enum TypeDescriptorNode {
     Named(TypeId),
     Reference(TypeId),
@@ -217,7 +218,7 @@ impl Error for TypeDescriptorError {}
 ///
 /// This enum models compatibility representations only. It does not resolve
 /// source spellings or identify catalogue types.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum StandardScalar {
     Boolean,
     Integer,
@@ -258,7 +259,7 @@ impl StandardScalar {
 /// This initial form deliberately excludes source syntax and deferred type
 /// constructors. Named types, references, and value types carry resolved
 /// `TypeId` values.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum ResolvedType {
     Scalar(StandardScalar),
     Named(TypeId),
