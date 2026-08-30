@@ -1585,6 +1585,10 @@ impl SqliteRevisionStore {
     /// The active pair and security digest are checked before any evidence is
     /// selected. Trace and snapshot rows therefore cannot be combined across a
     /// revision or authenticated-session change.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the read contract carries active, security, and session pins"
+    )]
     pub async fn read_inspect_at(
         &self,
         active: &ActiveDatabaseRevision,
@@ -1618,14 +1622,13 @@ impl SqliteRevisionStore {
                 &current_security,
             )?;
             let snapshot = load_inspect_snapshot_on(&transaction, invocation, epoch).await?;
-            if let Some(snapshot) = snapshot.as_ref() {
-                if snapshot.source_revision != active.pair().source()
-                    || snapshot.catalogue_revision != active.pair().catalogue()
-                {
-                    return Err(SqliteError::InvalidPersistedData(
-                        "inspection snapshot is not pinned to the active revision",
-                    ));
-                }
+            if let Some(snapshot) = snapshot.as_ref()
+                && (snapshot.source_revision != active.pair().source()
+                    || snapshot.catalogue_revision != active.pair().catalogue())
+            {
+                return Err(SqliteError::InvalidPersistedData(
+                    "inspection snapshot is not pinned to the active revision",
+                ));
             }
             let events = if include_trace {
                 load_inspect_trace_events_on(&transaction, invocation, after_sequence).await?

@@ -168,12 +168,21 @@ impl RunningServer {
     }
 
     fn stop_with_signal(mut self, signal: Signal) -> io::Result<Output> {
-        let child = self.child.take().expect("running server child");
-        let pid = Pid::from_raw(
-            i32::try_from(child.id())
-                .map_err(|_| io::Error::other("SQLite server process id overflow"))?,
-        );
-        kill(pid, signal).map_err(io::Error::other)?;
+        let mut child = self.child.take().expect("running server child");
+        let pid = match i32::try_from(child.id()) {
+            Ok(pid) => Pid::from_raw(pid),
+            Err(_) => {
+                let error = io::Error::other("SQLite server process id overflow");
+                let _ = child.kill();
+                let _ = wait_bounded(child);
+                return Err(error);
+            }
+        };
+        if let Err(error) = kill(pid, signal).map_err(io::Error::other) {
+            let _ = child.kill();
+            let _ = wait_bounded(child);
+            return Err(error);
+        }
         wait_bounded(child)
     }
 }

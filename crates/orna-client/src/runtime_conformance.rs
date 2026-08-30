@@ -12,9 +12,7 @@ use std::{
 };
 mod headless_fixture;
 
-pub use headless_fixture::{
-    HeadlessFixtureError, HeadlessFixtureErrorKind, HeadlessFixtureSession,
-};
+pub use headless_fixture::{HeadlessFixtureErrorKind, HeadlessFixtureSession};
 
 unsafe impl Sync for StringView {}
 unsafe impl Sync for ContractVersion {}
