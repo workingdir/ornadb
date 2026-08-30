@@ -18,21 +18,17 @@ sqlite-smoke:
 fmt:
     cargo fmt --all -- --check
 
-
 # Run the accepted TTY renderer demo for terminal documents and byte streams.
 runtime-tty-demo:
     cargo run --locked -p orna-runtime-tty --example runtime_demo
-
 
 # Build the binary, start a temporary local server, and invoke std.invoke.echo.
 local-cli-demo:
     bash scripts/local-cli-demo.sh
 
-
 # Exercise CLIENT artifact kind and payload-digest validation.
 client-artifact-demo:
     cargo run --locked -p orna-client --example client_artifact_demo
-
 
 # Exercise component-boundary matching for a local filesystem grant.
 client-capability-demo:
@@ -45,7 +41,6 @@ demo-suite: demo-check runtime-tty-demo client-artifact-demo client-capability-d
 runtime-qt-build:
     cmake -S runtimes/qt -B target/runtime-qt
     cmake --build target/runtime-qt --parallel
-
 
 # Build and run the Qt runtime demo against a real display.
 runtime-qt-demo: runtime-qt-build
@@ -61,12 +56,9 @@ runtime-qt-test:
     cmake --build target/runtime-qt --parallel
     ctest --test-dir target/runtime-qt --output-on-failure
 
-
-
 # Run the Rust Qt runtime loader/session smoke test against an explicit shared library path.
 runtime-qt-rust-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
-
 
 # Prove adapter shutdown drains a full callback queue before native shutdown.
 runtime-qt-shutdown-queue-smoke runtime_path:

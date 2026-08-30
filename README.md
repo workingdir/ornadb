@@ -6,7 +6,7 @@ OrnaDB is a database platform for typed applications, with SERVER functions besi
 
 - One function model covers queries, mutations, user interfaces, presenters, and integrations.
 - Stable identities and revisions apply across code, data, and dependencies.
-- PostgreSQL-backed storage provides transactions, constraints, and server-side functions.
+- PostgreSQL-backed storage provides transactions, constraints, and server-side functions; a local SQLite backend provides a file-backed development path.
 - Client runtimes provide application interfaces, state, resources, actions, and local presentation.
 - Structured invocation traces show execution details and security decisions.
 - Source checking, semantic diffs, and editor integrations support local development.
@@ -34,7 +34,22 @@ Run the included examples without PostgreSQL or a native runtime:
 just demo-suite
 ```
 
-For a complete local server and invocation example:
+Exercise the complete file-backed SQLite path without PostgreSQL:
+
+```sh
+just sqlite-smoke
+```
+
+For a local SQLite database, build the CLI and pass its filesystem path:
+
+```sh
+cargo build --locked -p orna-server
+target/debug/orna --db ./app.sqlite source check ./app.orna
+target/debug/orna --db ./app.sqlite source apply ./app.orna
+target/debug/orna --db ./app.sqlite source diff ./app.orna
+```
+
+For a complete local PostgreSQL server and invocation example:
 
 ```sh
 just local-cli-demo

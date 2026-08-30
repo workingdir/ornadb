@@ -72,36 +72,23 @@ const SCHEMA: &str = concat!(
     include_str!("../migrations/0002_security_runtime.sql"),
 );
 
-/// A candidate capability that the SQLite revision store does not yet accept.
+/// A capability that the SQLite adapter does not accept.
 ///
-/// The first SQLite persistence slice accepts schemas, objects, functions,
-/// expressions, references, and schema origins. These checks reject the
-/// remaining catalogue categories in fixed precedence, then the catalogue
-/// hash context.
+/// The adapter supports the bounded local catalogue, migration, and runtime
+/// subset implemented below. These checks reject unsupported catalogue
+/// categories in fixed precedence, then the catalogue hash context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SqliteCapability {
-    /// A non-schema object type definition.
-    ObjectType,
     /// A by-value catalogue type definition.
     ValueType,
-    /// A legacy scalar that SQLite cannot encode as a canonical runtime value.
-    ScalarType,
     /// An enum catalogue type definition.
     EnumType,
     /// A record-value catalogue type definition.
     RecordValueType,
     /// A catalogue type-name binding.
     TypeBinding,
-    /// A compiled expression artifact.
-    Expression,
-    /// A semantic definition reference.
-    Reference,
-    /// A newly installed function revision.
-    FunctionRevision,
-    /// A catalogue function definition.
-    Function,
-    /// A non-schema declaration origin.
-    NonSchemaOrigin,
+    /// A scalar field type outside SQLite's supported runtime set.
+    ScalarType,
     /// A catalogue hash context other than the SQLite-supported version 1.
     CatalogueHashVersion,
 }
@@ -109,17 +96,11 @@ pub enum SqliteCapability {
 impl fmt::Display for SqliteCapability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::ObjectType => "object type",
             Self::ValueType => "value type",
-            Self::ScalarType => "scalar type",
             Self::EnumType => "enum type",
             Self::RecordValueType => "record value type",
             Self::TypeBinding => "type binding",
-            Self::Expression => "expression",
-            Self::Reference => "reference",
-            Self::FunctionRevision => "function revision",
-            Self::Function => "function",
-            Self::NonSchemaOrigin => "non-schema origin",
+            Self::ScalarType => "scalar type",
             Self::CatalogueHashVersion => "catalogue hash version",
         };
         f.write_str(name)

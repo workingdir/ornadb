@@ -332,7 +332,7 @@ fn main() -> ExitCode {
                 Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
                 Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
                 Ok(orna_server::InstalledInvokeOutcome::Cancelled) => ExitCode::from(6),
-                // A future closed outcome falls back to protocol / internal.
+                // Future variants fail closed.
                 Ok(_) => ExitCode::from(7),
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -351,7 +351,7 @@ fn main() -> ExitCode {
             };
             match result {
                 Ok(orna_server::InstalledUserStateOutcome::Completed) => ExitCode::SUCCESS,
-                // A future closed outcome falls back to internal.
+                // Future variants fail closed.
                 Ok(_) => ExitCode::from(7),
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -388,7 +388,7 @@ fn main() -> ExitCode {
             };
             match result {
                 Ok(orna_server::InstalledInspectOutcome::Completed) => ExitCode::SUCCESS,
-                // A future closed outcome falls back to internal.
+                // Future variants fail closed.
                 Ok(_) => ExitCode::from(7),
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -578,7 +578,7 @@ const fn invoke_error_exit_code(error: &orna_server::InstalledInvokeError) -> u8
         orna_server::InstalledInvokeErrorKind::Presentation => 5,
         orna_server::InstalledInvokeErrorKind::Cancelled => 6,
         orna_server::InstalledInvokeErrorKind::Internal => 7,
-        // A future closed kind falls back to protocol / internal.
+        // Future variants fail closed as protocol / internal.
         _ => 7,
     }
 }
@@ -590,7 +590,7 @@ const fn state_error_exit_code(error: &orna_server::InstalledUserStateError) -> 
         orna_server::InstalledUserStateErrorKind::State => 1,
         orna_server::InstalledUserStateErrorKind::Presentation => 5,
         orna_server::InstalledUserStateErrorKind::Internal => 7,
-        // A future closed kind falls back to internal.
+        // Future variants fail closed as internal.
         _ => 7,
     }
 }
@@ -602,7 +602,7 @@ const fn inspect_error_exit_code(error: &orna_server::InstalledInspectError) -> 
         orna_server::InstalledInspectErrorKind::Kernel => 1,
         orna_server::InstalledInspectErrorKind::Rendering => 5,
         orna_server::InstalledInspectErrorKind::Internal => 7,
-        // A future closed kind falls back to internal.
+        // Future variants fail closed as internal.
         _ => 7,
     }
 }
