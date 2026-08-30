@@ -6,6 +6,10 @@ use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
+use orna_standard::retained_standard_library_v11_snapshot;
+use orna_standard::verify_standard_library_v11_snapshot;
+
+#[cfg(test)]
 use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_library_v10_snapshot};
 
 #[cfg(test)]
@@ -32,6 +36,24 @@ mod tests {
 
         let report = check_new_application(&source, &standard)
             .expect("application source must be checked against V10");
+        assert_eq!(report.diagnostics(), &[]);
+    }
+    #[test]
+    fn checks_new_application_source_against_verified_v11_standard() {
+        let snapshot = retained_standard_library_v11_snapshot()
+            .and_then(verify_standard_library_v11_snapshot)
+            .expect("retained V11 standard must verify");
+        let standard =
+            check_standard_library_source(&snapshot).expect("verified V11 source must check");
+        let source = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app;\n\
+             CREATE CLIENT FUNCTION app.value() RETURNS INTEGER\n\
+             RETURN std.math.increment(4);",
+        )])
+        .expect("application source must form a bundle");
+        let report = check_new_application(&source, &standard)
+            .expect("application source must be checked against V11");
         assert_eq!(report.diagnostics(), &[]);
     }
 
@@ -133,8 +155,8 @@ pub(super) fn run_with_output(
         Ok(bundle) if bundle.len() == 1 => bundle,
         _ => return SourceCheckResult::Usage,
     };
-    let snapshot = match retained_standard_library_v10_snapshot()
-        .and_then(verify_standard_library_v10_snapshot)
+    let snapshot = match retained_standard_library_v11_snapshot()
+        .and_then(verify_standard_library_v11_snapshot)
     {
         Ok(snapshot) => snapshot,
         Err(_) => return write_standard_failure(output),

@@ -2866,14 +2866,21 @@ fn source_metadata_type_id(
 fn source_metadata_body_kind(
     artifact: &ExecutableArtifact,
 ) -> orna_core::source_metadata::SourceBodyKind {
-    match artifact.version() {
+    let version = if artifact.version() == CAPABILITY_FORMAT_VERSION {
+        CapabilityClientPlan::decode(artifact.payload())
+            .map(|plan| plan.inner_plan_version())
+            .unwrap_or_default()
+    } else {
+        artifact.version()
+    };
+    match version {
+        FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::BooleanLiteral,
         EXPRESSION_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Expression,
         PROCEDURAL_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Procedural,
         orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION => {
             orna_core::source_metadata::SourceBodyKind::ControlFlow
         }
         STATE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::State,
-        OPAQUE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::ExternalContract,
         _ => orna_core::source_metadata::SourceBodyKind::Unknown,
     }
 }

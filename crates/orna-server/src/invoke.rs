@@ -40,9 +40,10 @@ mod presentation;
 use inspect::{
     run_installed_external_contract, run_installed_inspect, same_resource_request_identity,
 };
+use installed::bind_installed_cli_arguments;
 #[cfg(test)]
 use installed::{
-    InvokeTransport, bind_installed_cli_arguments, build_output_requirement, build_sealed_request,
+    InvokeTransport, build_output_requirement, build_sealed_request,
     canonicalise_invocation_arguments, client_sink_offers, connect_local_socket,
     endpoint_transport, installed_cli_resolved_type, installed_tty_runtime_offers,
     map_qt_runtime_load_error, selected_runtime,
@@ -388,7 +389,7 @@ pub(crate) struct SharedInvokeBroker {
     commands: UnboundedSender<BrokerCommand>,
     task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     session_bridge: Arc<Mutex<Option<Arc<SessionBridge>>>>,
-    dynamic_context: Arc<Mutex<Option<DynamicInvocationContext>>>,
+    dynamic_contexts: Arc<Mutex<BTreeMap<InvocationId, DynamicInvocationContext>>>,
     resource_expectations: BrokerResourceExpectations,
     next_resource_stream_id: std::sync::Arc<std::sync::Mutex<u64>>,
     resource_terminal_provenance: BrokerResourceProvenance,
@@ -404,7 +405,6 @@ struct DynamicInvocationContext {
 }
 
 impl SharedInvokeBroker {
-    #[allow(dead_code)]
     pub(crate) fn bind_dynamic_context(
         &self,
         active: ActiveDatabaseRevision,
@@ -412,25 +412,35 @@ impl SharedInvokeBroker {
         session: AuthenticatedSession,
         root_invocation: InvocationId,
     ) {
-        *self
-            .dynamic_context
-            .lock()
-            .expect("dynamic invocation context lock") = Some(DynamicInvocationContext {
-            active,
-            security,
-            session,
-            root_invocation,
-        });
-    }
-
-    fn dynamic_context(&self) -> Option<DynamicInvocationContext> {
-        self.dynamic_context
+        self.dynamic_contexts
             .lock()
             .expect("dynamic invocation context lock")
-            .clone()
+            .insert(
+                root_invocation,
+                DynamicInvocationContext {
+                    active,
+                    security,
+                    session,
+                    root_invocation,
+                },
+            );
+    }
+
+    fn dynamic_context(&self, root_invocation: InvocationId) -> Option<DynamicInvocationContext> {
+        self.dynamic_contexts
+            .lock()
+            .expect("dynamic invocation context lock")
+            .get(&root_invocation)
+            .cloned()
+    }
+
+    pub(crate) fn clear_dynamic_context(&self, root_invocation: InvocationId) {
+        self.dynamic_contexts
+            .lock()
+            .expect("dynamic invocation context lock")
+            .remove(&root_invocation);
     }
 }
-
 pub(crate) struct SessionBridge {
     root_invocation_id: InvocationId,
     call_stream: u64,
@@ -1377,28 +1387,41 @@ impl InstalledClientResourceExecutor {
         let Some(broker) = self.broker.as_ref() else {
             return Err("client.dynamic_invocation_unavailable".to_owned());
         };
-        let Some(dynamic) = broker.dynamic_context() else {
+        let Some(dynamic) = broker.dynamic_context(context.parent_invocation_id()) else {
             return Err("client.dynamic_invocation_unavailable".to_owned());
         };
         if self.cancellation.is_requested() {
             return Err("client.dynamic_invocation_cancelled".to_owned());
         }
-        let tokens = command.split_whitespace().collect::<Vec<_>>();
-        let target_name = tokens
-            .first()
-            .copied()
-            .filter(|value| value.split('.').count() > 1)
-            .ok_or_else(|| "client.dynamic_invocation_invalid_command".to_owned())?;
-        let name = QualifiedSemanticName::new(target_name.split('.').map(str::to_owned))
-            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
-        let target = InvocationTarget::qualified_name(name)
-            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let parsed = SessionCommand::parse(command)?;
         let standard = dynamic.active.catalogue_hash_context().standard();
-        let resolved = installed::resolve_target(&dynamic.active, standard, &target)
+        let resolved = installed::resolve_target(&dynamic.active, standard, &parsed.target)
             .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
         if resolved.function.domain() != FunctionDomain::Client {
             return Err("client.dynamic_invocation_target_not_client".to_owned());
         }
+        let cli_arguments = bind_installed_cli_arguments(
+            dynamic.active.catalogue(),
+            standard,
+            resolved.function,
+            &parsed.arguments,
+        )
+        .map_err(|_| "client.dynamic_invocation_invalid_arguments".to_owned())?;
+        let arguments = cli_arguments
+            .into_iter()
+            .map(|argument| {
+                let orna_core::invocation::InvocationParameterSelector::ParameterId(parameter) =
+                    argument.selector()
+                else {
+                    return Err("client.dynamic_invocation_invalid_arguments".to_owned());
+                };
+                orna_core::value::FunctionArgument::new(
+                    *parameter,
+                    argument.value().clone().into_value(),
+                )
+                .map_err(|_| "client.dynamic_invocation_invalid_arguments".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let target = orna_core::security::InvocationTarget::new(
             resolved.function.id(),
             dynamic.active.pair(),
@@ -1413,7 +1436,7 @@ impl InstalledClientResourceExecutor {
         let result = orna_client::evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation(
             &dynamic.active,
             &authorisation,
-            &[],
+            &arguments,
             &[],
             &grants,
             &mut state,
@@ -1422,6 +1445,41 @@ impl InstalledClientResourceExecutor {
         )
         .map_err(|_| "client.dynamic_invocation_failed".to_owned())?;
         Ok(result.into_value())
+    }
+}
+#[derive(Debug, PartialEq)]
+struct SessionCommand {
+    target: InvocationTarget,
+    arguments: Vec<CliArgumentInput>,
+}
+
+impl SessionCommand {
+    fn parse(command: &str) -> Result<Self, String> {
+        let tokens = command.split_whitespace().collect::<Vec<_>>();
+        let Some(target) = tokens.first().copied() else {
+            return Err("client.dynamic_invocation_invalid_command".to_owned());
+        };
+        let target = QualifiedSemanticName::new(target.split('.').map(str::to_owned))
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let target = InvocationTarget::qualified_name(target)
+            .map_err(|_| "client.dynamic_invocation_invalid_command".to_owned())?;
+        let mut arguments = Vec::new();
+        for token in tokens.into_iter().skip(1) {
+            let Some(pair) = token.strip_prefix("--") else {
+                return Err("client.dynamic_invocation_invalid_arguments".to_owned());
+            };
+            let Some((name, value)) = pair.split_once('=') else {
+                return Err("client.dynamic_invocation_invalid_arguments".to_owned());
+            };
+            if name.is_empty() {
+                return Err("client.dynamic_invocation_invalid_arguments".to_owned());
+            }
+            arguments.push(CliArgumentInput::Canonical {
+                parameter: name.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        Ok(Self { target, arguments })
     }
 }
 
@@ -2254,7 +2312,7 @@ impl SharedInvokeBroker {
                 commands,
                 task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                 session_bridge: Arc::new(Mutex::new(None)),
-                dynamic_context: Arc::new(Mutex::new(None)),
+                dynamic_contexts: Arc::new(Mutex::new(BTreeMap::new())),
                 resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 next_resource_stream_id: std::sync::Arc::new(std::sync::Mutex::new(1)),
                 resource_terminal_provenance: Arc::new(Mutex::new(BTreeMap::new())),

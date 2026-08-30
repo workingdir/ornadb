@@ -614,7 +614,8 @@ async fn opens_reopens_and_rejects_tampered_standard_database_inner() -> TestRes
             "the failed public opener changed the active durable pointer",
         )
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 #[cfg(feature = "test-hooks")]

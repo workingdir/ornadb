@@ -34,12 +34,13 @@ use orna_core::{
 
 use super::*;
 use crate::{
-    check, check_standard_application, check_standard_library_source,
+    StandardApplicationCheckContext, StandardSourceIdentitySeed, check, check_standard_application,
+    check_standard_library_source,
     mutation::{
         MutationAssignment, MutationExpression, MutationExpressionKind,
         MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
     },
-    prepare_standard_source, StandardApplicationCheckContext, StandardSourceIdentitySeed,
+    prepare_standard_source,
 };
 mod client;
 mod mutation;
@@ -130,10 +131,12 @@ fn legacy_preparation_reaches_the_explicit_enum_hash_version_gate() {
     let enum_type = &material.catalogue.enum_types()[0];
     assert_eq!(enum_type.name(), &semantic_name(&["crm", "stage"]));
     assert_eq!(enum_type.labels(), &["lead", "customer"]);
-    assert!(material
-        .origins
-        .iter()
-        .any(|origin| { origin.identity() == DefinitionIdentity::ValueType(enum_type.id()) }));
+    assert!(
+        material
+            .origins
+            .iter()
+            .any(|origin| { origin.identity() == DefinitionIdentity::ValueType(enum_type.id()) })
+    );
 
     assert!(matches!(
         prepare(&report, active.pair(), &active),
@@ -299,8 +302,7 @@ fn mapped_candidate_type_selection_is_closed_and_retains_standard_identity() {
         assert!(matches!(
             error,
             PrepareError::InvalidCheckedBundle {
-                reason:
-                    "checked standard declaration type evidence disagrees with its semantic type",
+                reason: "checked standard declaration type evidence disagrees with its semantic type",
             }
         ));
     }
@@ -886,10 +888,12 @@ fn prepares_source_authored_math_with_seeded_identities() {
         prepared.new_function_revisions().len(),
         seed.revisions.len()
     );
-    assert!(prepared
-        .new_function_revisions()
-        .iter()
-        .all(|revision| !revision.artifact().payload().is_empty()));
+    assert!(
+        prepared
+            .new_function_revisions()
+            .iter()
+            .all(|revision| !revision.artifact().payload().is_empty())
+    );
 }
 
 #[test]
@@ -1402,11 +1406,10 @@ fn active_field_rename_states_are_exact_and_fail_closed() {
     assert!(
         validate_active_field_rename(&object(vec![field(field_id, "email", 0)]), &rename).is_ok()
     );
-    assert!(validate_active_field_rename(
-        &object(vec![field(field_id, "primary_email", 0)]),
-        &rename
-    )
-    .is_ok());
+    assert!(
+        validate_active_field_rename(&object(vec![field(field_id, "primary_email", 0)]), &rename)
+            .is_ok()
+    );
     assert!(matches!(
         validate_active_field_rename(
             &object(vec![

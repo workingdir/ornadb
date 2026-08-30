@@ -1,4 +1,5 @@
 use super::*;
+use crate::CheckedClientBodyKind;
 
 #[test]
 fn checks_client_boolean_constant_with_exact_model_and_literal_location() {
@@ -32,6 +33,47 @@ fn checks_client_boolean_constant_with_exact_model_and_literal_location() {
     assert_eq!(literal_location.logical_path(), "client.orna");
     assert_eq!(literal_location.span().start(), literal_start);
     assert_eq!(literal_location.span().end(), literal_start + 4);
+}
+
+#[test]
+fn exposes_every_checked_client_body_kind_through_the_generic_api() {
+    let cases = [
+        (
+            "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.expression() RETURNS INTEGER RETURN 1;",
+            CheckedClientBodyKind::Expression,
+        ),
+        (
+            "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.procedural() RETURNS INTEGER IS BEGIN LET value INTEGER := 1; RETURN value; END;",
+            CheckedClientBodyKind::Procedural,
+        ),
+        (
+            "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.control_flow() RETURNS INTEGER IS BEGIN IF TRUE THEN RETURN 1; ELSE RETURN 0; END IF; END;",
+            CheckedClientBodyKind::ControlFlow,
+        ),
+        (
+            "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.state() RETURNS INTEGER IS STATE value INTEGER DEFAULT 1; BEGIN RETURN 1; END;",
+            CheckedClientBodyKind::State,
+        ),
+        (
+            "CREATE SCHEMA examples; CREATE EXTERNAL CLIENT FUNCTION examples.external() RETURNS INTEGER RUNTIME CONTRACT 'examples.external@1';",
+            CheckedClientBodyKind::ExternalContract,
+        ),
+        (
+            "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.boolean() RETURNS BOOLEAN RETURN TRUE;",
+            CheckedClientBodyKind::BooleanLiteral,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let report = check(&bundle([("body-kind.orna", source)]), &empty_catalogue());
+        assert!(
+            report.diagnostics().is_empty(),
+            "{expected:?}: {:?}",
+            report.diagnostics()
+        );
+        let function = &report.checked_bundle().unwrap().client_functions()[0];
+        assert_eq!(function.body_kind(), expected, "{source}");
+    }
 }
 
 #[test]
@@ -903,7 +945,6 @@ fn rejects_state_block_pre_begin_let_locals_in_parser_shape() {
     );
     assert_no_checked_bundle(&report);
 }
-
 #[test]
 fn rejects_state_blocks_mixed_with_procedural_declarations() {
     let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.mixed() RETURNS BOOLEAN IS STATE value TEXT; BEGIN LET other := 'x'; RETURN TRUE; END;";

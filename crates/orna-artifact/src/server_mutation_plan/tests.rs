@@ -1,4 +1,3 @@
-
 use super::*;
 
 const TARGET: TypeId = TypeId::from_bytes([1; 16]);

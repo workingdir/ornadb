@@ -105,6 +105,40 @@ fn transport_test_request(revision: RevisionPair, stream_id: u64) -> ResourceReq
 }
 
 #[test]
+fn session_command_parser_preserves_arguments_and_allows_empty_values() {
+    let parsed =
+        SessionCommand::parse("app.echo --p_message=hello --p_empty=").expect("command parses");
+    assert_eq!(
+        parsed.arguments,
+        vec![
+            CliArgumentInput::Canonical {
+                parameter: "p_message".to_owned(),
+                value: "hello".to_owned(),
+            },
+            CliArgumentInput::Canonical {
+                parameter: "p_empty".to_owned(),
+                value: String::new(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn session_command_parser_rejects_malformed_tokens() {
+    for command in [
+        "",
+        "app.echo positional",
+        "app.echo --p_value",
+        "app.echo --=value",
+    ] {
+        assert!(
+            SessionCommand::parse(command).is_err(),
+            "command should be rejected: {command:?}"
+        );
+    }
+}
+
+#[test]
 fn session_bridge_rejects_crossed_response_identity() {
     let root = InvocationId::from_bytes([0x41; 16]);
     let bridge = SessionBridge::new(root, 7).expect("session bridge creates");
@@ -710,6 +744,47 @@ fn shared_broker_resource_expectations_require_exact_request_identity() {
     assert!(!broker.take_expected_resource_request(&mismatched));
     assert!(broker.take_expected_resource_request(&request));
     assert!(!broker.take_expected_resource_request(&request));
+}
+
+#[test]
+fn shared_broker_dynamic_contexts_are_keyed_and_clearable() {
+    let (broker, _receiver) = SharedInvokeBroker::pending();
+    let first = InvocationId::from_bytes([0x51; 16]);
+    let second = InvocationId::from_bytes([0x52; 16]);
+    let active = transport_test_context().0;
+    let principal = PrincipalId::from_bytes([0x53; 16]);
+    let security = orna_core::security::SecuritySnapshot::new(
+        active.pair(),
+        Vec::new(),
+        vec![orna_core::security::Principal::new(
+            principal,
+            orna_core::security::PrincipalKind::User,
+            orna_core::security::PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("empty security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("authenticated test session");
+    broker.bind_dynamic_context(active.clone(), security.clone(), session.clone(), first);
+    broker.bind_dynamic_context(active, security, session, second);
+
+    assert!(broker.dynamic_context(first).is_some());
+    assert!(broker.dynamic_context(second).is_some());
+    broker.clear_dynamic_context(first);
+    assert!(broker.dynamic_context(first).is_none());
+
+    assert!(broker.dynamic_context(second).is_some());
+}
+
+#[test]
+fn shared_broker_dynamic_context_clear_is_idempotent() {
+    let (broker, _receiver) = SharedInvokeBroker::pending();
+    let root = InvocationId::from_bytes([0x55; 16]);
+    broker.clear_dynamic_context(root);
+    assert!(broker.dynamic_context(root).is_none());
 }
 
 #[test]

@@ -592,8 +592,43 @@ mod tests {
     }
 
     #[test]
-    fn signature_metadata_round_trips_body_and_return_shape() {
-        let value = SourceFunctionMetadata::new_with_signature(
+    fn signature_metadata_round_trips_every_body_kind() {
+        let body_kinds = [
+            SourceBodyKind::Unknown,
+            SourceBodyKind::Expression,
+            SourceBodyKind::Procedural,
+            SourceBodyKind::ControlFlow,
+            SourceBodyKind::State,
+            SourceBodyKind::ExternalContract,
+            SourceBodyKind::BooleanLiteral,
+        ];
+
+        for body_kind in body_kinds {
+            let value = SourceFunctionMetadata::new_with_signature(
+                FunctionId::from_bytes([1; 16]),
+                FunctionRevisionId::from_bytes([2; 16]),
+                "app.f",
+                SourceUnitId::from_bytes([3; 16]),
+                4,
+                8,
+                Sha256Digest::from_bytes([4; 32]),
+                body_kind,
+                Some(SourceReturnMetadata::Stream(TypeId::from_bytes([6; 16]))),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            let bytes = value.encode_with_signature();
+            let decoded = SourceFunctionMetadata::decode(&bytes).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(decoded.body_kind(), body_kind);
+            assert_eq!(decoded.return_metadata(), value.return_metadata());
+        }
+    }
+
+    #[test]
+    fn signature_metadata_rejects_unknown_body_kind() {
+        let mut bytes = SourceFunctionMetadata::new_with_signature(
             FunctionId::from_bytes([1; 16]),
             FunctionRevisionId::from_bytes([2; 16]),
             "app.f",
@@ -601,17 +636,63 @@ mod tests {
             4,
             8,
             Sha256Digest::from_bytes([4; 32]),
-            SourceBodyKind::ControlFlow,
-            Some(SourceReturnMetadata::Stream(TypeId::from_bytes([6; 16]))),
+            SourceBodyKind::Expression,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .encode_with_signature();
+        let body_kind_offset = b"ORNA-SOURCE/2\0".len() + 16 + 16 + 4 + 5 + 16 + 4 + 4 + 32;
+        bytes[body_kind_offset] = 7;
+        assert_eq!(
+            SourceFunctionMetadata::decode(&bytes),
+            Err(SourceMetadataError::InvalidBodyKind)
+        );
+    }
+
+    #[test]
+    fn signature_metadata_rejects_unknown_return_shape() {
+        let mut bytes = SourceFunctionMetadata::new_with_signature(
+            FunctionId::from_bytes([1; 16]),
+            FunctionRevisionId::from_bytes([2; 16]),
+            "app.f",
+            SourceUnitId::from_bytes([3; 16]),
+            4,
+            8,
+            Sha256Digest::from_bytes([4; 32]),
+            SourceBodyKind::Expression,
+            Some(SourceReturnMetadata::Single(TypeId::from_bytes([6; 16]))),
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .encode_with_signature();
+        let return_shape_offset = b"ORNA-SOURCE/2\0".len() + 16 + 16 + 4 + 5 + 16 + 4 + 4 + 32 + 1;
+        bytes[return_shape_offset] = 3;
+        assert_eq!(
+            SourceFunctionMetadata::decode(&bytes),
+            Err(SourceMetadataError::InvalidReturnMetadata)
+        );
+    }
+
+    #[test]
+    fn legacy_metadata_keeps_unknown_signature_fields() {
+        let value = SourceFunctionMetadata::new(
+            FunctionId::from_bytes([1; 16]),
+            FunctionRevisionId::from_bytes([2; 16]),
+            "app.f",
+            SourceUnitId::from_bytes([3; 16]),
+            4,
+            8,
+            Sha256Digest::from_bytes([4; 32]),
             vec![],
             vec![],
         )
         .unwrap();
-        let bytes = value.encode_with_signature();
-        let decoded = SourceFunctionMetadata::decode(&bytes).unwrap();
-        assert_eq!(decoded, value);
-        assert_eq!(decoded.body_kind(), SourceBodyKind::ControlFlow);
-        assert_eq!(decoded.return_metadata(), value.return_metadata());
+        let decoded = SourceFunctionMetadata::decode(&value.encode()).unwrap();
+        assert_eq!(decoded.body_kind(), SourceBodyKind::Unknown);
+        assert_eq!(decoded.return_metadata(), None);
     }
 
     #[test]

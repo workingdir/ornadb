@@ -465,7 +465,6 @@ pub(crate) fn prepare_standard_application_with_allocator(
     prepare_standard_application_with_seed(report, expected_base, active, allocations, None)
 }
 
-
 fn prepare_standard_application_with_seed(
     report: &StandardApplicationCheckReport,
     expected_base: RevisionPair,
@@ -560,7 +559,10 @@ fn prepare_standard_application_with_seed(
                     .iter()
                     .find(|function| function.id() == *owner)
                     .and_then(|function| {
-                        Some((identities.functions[&function.id()], *seed.revisions.get(index)?))
+                        Some((
+                            identities.functions[&function.id()],
+                            *seed.revisions.get(index)?,
+                        ))
                     })
             })
             .collect();
@@ -938,7 +940,9 @@ impl PreparationMode<'_> {
             Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
             Self::StandardV2Plan { standard, .. }
             | Self::StandardV2 { standard, .. }
-            | Self::StandardSource { standard, .. } => Some(standard.verified_snapshot().catalogue()),
+            | Self::StandardSource { standard, .. } => {
+                Some(standard.verified_snapshot().catalogue())
+            }
         }
     }
     fn standard_preflight(&self) -> Option<&StandardPreflight> {

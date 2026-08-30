@@ -1591,6 +1591,21 @@ impl DispatchService for RawDispatchService {
         let cancellations = self.invoke_cancellations.clone();
         let resource_broker = self.resource_broker.clone();
         let future = Box::pin(async move {
+            struct DynamicContextGuard {
+                broker: Option<SharedInvokeBroker>,
+                root_invocation: Option<InvocationId>,
+            }
+
+            impl Drop for DynamicContextGuard {
+                fn drop(&mut self) {
+                    if let (Some(broker), Some(root_invocation)) =
+                        (self.broker.as_ref(), self.root_invocation)
+                    {
+                        broker.clear_dynamic_context(root_invocation);
+                    }
+                }
+            }
+
             let mut operation = match continuation.prepare_sealed_sys_invoke_after_accept().await {
                 Ok(operation) => operation,
                 Err(source) => {
@@ -1637,6 +1652,20 @@ impl DispatchService for RawDispatchService {
             let worker_kernel = kernel.clone();
             let worker_session = dispatch_session.clone();
             let worker_active = operation.active_revision();
+            let _dynamic_context_guard = resource_broker.as_ref().map(|broker| {
+                let (context_session, context_security, root_invocation) =
+                    operation.client_evaluation_context();
+                broker.bind_dynamic_context(
+                    operation.active_revision(),
+                    context_security,
+                    context_session,
+                    root_invocation,
+                );
+                DynamicContextGuard {
+                    broker: Some(broker.clone()),
+                    root_invocation: Some(root_invocation),
+                }
+            });
             let execution = tokio::task::spawn_blocking(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

@@ -535,7 +535,9 @@ impl IdentityMap {
                                 }
                             };
                             result.functions.insert(function.id(), function_id);
-                            for (parameter_index, parameter) in function.parameters().iter().enumerate() {
+                            for (parameter_index, parameter) in
+                                function.parameters().iter().enumerate()
+                            {
                                 let parameter_id = match parameter.id() {
                                     CheckedParameterId::Existing(id) => id,
                                     CheckedParameterId::Provisional(_) if let Some(seed) = source_seed => seed

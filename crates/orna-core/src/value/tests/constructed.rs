@@ -1018,6 +1018,40 @@ fn collection_descriptor_rejects_missing_and_inactive_leaf_categories_exactly() 
 }
 
 #[test]
+fn sealed_source_metadata_is_rejected_outside_permitted_collection_positions() {
+    let active = active_record_revision();
+    let source = TypeDescriptor::named(crate::system::SYS_SOURCE_FUNCTION_TYPE_ID);
+
+    let map_value =
+        TypeDescriptor::map(TypeDescriptor::named(STANDARD_BOOLEAN), source.clone()).unwrap();
+    let error = RuntimeValue::map(&active, map_value, vec![]).unwrap_err();
+    let CollectionValueError::UnsupportedDescriptor { path, descriptor } = error else {
+        panic!("source metadata map value must be rejected");
+    };
+    assert_eq!(
+        path.segments(),
+        &[CollectionValuePathSegment::MapValueChild]
+    );
+    assert_eq!(descriptor, source.clone());
+
+    let map_key =
+        TypeDescriptor::map(source.clone(), TypeDescriptor::named(STANDARD_BOOLEAN)).unwrap();
+    let error = RuntimeValue::map(&active, map_key, vec![]).unwrap_err();
+    let CollectionValueError::UnsupportedDescriptor { path, descriptor } = error else {
+        panic!("source metadata map key must be rejected");
+    };
+    assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKeyChild]);
+    assert_eq!(descriptor, source);
+
+    let nested_set = TypeDescriptor::list(TypeDescriptor::set(source).unwrap()).unwrap();
+    let error = RuntimeValue::list(&active, nested_set, vec![]).unwrap_err();
+    assert!(matches!(
+        error,
+        CollectionValueError::UnsupportedDescriptor { .. }
+    ));
+}
+
+#[test]
 fn ambiguous_application_standard_named_collision_precedes_category_rejection() {
     let active = active_record_revision_with_opaque_contract(
         TypeId::from_bytes([0x49; 16]),

@@ -13,7 +13,7 @@ use lsp_types::{
 use orna_compiler::{CompilerDiagnostic, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v10_snapshot, verify_standard_library_v10_snapshot};
+use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
@@ -30,15 +30,15 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V10 standard library.
+    /// Loads and verifies the retained V11 standard library.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
         let snapshot =
-            retained_standard_library_v10_snapshot().map_err(|error| error.to_string())?;
+            retained_standard_library_v11_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_v10_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v11_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -3701,17 +3701,17 @@ mod tests {
     }
 
     #[test]
-    fn standard_library_loads_verified_v10_snapshot() {
-        let standard = StandardLibrary::load().expect("retained V10 standard must load");
+    fn standard_library_loads_verified_v11_snapshot() {
+        let standard = StandardLibrary::load().expect("retained V11 standard must load");
         let snapshot = standard.checked.verified_snapshot();
 
         assert_eq!(
             snapshot.revision(),
-            orna_standard::STANDARD_LIBRARY_V10_REVISION_ID
+            orna_standard::STANDARD_LIBRARY_V11_REVISION_ID
         );
         assert_eq!(
             snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_V10_REVISION_ID
+            orna_standard::STANDARD_SOURCE_V11_REVISION_ID
         );
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::source_metadata_body_kind;
 
 #[test]
 fn capability_gate_denies_an_ungranted_declared_capability() {
@@ -1414,6 +1415,100 @@ END IF;
 }
 
 #[test]
+fn retained_v11_math_functions_execute_through_the_normal_client_path() {
+    let snapshot = orna_standard::retained_standard_library_v11_snapshot()
+        .expect("retained V11 standard snapshot");
+    let verified = orna_standard::verify_standard_library_v11_snapshot(snapshot)
+        .expect("verified V11 standard snapshot");
+    let standard = orna_compiler::check_standard_library_source(&verified)
+        .expect("checked V11 standard source");
+    let application_active = empty_version_two_active(&verified);
+    let context = orna_compiler::StandardApplicationCheckContext::try_new(
+        application_active.catalogue(),
+        &standard,
+    )
+    .expect("V11 standard application context");
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "application.orna",
+        "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.entry() RETURNS INTEGER RETURN std.math.increment(4);",
+    )])
+    .expect("dogfood source bundle");
+    let report = orna_compiler::check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let prepared = orna_compiler::prepare_standard_application(
+        &report,
+        application_active.pair(),
+        &application_active,
+    )
+    .expect("prepared dogfood source");
+    let active = active_from_prepared_with_references(&prepared, prepared.references().to_vec());
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().to_string() == "app.entry")
+        .expect("dogfood entry function")
+        .id();
+    let result = evaluate_client_function(&active, function).expect("dogfood function evaluates");
+    assert_eq!(result.value(), &RuntimeValue::Integer(5));
+}
+
+#[test]
+fn retained_v11_math_fixture_evaluates_all_functions() {
+    let snapshot = orna_standard::retained_standard_library_v11_snapshot()
+        .expect("retained V11 standard snapshot");
+    let verified = orna_standard::verify_standard_library_v11_snapshot(snapshot)
+        .expect("verified V11 standard snapshot");
+    let standard = orna_compiler::check_standard_library_source(&verified)
+        .expect("checked V11 standard source");
+    let application_active = empty_version_two_active(&verified);
+    let context = orna_compiler::StandardApplicationCheckContext::try_new(
+        application_active.catalogue(),
+        &standard,
+    )
+    .expect("V11 standard application context");
+    let fixture = include_str!("../../../orna-standard/src/tests/fixtures/v11_math_dogfood.orna");
+    let bundle = SourceBundle::new([SourceUnit::new("v11_math_dogfood.orna", fixture)])
+        .expect("dogfood fixture source bundle");
+    let report = orna_compiler::check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let prepared = orna_compiler::prepare_standard_application(
+        &report,
+        application_active.pair(),
+        &application_active,
+    )
+    .expect("prepared dogfood fixture");
+    let active = active_from_prepared_with_references(&prepared, prepared.references().to_vec());
+    let expected = [
+        ("app.incremented", RuntimeValue::Integer(5)),
+        ("app.decremented", RuntimeValue::Integer(3)),
+        ("app.zero_check", RuntimeValue::Boolean(true)),
+        ("app.minimum", RuntimeValue::Integer(2)),
+        ("app.maximum", RuntimeValue::Integer(5)),
+        ("app.clamped", RuntimeValue::Integer(10)),
+    ];
+    for (name, expected_value) in expected {
+        let function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == name)
+            .expect("dogfood function")
+            .id();
+        let result =
+            evaluate_client_function(&active, function).expect("dogfood function evaluates");
+        assert_eq!(result.value(), &expected_value, "{name}");
+    }
+}
+#[test]
 fn recursive_client_control_flow_uses_shared_execution_fuel() {
     let prepared = prepared_client_source_v6(
         r#"CREATE SCHEMA app;
@@ -1588,7 +1683,56 @@ arguments => std.call.args(p_value => app.first())
 }
 
 #[test]
-fn source_introspection_exposes_parameters_and_function_references() {
+fn source_metadata_body_kind_categories_follow_runtime_return_contract() {
+    let state = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.state() RETURNS INTEGER \
+         IS STATE value INTEGER DEFAULT 1; BEGIN RETURN 1; END;",
+    );
+    let state_active = active_from_prepared_candidate(&state);
+    let state_function = state_active.catalogue().functions()[0].id();
+    let state_result = evaluate_client_function(&state_active, state_function)
+        .expect("state function must execute");
+    assert_eq!(state_result.value(), &RuntimeValue::Integer(1));
+    assert_eq!(
+        state_active.function_revisions()[0].artifact().version(),
+        orna_artifact::client_plan::STATE_FORMAT_VERSION
+    );
+    assert_eq!(
+        source_metadata_body_kind(state_active.function_revisions()[0].artifact()),
+        orna_core::source_metadata::SourceBodyKind::State
+    );
+
+    let external = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE EXTERNAL CLIENT FUNCTION app.external() RETURNS INTEGER \
+         RUNTIME CONTRACT 'app.external@1';",
+    );
+    let external_active = active_from_prepared_candidate(&external);
+    let external_function = external_active.catalogue().functions()[0].id();
+    let external_result = evaluate_client_function(&external_active, external_function)
+        .expect_err("external contract execution requires a host executor");
+    assert!(matches!(
+        external_result,
+        super::super::ClientExecutionError::ExternalContract { identity, .. }
+            if identity == "app.external@1"
+    ));
+    assert_eq!(
+        source_metadata_body_kind(external_active.function_revisions()[0].artifact()),
+        orna_core::source_metadata::SourceBodyKind::Expression
+    );
+    let external_plan = orna_artifact::client_plan::ExpressionClientPlan::decode(
+        external_active.function_revisions()[0].artifact().payload(),
+    )
+    .expect("the external artefact must decode as an expression plan");
+    assert!(matches!(
+        external_plan.expression(),
+        orna_artifact::client_plan::ClientExpressionNode::ExternalContract { identity }
+            if identity == "app.external@1"
+    ));
+}
+#[test]
+fn source_introspection_exposes_complete_generic_function_metadata() {
     let prepared = prepared_client_source(
         "CREATE SCHEMA app; \
          CREATE CLIENT FUNCTION app.target(p_value INTEGER) RETURNS INTEGER RETURN p_value; \
@@ -1614,11 +1758,380 @@ fn source_introspection_exposes_parameters_and_function_references() {
             .expect("the returned payload must decode as source metadata");
     assert_eq!(metadata.function(), function);
     assert_eq!(metadata.function_name(), "app.describe");
+    assert_eq!(
+        metadata.body_kind(),
+        orna_core::source_metadata::SourceBodyKind::Expression
+    );
+    assert_eq!(
+        metadata.return_metadata(),
+        Some(orna_core::source_metadata::SourceReturnMetadata::Single(
+            orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+        ))
+    );
+
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .expect("the active revision has a verified standard library");
+    let registry = orna_standard::registered_opaque_codecs(standard)
+        .expect("the standard opaque codec registry is valid");
+    let encoded = orna_protocol::encode_registered_value(&active, &registry, result.value())
+        .expect("source metadata must encode through the generic protocol carrier");
+    let decoded = orna_protocol::decode_registered_value(&active, &registry, &encoded)
+        .expect("source metadata must decode through the generic protocol carrier");
+    assert_eq!(decoded, result.value().clone());
     assert!(metadata.parameters().is_empty());
     assert_eq!(metadata.references().len(), 1);
     assert_eq!(
         metadata.references()[0].target_name(),
         "sys.source.function"
+    );
+}
+
+#[test]
+fn procedural_source_introspection_reports_procedural_body_kind() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function IS \
+         BEGIN LET value INTEGER := 1; RETURN sys.source.current(); END;",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name().to_string() == "app.describe")
+        .expect("the procedural source function is present")
+        .id();
+
+    let result = evaluate_client_function(&active, function)
+        .expect("procedural source introspection must execute");
+    let RuntimeValue::Opaque(value) = result.value() else {
+        panic!("source introspection must return metadata");
+    };
+    let metadata =
+        orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
+            .expect("the returned payload must decode");
+    assert_eq!(
+        metadata.body_kind(),
+        orna_core::source_metadata::SourceBodyKind::Procedural
+    );
+}
+
+#[test]
+fn state_source_introspection_is_rejected_by_runtime_return_contract() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function IS \
+         STATE value INTEGER DEFAULT 1; \
+         BEGIN RETURN sys.source.current(); END;",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active.catalogue().functions()[0].id();
+    let Err(error) = evaluate_client_function(&active, function) else {
+        panic!("state source introspection must be rejected by the runtime return contract");
+    };
+    assert!(matches!(
+        error,
+        super::super::ClientExecutionError::InvalidFunction {
+            rule: super::super::ClientExecutionRule::ReturnType,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn source_metadata_protocol_carrier_rejects_stale_revision() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
+         RETURN sys.source.current();",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name().to_string() == "app.describe")
+        .expect("the source-authored function is present")
+        .id();
+    let result =
+        evaluate_client_function(&active, function).expect("source introspection succeeds");
+    let RuntimeValue::Opaque(value) = result.value() else {
+        panic!("source introspection must return an opaque metadata value");
+    };
+    let metadata =
+        orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
+            .expect("the metadata payload is valid");
+    let stale = orna_core::source_metadata::SourceFunctionMetadata::new_with_signature(
+        metadata.function(),
+        orna_core::FunctionRevisionId::from_bytes([0xff; 16]),
+        metadata.function_name(),
+        metadata.source_unit(),
+        metadata.byte_start(),
+        metadata.byte_end(),
+        metadata.declaration_content_hash(),
+        metadata.body_kind(),
+        metadata.return_metadata(),
+        metadata.parameters().to_vec(),
+        metadata.references().to_vec(),
+    )
+    .expect("the stale metadata remains structurally valid");
+    let encoded = {
+        let payload = stale.encode_with_signature();
+        let mut encoded = b"ORV4".to_vec();
+        encoded.push(0x0c);
+        encoded.extend_from_slice(&orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID.to_bytes());
+        encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(&payload);
+        encoded
+    };
+    let standard = active.catalogue_hash_context().standard().unwrap();
+    let registry = orna_standard::registered_opaque_codecs(standard).unwrap();
+    let error = orna_protocol::decode_registered_value(&active, &registry, &encoded)
+        .expect_err("stale source metadata must fail closed");
+    assert!(matches!(
+        error,
+        orna_protocol::ValueCodecError::OpaqueValue {
+            source: orna_core::value::OpaqueValueError::SourceRevisionMismatch { .. },
+        }
+    ));
+}
+
+#[test]
+fn source_metadata_protocol_carrier_round_trips_nested_orv5_and_orv6_values() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe() RETURNS sys.source.function \
+         RETURN sys.source.current();",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name().to_string() == "app.describe")
+        .expect("the source-authored function is present")
+        .id();
+    let result =
+        evaluate_client_function(&active, function).expect("source introspection succeeds");
+    let metadata_value = result.value().clone();
+    let standard = active.catalogue_hash_context().standard().unwrap();
+    let registry = orna_standard::registered_opaque_codecs(standard).unwrap();
+    let source_type =
+        orna_core::types::TypeDescriptor::named(orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID);
+    let option_descriptor = orna_core::types::TypeDescriptor::option(source_type.clone()).unwrap();
+    let list_descriptor =
+        orna_core::types::TypeDescriptor::list(option_descriptor.clone()).unwrap();
+    let list = RuntimeValue::list(
+        &active,
+        list_descriptor,
+        vec![
+            RuntimeValue::option(&active, option_descriptor, Some(metadata_value.clone())).unwrap(),
+        ],
+    )
+    .unwrap();
+    let encoded = orna_protocol::encode_constructed_value(&active, &registry, &list)
+        .expect("nested source metadata must encode through ORV5");
+    let decoded = orna_protocol::decode_constructed_value(&active, &registry, &encoded)
+        .expect("nested source metadata must decode through ORV5");
+    assert_eq!(decoded, list);
+    let unknown_type =
+        orna_core::types::TypeDescriptor::named(orna_core::TypeId::from_bytes([0xee; 16]));
+    let unknown_option = orna_core::types::TypeDescriptor::option(unknown_type).unwrap();
+    assert!(matches!(
+        RuntimeValue::option(&active, unknown_option, None),
+        Err(orna_core::value::CollectionValueError::UnsupportedDescriptor { .. })
+    ));
+    let set_descriptor = orna_core::types::TypeDescriptor::set(source_type.clone()).unwrap();
+    let duplicate = RuntimeValue::set(
+        &active,
+        set_descriptor.clone(),
+        vec![metadata_value.clone(), metadata_value.clone()],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        orna_core::value::CollectionValueError::DuplicateSetElement { .. }
+    ));
+    let alternate_metadata = {
+        let RuntimeValue::Opaque(value) = &metadata_value else {
+            panic!("source metadata must be opaque");
+        };
+        let metadata =
+            orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
+                .unwrap();
+        let alternate = orna_core::source_metadata::SourceFunctionMetadata::new(
+            metadata.function(),
+            metadata.function_revision(),
+            metadata.function_name(),
+            metadata.source_unit(),
+            metadata.byte_start(),
+            metadata.byte_end(),
+            metadata.declaration_content_hash(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        RuntimeValue::Opaque(
+            orna_core::value::OpaqueValue::new_source_metadata_carrier(
+                &active,
+                orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+                alternate.encode(),
+            )
+            .unwrap(),
+        )
+    };
+    let set = RuntimeValue::set(
+        &active,
+        set_descriptor,
+        vec![metadata_value.clone(), alternate_metadata],
+    )
+    .unwrap();
+    let RuntimeValue::Constructed(set_value) = &set else {
+        panic!("SET construction must produce a constructed value");
+    };
+    let orna_core::value::ConstructedValueKind::Set(values) = set_value.kind() else {
+        panic!("SET construction must retain set contents");
+    };
+    assert_eq!(values.len(), 2);
+    assert_ne!(values[0], values[1]);
+    let RuntimeValue::Opaque(first) = &values[0] else {
+        panic!("SET values must retain opaque carriers");
+    };
+    let RuntimeValue::Opaque(second) = &values[1] else {
+        panic!("SET values must retain opaque carriers");
+    };
+    assert_eq!(
+        first.canonical_payload().cmp(second.canonical_payload()),
+        std::cmp::Ordering::Less
+    );
+    let encoded = orna_protocol::encode_constructed_value(&active, &registry, &set)
+        .expect("nested source metadata must encode through ORV6");
+    let decoded = orna_protocol::decode_constructed_value(&active, &registry, &encoded)
+        .expect("nested source metadata must decode through ORV6");
+    assert_eq!(decoded, set);
+}
+
+#[test]
+fn source_preparation_exposes_parameter_and_control_flow_metadata() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe(p_value INTEGER) RETURNS INTEGER IS \
+         BEGIN IF p_value > 0 THEN RETURN p_value; ELSE RETURN 0; END IF; END;",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name().to_string() == "app.describe")
+        .expect("the control-flow function is present")
+        .id();
+    let definition = active
+        .catalogue()
+        .function_by_id(function)
+        .expect("the function definition is present");
+    let parameter = definition.parameters()[0].id();
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|candidate| candidate.function() == function)
+        .expect("the function revision is present");
+
+    assert_eq!(definition.parameters().len(), 1);
+    assert_eq!(definition.parameters()[0].name(), "p_value");
+    assert_eq!(
+        definition.parameters()[0].resolved_type(),
+        orna_core::types::ResolvedType::value(orna_standard::INTEGER_TYPE_ID)
+    );
+    assert_eq!(
+        revision.artifact().version(),
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
+    );
+    assert_eq!(
+        revision.declaration_origin().source_unit(),
+        prepared
+            .source()
+            .units()
+            .iter()
+            .find(|unit| unit.logical_path() == "application.orna")
+            .expect("application source unit is present")
+            .id()
+    );
+    assert_ne!(
+        revision.declaration_content_hash(),
+        orna_core::revision::Sha256Digest::from_bytes([0; 32])
+    );
+    assert_eq!(
+        active
+            .references()
+            .iter()
+            .filter(|reference| reference.source_function() == function)
+            .count(),
+        2
+    );
+    assert_ne!(parameter, orna_core::ParameterId::from_bytes([0; 16]));
+}
+#[test]
+fn control_flow_source_introspection_evaluates_without_function_specific_dispatch() {
+    let prepared = prepared_client_source(
+        "CREATE SCHEMA app; \
+         CREATE CLIENT FUNCTION app.describe(p_value INTEGER) RETURNS sys.source.function IS \
+         BEGIN IF p_value > 0 THEN RETURN sys.source.current(); ELSE RETURN sys.source.current(); END IF; END;",
+    );
+    let active = active_from_prepared_candidate(&prepared);
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|candidate| candidate.name().to_string() == "app.describe")
+        .expect("the control-flow function is present")
+        .id();
+    let parameter = active
+        .catalogue()
+        .function_by_id(function)
+        .expect("function definition")
+        .parameters()[0]
+        .id();
+    let result = super::super::evaluate_client_function_with_arguments(
+        &active,
+        &authorise(active.pair(), function),
+        &[FunctionArgument::new(parameter, RuntimeValue::Integer(1)).expect("integer argument")],
+    );
+    let result = result.expect("control-flow source introspection must evaluate");
+    let RuntimeValue::Opaque(value) = result.value() else {
+        panic!("control-flow introspection must return a source metadata carrier");
+    };
+    let metadata =
+        orna_core::source_metadata::SourceFunctionMetadata::decode(value.canonical_payload())
+            .expect("metadata payload");
+    assert_eq!(metadata.function(), function);
+    assert_eq!(
+        metadata.body_kind(),
+        orna_core::source_metadata::SourceBodyKind::ControlFlow
+    );
+    assert_eq!(
+        metadata.return_metadata(),
+        Some(orna_core::source_metadata::SourceReturnMetadata::Single(
+            orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID,
+        ))
+    );
+    assert_eq!(metadata.parameters().len(), 1);
+    assert_eq!(metadata.parameters()[0].name(), "p_value");
+    assert_eq!(metadata.parameters()[0].ordinal(), 0);
+    assert_eq!(
+        metadata.parameters()[0].resolved_type(),
+        orna_standard::INTEGER_TYPE_ID
+    );
+    assert_eq!(metadata.references().len(), 2);
+    assert_eq!(
+        metadata
+            .references()
+            .iter()
+            .map(orna_core::source_metadata::SourceReferenceMetadata::target_name)
+            .collect::<Vec<_>>(),
+        ["std.types.integer", "sys.source.function"]
     );
 }
 #[test]

@@ -14,6 +14,16 @@ mod cst;
 mod server;
 
 #[test]
+fn rejects_sql_function_declarations_as_a_separate_unsupported_domain() {
+    let source = "CREATE SQL FUNCTION app.total() RETURNS INTEGER AS SELECT 1;";
+    let parsed = parse(source);
+
+    assert!(parsed.server_functions().is_empty());
+    assert!(parsed.client_functions().is_empty());
+    assert!(!parsed.diagnostics().is_empty());
+    assert_eq!(parsed.syntax().text(), source);
+}
+#[test]
 fn parses_schema_declarations_case_insensitively_without_rewriting_source() {
     let source = "cReAtE sChEmA crm.sales;";
     let parsed = parse(source);

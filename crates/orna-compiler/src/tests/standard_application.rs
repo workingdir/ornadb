@@ -560,15 +560,17 @@ fn standard_preparation_orders_gate_ten_and_common_preflight_before_client_seman
     assert_eq!(report.diagnostics(), &[]);
 
     let mut gate_ten = report.clone();
-    assert!(gate_ten.replace_standard_type_reference_for_test(
-        0,
-        CheckedFunctionId::Existing(FunctionId::from_bytes([0xc1; 16])),
-        0,
-        TypeId::from_bytes([3; 16]),
-        report.checked_bundle().unwrap().standard_type_references()[0]
-            .location()
-            .clone(),
-    ));
+    assert!(
+        gate_ten.replace_standard_type_reference_for_test(
+            0,
+            CheckedFunctionId::Existing(FunctionId::from_bytes([0xc1; 16])),
+            0,
+            TypeId::from_bytes([3; 16]),
+            report.checked_bundle().unwrap().standard_type_references()[0]
+                .location()
+                .clone(),
+        )
+    );
     assert!(gate_ten.replace_first_client_body_with_unsupported_for_test());
     let error = prepare_standard_application_with_allocator(
         &gate_ten,
@@ -656,8 +658,10 @@ fn standard_preparation_materialises_exact_client_return_evidence_at_gate_ten() 
     hostile_cases.push((missing, owner));
 
     let mut extra = report.clone();
-    assert!(extra
-        .replace_standard_type_references_for_test(vec![reference.clone(), reference.clone(),]));
+    assert!(
+        extra
+            .replace_standard_type_references_for_test(vec![reference.clone(), reference.clone(),])
+    );
     hostile_cases.push((extra, owner));
 
     let mut wrong_owner = report.clone();
@@ -724,8 +728,10 @@ fn standard_preparation_materialises_exact_client_return_evidence_at_gate_ten() 
     hostile_cases.push((wrong_kind_ordinal, owner));
 
     let mut wrong_retained_target = report.clone();
-    assert!(wrong_retained_target
-        .replace_first_client_return_type_id_for_test(TypeId::from_bytes([0xc6; 16])));
+    assert!(
+        wrong_retained_target
+            .replace_first_client_return_type_id_for_test(TypeId::from_bytes([0xc6; 16]))
+    );
     hostile_cases.push((wrong_retained_target, owner));
 
     let mut wrong_retained_location = report.clone();
@@ -913,8 +919,10 @@ fn standard_preparation_validates_every_gate_eleven_location_in_nested_order() {
     }
 
     let mut nested_precedence = report;
-    assert!(nested_precedence
-        .replace_standard_preparation_location_for_test("schema", invalid_location.clone(),));
+    assert!(
+        nested_precedence
+            .replace_standard_preparation_location_for_test("schema", invalid_location.clone(),)
+    );
     assert!(nested_precedence.replace_first_client_body_with_unsupported_for_test());
     let error = prepare_standard_application_with_allocator(
         &nested_precedence,
@@ -951,8 +959,10 @@ fn standard_preparation_orders_server_continuity_client_order_and_owner_complete
     let server_id = FunctionId::from_bytes([0xc2; 16]);
 
     let mut server_before_client = report.clone();
-    assert!(server_before_client
-        .replace_first_server_id_for_test(CheckedFunctionId::Existing(server_id)));
+    assert!(
+        server_before_client
+            .replace_first_server_id_for_test(CheckedFunctionId::Existing(server_id))
+    );
     assert!(server_before_client.replace_first_client_body_with_unsupported_for_test());
     let error = prepare_standard_application_with_allocator(
         &server_before_client,
@@ -968,7 +978,9 @@ fn standard_preparation_orders_server_continuity_client_order_and_owner_complete
     let client_id = checked.client_functions().next().unwrap().id();
     let mut client_semantics_before_duplicate = report.clone();
     assert!(client_semantics_before_duplicate.replace_first_server_id_for_test(client_id));
-    assert!(client_semantics_before_duplicate.replace_first_client_body_with_unsupported_for_test());
+    assert!(
+        client_semantics_before_duplicate.replace_first_client_body_with_unsupported_for_test()
+    );
     let error = prepare_standard_application_with_allocator(
         &client_semantics_before_duplicate,
         active.pair(),
@@ -1123,8 +1135,10 @@ fn standard_preparation_checks_both_active_function_domain_directions_and_name_c
     let server_report = check_standard_application(&server_bundle, &client_context);
     assert_eq!(server_report.diagnostics(), &[]);
     let mut server_as_client = server_report.clone();
-    assert!(server_as_client
-        .replace_first_server_id_for_test(CheckedFunctionId::Existing(active_client_id)));
+    assert!(
+        server_as_client
+            .replace_first_server_id_for_test(CheckedFunctionId::Existing(active_client_id))
+    );
     let error = prepare_standard_application_with_allocator(
         &server_as_client,
         client_active.pair(),
@@ -1186,8 +1200,10 @@ fn standard_preparation_checks_both_active_function_domain_directions_and_name_c
     let ordered_client_report = check_standard_application(&ordered_client_bundle, &client_context);
     assert_eq!(ordered_client_report.diagnostics(), &[]);
     let mut first_continuity_before_second = ordered_client_report.clone();
-    assert!(first_continuity_before_second
-        .replace_first_client_name_for_test(semantic_name(["app", "renamed",])));
+    assert!(
+        first_continuity_before_second
+            .replace_first_client_name_for_test(semantic_name(["app", "renamed",]))
+    );
     assert!(
         first_continuity_before_second.replace_client_domain_for_test(1, FunctionDomain::Server)
     );
@@ -1225,8 +1241,10 @@ fn standard_preparation_orders_the_first_seven_gates() {
     assert_check_not_complete(error, incomplete.diagnostics().len());
 
     let mut wrong_base_after_expected = valid_report.clone();
-    assert!(wrong_base_after_expected
-        .replace_base_catalogue_revision_for_test(CatalogueRevisionId::from_bytes([0xe2; 16])));
+    assert!(
+        wrong_base_after_expected
+            .replace_base_catalogue_revision_for_test(CatalogueRevisionId::from_bytes([0xe2; 16]))
+    );
     let wrong_expected_base = RevisionPair::new(
         SourceRevisionId::from_bytes([0xe3; 16]),
         active.pair().catalogue(),
@@ -1237,8 +1255,10 @@ fn standard_preparation_orders_the_first_seven_gates() {
     assert_expected_base_mismatch(error, wrong_expected_base, active.pair());
 
     let mut wrong_base = valid_report.clone();
-    assert!(wrong_base
-        .replace_base_catalogue_revision_for_test(CatalogueRevisionId::from_bytes([0xe4; 16])));
+    assert!(
+        wrong_base
+            .replace_base_catalogue_revision_for_test(CatalogueRevisionId::from_bytes([0xe4; 16]))
+    );
     let no_standard = empty_version_one_active();
     let error =
         prepare_standard_application(&wrong_base, no_standard.pair(), &no_standard).unwrap_err();
@@ -1249,8 +1269,10 @@ fn standard_preparation_orders_the_first_seven_gates() {
     );
 
     let mut report_without_standard = valid_report.clone();
-    assert!(report_without_standard
-        .replace_base_catalogue_revision_for_test(no_standard.pair().catalogue()));
+    assert!(
+        report_without_standard
+            .replace_base_catalogue_revision_for_test(no_standard.pair().catalogue())
+    );
     let error =
         prepare_standard_application(&report_without_standard, no_standard.pair(), &no_standard)
             .unwrap_err();
@@ -1772,8 +1794,12 @@ fn standard_preparation_drives_declaration_body_and_reference_evidence_gates() {
     assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
 
     let mut wrong_declaration_type = report.clone();
-    assert!(wrong_declaration_type
-        .replace_value_type_id_for_test(declaration_value_index, TypeId::from_bytes([0xd1; 16]),));
+    assert!(
+        wrong_declaration_type.replace_value_type_id_for_test(
+            declaration_value_index,
+            TypeId::from_bytes([0xd1; 16]),
+        )
+    );
     let error =
         prepare_standard_application(&wrong_declaration_type, active.pair(), &active).unwrap_err();
     assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
@@ -1893,8 +1919,10 @@ fn standard_preparation_drives_declaration_body_and_reference_evidence_gates() {
     assert_body_evidence_mismatch(error, body_function);
 
     let mut wrong_body_type = report.clone();
-    assert!(wrong_body_type
-        .replace_value_type_id_for_test(body_value_index, TypeId::from_bytes([0xd4; 16]),));
+    assert!(
+        wrong_body_type
+            .replace_value_type_id_for_test(body_value_index, TypeId::from_bytes([0xd4; 16]),)
+    );
     let error = prepare_standard_application(&wrong_body_type, active.pair(), &active).unwrap_err();
     assert_body_evidence_mismatch(error, body_function);
 
@@ -2185,9 +2213,11 @@ fn standard_preparation_preserves_multi_unit_signature_references_and_mixed_owne
         })
         .collect::<Vec<_>>();
     assert_eq!(value_reference_targets.len(), 4);
-    assert!(value_reference_targets
-        .iter()
-        .all(|type_id| *type_id == TypeId::from_bytes([3; 16])));
+    assert!(
+        value_reference_targets
+            .iter()
+            .all(|type_id| *type_id == TypeId::from_bytes([3; 16]))
+    );
     assert_eq!(
         prepared
             .references()

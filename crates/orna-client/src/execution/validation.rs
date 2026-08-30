@@ -138,7 +138,10 @@ fn classify_client_return(
     if resolved_type.named_type() == Some(SYS_SOURCE_FUNCTION_TYPE_ID) {
         return if matches!(
             artifact_version,
-            EXPRESSION_FORMAT_VERSION | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
+            EXPRESSION_FORMAT_VERSION
+                | PROCEDURAL_FORMAT_VERSION
+                | orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
+                | orna_artifact::client_plan::INSPECT_FORMAT_VERSION
         ) {
             ClientReturnShape::Source(resolved_type)
         } else {
@@ -902,7 +905,7 @@ pub(crate) fn validate_artifact(
         }
         ClientReturnShape::Action(_) => orna_artifact::client_plan::ACTION_FORMAT_VERSION,
         ClientReturnShape::Inspect(_) => orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
-        ClientReturnShape::Source(_) => EXPRESSION_FORMAT_VERSION,
+        ClientReturnShape::Source(_) => artifact_version,
         ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
         ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
     };

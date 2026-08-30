@@ -1395,10 +1395,11 @@ fn v5_and_v6_retain_the_locked_sources_and_catalogue_identities() {
             .to_string(),
         "std.jsonvalue"
     );
-    assert!(v5
-        .catalogue()
-        .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
-        .is_some());
+    assert!(
+        v5.catalogue()
+            .function_by_id(STD_JSON_ENCODE_FUNCTION_ID)
+            .is_some()
+    );
 
     assert_eq!(
         super::super::standard_library_v6_manifest()
