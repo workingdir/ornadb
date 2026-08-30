@@ -857,7 +857,6 @@ impl PhysicalMigrationEncoder {
     }
 }
 
-
 /// One complete ordered set of supported physical changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysicalPlan {
