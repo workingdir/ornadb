@@ -7,7 +7,7 @@
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
-use crate::analysis::{DeclarationRef, FieldInfo, ParameterInfo};
+use crate::analysis::{DeclarationRef, FieldInfo, FunctionDeclarationView, ParameterInfo};
 use crate::reference::{KeywordReference, ScalarReference};
 
 /// Returns the grammar specification link for one document, if reachable.
@@ -369,7 +369,7 @@ fn append_spec_link(value: &mut String, doc_link: Option<&str>) {
 /// Appends a Parameters section from a function declaration.
 fn append_parameters<F>(value: &mut String, declaration: &F, text: &str)
 where
-    F: Parameterized,
+    F: FunctionDeclarationView,
 {
     let parameters = declaration
         .parameters()
@@ -393,23 +393,6 @@ where
         .join("\n");
     if !parameters.is_empty() {
         value.push_str(&format!("\n**Parameters**\n{parameters}\n"));
-    }
-}
-
-/// A common view over function declarations for parameter rendering.
-pub trait Parameterized {
-    fn parameters(&self) -> &[orna_syntax::ServerFunctionParameter];
-}
-
-impl Parameterized for orna_syntax::ServerFunctionDeclaration {
-    fn parameters(&self) -> &[orna_syntax::ServerFunctionParameter] {
-        &self.parameters
-    }
-}
-
-impl Parameterized for orna_syntax::ClientFunctionDeclaration {
-    fn parameters(&self) -> &[orna_syntax::ClientFunctionParameter] {
-        &self.parameters
     }
 }
 
@@ -441,7 +424,7 @@ fn capability_clause_text(capabilities: &[orna_syntax::CapabilitySpecification])
 /// Renders the parameter list of a function from source slices.
 fn parameters<F>(declaration: &F, text: &str) -> String
 where
-    F: Parameterized,
+    F: FunctionDeclarationView,
 {
     declaration
         .parameters()

@@ -1,3 +1,5 @@
+// Support materialisation returns the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},

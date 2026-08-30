@@ -1,3 +1,7 @@
+// User state preserves its accepted protocol and error layouts.
+#![allow(clippy::large_enum_variant)]
+// User-state operations return the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 //! Active `orna state` access to the durable USER state service.
 //!
 //! This module runs one closed `orna state get|set` command against the
