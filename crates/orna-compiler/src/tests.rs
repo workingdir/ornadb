@@ -2482,7 +2482,7 @@ fn verified_non_std_schema_standard_source_fixture()
     verify_standard_library_snapshot(snapshot).unwrap()
 }
 
-fn verified_canonical_standard_source_fixture()
+pub(crate) fn verified_canonical_standard_source_fixture()
 -> orna_core::revision::VerifiedStandardLibrarySnapshot {
     let source_unit = StoredSourceUnit::new(
         SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
