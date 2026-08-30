@@ -121,9 +121,7 @@ fn fixed_listener_replaces_only_a_verified_stale_socket_and_drains_connections()
 }
 
 fn listener_test_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(format!("raw-socket-listener-{}", std::process::id()))
+    std::env::temp_dir().join(format!("orna-socket-{}", std::process::id()))
 }
 
 #[tokio::test]
