@@ -198,7 +198,7 @@ impl ResourceProtocolConnection {
     /// Applies one server frame after validating its canonical ORV5/ORV6
     /// values and declared byte count.
     ///
-    /// [`Self::apply`] operates on an already decoded frame and therefore
+    /// `Self::apply` operates on an already decoded frame and therefore
     /// cannot reconstruct the active-revision-dependent value bytes. Adapters
     /// that receive values from an in-memory producer (rather than through
     /// [`decode_resource_server_frame`]) must use this entry point so a forged
@@ -233,7 +233,7 @@ impl ResourceProtocolConnection {
     /// Applies the terminal cancellation response after the client has already
     /// moved the request into its terminal late-frame state.
     ///
-    /// The ordinary [`Self::apply`] path treats a terminal frame as late and
+    /// The ordinary `Self::apply` path treats a terminal frame as late and
     /// drops it. The authenticated server adapter must emit the one
     /// cancellation response that confirms a client cancellation, so it uses
     /// this explicit transition after [`Self::receive`] accepts the cancel.
