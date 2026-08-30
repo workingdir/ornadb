@@ -1,8 +1,11 @@
 use super::{
-    StandardLibrary, completion_at, declaration_at, hover, references, type_owner_name_from_source,
+    StandardLibrary, check_document, completion_at, declaration_at, hover, references,
+    syntax_diagnostics, type_owner_name_from_source,
 };
 use crate::documents::{Document, PositionMapper};
-use lsp_types::{Hover, HoverContents, Position, Range};
+use lsp_types::{
+    DiagnosticSeverity, DiagnosticTag, Hover, HoverContents, NumberOrString, Position, Range,
+};
 
 fn hover_at(text: &str, byte: usize) -> Option<Hover> {
     let document = Document::new("file:///hover.orna".parse().unwrap(), text.to_owned(), 1);
@@ -31,6 +34,114 @@ fn standard_library_loads_verified_v10_snapshot() {
         snapshot.source().id(),
         orna_standard::STANDARD_SOURCE_V10_REVISION_ID
     );
+}
+
+#[test]
+fn syntax_diagnostics_publish_compiler_metadata() {
+    let text = "CREATE SCHEMA ;";
+    let document = Document::new("file:///syntax.orna".parse().unwrap(), text.to_owned(), 1);
+    let mapper = PositionMapper::new(text);
+
+    let diagnostics = syntax_diagnostics(&document, &mapper);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+    assert_eq!(
+        diagnostic.code,
+        Some(NumberOrString::String("ORNA0001".to_owned()))
+    );
+    assert!(diagnostic.message.contains("help:"));
+    assert_eq!(diagnostic.related_information, None);
+    let data = diagnostic
+        .data
+        .as_ref()
+        .expect("structured diagnostic data");
+    assert_eq!(data["severity"], "error");
+    assert_eq!(data["primaryLabel"], "unexpected syntax");
+}
+
+#[test]
+fn duplicate_diagnostics_publish_the_first_definition() {
+    let standard = StandardLibrary::load().expect("retained V10 standard must load");
+    let text = "CREATE SCHEMA app;\nCREATE SCHEMA app;";
+    let document = Document::new(
+        "file:///duplicate.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let mapper = PositionMapper::new(text);
+
+    let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+    assert_eq!(
+        diagnostic.code,
+        Some(NumberOrString::String("ORNA0103".to_owned()))
+    );
+    let related = diagnostic
+        .related_information
+        .as_ref()
+        .expect("duplicate diagnostic has related information");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "first defined here");
+    assert_eq!(related[0].location.range.start, Position::new(0, 14));
+    assert_eq!(related[0].location.range.end, Position::new(0, 17));
+    let data = diagnostic
+        .data
+        .as_ref()
+        .expect("structured diagnostic data");
+    assert_eq!(data["primaryLabel"], "redefined here");
+    assert_eq!(
+        data["help"],
+        "rename one of the definitions or remove the duplicate"
+    );
+}
+
+#[test]
+fn unreachable_code_is_a_warning_with_an_unnecessary_tag() {
+    let standard = StandardLibrary::load().expect("retained V10 standard must load");
+    let text = "CREATE SCHEMA app;\n\
+                CREATE CLIENT FUNCTION app.unreachable()\n\
+                RETURNS BOOLEAN\n\
+                IS\n\
+                BEGIN\n\
+                    RETURN TRUE;\n\
+                    LET ignored := FALSE;\n\
+                END;";
+    let document = Document::new("file:///warning.orna".parse().unwrap(), text.to_owned(), 1);
+    let mapper = PositionMapper::new(text);
+
+    let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::WARNING));
+    assert_eq!(
+        diagnostic.code,
+        Some(NumberOrString::String("ORNA0401".to_owned()))
+    );
+    assert_eq!(diagnostic.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    assert_eq!(diagnostic.range.start, Position::new(6, 0));
+    let related = diagnostic
+        .related_information
+        .as_ref()
+        .expect("warning has return-cause information");
+    assert_eq!(related[0].location.range.start, Position::new(5, 0));
+    assert_eq!(
+        related[0].message,
+        "this statement returns from the function"
+    );
+    assert!(diagnostic.message.contains("help:"));
+    assert!(diagnostic.message.contains("note:"));
+    let data = diagnostic
+        .data
+        .as_ref()
+        .expect("structured diagnostic data");
+    assert_eq!(data["severity"], "warning");
+    assert_eq!(data["primaryLabel"], "unreachable code");
 }
 
 #[test]

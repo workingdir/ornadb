@@ -75,8 +75,8 @@ use super::{
 };
 use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
 use crate::{
-    ParsedSourceUnit, PrepareError, PrepareStandardApplicationError, parse_bundle,
-    prepare_standard_application,
+    DiagnosticSeverity, ParsedSourceUnit, PrepareError, PrepareStandardApplicationError,
+    parse_bundle, prepare_standard_application,
 };
 
 const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
@@ -645,6 +645,68 @@ fn application_diagnostics_are_ordered_by_source_unit_and_span() {
         assert_eq!(diagnostic.code(), code);
     }
     assert_no_checked_bundle(&report);
+}
+
+#[test]
+fn duplicate_diagnostics_identify_the_first_definition() {
+    let source = "CREATE SCHEMA app;\nCREATE SCHEMA app;";
+    let report = check(&bundle([("duplicate.orna", source)]), &empty_catalogue());
+
+    assert!(report.has_errors());
+    assert_eq!(report.error_count(), 1);
+    assert_eq!(report.warning_count(), 0);
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
+    assert_eq!(diagnostic.primary_label(), "redefined here");
+    assert_eq!(
+        diagnostic.help(),
+        Some("rename one of the definitions or remove the duplicate")
+    );
+    assert_eq!(diagnostic.related().len(), 1);
+    assert_eq!(diagnostic.related()[0].message(), "first defined here");
+    assert_eq!(
+        diagnostic.related()[0].location().logical_path(),
+        "duplicate.orna"
+    );
+    assert_eq!(
+        diagnostic.related()[0].location().span().start(),
+        source.find("app").unwrap()
+    );
+}
+
+#[test]
+fn unreachable_statements_are_nonblocking_warnings() {
+    let source = "CREATE SCHEMA app;\n\
+                  CREATE CLIENT FUNCTION app.unreachable()\n\
+                  RETURNS BOOLEAN\n\
+                  IS\n\
+                  BEGIN\n\
+                      RETURN TRUE;\n\
+                      LET ignored := FALSE;\n\
+                  END;";
+    let report = check(&bundle([("warning.orna", source)]), &empty_catalogue());
+
+    assert!(!report.has_errors());
+    assert_eq!(report.error_count(), 0);
+    assert_eq!(report.warning_count(), 1);
+    assert!(report.checked_bundle().is_some());
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.code(), DiagnosticCode::UnreachableCode);
+    assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
+    assert_eq!(diagnostic.primary_label(), "unreachable code");
+    assert_eq!(
+        diagnostic.location().span().start(),
+        source.find("LET ignored").unwrap()
+    );
+    assert_eq!(
+        diagnostic.notes(),
+        &["unreachable statements are still checked but can never execute"]
+    );
+    assert_eq!(diagnostic.related().len(), 1);
+    assert_eq!(
+        diagnostic.related()[0].location().span().start(),
+        source.find("RETURN TRUE").unwrap()
+    );
 }
 
 fn catalogue(
