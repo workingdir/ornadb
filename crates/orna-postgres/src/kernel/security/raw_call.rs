@@ -180,6 +180,25 @@ fn raw_server_insert_argument_target_is_unavailable(
     }
 }
 
+#[cfg(feature = "test-hooks")]
+struct RawDispatchTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn pause_after_raw_dispatch_recovery(test_barrier: Option<&RawDispatchTestBarrier>) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct RawDispatchTestBarrier;
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_raw_dispatch_recovery(_test_barrier: Option<&RawDispatchTestBarrier>) {}
 impl PostgresKernel {
     /// Dispatches one authenticated parameter-free raw call inside one transaction.
     ///
@@ -588,6 +607,6 @@ impl PostgresKernel {
             execution
         }
         .await;
-        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+        finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
     }
 }

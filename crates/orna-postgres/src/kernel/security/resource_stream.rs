@@ -119,7 +119,7 @@ async fn commit_post_acceptance_resource_error_audit(
         Ok(())
     }
     .await;
-    finish_authenticated_server_select_session(operation, session.shutdown().await)
+    finish_authenticated_dispatch_session(operation, session.shutdown().await)
 }
 
 fn send_resource_producer_ready(
@@ -359,7 +359,7 @@ async fn finalize_reserved_resource_request(
         result
     }
     .await;
-    finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
 }
 
 pub(super) async fn run_authenticated_server_resource_producer_task(
@@ -388,7 +388,7 @@ pub(super) async fn run_authenticated_server_resource_producer_task(
         )
         .await;
         let shutdown = database_session.shutdown().await;
-        finish_authenticated_server_select_session(operation, shutdown)
+        finish_authenticated_dispatch_session(operation, shutdown)
     }
     .await;
     let finalizer = finalize_reserved_resource_request(

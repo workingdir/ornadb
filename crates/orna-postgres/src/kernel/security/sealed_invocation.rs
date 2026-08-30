@@ -430,7 +430,7 @@ impl PostgresKernel {
             ))
         }
         .await;
-        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+        finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
     }
 }
 
@@ -617,7 +617,7 @@ impl SealedInvocationOperation {
             Ok(())
         }
         .await;
-        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+        finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
     }
 
     /// Executes the accepted invocation after its start Event is delivered.
