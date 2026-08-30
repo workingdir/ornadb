@@ -9,7 +9,7 @@ use super::resource_producer::{
     ResourceProducerExit, ResourceProducerFailed, ResourceProducerFailureStage,
     ResourceProducerLifecycle, ResourceProducerReady, wait_for_resource_producer_pull_or_cancel,
 };
-use super::sealed_server_execution::{
+use super::sealed_server_contract::{
     bind_authenticated_resource_arguments, resource_target_security_is_supported,
     resource_target_shape_is_supported,
 };
