@@ -16,6 +16,9 @@ impl DispatchService for RawDispatchService {
         {
             cancellation.request_cancel();
         }
+        if let Some(bridge) = self.session_bridge() {
+            bridge.cancel_stream(stream);
+        }
     }
 
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
