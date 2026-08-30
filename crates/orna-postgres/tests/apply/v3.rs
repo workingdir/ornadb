@@ -189,9 +189,27 @@ fn user_state_plan_candidate(
     )?)
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestResult<()> {
+fn proves_public_user_state_profiles_and_atomic_conflict_batch() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("v3-user-state-live".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("V3 user-state runtime failed: {error}")))?;
+            runtime.block_on(proves_public_user_state_profiles_and_atomic_conflict_batch_inner())
+        })
+        .map_err(|error| failure(format!("V3 user-state thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("V3 user-state thread panicked")),
+    }
+}
+
+async fn proves_public_user_state_profiles_and_atomic_conflict_batch_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let chain = install_v3_standard_chain(&database).await?;
         let kernel = kernel(&database)?;
