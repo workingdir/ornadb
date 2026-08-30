@@ -45,6 +45,8 @@ fn recovered_standard_verifier_dispatches_all_retained_revisions_and_rejects_cro
         orna_standard::retained_standard_library_v7_snapshot().expect("retained V7 standard"),
         orna_standard::retained_standard_library_v8_snapshot().expect("retained V8 standard"),
         orna_standard::retained_standard_library_v9_snapshot().expect("retained V9 standard"),
+        orna_standard::retained_standard_library_v10_snapshot().expect("retained V10 standard"),
+        orna_standard::retained_standard_library_v11_snapshot().expect("retained V11 standard"),
     ];
     for snapshot in retained {
         let revision = snapshot.revision();
