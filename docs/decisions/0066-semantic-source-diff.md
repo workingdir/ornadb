@@ -69,25 +69,28 @@ Comparison keys are stable identities (`SchemaId`, `TypeId`, `FunctionId`,
 
 ## Diagnostics and failures
 
-Compiler diagnostics are rendered exactly as `orna source check` renders them
-(no candidate is prepared). A bundle that fails checking exits with the
-diagnostic document, not a diff. Installed-host failures (service identity,
-package state, engine, missing instance) reuse the installed-source error
-classes from work ADR 0038.
+Compiler diagnostics are rendered exactly as `orna source check` renders them.
+An error-level diagnostic prevents candidate preparation and exits with the
+diagnostic document rather than a diff. Warning-only source is prepared,
+produces the semantic diff, emits its warnings, and exits successfully.
+Installed-host failures (service identity, package state, engine, missing
+instance) reuse the installed-source error classes from work ADR 0038.
 
 ## Proof
 
-A live proof (`source_diff_live.rs`) boots the standard chain, installs one
+The live proof (`source_diff_live.rs`) boots the standard chain, installs one
 application revision with an object type and two functions, and exercises
 body-only, field-rename, broken-source, and identical candidates. The field
-rename candidate uses the identity-preserving `ALTER TYPE ... RENAME FIELD`
-form, adds one function, and drops another. The rendered report must show the
-field rename with its stable identity preserved (so dependent references
-survive), the addition, and the drop; the identical candidate must report no
-semantic changes; and the active pair must be byte-identical before and after
-the diff command. This proof does not cover function or parameter renames:
-source syntax for those transitions remains deferred pending a separate
-accepted language contract.
+rename candidate uses the identity-preserving
+`ALTER TYPE ... RENAME FIELD` form, adds one function, and drops another. The
+rendered report must show the field rename with its stable identity preserved
+(so dependent references survive), the addition, and the drop; the identical
+candidate must report no semantic changes; and the active pair must be
+byte-identical before and after every diff command. Separate source-command
+coverage exercises a warning-only candidate and requires emitted diagnostics,
+a semantic diff, success status, and no mutation. This proof does not cover
+function or parameter renames: source syntax for those transitions remains
+deferred pending a separate accepted language contract.
 
 ## Consequences
 

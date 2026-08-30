@@ -151,7 +151,7 @@ impl DiagnosticSeverity {
     }
 }
 
-/// The closed set of syntax diagnostic codes produced by this compiler stage.
+/// The closed set of stable compiler diagnostic categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticCode {
     /// The source contains a token that is invalid at its current position.
@@ -389,7 +389,7 @@ impl CompilerDiagnostic {
         self.code
     }
 
-    /// Returns a description of the source error.
+    /// Returns the diagnostic's detailed user-facing message.
     pub fn message(&self) -> &str {
         &self.message
     }

@@ -40,7 +40,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSourceDiffOutcome {
-    /// The source had compiler diagnostics; no candidate was prepared.
+    /// Error-level diagnostics prevented candidate preparation.
     Diagnostics(InstalledSourceDiffDiagnostics),
     /// The candidate was prepared and its semantic diff is ready.
     Diff(InstalledSourceDiffReport),

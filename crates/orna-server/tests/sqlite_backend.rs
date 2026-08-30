@@ -422,6 +422,73 @@ fn local_source_apply_emits_json_and_same_source_diff_is_empty() {
         "empty semantic diff has two lines"
     );
 }
+
+#[test]
+fn local_warning_diagnostics_do_not_block_source_apply_or_diff() {
+    let directory = TestDirectory::new("source-warning").expect("scratch directory");
+    let database = directory.path().join("source-warning.sqlite");
+    let source = directory.path().join("warning.orna");
+    let source_text = "CREATE SCHEMA app;\n\
+                       CREATE CLIENT FUNCTION app.unreachable()\n\
+                       RETURNS BOOLEAN\n\
+                       IS\n\
+                       BEGIN\n\
+                           RETURN TRUE;\n\
+                           LET ignored := FALSE;\n\
+                       END;";
+    fs::write(&source, source_text).expect("write warning source");
+    let start = source_text
+        .find("LET ignored")
+        .expect("warning source contains unreachable statement");
+    let end = start + "LET ignored := FALSE;".len();
+    let expected_diagnostic = format!(
+        "{}:{start}..{end}: ORNA0401: unreachable statement\n",
+        source.display()
+    );
+
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("warning-only source apply");
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "warning-only source apply: {applied:?}"
+    );
+    serde_json::from_slice::<Value>(&applied.stdout)
+        .expect("warning-only apply still emits its success document");
+    assert_eq!(
+        String::from_utf8(applied.stderr).expect("UTF-8 apply warning"),
+        expected_diagnostic
+    );
+    let after_apply = sqlite_revision_state(&database);
+
+    let diff = run_orna(
+        directory.path(),
+        &source_arguments(&database, "diff", &source),
+    )
+    .expect("warning-only source diff");
+    assert_eq!(
+        diff.status.code(),
+        Some(0),
+        "warning-only source diff: {diff:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).contains("no semantic changes"),
+        "warning-only diff still emits its semantic report: {:?}",
+        diff.stdout
+    );
+    assert_eq!(
+        String::from_utf8(diff.stderr).expect("UTF-8 diff warning"),
+        expected_diagnostic
+    );
+    assert_eq!(
+        sqlite_revision_state(&database),
+        after_apply,
+        "warning-only source diff remains read-only"
+    );
+}
 #[test]
 fn local_source_diff_is_read_only_and_rejects_fresh_database() {
     let directory = TestDirectory::new("source-diff").expect("scratch directory");

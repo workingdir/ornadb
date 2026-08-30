@@ -108,10 +108,10 @@ fn collect_if_warnings(
 ) -> bool {
     let then_returns =
         collect_sequence_warnings(logical_path, statement.then_statements(), warnings);
-    let elsif_return = statement
-        .elsif_branches()
-        .iter()
-        .all(|branch| collect_sequence_warnings(logical_path, branch.statements(), warnings));
+    let mut elsif_return = true;
+    for branch in statement.elsif_branches() {
+        elsif_return &= collect_sequence_warnings(logical_path, branch.statements(), warnings);
+    }
     let else_returns = statement
         .else_statements()
         .is_some_and(|statements| collect_sequence_warnings(logical_path, statements, warnings));

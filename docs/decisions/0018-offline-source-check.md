@@ -177,11 +177,12 @@ cannot infer one.
 
 The empty application base is a checking input only. The returned
 `StandardApplicationCheckReport` retains its lossless parse report,
-diagnostics, and, on success, distinct checked definitions labelled with the
-exact sentinel. The caller does not prepare that report through the legacy
-path. The compiler returns diagnostics in its established order and preserves
-the invariant that a report with no diagnostics contains one complete distinct
-checked bundle.
+diagnostics, and, when no error-level diagnostic exists, distinct checked
+definitions labelled with the exact sentinel. The caller does not prepare that
+report through the legacy path. The compiler returns diagnostics in its
+established order and preserves the invariant that a report without errors
+contains one complete distinct checked bundle. Warning-level diagnostics remain
+attached to that successful report.
 
 The only standard-library authority accepted by this seam is a
 `CheckedStandardLibrary`. Host composition reconstructs the embedded standard
@@ -409,37 +410,41 @@ colour, annotate, or convert them to another format. Every line has one final
 line feed.
 
 When standard error is a terminal, source check instead emits a human-readable
-presentation with the diagnostic code and message, a one-based line and
-column, source context, a caret, and help text when the diagnostic is covered
-by the renderer:
+presentation with severity, diagnostic code and message, one-based line and
+column, bounded source context, labelled primary and related markers, help,
+notes, and a final error/warning summary:
 
 ```text
 error[ORNA0001]: expected a schema name after CREATE SCHEMA
   --> broken.orna:1:15
    |
  1 | CREATE SCHEMA ;
-   |               ^
+   |               ^ unexpected syntax
    |
    = help: write a schema name before the semicolon
+
+error: aborting due to 1 previous error
 ```
 
 Human output remains on standard error and retains compiler order. It is a
-presentation of the same diagnostic; it does not change compiler byte spans or
-messages. Non-terminal source-check output remains machine-readable.
+presentation of the same diagnostics; it does not change compiler byte spans
+or raw messages. Non-terminal source-check output remains machine-readable.
 
 The complete exit contract is:
 
 | Result | Standard output | Standard error | Status |
 | --- | --- | --- | --- |
 | Valid source with no diagnostics | empty | empty | `0` |
-| One or more compiler diagnostics | empty | machine diagnostic lines when standard error is redirected; human diagnostic report when it is a terminal | `1` |
+| Valid source with warnings only | empty | machine warning lines when standard error is redirected; human warning report when it is a terminal | `0` |
+| One or more compiler errors | empty | machine diagnostic lines when standard error is redirected; human diagnostic report when it is a terminal | `1` |
 | Source read failure | empty | exact read line | `1` |
 | Invalid source UTF-8 | empty | exact UTF-8 line | `1` |
 | Embedded standard, empty-catalogue, or context failure | empty | exact standard line | `1` |
 | Usage error | empty | exact global usage | `2` |
 
-Checking never emits a success message. A compiler diagnostic is a failed
-check, not a usage error.
+Checking never emits a success message. An error-level compiler diagnostic is a
+failed check, not a usage error. A warning is emitted without changing success
+status.
 
 ## Offline and side-effect boundary
 
@@ -489,13 +494,13 @@ does not give `orna-compiler` filesystem or process authority.
 | Bundle scope | empty source; declarations and references in one file; reference that exists only in a neighbouring file; directory containing valid `.orna` files | The command checks one source unit only. It performs no directory walk, import, project discovery, or implicit bundle merge. |
 | Compiler source-unit cardinality | direct `check_new_application` calls with zero, one, and two ordered source units | Zero and two return exact `SourceUnitCount { actual: 0 }` and `{ actual: 2 }` before `CatalogueSnapshot::new`, parsing, or semantic work. Their exact display text and absent error source match the contract. One proceeds to empty-catalogue construction. |
 | Empty application catalogue | one source unit; the same production-private empty-catalogue construction seam used by the public path supplies a typed `CatalogueSnapshotError` for the empty sentinel and empty vectors; simultaneous hostile context data; `Catalogue` derive, field, display, and error source; attempted `panic!` or `expect` construction | `Catalogue { source }` retains the exact supplied `CatalogueSnapshotError` as its only source and wins before context construction or checking. The implementation handles its `Result` directly, with no `panic!` or `expect` path, public seam, or test-only production branch. |
-| Empty application identity | successful and failed offline checks; direct active application and standard construction; raw recovered version-1 application catalogue; deployable expected base, explicit parent, and candidate, each separately set to the sentinel | A successful offline distinct checked bundle exposes exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` bytes `[0; 16]`. A diagnostic report has no checked bundle. Each direct durable revision position returns exact `ReservedOfflineCheckCatalogueRevision { revision, role }` with the corresponding `DurableCatalogueRevisionRole`, exact display text, and no error source. Current version-1 recovery returns `ActiveOrRecoveredApplication` only. The later work ADR 0016 standard-revision decoder owns the raw standard-catalogue `ActiveOrRecoveredStandard` proof. Deployable checks run in expected-base, parent, candidate order. The sentinel remains distinct from the standard catalogue identity ending in `01`; legacy preparation cannot accept the distinct report or bundle at compile time. |
+| Empty application identity | successful, warning-only, and failed offline checks; direct active application and standard construction; raw recovered version-1 application catalogue; deployable expected base, explicit parent, and candidate, each separately set to the sentinel | A successful or warning-only offline distinct checked bundle exposes exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` bytes `[0; 16]`. An error-level diagnostic report has no checked bundle. Each direct durable revision position returns exact `ReservedOfflineCheckCatalogueRevision { revision, role }` with the corresponding `DurableCatalogueRevisionRole`, exact display text, and no error source. Current version-1 recovery returns `ActiveOrRecoveredApplication` only. The later work ADR 0016 standard-revision decoder owns the raw standard sentinel separately. |
 | New-application context | new definitions; rename, delete, and reference that require prior application state; hostile or available database state; every `StandardApplicationContextError` and `NewApplicationCheckError::Context` field, display, and source case; host `Context` mapping; mandatory non-exhaustive wildcard review | Checking uses the all-zero empty application base and no continuity. Database state cannot make a missing application definition resolve or change an identity decision. After successful empty-catalogue construction, the compiler constructs its context from `CheckedStandardLibrary`, preserves the exact typed context error, and never accepts raw verified authority or a standard-owned error. The CLI maps `Catalogue`, `Context`, and every unmatched future compiler error through its mandatory wildcard to the exact embedded-standard line and status `1`; it never calls legacy prepare. |
 | Standard authority | accepted retained source and digest; changed retained source; changed hard-coded digest; self-consistent but non-golden snapshot; source-independent manifest alone; host standard-source reconciliation failure; direct compiler raw-capability attempt | Host composition alone verifies the accepted retained `orna.std/1` snapshot and checks its source before application checking. Only `CheckedStandardLibrary` reaches `check_new_application`; no `orna_standard::StandardLibraryError` crosses the compiler seam. The CLI maps host standard failure to the exact embedded-standard line and no application diagnostic. The manifest alone grants no compiler authority. A core-verified nongolden checked standard library remains acceptable only when its checked facts agree and every compatibility contract is supported and unique. |
 | Standard type identity | `BOOLEAN`, `BOOL`, `std.boolean`, and `std.types.boolean` in accepted type positions | Every spelling resolves to the same Boolean `TypeId` and emits the exact standard value-type reference evidence. No spelling adapter or second scalar identity participates. |
 | Protected standard source | application-owned `std` declaration, `KERNEL CONTRACT`, qualified type export, and prelude export, alone and after valid declarations | The accepted `ORNA0303` code, message, span, protection precedence, and compiler order are preserved. No checked bundle or durable change results. |
-| Diagnostic rendering | syntax and semantic failures; multiple ordered diagnostics; path containing spaces and punctuation; CRLF and Unicode before a failure; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029`; terminal and redirected standard error | Redirected output is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Terminal output is the human diagnostic presentation with a one-based line and column, source context, caret, and optional help. Path, span, and code text remain unescaped in the machine format. |
-| Streams and status | success; compiler diagnostics; each pre-check failure; piped hostile standard input; redirected standard output | Standard output is empty in every case. Success is silent `0`, check and operational failures are `1`, usage is `2`, and piped input is neither consumed nor allowed to change or delay the result. |
+| Diagnostic rendering | syntax and semantic errors; warning-only source; multiple ordered diagnostics; related definitions; path containing spaces and punctuation; CRLF and Unicode before a diagnostic; long and multiline spans; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029`; terminal and redirected standard error | Redirected output is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Terminal output is severity-aware and includes one-based line and column, bounded source context, labelled primary and related markers, help, notes, and an error/warning summary. Path, span, and code text remain unescaped in the machine format. |
+| Streams and status | silent success; warning-only success; compiler errors; each pre-check failure; piped hostile standard input; redirected standard output | Standard output is empty in every case. Silent and warning-only success return `0`, check and operational failures return `1`, usage returns `2`, and piped input is neither consumed nor allowed to change or delay the result. |
 | PostgreSQL isolation | no external PostgreSQL installation or service; hostile PostgreSQL, package-maintenance, and Orna environment variables; invalid embedded-engine evidence; absent or changed materialised support data; changed server configuration | The same source result is produced without entering an embedded PostgreSQL role or performing a PostgreSQL socket, connection, child, package, engine-manifest, support-data, instance, or environment operation. The hostile private package selector cannot intercept a public source-check shape. |
 | No command-issued state writes | successful and failed checks in a snapshotted writable directory and a read-only directory; process tracing where available; filesystem access-time updates enabled and disabled | The command opens no path for writing and issues no create, content mutation, truncate, rename, remove, ownership, mode, or other metadata mutation. It starts no network or child process. Snapshots exclude access time or use a no-access-time mount. Ordinary read-driven access-time changes do not invalidate the proof. Only the supplied standard-error descriptor can receive command output bytes. |
 | Existing host commands | current backend-shell unit and integration suites, valid backend-shell dispatch, invalid global shapes | Source-check dispatch leaves backend-shell terminal, configuration, process, exit, and pre-attachment write behaviour unchanged. The only shared change is the accepted global usage body. |
