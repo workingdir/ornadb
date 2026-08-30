@@ -106,3 +106,19 @@ pub(super) enum ResourceProducerFailureStage {
     PostAcceptanceAuditCancellation,
     PostAcceptanceCancelledExitAudit,
 }
+pub(super) async fn wait_for_resource_producer_pull_or_cancel(
+    commands: &mut tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
+    cancellation: &ResourceCancellation,
+) -> Option<ResourceProducerPull> {
+    let cancelled = cancellation.cancelled();
+    let received = commands.recv();
+    futures_util::pin_mut!(cancelled, received);
+    match futures_util::future::select(cancelled, received).await {
+        futures_util::future::Either::Left(((), _received)) => None,
+        futures_util::future::Either::Right((
+            Some(ResourceProducerCommand::Pull(pull)),
+            _cancelled,
+        )) => Some(pull),
+        futures_util::future::Either::Right((None, _cancelled)) => None,
+    }
+}
