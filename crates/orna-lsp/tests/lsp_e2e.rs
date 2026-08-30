@@ -489,6 +489,15 @@ fn initialize(client: &mut Client) {
         "the server must advertise document-symbol support: {result}"
     );
     assert_eq!(
+        capabilities["signatureHelpProvider"]["triggerCharacters"],
+        json!(["(", ","]),
+        "the server must advertise signature-help triggers: {result}"
+    );
+    assert_eq!(
+        capabilities["workspaceSymbolProvider"], true,
+        "the server must advertise workspace-symbol support: {result}"
+    );
+    assert_eq!(
         capabilities["completionProvider"]["triggerCharacters"],
         json!([".", ":"]),
         "the server must advertise completion trigger characters: {result}"
@@ -1875,6 +1884,43 @@ fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbol
 
     client.shutdown();
 }
+#[test]
+fn serves_signature_help_and_workspace_symbols() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/extended-requests.orna";
+    let source = concat!(
+        "CREATE SCHEMA request_test;\n",
+        "CREATE SERVER FUNCTION request_test.echo(p_value INTEGER, p_other BOOLEAN)\n",
+        "RETURNS INTEGER AS SELECT p_value;\n",
+        "CREATE SERVER FUNCTION request_test.call()\n",
+        "RETURNS INTEGER AS SELECT request_test.echo(1, TRUE);\n",
+    );
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let signature = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(source, "SELECT request_test.echo(", "1"),
+        }),
+    );
+    assert!(
+        signature.is_null() || signature["signatures"].is_array(),
+        "signature-help response must use the LSP shape: {signature}"
+    );
+
+    let workspace_symbols = client.request("workspace/symbol", json!({ "query": "echo" }));
+    assert!(
+        workspace_symbols
+            .as_array()
+            .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "echo")),
+        "workspace symbols must find the opened function: {workspace_symbols}"
+    );
+
+    client.shutdown();
+}
 
 #[test]
 fn serves_semantic_tokens_document_symbols_and_completion() {
@@ -1942,14 +1988,19 @@ fn serves_semantic_tokens_document_symbols_and_completion() {
 
 #[test]
 fn serves_rich_hover_content() {
+    let fixture_root =
+        std::env::temp_dir().join(format!("orna-lsp-rich-hover-{}", std::process::id()));
+    let spec_directory = fixture_root.join("spec").join("spec");
+    fs::create_dir_all(&spec_directory).expect("spec fixture directory");
+    fs::write(spec_directory.join("orna.ebnf"), "start = 'fixture';\n").expect("spec fixture");
+    let document_path = fixture_root.join("rich-hover.orna");
+    fs::write(&document_path, VALID_SOURCE).expect("rich-hover fixture");
+    let uri = format!("file://{}", document_path.display());
+
     let mut client = Client::spawn();
     initialize(&mut client);
-    // The URI sits inside the workspace tree so the spec-bundle walk finds
-    // the grammar reference and hovers carry a Spec link.
-    let uri = format!(
-        "file://{}/../../rich-hover.orna",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    // The document sits beside a temporary spec bundle so hovers carry a
+    // deterministic Spec link without depending on a sibling checkout.
     open_document(&mut client, &uri, VALID_SOURCE, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -2172,6 +2223,7 @@ fn serves_rich_hover_content() {
     );
 
     client.shutdown();
+    fs::remove_dir_all(fixture_root).expect("remove rich-hover fixture");
 }
 
 #[test]
