@@ -709,6 +709,72 @@ fn unreachable_statements_are_nonblocking_warnings() {
     );
 }
 
+#[test]
+fn exhaustive_returning_if_makes_following_statements_unreachable() {
+    let source = "CREATE SCHEMA app;\n\
+                  CREATE CLIENT FUNCTION app.exhaustive()\n\
+                  RETURNS BOOLEAN\n\
+                  IS\n\
+                  BEGIN\n\
+                      IF TRUE THEN\n\
+                          RETURN TRUE;\n\
+                      ELSE\n\
+                          RETURN FALSE;\n\
+                      END IF;\n\
+                      LET ignored := FALSE;\n\
+                  END;";
+    let report = check(&bundle([("exhaustive.orna", source)]), &empty_catalogue());
+
+    assert!(!report.has_errors());
+    assert_eq!(report.warning_count(), 1);
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.code(), DiagnosticCode::UnreachableCode);
+    assert_eq!(
+        diagnostic.location().span().start(),
+        source.find("LET ignored").unwrap()
+    );
+    assert_eq!(diagnostic.related().len(), 1);
+    assert_eq!(
+        diagnostic.related()[0].location().span().start(),
+        source.find("IF TRUE").unwrap()
+    );
+    assert_eq!(
+        diagnostic.related()[0].message(),
+        "every branch of this statement returns from the function"
+    );
+}
+
+#[test]
+fn unreachable_warnings_visit_every_elsif_branch() {
+    let source = "CREATE SCHEMA app;\n\
+                  CREATE CLIENT FUNCTION app.branches()\n\
+                  RETURNS BOOLEAN\n\
+                  IS\n\
+                  BEGIN\n\
+                      IF TRUE THEN\n\
+                          RETURN TRUE;\n\
+                      ELSIF FALSE THEN\n\
+                          LET reachable := FALSE;\n\
+                      ELSIF TRUE THEN\n\
+                          RETURN TRUE;\n\
+                          LET ignored := FALSE;\n\
+                      ELSE\n\
+                          RETURN FALSE;\n\
+                      END IF;\n\
+                      RETURN TRUE;\n\
+                  END;";
+    let report = check(&bundle([("branches.orna", source)]), &empty_catalogue());
+
+    assert!(!report.has_errors());
+    assert_eq!(report.warning_count(), 1);
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.code(), DiagnosticCode::UnreachableCode);
+    assert_eq!(
+        diagnostic.location().span().start(),
+        source.find("LET ignored").unwrap()
+    );
+}
+
 fn catalogue(
     schemas: Vec<SchemaDefinition>,
     object_types: Vec<ObjectTypeDefinition>,
