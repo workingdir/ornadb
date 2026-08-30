@@ -154,6 +154,37 @@ fn session_bridge_close_before_request_does_not_publish_fake_response() {
         .expect_err("closed bridge rejects input");
     assert_eq!(error, "client.input_unavailable");
 }
+#[test]
+fn session_bridge_cancel_wakes_pending_input() {
+    let root = InvocationId::from_bytes([0x43; 16]);
+    let bridge = SessionBridge::new(root, 8).expect("session bridge creates");
+    let waiting_bridge = Arc::clone(&bridge);
+    let waiter = std::thread::spawn(move || waiting_bridge.request_input(root));
+    let request = loop {
+        if let Some(SessionServerFrame::InputRequested(request)) = bridge.try_take_outbound() {
+            break request;
+        }
+        std::thread::yield_now();
+    };
+
+    bridge.cancel_stream(7);
+    assert!(!waiter.is_finished());
+    bridge.cancel_stream(8);
+
+    assert_eq!(
+        waiter.join().expect("cancelled input waiter joins"),
+        Err("client.input_unavailable".to_owned())
+    );
+    assert_eq!(
+        bridge.accept_response(SessionClientFrame::InputLine {
+            root_invocation_id: root,
+            call_stream: 8,
+            request_invocation_id: request.request_invocation_id,
+            line: "late".to_owned(),
+        }),
+        Err(SessionStateError::WrongState)
+    );
+}
 #[cfg(unix)]
 #[test]
 fn local_socket_connector_attaches_to_a_listener() {
