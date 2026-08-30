@@ -1,3 +1,5 @@
+// Backend shell operations return the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 //! The host-only native PostgreSQL escape hatch for the local server.
 
 use std::{
