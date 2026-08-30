@@ -47,7 +47,27 @@ target/debug/orna --help
 target/debug/orna --version
 ```
 
-Use `orna` to check source, compare revisions, invoke functions, inspect calls, access state, describe runtimes, and manage local permissions. Command-specific help lists the available command options.
+The default `orna` command opens the local function-backed session. Use
+`orna repl` for the explicit form. Use `orna invoke <function>` for one stored
+function call:
+
+```sh
+orna
+orna repl
+orna invoke std.invoke.echo --arg p_value=hello
+orna --db orna+unix:///run/orna/orna.sock invoke tasks.overdue
+orna --db orna://db.example.test/work invoke tasks.overdue
+orna --daemon
+```
+
+The `--db` option selects a managed local database, an explicit Orna Unix
+socket, or a remote Orna URI. Remote invocation is parsed by the CLI but is not
+available until the authenticated TLS session contract is accepted.
+
+Use `orna inspect`, `orna source check`, and `orna source apply` for normal
+inspection and source workflows. Server administration, security management,
+runtime metadata, and `raw-call` are explicit operational or recovery paths.
+Use command-specific help for their options.
 
 ## Desktop runtime
 
