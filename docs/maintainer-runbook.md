@@ -85,24 +85,26 @@ application migration ledger, and generated object tables with reference
 foreign keys for supported object changes. Unsupported value, enum, record,
 binding, scalar, and artifact shapes fail closed.
 
-The SQLite execution surface is similarly bounded: its local socket accepts
-only the supported server-plan/parameter-echo execution subset. Unsupported
-artifact shapes or versions fail closed instead of being interpreted as source
-text.
+`LocalPath` also has direct routes for SERVER-only `invoke` and `raw-call`,
+principal-scoped USER state, security administration, and redacted invocation
+inspection. Local invocation evidence stores only bounded structural summaries,
+terminal audit fields, and trace records; arguments, result values, source text,
+and resource payloads are not persisted. The private SQLite socket continues to
+serve protocol raw calls and applies the same local-peer/execute gate.
 
 Migration validation is bounded to typed migration artifacts and deterministic
 PostgreSQL/SQLite artifact checks, plus SQLite schema/data lineage,
-revision-ledger integrity, semantic snapshot, and generated object-table/
-foreign-key checks. This scope does not prove full physical or runtime parity
-between PostgreSQL and SQLite; do not record that claim without fresh,
-dedicated evidence.
+revision-ledger integrity, semantic snapshot, generated object-table/
+foreign-key checks, and bounded runtime evidence. This scope does not prove
+full physical or runtime parity between PostgreSQL and SQLite; do not record
+that claim without fresh, dedicated evidence. CLIENT/Qt execution, protected
+standard transports, and resource transport remain PostgreSQL/runtime-only.
 
 `just sqlite-check` is the dedicated offline compile gate for the storage,
 SQLite, and local CLI binary targets. `just sqlite-smoke` runs the deterministic
 revision-store example and the focused SQLite process/socket integration target.
-These recipes provide a dedicated SQLite parity/adoption proof; the standalone
-adapter example remains a library smoke and does not exercise the socket by
-itself.
+These recipes provide a dedicated SQLite adoption proof; the standalone adapter
+example remains a library smoke and does not exercise the socket by itself.
 
 The accepted standard-library revision chain is V1 through V9 only; there is no
 V10 revision.
@@ -207,10 +209,10 @@ exposes the `<database>.orna.sock` Unix socket described below.
 
 The managed PostgreSQL server supports `invoke`, `state`, `inspect`, `raw-call`,
 `backend-shell`, source apply/diff, and security administration through the
-same peer-authenticated instance. Explicit `LocalPath` source apply/diff use
-the bounded SQLite routes; administration, invoke, state, and inspect remain
-PostgreSQL-only. `source check` remains offline and does not need PostgreSQL,
-network access, configuration, or writes.
+same peer-authenticated instance. Explicit `LocalPath` uses direct SQLite
+routes for source apply/diff, SERVER-only invoke/raw-call, USER state, security
+administration, and redacted invocation inspection. `source check` remains
+offline and does not need PostgreSQL, network access, configuration, or writes.
 
 ## Endpoint and command-routing boundary
 
@@ -218,9 +220,10 @@ network access, configuration, or writes.
 `DatabaseEndpoint::LocalPath`; `Display` renders that path directly. Parsing
 and display do not imply that every command is routed.
 
-An explicit `LocalPath` is accepted only for `server run`, `source check`,
-`source apply`, and `source diff`; unsupported commands fail before selecting a
-backend. `orna server run` opens and bootstraps the database before exposing
+An explicit `LocalPath` is accepted for `server run`, `source check`, source
+apply/diff, SERVER-only `invoke` and `raw-call`, `state`, `inspect`, and
+security administration. Unsupported commands fail before selecting a backend.
+`orna server run` opens and bootstraps the database before exposing
 `<database>.orna.sock`; the foreground Unix listener enforces mode `0600`.
 Its handshake recognises protocol versions v1 through v5. Versions v1 through
 v3 have typed handling in the bounded SQLite surface; v4 and v5 use the
@@ -228,12 +231,18 @@ protocol fallback when their opaque codec registry is unavailable. The socket
 shares the public raw-call wire protocol, but only the bounded
 server-plan/parameter-echo execution subset can produce a successful result.
 
+LocalPath inspection is deliberately narrower than PostgreSQL inspection:
+successful direct invocations persist a bounded structural summary and trace
+event, while value-bearing projections, source text, and resource payloads are
+not stored. LocalPath security mutations are authorized by the durable local
+peer principal and `SecurityAdmin` privilege; USER state is principal-scoped
+and uses canonical ORV5 values with optimistic revisions.
+
 For an explicit endpoint (`--db` or a positional endpoint), the CLI currently
 accepts `ManagedLocal` and `LocalPath`. Explicit Unix-socket and remote-TLS
 endpoints remain rejected until their route wiring is available. ManagedLocal
-routes installed `source apply` and `source diff` to the fixed embedded
-PostgreSQL host; LocalPath routes them to the direct SQLite adapter.
-Administration, invoke, state, and inspect remain PostgreSQL-only.
+routes installed commands to the fixed embedded PostgreSQL host; LocalPath
+routes the supported local surface to SQLite without a PostgreSQL fallback.
 
 Run the complete local binary demo with:
 
@@ -250,20 +259,21 @@ Managed local operations authenticate the operating-system peer. The server
 obtains the Unix peer UID, maps it to the session principal, and keeps the
 principal out of request payloads. A caller cannot supply a replacement
 principal. The bounded SQLite socket relies on its `0600` filesystem mode and
-does not expose PostgreSQL administration, invoke, state, inspect, security, or
-resource-dispatch surfaces.
+applies the same local-peer and execute checks as the direct LocalPath routes.
+SQLite LocalPath does not expose PostgreSQL CLIENT/Qt execution, standard
+protected transports, or resource dispatch.
 
 Keep secrets out of source, argument files, state value files, shell history,
 CI logs, and evidence artifacts. The Compose password is a repository-visible
 development fixture, not a production credential.
 
-Treat source apply and recovery as transactional operations:
+Treat source apply, runtime evidence, and recovery as transactional operations:
 
 1. Source apply reads one regular UTF-8 file and fails closed for invalid input.
 2. Managed PostgreSQL source apply records its protected audit event and cannot
    choose an audit principal from the request. SQLite source apply records its
-   typed migration and snapshot transaction but has no PostgreSQL protected
-   audit store or resource-dispatch path.
+   typed migration and snapshot transaction; SQLite runtime commands record
+   only bounded redacted invocation/inspection metadata.
 3. Recovery must reproduce the candidate source and catalogue hashes. A
    recovery mismatch, session-close failure, or audit invariant failure is an
    operational failure.

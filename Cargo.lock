@@ -1492,6 +1492,7 @@ version = "0.1.0"
 dependencies = [
  "orna-artifact",
  "orna-core",
+ "orna-protocol",
  "orna-standard",
  "orna-storage",
  "serde",
