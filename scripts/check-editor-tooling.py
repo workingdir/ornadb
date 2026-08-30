@@ -59,6 +59,11 @@ SOURCE_CHECK_CORPUS_CASE_NAMES = (
     "line and block comments",
     "normal whitespace remains extras",
 )
+# These checked-in `.orna` files are source data for a dedicated parser rather
+# than editor-language sources. Keep them in the repository without asking the
+# general tree-sitter grammar to accept the closed backend migration DSL.
+DEDICATED_SOURCE_DIRECTORIES = ("crates/orna-storage/migrations",)
+
 # Exact AST and per-case LSP parity stays in the existing Rust parser manifest
 # and framed LSP tests. This dependency-light gate invokes those public tests
 # rather than inventing a shared runtime protocol between editor implementations.
@@ -2312,6 +2317,9 @@ def main() -> int:
     )
 
     parse_paths: list[Path] = []
+    dedicated_source_roots = tuple(
+        repository / relative_path for relative_path in DEDICATED_SOURCE_DIRECTORIES
+    )
     if spec_examples.is_dir():
         canonical_paths = sorted_orna_files(spec_examples)
         log(
@@ -2332,7 +2340,15 @@ def main() -> int:
             f"fixtures under {display_path(directory, repository)}: "
             f"{len(fixture_paths)} .orna files"
         )
-        parse_paths.extend(fixture_paths)
+        for path in fixture_paths:
+            relative_path = display_path(path, repository)
+            if any(path.is_relative_to(root) for root in dedicated_source_roots):
+                log(
+                    f"excluding dedicated-parser source from editor parse: "
+                    f"{relative_path}"
+                )
+            else:
+                parse_paths.append(path)
 
     parse_paths.sort(key=lambda path: path.as_posix())
     if parse_paths:
