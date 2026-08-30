@@ -11,6 +11,8 @@
 #![allow(clippy::match_like_matches_macro)]
 #[path = "security/audit.rs"]
 mod audit;
+#[path = "security/audit_recovery.rs"]
+mod audit_recovery;
 #[path = "security/audit_writer.rs"]
 mod audit_writer;
 #[path = "security/authenticated_select.rs"]
@@ -54,6 +56,8 @@ mod target_resolution;
 
 pub(crate) use audit::encode_principal_kind;
 use audit::*;
+pub(crate) use audit_recovery::recover_invocation_audit_events;
+use audit_recovery::*;
 pub use audit_writer::ResourceAuditTerminalOutcome;
 #[cfg(test)]
 use audit_writer::validate_resource_audit_nested_invocation;
@@ -70,9 +74,7 @@ use inspect_capture::{
 use local_identity::append_client_capability_audit;
 pub(crate) use local_identity::security_snapshots_match;
 use persistence::*;
-pub(crate) use persistence::{
-    encode_privilege_class, recover_invocation_audit_events, recover_security_snapshot_for_active,
-};
+pub(crate) use persistence::{encode_privilege_class, recover_security_snapshot_for_active};
 pub use raw_call::{AuthenticatedRawCallResult, RecordArgumentPreflight};
 pub use resource::{
     AuthenticatedServerResourceAccepted, AuthenticatedServerResourceEvent,
