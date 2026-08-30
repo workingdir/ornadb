@@ -1,6 +1,8 @@
 //! Client expression, state, capability, and resource preparation tests.
 
 use super::*;
+use crate::DiagnosticCode;
+
 #[test]
 fn empty_client_state_block_uses_expression_plan_format() {
     let verified = invocation_carrier_standard();
@@ -29,6 +31,29 @@ fn empty_client_state_block_uses_expression_plan_format() {
         plan.expression(),
         &ClientExpressionNode::Boolean { value: true },
     );
+}
+
+#[test]
+fn unreachable_warning_does_not_block_standard_preparation() {
+    let verified = invocation_carrier_standard();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let source = "CREATE SCHEMA examples; \
+                  CREATE CLIENT FUNCTION examples.ready() RETURNS BOOLEAN IS \
+                  BEGIN RETURN TRUE; LET ignored := FALSE; END;";
+    let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+    let report = check_standard_application(&bundle, &context);
+
+    assert!(!report.has_errors());
+    assert_eq!(report.warning_count(), 1);
+    assert_eq!(
+        report.diagnostics()[0].code(),
+        DiagnosticCode::UnreachableCode
+    );
+    let prepared = prepare_standard_application(&report, active.pair(), &active)
+        .expect("warnings must not block preparation");
+    assert_eq!(prepared.candidate().functions().len(), 1);
 }
 
 #[test]

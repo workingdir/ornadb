@@ -89,20 +89,24 @@ pub(super) fn resolve_client_function_inputs<'a>(
                 &body_source.span,
             ));
         }
-        let mut parameter_names = HashSet::new();
+        let mut parameter_names = HashMap::<String, SourceLocation>::new();
         let mut parameters = Vec::with_capacity(declaration.parameters.len());
 
         for parameter in &declaration.parameters {
             let parameter_name = semantic_part(&parameter.name);
-            if !parameter_names.insert(parameter_name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = parameter_names.get(&parameter_name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate parameter definition {parameter_name} in {name}"),
                     header.logical_path,
                     &parameter.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            parameter_names.insert(
+                parameter_name.clone(),
+                location(header.logical_path, &parameter.name.span),
+            );
             if let Some(default) = &parameter.default_expression {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
