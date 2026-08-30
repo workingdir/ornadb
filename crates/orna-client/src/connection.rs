@@ -102,12 +102,22 @@ impl<S: Read + Write> InvocationConnection<S> {
     /// frames. Window updates, liveness pings, and cancellation are accepted;
     /// a second invocation start or argument frame is rejected.
     pub fn write_control(&mut self, frame: &ClientFrame) -> Result<(), InvocationConnectionError> {
+        let mut next_client = self.client.clone();
         match frame {
             ClientFrame::Ping { .. } => {}
-            ClientFrame::WindowUpdate { stream, .. } if *stream == self.client.stream() => {}
-            ClientFrame::CallCancel { stream } if *stream == self.client.stream() => {
-                let expected = self
-                    .client
+            ClientFrame::WindowUpdate {
+                stream,
+                channel,
+                credit,
+            } if *stream == next_client.stream() => {
+                if *channel == orna_protocol::Channel::ResultValues {
+                    next_client
+                        .grant_result_credit(*credit)
+                        .map_err(InvocationConnectionError::Client)?;
+                }
+            }
+            ClientFrame::CallCancel { stream } if *stream == next_client.stream() => {
+                let expected = next_client
                     .request_cancellation()
                     .map_err(InvocationConnectionError::Client)?;
                 if &expected != frame {
@@ -116,7 +126,9 @@ impl<S: Read + Write> InvocationConnection<S> {
             }
             _ => return Err(InvocationConnectionError::InvalidControlFrame),
         }
-        write_client_frame(&mut self.stream, &self.active, &self.registry, frame)
+        write_client_frame(&mut self.stream, &self.active, &self.registry, frame)?;
+        self.client = next_client;
+        Ok(())
     }
 
     /// Returns the invocation state owner.
@@ -225,6 +237,13 @@ fn read_server_frame<S: Read>(stream: &mut S) -> Result<Vec<u8>, InvocationConne
 mod tests {
     use std::io::{self, Cursor, Read, Write};
 
+    #[cfg(unix)]
+    use std::{
+        fs,
+        os::unix::net::{UnixListener, UnixStream},
+        thread,
+    };
+
     use super::*;
 
     struct MemoryStream {
@@ -282,6 +301,29 @@ mod tests {
             InvocationConnectionError::HandshakeRejected
         ));
         assert_eq!(stream.output, CONSTRUCTED_PROTOCOL_HELLO);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn constructed_handshake_runs_over_a_local_unix_stream() {
+        let socket_path =
+            std::env::temp_dir().join(format!("orna-connection-test-{}.sock", std::process::id()));
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("test Unix listener");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test Unix connection");
+            let mut hello = [0_u8; CONSTRUCTED_PROTOCOL_HELLO.len()];
+            stream.read_exact(&mut hello).expect("client hello");
+            assert_eq!(hello, CONSTRUCTED_PROTOCOL_HELLO);
+            stream
+                .write_all(&CONSTRUCTED_PROTOCOL_ACK)
+                .expect("server acknowledgement");
+        });
+
+        let mut stream = UnixStream::connect(&socket_path).expect("connect to test Unix socket");
+        InvocationConnection::<UnixStream>::handshake(&mut stream)
+            .expect("constructed handshake over Unix stream");
+        server.join().expect("Unix handshake server");
+        fs::remove_file(socket_path).expect("remove test Unix socket");
     }
 
     #[test]

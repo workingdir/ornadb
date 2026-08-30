@@ -9,6 +9,7 @@ license.workspace = true
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
 orna-protocol = { path = "../orna-protocol" }
+orna-runtime-tty = { path = "../orna-runtime-tty" }
 sha2 = "0.11.0"
 orna-standard = { path = "../orna-standard" }
 libloading = "0.9.0"
