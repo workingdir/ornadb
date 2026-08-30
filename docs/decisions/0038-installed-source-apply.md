@@ -40,13 +40,15 @@ Source apply performs these operations in order:
    retained standard library, then reconstruct its checked standard source;
 6. call `check_standard_application` with the one-unit source bundle, the
    active application catalogue, and that checked standard library;
-7. stop on any diagnostic without calling preparation or PostgreSQL apply;
+7. stop on any error-level diagnostic without calling preparation or database
+   apply, while retaining warning-level diagnostics with a successful check;
 8. call `prepare_standard_application` with the recovered active
    `RevisionPair` as the expected base;
 9. construct the bounded success document before database mutation;
-10. call `PostgresKernel::apply_source_apply`; and
-11. write the success document only after apply has committed, recovered the
-    exact candidate, and closed its PostgreSQL session successfully.
+10. call the selected database kernel's source-apply operation; and
+11. only after apply has committed, recovered the exact candidate, and closed
+    its database session successfully, write any retained warnings to standard
+    error and the success document to standard output.
 
 The recovered pair in step 4 is the expected base required by work ADR 0003.
 It is not an optional command argument. `PostgresKernel::apply_source_apply`
@@ -70,8 +72,9 @@ itself.
 ## Success output
 
 A successful command writes one compact JSON document and one final line feed
-to standard output. Standard error is empty. The object keys and their order
-are exact:
+to standard output. Standard error is empty when checking produced no warnings;
+otherwise it contains the diagnostic presentation defined by work ADR 0018.
+The object keys and their order are exact:
 
 ```json
 {"source_revision":"source-revision:<canonical-id>","catalogue_revision":"catalogue-revision:<canonical-id>","functions":[{"qualified_name":["schema","function"],"function_id":"function:<canonical-id>"}]}
@@ -95,16 +98,17 @@ parameters and defines an optional ordered `parameters` array after
 intentionally omits `parameters`.
 
 The output is discovery evidence, not identity authority. The database
-catalogue remains authoritative. The command emits no success byte before the
-commit is confirmed. If writing standard output fails after that confirmation,
-the command reports failure but does not claim or attempt to roll back the
-committed database transaction.
+catalogue remains authoritative. The command emits neither warning nor success
+bytes before the commit is confirmed. If writing a warning or standard output
+fails after that confirmation, the command reports failure but does not claim
+or attempt to roll back the committed database transaction.
 
 ## Failure contract
 
 Usage errors write the global usage text and exit with status `2`. Source read,
-UTF-8, standard-library, and compiler-diagnostic failures retain work ADR
-0018's exact lines and exit with status `1`.
+UTF-8, standard-library, and compiler-error failures retain work ADR 0018's
+exact lines and exit with status `1`. Warning-only checking proceeds through
+preparation and apply and retains status `0`.
 
 A stale expected base writes this exact line, with canonical identities in the
 shown order, and exits with status `1`:
@@ -250,6 +254,9 @@ Tests must prove:
 * compiler failure, preparation failure, a forced failure after physical DDL,
   and post-apply recovery failure leave the complete active pair, protected
   catalogue, revision records, physical relation inventory, and data unchanged;
+* warning-only source reaches the production apply transaction, reports its
+  warnings through the selected diagnostic presentation, and still emits the
+  exact committed success document with status `0`;
 * the successful apply produces exactly one protected `SourceApply` event
   with the fixed `CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID`, the committed
   candidate `RevisionPair`, and `source_apply:committed`, and the recovered

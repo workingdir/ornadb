@@ -1,6 +1,6 @@
 //! Public request/completion binding for one client-side Inspector lifecycle.
 //!
-//! [`ClientInspectLifecycle`](crate::ClientInspectLifecycle) owns the epoch
+//! [`ClientInspectLifecycle`] owns the epoch
 //! state. This module is the small host-facing seam that makes that state
 //! useful: requests are admitted only for the live epoch, and a completion is
 //! published only while the request and its exact epoch are still current.

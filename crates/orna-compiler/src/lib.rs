@@ -132,7 +132,26 @@ pub fn parse_bundle(bundle: &SourceBundle) -> ParseReport {
     ParseReport { units, diagnostics }
 }
 
-/// The closed set of syntax diagnostic codes produced by this compiler stage.
+/// The user-facing importance of one compiler diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticSeverity {
+    /// Compilation cannot continue until the diagnostic is resolved.
+    Error,
+    /// Compilation can continue, but the source contains a suspicious construct.
+    Warning,
+}
+
+impl DiagnosticSeverity {
+    /// Returns the stable lowercase severity name used by diagnostic renderers.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+/// The closed set of stable compiler diagnostic categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticCode {
     /// The source contains a token that is invalid at its current position.
@@ -151,6 +170,8 @@ pub enum DiagnosticCode {
     CapabilityRequirement,
     /// A declaration uses a valid construct outside this compiler domain.
     DomainIncompatible,
+    /// A statement cannot execute because an earlier statement always returns.
+    UnreachableCode,
 }
 
 impl DiagnosticCode {
@@ -165,6 +186,7 @@ impl DiagnosticCode {
             Self::InvalidReferenceTarget => "ORNA0203",
             Self::CapabilityRequirement => "ORNA0304",
             Self::DomainIncompatible => "ORNA0303",
+            Self::UnreachableCode => "ORNA0401",
         }
     }
 
@@ -179,6 +201,7 @@ impl DiagnosticCode {
             Self::InvalidReferenceTarget => "invalid reference target",
             Self::CapabilityRequirement => "unsupported capability",
             Self::DomainIncompatible => "unsupported construct",
+            Self::UnreachableCode => "unreachable code",
         }
     }
 
@@ -197,6 +220,9 @@ impl DiagnosticCode {
             Self::InvalidReferenceTarget => Some("use REF only with an object type"),
             Self::CapabilityRequirement => Some("use a supported client capability"),
             Self::DomainIncompatible => Some("use this construct in its supported function domain"),
+            Self::UnreachableCode => {
+                Some("remove the unreachable code or move it before the preceding return")
+            }
         }
     }
 
@@ -211,6 +237,22 @@ impl DiagnosticCode {
             Self::InvalidReferenceTarget => "A reference targets an invalid type.",
             Self::CapabilityRequirement => "A client capability is not supported.",
             Self::DomainIncompatible => "A valid construct is outside this compiler domain.",
+            Self::UnreachableCode => "A statement cannot execute.",
+        }
+    }
+
+    /// Returns the severity assigned to this stable diagnostic category.
+    pub const fn severity(self) -> DiagnosticSeverity {
+        match self {
+            Self::UnreachableCode => DiagnosticSeverity::Warning,
+            Self::UnexpectedToken
+            | Self::UnterminatedSourceConstruct
+            | Self::UnknownQualifiedName
+            | Self::DuplicateDefinition
+            | Self::TypeMismatch
+            | Self::InvalidReferenceTarget
+            | Self::CapabilityRequirement
+            | Self::DomainIncompatible => DiagnosticSeverity::Error,
         }
     }
 
@@ -223,6 +265,10 @@ impl DiagnosticCode {
             code,
             message: message.into(),
             location,
+            primary_label: None,
+            help: None,
+            notes: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -294,12 +340,35 @@ impl SourceLocation {
     }
 }
 
+/// A secondary source location that explains one compiler diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticLabel {
+    location: SourceLocation,
+    message: String,
+}
+
+impl DiagnosticLabel {
+    /// Returns the exact related source location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+
+    /// Returns the explanation attached to the related source location.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// A compiler diagnostic with an Orna-owned code and source location.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompilerDiagnostic {
     code: DiagnosticCode,
     message: String,
     location: SourceLocation,
+    primary_label: Option<String>,
+    help: Option<String>,
+    notes: Vec<String>,
+    related: Vec<DiagnosticLabel>,
 }
 
 impl CompilerDiagnostic {
@@ -308,6 +377,10 @@ impl CompilerDiagnostic {
             code: DiagnosticCode::from_syntax_code(diagnostic.code),
             message: diagnostic.message.clone(),
             location: SourceLocation::from_syntax(logical_path, &diagnostic.span),
+            primary_label: None,
+            help: None,
+            notes: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -316,7 +389,7 @@ impl CompilerDiagnostic {
         self.code
     }
 
-    /// Returns a description of the source error.
+    /// Returns the diagnostic's detailed user-facing message.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -324,6 +397,65 @@ impl CompilerDiagnostic {
     /// Returns the source unit and byte span that produced this diagnostic.
     pub fn location(&self) -> &SourceLocation {
         &self.location
+    }
+
+    /// Returns this diagnostic's user-facing severity.
+    pub const fn severity(&self) -> DiagnosticSeverity {
+        self.code.severity()
+    }
+
+    /// Returns whether this diagnostic prevents successful compilation.
+    pub const fn is_error(&self) -> bool {
+        matches!(self.severity(), DiagnosticSeverity::Error)
+    }
+
+    /// Returns the concise label shown beside the primary source underline.
+    pub fn primary_label(&self) -> &str {
+        self.primary_label
+            .as_deref()
+            .unwrap_or_else(|| self.code.title())
+    }
+
+    /// Returns the actionable next step, when one is available.
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref().or_else(|| self.code.help())
+    }
+
+    /// Returns supplementary explanations in display order.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// Returns related source locations in display order.
+    pub fn related(&self) -> &[DiagnosticLabel] {
+        &self.related
+    }
+
+    pub(crate) fn with_primary_label(mut self, label: impl Into<String>) -> Self {
+        self.primary_label = Some(label.into());
+        self
+    }
+
+    pub(crate) fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub(crate) fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    pub(crate) fn with_related(
+        mut self,
+        location: SourceLocation,
+        message: impl Into<String>,
+    ) -> Self {
+        self.related.push(DiagnosticLabel {
+            location,
+            message: message.into(),
+        });
+        self
     }
 }
 
@@ -377,6 +509,24 @@ impl ParseReport {
     /// Returns compiler diagnostics in source-unit and source order.
     pub fn diagnostics(&self) -> &[CompilerDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns whether parsing produced any error-level diagnostics.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(CompilerDiagnostic::is_error)
+    }
+
+    /// Returns the number of error-level diagnostics.
+    pub fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .count()
+    }
+
+    /// Returns the number of warning-level diagnostics.
+    pub fn warning_count(&self) -> usize {
+        self.diagnostics.len() - self.error_count()
     }
 }
 
