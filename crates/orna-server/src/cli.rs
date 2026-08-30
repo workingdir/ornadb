@@ -36,6 +36,11 @@ Commands:
 Host Mode:
   --daemon     Run the local server in the foreground.
 
+Operational Commands:
+  server ...   Manage the server and backend shell.
+  security ... Manage principals and grants.
+  raw-call ... Use the low-level recovery interface.
+
 Options:
   --db <URI>   Select a local path, Unix socket, or remote Orna URI.
   --runtime <family>  Select tty or qt for invoke.
