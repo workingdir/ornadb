@@ -1439,11 +1439,6 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
     ) -> Result<RuntimeValue, String> {
         InstalledClientResourceExecutor::evaluate_command(self, context, command)
     }
-    #[cfg(test)]
-    #[test]
-    fn trait_dispatches_dynamic_command_to_installed_executor() {
-        let _ = <Self as ClientResourceExecutor>::evaluate_command;
-    }
 
     fn inspect(&mut self, request: ClientInspectRequest) -> Result<RuntimeValue, String> {
         let (Some(kernel), Some(session)) =
@@ -4589,3 +4584,13 @@ const fn server_resource_failure_code(failure: orna_protocol::CallFailure) -> &'
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod trait_tests {
+    use super::{ClientResourceExecutor, InstalledClientResourceExecutor};
+
+    #[test]
+    fn trait_dispatches_dynamic_command_to_installed_executor() {
+        let _ = <InstalledClientResourceExecutor as ClientResourceExecutor>::evaluate_command;
+    }
+}
