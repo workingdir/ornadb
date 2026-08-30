@@ -36,6 +36,7 @@ use orna_core::{
         QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
         SchemaDefinition, TypeBinding, TypeLookupName, ValueTypeMutability, ValueTypePersistence,
     },
+    physical::{PhysicalMigrationArtifact, PhysicalPlan},
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
@@ -67,6 +68,7 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{CallFailure, ResourceArgument, ResourceKind, ResourceRequest};
+use orna_storage::MigrationLedgerEntry;
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
 const SCHEMA_SOURCE: &str = "schema café;\n";
@@ -2217,6 +2219,44 @@ async fn install_reused_function_catalogue(
                 "UPDATE _orna_kernel.active_revision
                  SET source_revision_id = $1, catalogue_revision_id = $2",
                 &[&source.to_bytes().to_vec(), &new_catalogue_bytes],
+            )
+            .await?;
+        let artifact = PhysicalMigrationArtifact::from_plan(
+            RevisionPair::new(old_source, old_catalogue),
+            RevisionPair::new(source, catalogue_id),
+            &PhysicalPlan::empty(),
+        )?;
+        let entry = MigrationLedgerEntry::from_artifact(&artifact);
+        let expected_base = entry.expected_base();
+        let candidate_pair = entry.candidate_pair();
+        let expected_source = expected_base.source().to_bytes().to_vec();
+        let expected_catalogue = expected_base.catalogue().to_bytes().to_vec();
+        let candidate_source = candidate_pair.source().to_bytes().to_vec();
+        let candidate_catalogue = candidate_pair.catalogue().to_bytes().to_vec();
+        let canonical_bytes = entry.canonical_bytes().to_vec();
+        let digest = entry.digest().to_bytes().to_vec();
+        let ordinal = 0_i64;
+        let version = i64::from(entry.version());
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.application_migrations
+                    (ordinal, format, version,
+                     expected_source_revision_id, expected_catalogue_revision_id,
+                     candidate_source_revision_id, candidate_catalogue_revision_id,
+                     canonical_bytes, digest)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &ordinal,
+                    &entry.format(),
+                    &version,
+                    &expected_source,
+                    &expected_catalogue,
+                    &candidate_source,
+                    &candidate_catalogue,
+                    &canonical_bytes,
+                    &digest,
+                ],
             )
             .await?;
         session.client().batch_execute("COMMIT").await?;
