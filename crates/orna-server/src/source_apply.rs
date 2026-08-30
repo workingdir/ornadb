@@ -44,13 +44,13 @@ use orna_standard::{
 use orna_storage::{ApplicationRevisionStore, StorageError};
 use serde::Serialize;
 
-use crate::{EmbeddedHostError, inspect_current_embedded_host, source_diagnostics};
+use crate::{EmbeddedHostError, inspect_current_embedded_host, source_support};
 
 /// The result of checking and applying one local application source file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum InstalledSourceApplyOutcome {
-    /// The source had compiler diagnostics and no candidate was prepared or applied.
+    /// Error-level diagnostics prevented candidate preparation and application.
     Diagnostics(InstalledSourceApplyDiagnostics),
     /// The exact candidate committed and its complete discovery document is ready.
     Applied(InstalledSourceApplySuccess),
@@ -358,20 +358,18 @@ async fn apply_source_bundle(
     let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
         .map_err(|source| InstalledSourceApplyError::ApplicationContext { source })?;
     let report = check_standard_application(&bundle, &context);
-    let rendered_diagnostics =
-        (!report.diagnostics().is_empty()).then(|| InstalledSourceApplyDiagnostics {
-            bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
-            human_bytes: source_diagnostics::render_human_diagnostics(
-                report.parse_report(),
-                report.diagnostics(),
-                false,
-            ),
-            coloured_bytes: source_diagnostics::render_human_diagnostics(
-                report.parse_report(),
-                report.diagnostics(),
-                true,
-            ),
-        });
+    let rendered_diagnostics = if report.diagnostics().is_empty() {
+        None
+    } else {
+        let (bytes, human_bytes, coloured_bytes) =
+            source_support::render_source_diagnostics(report.parse_report(), report.diagnostics())
+                .into_parts();
+        Some(InstalledSourceApplyDiagnostics {
+            bytes,
+            human_bytes,
+            coloured_bytes,
+        })
+    };
 
     if report.has_errors() {
         return Ok(InstalledSourceApplyOutcome::Diagnostics(
