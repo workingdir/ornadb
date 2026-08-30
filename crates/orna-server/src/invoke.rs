@@ -555,9 +555,6 @@ impl SessionBridge {
         }
     }
 
-    pub(crate) fn cancel(&self) {
-        self.close();
-    }
     pub(crate) fn try_take_outbound(&self) -> Option<SessionServerFrame> {
         self.outbound_receiver
             .lock()

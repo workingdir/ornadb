@@ -1494,6 +1494,9 @@ impl DispatchService for RawDispatchService {
         {
             cancellation.request_cancel();
         }
+        if let Some(bridge) = self.session_bridge() {
+            bridge.cancel_stream(stream);
+        }
     }
 
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
@@ -2810,17 +2813,9 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 
     reader_task.abort();
     let _ = reader_task.await;
-    if let Some(bridge) = dispatcher.session_bridge() {
-        bridge.close();
-    }
-    // Close the socket before waiting for accepted dispatches. A started
-    // spawn_blocking worker cannot be aborted safely, so the connection must
-    // not remain open while its completion boundary is drained below.
-    let _ = writer.shutdown().await;
-    drop(writer);
-    // Disconnect is an implicit cancellation boundary only before a sealed
-    // invocation start Event is delivered. Started sealed workers stay owned
-    // by this connection until their durable terminal result is produced.
+    // Cancel pending work before closing the bridge. This wakes a synchronous
+    // std.cli.input() call while its cancellation token is still associated
+    // with the root invocation.
     let unstarted_streams: BTreeSet<_> = unstarted.iter().map(|dispatch| dispatch.stream).collect();
     for dispatch in &unstarted {
         dispatcher.cancelled(dispatch.stream);
@@ -2833,6 +2828,14 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     for stream_id in preflight_pending.iter().copied() {
         dispatcher.cancelled(stream_id);
     }
+    if let Some(bridge) = dispatcher.session_bridge() {
+        bridge.close();
+    }
+    // Close the socket before waiting for accepted dispatches. A started
+    // spawn_blocking worker cannot be aborted safely, so the connection must
+    // not remain open while its completion boundary is drained below.
+    let _ = writer.shutdown().await;
+    drop(writer);
     while !unstarted.is_empty() {
         start_one_dispatch(&mut unstarted, &mut tasks);
     }
