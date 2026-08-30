@@ -40,7 +40,7 @@ mod presentation;
 use inspect::{
     run_installed_external_contract, run_installed_inspect, same_resource_request_identity,
 };
-use installed::bind_installed_cli_arguments;
+pub(crate) use installed::bind_installed_cli_arguments;
 #[cfg(test)]
 use installed::{
     InvokeTransport, build_output_requirement, build_sealed_request,

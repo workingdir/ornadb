@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.95"
@@ -60,6 +62,37 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-evidence-${{ github.run_id }}
+          path: ci-evidence
+          if-no-files-found: error
+
+  sqlite:
+    name: SQLite parity gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+      - uses: extractions/setup-just@v3
+      - name: Warm Cargo dependency cache
+        run: cargo fetch --locked
+      - name: Prepare SQLite evidence
+        run: mkdir -p ci-evidence
+      - name: Run SQLite check gate
+        run: |
+          set -euo pipefail
+          just sqlite-check 2>&1 | tee ci-evidence/sqlite-check.log
+      - name: Run SQLite smoke gate
+        run: |
+          set -euo pipefail
+          just sqlite-smoke 2>&1 | tee ci-evidence/sqlite-smoke.log
+      - name: Upload SQLite evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-evidence-${{ github.run_id }}
           path: ci-evidence
           if-no-files-found: error
           retention-days: 14
