@@ -1005,6 +1005,11 @@ impl SealedInvocationOperation {
             )) => Ok(SealedInvocationExecution::Cancelled {
                 invocation: self.invocation,
             }),
+            Err(_error) if cancellation.is_requested() => {
+                Ok(SealedInvocationExecution::Cancelled {
+                    invocation: self.invocation,
+                })
+            }
             Err(error) => Err(error),
         }
     }

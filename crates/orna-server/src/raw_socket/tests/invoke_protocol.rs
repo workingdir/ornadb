@@ -1031,7 +1031,7 @@ fn sealed_failure_after_value_preserves_contiguous_sequences() {
 }
 
 #[test]
-fn disconnect_cancellation_only_targets_unstarted_sealed_work() {
+fn disconnect_cancellation_targets_unstarted_and_client_work() {
     let invocation = InvocationId::from_bytes([0x52; 16]);
     let mut completion = DispatchCompletion {
         sealed_producer: None,
@@ -1049,7 +1049,7 @@ fn disconnect_cancellation_only_targets_unstarted_sealed_work() {
         _guards: None,
     };
 
-    assert!(!should_cancel_on_disconnect(&completion));
+    assert!(should_cancel_on_disconnect(&completion));
     assert!(!should_drain_sealed_on_disconnect(&completion));
     completion.start_delivered = false;
     assert!(should_cancel_on_disconnect(&completion));
