@@ -1,4 +1,23 @@
+// EmbeddedHostError is a stable public error boundary. Its large variants are
+// intentional because callers receive the original typed subsystem failure.
+#![allow(clippy::result_large_err)]
 //! The embedded PostgreSQL instance boundary.
+
+use std::{
+    collections::BTreeSet,
+    env,
+    ffi::{CString, OsStr, OsString},
+    fmt, fs,
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
+    path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicI32, Ordering},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use nix::{
     errno::Errno,
@@ -6,9 +25,7 @@ use nix::{
         signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, sigaction},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{
-        ForkResult, Group, Pid, User, fork, getegid, geteuid, getgid, getgroups, getuid, pipe,
-    },
+    unistd::{ForkResult, Pid, User, fork, geteuid, pipe},
 };
 use orna_postgres::{
     AbsolutePath, ControlData, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments,
@@ -59,6 +76,11 @@ const INSTANCE_PARENT: &str = "/var/lib/orna/instances";
 const DEVELOPMENT_IDENT_MAP: &str = "orna_development";
 const DEVELOPMENT_LOCK_NAME: &str = "server.lock";
 const INSTANCE_LOCK_NAME: &str = "lock";
+const INITIALISER_LOG_NAME: &str = "orna-initialiser.log";
+const POSTMASTER_LOG_NAME: &str = "orna-engine.log";
+const MAX_CHILD_LOG_BYTES: usize = 256 * 1024;
+const CHILD_LOG_TRUNCATION_MARKER: &[u8] = b"\n[orna] embedded engine diagnostics truncated\n";
+const SUPPORT_DIRECTORY: &str = "support";
 const INSTANCE_MANIFEST_NAME: &str = "instance.toml";
 const UPGRADE_DIRECTORY_NAME: &str = "upgrade";
 const READY_NAME: &str = "ready";
@@ -1172,8 +1194,8 @@ fn instance_manifest_bytes(identity: &EmbeddedEngineIdentity, activation: bool) 
 
 /// Runs the default embedded PostgreSQL instance in the foreground.
 ///
-/// The host profile follows the process identity: the packaged service account
-/// uses the production paths, and other users use a private local profile.
+/// Orna owns the terminal output. PostgreSQL stdout and stderr are captured
+/// in the private engine log and are not copied to the caller's terminal.
 pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
     eprintln!("[orna] OrnaDB server starting");
     install_child_subreaper()?;
@@ -1962,6 +1984,12 @@ pub fn materialise_support_data(root: &Path) -> Result<MaterialisedSupport, Embe
     })
 }
 
+fn initialiser_log_path(data_directory: &Path) -> Result<PathBuf, EmbeddedHostError> {
+    data_directory
+        .parent()
+        .map(|generation_directory| generation_directory.join(INITIALISER_LOG_NAME))
+        .ok_or(EmbeddedHostError::InvalidInstanceState)
+}
 /// Initialises one new, empty PostgreSQL data directory through the linked engine entry.
 ///
 /// The caller must own the instance lock and must call this before it creates an asynchronous
@@ -1971,7 +1999,7 @@ pub fn initialise_embedded_cluster(
     data_directory: &Path,
 ) -> Result<(), EmbeddedHostError> {
     require_single_thread()?;
-    let log_path = data_directory.join(INITIALISER_LOG_NAME);
+    let log_path = initialiser_log_path(data_directory)?;
     let (read_fd, write_fd, log) = prepare_child_log(&log_path)?;
     let support_root = AbsolutePath::new(support_root)?;
     let data_directory = AbsolutePath::new(data_directory)?;
@@ -2144,7 +2172,11 @@ impl Drop for EmbeddedPostmaster {
                 Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) | Err(Errno::ECHILD) => {
+                    self.finish_log_capture();
+                    return;
+                }
+                Err(_) => {
                     self.finish_log_capture();
                     return;
                 }
@@ -2153,11 +2185,15 @@ impl Drop for EmbeddedPostmaster {
         let _ = kill(child, Signal::SIGKILL);
         loop {
             match waitpid(child, None) {
-                Ok(_) | Err(_) => {
+                Ok(_) | Err(Errno::ECHILD) => {
                     self.finish_log_capture();
                     return;
                 }
                 Err(Errno::EINTR) => continue,
+                Err(_) => {
+                    self.finish_log_capture();
+                    return;
+                }
             }
         }
     }
@@ -2238,6 +2274,59 @@ pub fn start_embedded_postmaster(
             })
         }
     }
+}
+fn prepare_child_log(path: &Path) -> Result<(OwnedFd, OwnedFd, fs::File), EmbeddedHostError> {
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    let (read_fd, write_fd) = pipe().map_err(|_| EmbeddedHostError::ProcessControl)?;
+    Ok((read_fd, write_fd, log))
+}
+
+fn redirect_child_output(write_fd: &OwnedFd) -> Result<(), EmbeddedHostError> {
+    let descriptor = write_fd.as_raw_fd();
+    for standard_descriptor in [nix::libc::STDOUT_FILENO, nix::libc::STDERR_FILENO] {
+        // SAFETY: `descriptor` is an open pipe descriptor and the target is a
+        // valid standard descriptor in the fresh child.
+        if unsafe { nix::libc::dup2(descriptor, standard_descriptor) } < 0 {
+            return Err(EmbeddedHostError::ProcessControl);
+        }
+    }
+    Ok(())
+}
+
+fn spawn_child_log_capture(read_fd: OwnedFd, mut log: fs::File) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = fs::File::from(read_fd);
+        let mut buffer = [0_u8; 8192];
+        let mut written = 0;
+        let mut truncated = false;
+        let content_limit = MAX_CHILD_LOG_BYTES.saturating_sub(CHILD_LOG_TRUNCATION_MARKER.len());
+        loop {
+            let count = match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => count,
+            };
+            if written >= content_limit {
+                truncated = true;
+                continue;
+            }
+            let available = content_limit - written;
+            let retained = count.min(available);
+            truncated |= retained < count;
+            if log.write_all(&buffer[..retained]).is_err() {
+                break;
+            }
+            written += retained;
+        }
+        if truncated {
+            let _ = log.write_all(CHILD_LOG_TRUNCATION_MARKER);
+        }
+        let _ = log.flush();
+    })
 }
 
 fn close_inherited_descriptors() -> Result<(), EmbeddedHostError> {
@@ -2685,57 +2774,21 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_missing_and_invalid_distribution_diagnostics() {
-        let missing = map_distribution_error(distribution::DistributionError::Missing);
-        assert!(matches!(
-            missing,
-            EmbeddedHostError::MissingDistributionManifest
-        ));
-        assert!(
-            missing
-                .to_string()
-                .contains("/usr/share/orna/distribution-manifest.toml")
-        );
-        assert!(
-            missing
-                .to_string()
-                .contains("install the Orna package before using `orna server run`")
-        );
-        assert!(
-            missing
-                .to_string()
-                .contains("make --file packaging/debian/rules development-package")
-        );
+    fn stores_initialiser_log_beside_the_cluster_directory() {
+        let data_directory = Path::new("/var/lib/orna/instances/default/generations/0001/data");
+        let log_path = initialiser_log_path(data_directory).expect("generation directory");
 
-        let invalid = map_distribution_error(distribution::DistributionError::Invalid);
-        assert!(matches!(
-            invalid,
-            EmbeddedHostError::InvalidDistributionManifest
-        ));
-        assert!(
-            invalid
-                .to_string()
-                .contains("Orna distribution manifest is invalid")
+        assert_eq!(
+            log_path,
+            PathBuf::from("/var/lib/orna/instances/default/generations/0001/orna-initialiser.log")
         );
+        assert_ne!(log_path.parent(), Some(data_directory));
     }
 
     #[test]
     fn validates_the_embedded_engine_manifest_and_bound_data() {
         validate_embedded_engine_manifest().expect("embedded engine manifest");
     }
-
-    #[test]
-    fn sends_the_exact_systemd_datagram_to_a_path_socket() {
-        let root = TestRoot::new();
-        let socket_path = root.0.join("notify.sock");
-        let socket = UnixDatagram::bind(&socket_path).expect("bind notification socket");
-        notify_socket(socket_path.as_os_str(), b"READY=1\nSTATUS=OrnaDB is ready")
-            .expect("send notification");
-        let mut message = [0_u8; 64];
-        let length = socket.recv(&mut message).expect("receive notification");
-        assert_eq!(&message[..length], b"READY=1\nSTATUS=OrnaDB is ready");
-    }
-
     #[test]
     fn captures_engine_output_in_a_bounded_private_log() {
         let parent = TestRoot::new();

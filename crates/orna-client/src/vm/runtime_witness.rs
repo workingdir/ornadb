@@ -199,6 +199,10 @@ impl RuntimeOfferWitness {
     /// The constructor accepts primitive fields so callers cannot retain
     /// native descriptor pointers. It enforces the loader's ABI, platform,
     /// thread, feature, sink, and contract policy before copying data.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the public constructor mirrors the native runtime descriptor"
+    )]
     pub fn new(
         abi_major: u32,
         abi_minor: u32,
@@ -229,6 +233,10 @@ impl RuntimeOfferWitness {
 
     /// Constructs a bounded canonical snapshot for the trusted bridge and
     /// internal deterministic tests.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the internal constructor mirrors the native runtime descriptor"
+    )]
     pub(crate) fn from_parts(
         abi_major: u32,
         abi_minor: u32,

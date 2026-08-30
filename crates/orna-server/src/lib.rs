@@ -1,3 +1,6 @@
+// Public host errors preserve the accepted typed subsystem layout.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::type_complexity)]
 //! Embedded PostgreSQL host and administrative interfaces for OrnaDB.
 
 mod backend_shell;
@@ -12,6 +15,7 @@ pub mod security_admin;
 mod source_apply;
 mod source_diagnostics;
 mod source_diff;
+mod source_support;
 mod user_state;
 
 /// Renders source diagnostics in the stable machine-readable format.
@@ -43,7 +47,7 @@ pub use invoke::RawResourceRequestAuthorizer;
 pub use invoke::{
     InstalledClientResourceExecutor, InstalledInvokeError, InstalledInvokeErrorKind,
     InstalledInvokeOutcome, InstalledInvokeRequest, RuntimeFamily, run_installed_invoke,
-    run_invoke_with_kernel,
+    run_installed_invoke_at, run_invoke_with_kernel,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
@@ -164,9 +168,13 @@ fn retained_verified_standard_snapshot(
             orna_standard::retained_standard_library_v9_snapshot()
                 .and_then(orna_standard::verify_standard_library_v9_snapshot)
         }
-        revision if revision == orna_standard::STANDARD_LIBRARY_V9_REVISION_ID => {
-            orna_standard::retained_standard_library_v9_snapshot()
-                .and_then(orna_standard::verify_standard_library_v9_snapshot)
+        revision if revision == orna_standard::STANDARD_LIBRARY_V10_REVISION_ID => {
+            orna_standard::retained_standard_library_v10_snapshot()
+                .and_then(orna_standard::verify_standard_library_v10_snapshot)
+        }
+        revision if revision == orna_standard::STANDARD_LIBRARY_V11_REVISION_ID => {
+            orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
         }
         _ => Err(StandardLibraryError::Unavailable),
     }
@@ -228,16 +236,22 @@ async fn bootstrap_latest_standard(
         orna_standard::prepare_standard_upgrade_v8_to_v9,
     )
     .await?;
+    let (active, _) = apply_standard_upgrade_step(
+        kernel,
+        &active,
+        orna_standard::prepare_standard_upgrade_v9_to_v10,
+    )
+    .await?;
     let (_, expected) = apply_standard_upgrade_step(
         kernel,
         &active,
-        orna_standard::prepare_standard_upgrade_v8_to_v9,
+        orna_standard::prepare_standard_upgrade_v10_to_v11,
     )
     .await?;
     Ok(expected)
 }
 
-async fn continue_standard_to_v10(
+async fn continue_standard_to_v11(
     kernel: &PostgresKernel,
     mut active: orna_core::revision::ActiveDatabaseRevision,
     prepares: &[fn(
@@ -283,11 +297,11 @@ async fn apply_standard_upgrade_step(
     Ok((active, expected))
 }
 
-/// Bootstraps and opens one database with the accepted standard library active.
+/// Bootstraps and opens one database with the accepted V11 standard library active.
 ///
 /// The returned kernel has completed bare bootstrap and verified recovery. A
 /// bare database, or an intermediate V2-V9 commit from an interrupted fresh
-/// chain, is advanced through the complete accepted upgrade chain to V10 before
+/// chain, is advanced through the complete accepted upgrade chain to V11 before
 /// it returns; intentionally installed V1 and V10 snapshots are verified in place.
 pub async fn open_standard_database(
     kernel: PostgresKernel,
@@ -310,15 +324,38 @@ pub async fn open_standard_database(
             retained_verified_standard_snapshot(orna_standard::STANDARD_LIBRARY_REVISION_ID)
                 .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?
         }
-        Some(orna_standard::STANDARD_LIBRARY_V9_REVISION_ID) => {
-            retained_verified_standard_snapshot(orna_standard::STANDARD_LIBRARY_V9_REVISION_ID)
+        Some(orna_standard::STANDARD_LIBRARY_V10_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[orna_standard::prepare_standard_upgrade_v10_to_v11],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V11_REVISION_ID) => {
+            retained_verified_standard_snapshot(orna_standard::STANDARD_LIBRARY_V11_REVISION_ID)
                 .map_err(|source| OpenStandardDatabaseError::StandardLibrary { source })?
         }
         Some(orna_standard::STANDARD_LIBRARY_V9_REVISION_ID) => {
-            continue_standard_to_v10(
+            continue_standard_to_v11(
                 &kernel,
                 active,
-                &[orna_standard::prepare_standard_upgrade_v8_to_v9],
+                &[
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V8_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
             )
             .await?
         }
@@ -334,19 +371,82 @@ pub async fn open_standard_database(
             .await?
         }
         Some(orna_standard::STANDARD_LIBRARY_V7_REVISION_ID) => {
-            continue_standard_to_v10(
+            continue_standard_to_v11(
                 &kernel,
                 active,
                 &[
                     orna_standard::prepare_standard_upgrade_v7_to_v8,
                     orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V6_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                    orna_standard::prepare_standard_upgrade_v7_to_v8,
                     orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V5_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                    orna_standard::prepare_standard_upgrade_v7_to_v8,
+                    orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V4_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v4_to_v5,
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                    orna_standard::prepare_standard_upgrade_v7_to_v8,
+                    orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
+                ],
+            )
+            .await?
+        }
+        Some(orna_standard::STANDARD_LIBRARY_V3_REVISION_ID) => {
+            continue_standard_to_v11(
+                &kernel,
+                active,
+                &[
+                    orna_standard::prepare_standard_upgrade_v3_to_v4,
+                    orna_standard::prepare_standard_upgrade_v4_to_v5,
+                    orna_standard::prepare_standard_upgrade_v5_to_v6,
+                    orna_standard::prepare_standard_upgrade_v6_to_v7,
+                    orna_standard::prepare_standard_upgrade_v7_to_v8,
+                    orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
                 ],
             )
             .await?
         }
         Some(orna_standard::STANDARD_LIBRARY_V2_REVISION_ID) => {
-            continue_standard_to_v10(
+            continue_standard_to_v11(
                 &kernel,
                 active,
                 &[
@@ -357,65 +457,8 @@ pub async fn open_standard_database(
                     orna_standard::prepare_standard_upgrade_v6_to_v7,
                     orna_standard::prepare_standard_upgrade_v7_to_v8,
                     orna_standard::prepare_standard_upgrade_v8_to_v9,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                ],
-            )
-            .await?
-        }
-        Some(orna_standard::STANDARD_LIBRARY_V3_REVISION_ID) => {
-            continue_standard_to_v10(
-                &kernel,
-                active,
-                &[
-                    orna_standard::prepare_standard_upgrade_v3_to_v4,
-                    orna_standard::prepare_standard_upgrade_v4_to_v5,
-                    orna_standard::prepare_standard_upgrade_v5_to_v6,
-                    orna_standard::prepare_standard_upgrade_v6_to_v7,
-                    orna_standard::prepare_standard_upgrade_v7_to_v8,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                ],
-            )
-            .await?
-        }
-        Some(orna_standard::STANDARD_LIBRARY_V4_REVISION_ID) => {
-            continue_standard_to_v10(
-                &kernel,
-                active,
-                &[
-                    orna_standard::prepare_standard_upgrade_v4_to_v5,
-                    orna_standard::prepare_standard_upgrade_v5_to_v6,
-                    orna_standard::prepare_standard_upgrade_v6_to_v7,
-                    orna_standard::prepare_standard_upgrade_v7_to_v8,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                ],
-            )
-            .await?
-        }
-        Some(orna_standard::STANDARD_LIBRARY_V5_REVISION_ID) => {
-            continue_standard_to_v10(
-                &kernel,
-                active,
-                &[
-                    orna_standard::prepare_standard_upgrade_v5_to_v6,
-                    orna_standard::prepare_standard_upgrade_v6_to_v7,
-                    orna_standard::prepare_standard_upgrade_v7_to_v8,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                ],
-            )
-            .await?
-        }
-        Some(orna_standard::STANDARD_LIBRARY_V6_REVISION_ID) => {
-            continue_standard_to_v10(
-                &kernel,
-                active,
-                &[
-                    orna_standard::prepare_standard_upgrade_v6_to_v7,
-                    orna_standard::prepare_standard_upgrade_v7_to_v8,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
-                    orna_standard::prepare_standard_upgrade_v8_to_v9,
+                    orna_standard::prepare_standard_upgrade_v9_to_v10,
+                    orna_standard::prepare_standard_upgrade_v10_to_v11,
                 ],
             )
             .await?
@@ -515,7 +558,8 @@ mod tests {
             orna_standard::STANDARD_LIBRARY_V7_REVISION_ID,
             orna_standard::STANDARD_LIBRARY_V8_REVISION_ID,
             orna_standard::STANDARD_LIBRARY_V9_REVISION_ID,
-            orna_standard::STANDARD_LIBRARY_V9_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V10_REVISION_ID,
+            orna_standard::STANDARD_LIBRARY_V11_REVISION_ID,
         ];
 
         for revision in revisions {
