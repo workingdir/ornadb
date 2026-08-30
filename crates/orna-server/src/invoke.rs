@@ -477,7 +477,7 @@ impl SessionBridge {
             request_invocation_id,
             prompt: String::new(),
         });
-        {
+        let send_result = {
             let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
             if waiting.closed || root_invocation_id != self.root_invocation_id {
                 return Err("client.input_unavailable".to_owned());
@@ -486,19 +486,23 @@ impl SessionBridge {
                 .state
                 .request(request_invocation_id)
                 .map_err(|_| "client.input_unavailable".to_owned())?;
-        }
-        if self.outbound.send(frame).is_err() {
+            self.outbound.send(frame)
+        };
+        if send_result.is_err() {
             self.close();
             return Err("client.input_unavailable".to_owned());
         }
         self.outbound_notify.notify_one();
 
-        let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
+        let mut waiting = self.waiting.lock().expect("session bridge response wait");
         while waiting.response.is_none() && !waiting.closed {
             waiting = self
                 .response_ready
                 .wait(waiting)
                 .expect("session bridge response wait");
+        }
+        if waiting.closed {
+            return Err("client.input_unavailable".to_owned());
         }
         let Some(response) = waiting.response.take() else {
             return Err("client.input_unavailable".to_owned());
@@ -545,6 +549,15 @@ impl SessionBridge {
         self.response_ready.notify_all();
     }
 
+    pub(crate) fn cancel_stream(&self, stream: u64) {
+        if self.call_stream == stream {
+            self.close();
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.close();
+    }
     pub(crate) fn try_take_outbound(&self) -> Option<SessionServerFrame> {
         self.outbound_receiver
             .lock()
