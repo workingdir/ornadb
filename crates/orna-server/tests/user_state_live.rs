@@ -1,3 +1,4 @@
+#![allow(clippy::redundant_field_names)]
 //! Live USER state service proof (ADR 0061 step 6).
 //!
 //! This suite drives the exact installed host flow through the
@@ -25,9 +26,10 @@ use orna_client::{ClientStateContext, ClientStateKey, ClientStateStore, ClientUs
 use orna_compiler::{
     StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::catalogue::FunctionDomain;
 use orna_core::{
     FunctionId, PrincipalId, StateSlotId, TypeId,
-    catalogue::FunctionDomain,
     security::{LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
     source::{SourceBundle, SourceUnit},
     state::{UserStateChange, UserStateWriteOutcome},
