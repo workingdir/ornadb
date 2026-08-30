@@ -1,4 +1,3 @@
-
 use orna_core::{
     CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
     inspect::InspectPrivilege,
