@@ -1,3 +1,6 @@
+// Source apply returns the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::type_complexity)]
 //! Installed one-file source checking, preparation, and atomic activation.
 
 use std::{
@@ -23,16 +26,19 @@ use orna_standard::{
     STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_V2_REVISION_ID, STANDARD_LIBRARY_V3_REVISION_ID,
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, StandardLibraryError,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
+    STANDARD_LIBRARY_V10_REVISION_ID, STANDARD_LIBRARY_V11_REVISION_ID, StandardLibraryError,
     retained_standard_library_snapshot, retained_standard_library_v2_snapshot,
     retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
     retained_standard_library_v5_snapshot, retained_standard_library_v6_snapshot,
     retained_standard_library_v7_snapshot, retained_standard_library_v8_snapshot,
-    retained_standard_library_v9_snapshot, verify_standard_library_snapshot,
+    retained_standard_library_v9_snapshot, retained_standard_library_v10_snapshot,
+    retained_standard_library_v11_snapshot, verify_standard_library_snapshot,
     verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
     verify_standard_library_v4_snapshot, verify_standard_library_v5_snapshot,
     verify_standard_library_v6_snapshot, verify_standard_library_v7_snapshot,
     verify_standard_library_v8_snapshot, verify_standard_library_v9_snapshot,
+    verify_standard_library_v10_snapshot, verify_standard_library_v11_snapshot,
 };
 use serde::Serialize;
 
@@ -501,8 +507,10 @@ pub(super) fn select_accepted_standard(
                 .and_then(verify_standard_library_v8_snapshot),
             STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
                 .and_then(verify_standard_library_v9_snapshot),
-            STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
-                .and_then(verify_standard_library_v9_snapshot),
+            STANDARD_LIBRARY_V10_REVISION_ID => retained_standard_library_v10_snapshot()
+                .and_then(verify_standard_library_v10_snapshot),
+            STANDARD_LIBRARY_V11_REVISION_ID => retained_standard_library_v11_snapshot()
+                .and_then(verify_standard_library_v11_snapshot),
             _ => return Err(StandardSelectionError::UnknownRevision),
         };
 
@@ -780,6 +788,25 @@ mod tests {
         assert!(
             installed.catalogue().function_by_name(&name).is_some(),
             "V9 active standard must expose std.ui.text"
+        );
+    }
+
+    #[test]
+    fn selects_the_accepted_v10_snapshot_for_a_v10_active_standard() {
+        let installed = verify_standard_library_v10_snapshot(
+            retained_standard_library_v10_snapshot().expect("retained V10 standard"),
+        )
+        .expect("verified V10 standard");
+        let selected = select_accepted_standard(&installed).expect("accepted V10 standard");
+        assert_eq!(selected.revision(), installed.revision());
+        assert_eq!(
+            selected.catalogue().revision(),
+            installed.catalogue().revision()
+        );
+        let name = QualifiedSemanticName::new(["std", "cli", "repl"]).expect("V10 name");
+        assert!(
+            selected.catalogue().function_by_name(&name).is_some(),
+            "V10 active standard must expose std.cli.repl"
         );
     }
 
