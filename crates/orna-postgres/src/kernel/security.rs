@@ -53,8 +53,14 @@ mod sealed_dispatch;
 mod sealed_events;
 #[path = "security/sealed_invocation.rs"]
 mod sealed_invocation;
+#[path = "security/sealed_server_contract.rs"]
+mod sealed_server_contract;
 #[path = "security/sealed_server_execution.rs"]
 mod sealed_server_execution;
+#[path = "security/sealed_server_stream.rs"]
+mod sealed_server_stream;
+#[path = "security/sealed_server_target.rs"]
+mod sealed_server_target;
 #[path = "security/target_resolution.rs"]
 mod target_resolution;
 
@@ -112,15 +118,18 @@ pub use sealed_invocation::{
     SealedInvocationPreflight, SealedInvocationResult,
 };
 #[cfg(test)]
-use sealed_server_execution::{
+use sealed_server_contract::{
     bind_authenticated_resource_arguments, classify_sealed_server_error,
     resource_target_shape_is_supported, resource_values_from_server_result,
-    sealed_server_result_kind, sealed_server_stream_completed_event,
+    sealed_server_result_kind,
 };
-use sealed_server_execution::{
-    execute_sealed_server_after_audit, resource_target_security_is_supported,
-    sealed_server_target_is_mutation, start_sealed_server_stream_producer,
+use sealed_server_contract::{
+    resource_target_security_is_supported, sealed_server_target_is_mutation,
 };
+use sealed_server_execution::execute_sealed_server_after_audit;
+#[cfg(test)]
+use sealed_server_stream::sealed_server_stream_completed_event;
+use sealed_server_stream::start_sealed_server_stream_producer;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::SystemTime,
