@@ -16,5 +16,4 @@ orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
 orna-standard = { path = "../orna-standard" }
 orna-syntax = { path = "../orna-syntax" }
-serde = "1.0.229"
 serde_json = "1.0.151"
