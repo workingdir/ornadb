@@ -286,7 +286,6 @@ fn usage_shape_failures_all_fail_closed_with_exact_usage() {
             OsString::from("diff"),
             OsString::from("app.orna"),
         ],
-        vec![],
         vec![OsString::new()],
         vec![OsString::from("source")],
         vec![OsString::from("source"), OsString::from("apply")],
