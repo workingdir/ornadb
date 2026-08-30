@@ -1752,9 +1752,27 @@ async fn raw_unique_text_select_socket_authorises_binds_and_redacts() -> TestRes
     .await
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
+fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
+    let handle = std::thread::Builder::new()
+        .name("raw-local-peer-live".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| failure(format!("raw local peer runtime failed: {error}")))?;
+            runtime.block_on(serves_the_actual_local_peer_through_the_raw_socket_protocol_inner())
+        })
+        .map_err(|error| failure(format!("raw local peer thread could not start: {error}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(failure("raw local peer thread panicked")),
+    }
+}
+
+async fn serves_the_actual_local_peer_through_the_raw_socket_protocol_inner() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
         let (active, standard_upgrade, client_function, server_function) =

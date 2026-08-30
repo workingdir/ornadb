@@ -7,9 +7,9 @@
 //! [`run_installed_source_diff`] checks one application source file against
 //! the fixed private instance, prepares its candidate revision without
 //! applying it, and renders semantic changes between the candidate and active
-//! catalogues and their executable function revisions. The command never
-//! writes a standard stream, never installs a candidate, and never changes the
-//! active revision pair.
+//! catalogues and their executable function revisions. It writes only the
+//! rendered report to its caller-provided output; it never installs a
+//! candidate and never changes the active revision pair.
 
 use std::{
     error::Error,
@@ -27,6 +27,7 @@ use orna_core::{
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::StandardLibraryError;
+use orna_storage::{ApplicationRevisionStore, StorageError};
 
 use crate::{
     EmbeddedHostError, inspect_current_embedded_host,
@@ -279,7 +280,9 @@ async fn diff_source_bundle(
     kernel: PostgresKernel,
     bundle: SourceBundle,
 ) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
-    let active = kernel.recover().await.map_err(map_recovery_error)?;
+    let active = ApplicationRevisionStore::recover(&kernel)
+        .await
+        .map_err(map_storage_recovery_error)?;
     let report = source_support::check_application_source(&active, &bundle)
         .map_err(map_application_check_error)?;
 
@@ -385,6 +388,15 @@ fn digest_hex(digest: orna_core::revision::Sha256Digest) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+pub(crate) fn render_prepared_source_diff(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    candidate: &orna_core::revision::DeployableRevision,
+) -> Result<Vec<u8>, InstalledSourceDiffError> {
+    let diff = orna_core::catalogue_diff::catalogue_diff(active.catalogue(), candidate.candidate());
+    let revision_changes = function_revision_changes(active, candidate);
+    render_diff_document(active, candidate, &diff, &revision_changes)
 }
 
 fn render_diff_document(
@@ -1035,6 +1047,17 @@ fn map_application_check_error(source: ApplicationCheckError) -> InstalledSource
         ApplicationCheckError::ApplicationContext(source) => {
             InstalledSourceDiffError::ApplicationContext { source }
         }
+    }
+}
+
+fn map_storage_recovery_error(
+    error: StorageError<PostgresKernelError>,
+) -> InstalledSourceDiffError {
+    match error {
+        StorageError::Backend(source) => map_recovery_error(source),
+        StorageError::InvalidRequest(source) => InstalledSourceDiffError::Recovery {
+            source: PostgresKernelError::InvalidLedgerRequest(source),
+        },
     }
 }
 

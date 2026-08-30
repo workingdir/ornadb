@@ -3,6 +3,7 @@
 //! A snapshot contains resolved definitions for one active catalogue revision.
 //! It does not contain source syntax, physical storage state, or backend types.
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -29,7 +30,7 @@ pub use types::{
 ///
 /// Name resolution establishes identifier case and quoted-name semantics before
 /// it creates this value. This type compares its parts exactly.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct QualifiedSemanticName {
     parts: Vec<String>,
 }
@@ -95,7 +96,7 @@ impl Error for SemanticNameError {}
 ///
 /// A schema is a durable semantic definition. It can exist without object
 /// types or functions.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SchemaDefinition {
     id: SchemaId,
     name: QualifiedSemanticName,
@@ -119,7 +120,7 @@ impl SchemaDefinition {
 }
 
 /// The action to take when a referenced object is deleted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OnDeleteAction {
     /// Reject deletion while a referencing value exists.
     Restrict,
@@ -130,7 +131,7 @@ pub enum OnDeleteAction {
 }
 
 /// One resolved field of an object type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FieldDefinition {
     id: FieldId,
     name: String,
@@ -214,7 +215,7 @@ impl FieldDefinition {
 }
 
 /// One resolved durable object type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObjectTypeDefinition {
     id: TypeId,
     name: QualifiedSemanticName,
@@ -257,7 +258,7 @@ impl ObjectTypeDefinition {
 }
 
 /// The execution location of a function.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FunctionDomain {
     /// The function executes in the database server runtime.
     Server,
@@ -266,7 +267,7 @@ pub enum FunctionDomain {
 }
 
 /// The principal context used to execute a function.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FunctionSecurity {
     /// Execute with the invoking principal's security context.
     Invoker,
@@ -275,7 +276,7 @@ pub enum FunctionSecurity {
 }
 
 /// The transaction behaviour of a server function.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FunctionTransaction {
     /// Execute within one atomic transaction.
     Atomic,
@@ -286,7 +287,7 @@ pub enum FunctionTransaction {
 }
 
 /// The state-dependence contract of a function result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FunctionVolatility {
     /// The result is independent of database state.
     Immutable,
@@ -297,7 +298,7 @@ pub enum FunctionVolatility {
 }
 
 /// One resolved parameter of a function signature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ParameterDefinition {
     id: ParameterId,
     name: String,
@@ -351,7 +352,7 @@ impl ParameterDefinition {
 }
 
 /// One named column in a `ROWS (...)` function result.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FunctionReturnColumnDefinition {
     name: String,
     ordinal: u32,
@@ -385,7 +386,7 @@ impl FunctionReturnColumnDefinition {
 }
 
 /// The resolved result shape of a function.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FunctionReturn {
     /// A function returns one resolved semantic value.
     Single(ResolvedType),
@@ -396,7 +397,7 @@ pub enum FunctionReturn {
 }
 
 /// One resolved executable function signature.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FunctionDefinition {
     id: FunctionId,
     name: QualifiedSemanticName,
