@@ -4546,7 +4546,7 @@ fn validate_candidate_records(
     }
     let function_revisions = candidate
         .current_function_revisions()
-        .map_or_else(|| candidate.new_function_revisions(), |revisions| revisions);
+        .unwrap_or_else(|| candidate.new_function_revisions());
     let expected_catalogue_hash = catalogue_digest(
         candidate.candidate(),
         function_revisions,
