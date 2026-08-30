@@ -29,6 +29,23 @@ pub const SYS_INVOKE_FUNCTION_ID: FunctionId =
 /// The exact resolved name of the mandatory invocation gateway.
 pub const SYS_INVOKE_FUNCTION_NAME: &str = "sys.invoke";
 
+/// The stable identity of the generic source-introspection function.
+pub const SYS_SOURCE_CURRENT_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x30]);
+
+/// The exact semantic name of the generic source-introspection function.
+pub const SYS_SOURCE_CURRENT_FUNCTION_NAME: &str = "sys.source.current";
+
+/// The stable identity of the source-introspection result carrier.
+pub const SYS_SOURCE_FUNCTION_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x31]);
+
+/// The exact semantic name of the source-introspection result carrier.
+pub const SYS_SOURCE_FUNCTION_TYPE_NAME: &str = "sys.source.function";
+
+/// The immutable representation contract of the source-introspection carrier.
+pub const SYS_SOURCE_FUNCTION_REPRESENTATION_CONTRACT: &str = "orna.sys.source.function@1";
+
 /// The stable identity of the sealed `sys.inspect.snapshot` function.
 pub const SYS_INSPECT_SNAPSHOT_FUNCTION_ID: FunctionId =
     FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
@@ -377,6 +394,7 @@ pub const SYS_SECURITY_PRINCIPAL_REPRESENTATION_CONTRACT: &str = "orna.sys.secur
 
 const CATALOGUE_HEALTH_NAME_PARTS: &[&str] = &["sys", "catalog", "health"];
 const SYS_INVOKE_NAME_PARTS: &[&str] = &["sys", "invoke"];
+const SYS_SOURCE_CURRENT_FUNCTION_NAME_PARTS: &[&str] = &["sys", "source", "current"];
 const SYS_INVOKE_VALUE_NAME_PARTS: &[&str] = &["sys", "invoke", "Value"];
 const SYS_INVOKE_REQUEST_NAME_PARTS: &[&str] = &["sys", "invoke", "Request"];
 const SYS_INVOKE_EVENT_NAME_PARTS: &[&str] = &["sys", "invoke", "Event"];
@@ -431,6 +449,8 @@ pub enum SystemFunctionKind {
     InspectProjection,
     /// Streams the sequence-addressable trace of one invocation.
     InspectTrace,
+    /// Reads one source declaration from the active execution revision.
+    SourceIntrospection,
     /// Reads one session identity fact from a bound authenticated session.
     SecurityIdentity,
     /// Mutates protected principal, role, or privilege state.
@@ -972,6 +992,15 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         None,
     ),
     SystemFunctionDefinition::new(
+        SystemFunctionKind::SourceIntrospection,
+        SYS_SOURCE_CURRENT_FUNCTION_ID,
+        SYS_SOURCE_CURRENT_FUNCTION_NAME_PARTS,
+        None,
+        None,
+        None,
+        None,
+    ),
+    SystemFunctionDefinition::new(
         SystemFunctionKind::InspectSnapshot,
         SYS_INSPECT_SNAPSHOT_FUNCTION_ID,
         SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
@@ -1227,7 +1256,7 @@ mod tests {
 
     #[test]
     fn system_registry_contains_exactly_the_twenty_six_sealed_entries_in_order() {
-        assert_eq!(SYSTEM_FUNCTIONS.len(), 26);
+        assert_eq!(SYSTEM_FUNCTIONS.len(), 27);
         let health = SYSTEM_FUNCTIONS[0];
         assert_eq!(health.kind(), SystemFunctionKind::Health);
         assert_eq!(health.id(), CATALOGUE_HEALTH_FUNCTION_ID);
@@ -1239,21 +1268,28 @@ mod tests {
         assert_eq!(invoke.kind(), SystemFunctionKind::Invoke);
         assert_eq!(invoke.id(), SYS_INVOKE_FUNCTION_ID);
         assert!(parts_equal(invoke.name_parts(), &["sys", "invoke"]));
-        let snapshot = SYSTEM_FUNCTIONS[2];
+        let source = SYSTEM_FUNCTIONS[2];
+        assert_eq!(source.kind(), SystemFunctionKind::SourceIntrospection);
+        assert_eq!(source.id(), SYS_SOURCE_CURRENT_FUNCTION_ID);
+        assert!(parts_equal(
+            source.name_parts(),
+            &["sys", "source", "current"]
+        ));
+        let snapshot = SYSTEM_FUNCTIONS[3];
         assert_eq!(snapshot.kind(), SystemFunctionKind::InspectSnapshot);
         assert_eq!(snapshot.id(), SYS_INSPECT_SNAPSHOT_FUNCTION_ID);
         assert!(parts_equal(
             snapshot.name_parts(),
             &["sys", "inspect", "snapshot"]
         ));
-        let trace = SYSTEM_FUNCTIONS[11];
+        let trace = SYSTEM_FUNCTIONS[12];
         assert_eq!(trace.kind(), SystemFunctionKind::InspectTrace);
         assert_eq!(trace.id(), SYS_INSPECT_TRACE_FUNCTION_ID);
         assert!(parts_equal(
             trace.name_parts(),
             &["sys", "inspect", "trace"]
         ));
-        let session_principal = SYSTEM_FUNCTIONS[12];
+        let session_principal = SYSTEM_FUNCTIONS[13];
         assert_eq!(
             session_principal.kind(),
             SystemFunctionKind::SecurityIdentity
@@ -1266,21 +1302,21 @@ mod tests {
             session_principal.name_parts(),
             &["sys", "security", "session_principal"]
         ));
-        let has_privilege = SYSTEM_FUNCTIONS[23];
+        let has_privilege = SYSTEM_FUNCTIONS[24];
         assert_eq!(has_privilege.kind(), SystemFunctionKind::SecurityCheck);
         assert_eq!(has_privilege.id(), SYS_SECURITY_HAS_PRIVILEGE_FUNCTION_ID);
         assert!(parts_equal(
             has_privilege.name_parts(),
             &["sys", "security", "has_privilege"]
         ));
-        let load_user_state = SYSTEM_FUNCTIONS[24];
+        let load_user_state = SYSTEM_FUNCTIONS[25];
         assert_eq!(load_user_state.kind(), SystemFunctionKind::State);
         assert_eq!(load_user_state.id(), SYS_STATE_LOAD_USER_STATE_FUNCTION_ID);
         assert!(parts_equal(
             load_user_state.name_parts(),
             &["sys", "state", "load_user_state"]
         ));
-        let write_user_state = SYSTEM_FUNCTIONS[25];
+        let write_user_state = SYSTEM_FUNCTIONS[26];
         assert_eq!(write_user_state.kind(), SystemFunctionKind::State);
         assert_eq!(
             write_user_state.id(),
@@ -1472,7 +1508,7 @@ mod tests {
             ),
         ];
         for (index, (id, name, kind)) in expected.into_iter().enumerate() {
-            let entry = SYSTEM_FUNCTIONS[2 + index];
+            let entry = SYSTEM_FUNCTIONS[3 + index];
             assert_eq!(entry.id(), id);
             assert_eq!(entry.kind(), kind);
             assert_eq!(entry.name_parts().join("."), name);
@@ -1649,7 +1685,7 @@ mod tests {
             ),
         ];
         for (index, (id, name, kind)) in expected.into_iter().enumerate() {
-            let entry = SYSTEM_FUNCTIONS[12 + index];
+            let entry = SYSTEM_FUNCTIONS[13 + index];
             assert_eq!(entry.id(), id);
             assert_eq!(entry.kind(), kind);
             assert_eq!(entry.name_parts().join("."), name);
@@ -1814,7 +1850,7 @@ mod tests {
         ];
         for (index, id) in ids.into_iter().enumerate() {
             assert_eq!(id.to_bytes()[15], 0x40 + index as u8);
-            assert_eq!(SYSTEM_FUNCTIONS[12 + index].id(), id);
+            assert_eq!(SYSTEM_FUNCTIONS[13 + index].id(), id);
         }
     }
 
@@ -1833,7 +1869,7 @@ mod tests {
             ),
         ];
         for (index, (id, name, kind)) in expected.into_iter().enumerate() {
-            let entry = SYSTEM_FUNCTIONS[24 + index];
+            let entry = SYSTEM_FUNCTIONS[25 + index];
             assert_eq!(entry.id(), id);
             assert_eq!(entry.kind(), kind);
             assert_eq!(entry.name_parts().join("."), name);
@@ -1891,7 +1927,7 @@ mod tests {
         ];
         for (index, id) in ids.into_iter().enumerate() {
             assert_eq!(id.to_bytes()[15], 0x4c + index as u8);
-            assert_eq!(SYSTEM_FUNCTIONS[24 + index].id(), id);
+            assert_eq!(SYSTEM_FUNCTIONS[25 + index].id(), id);
         }
     }
 
