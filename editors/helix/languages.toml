@@ -28,8 +28,3 @@ command = "orna-lsp"
 [[grammar]]
 name = "orna"
 source = { path = "editors/tree-sitter-orna" }
-
-# Once the grammar is published, the git source can be used instead:
-# [[grammar]]
-# name = "orna"
-# source = { git = "https://example.invalid/OrnaDB/tree-sitter-orna", rev = "..." }
