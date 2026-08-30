@@ -10,16 +10,16 @@ use lsp_types::{
     DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
     NumberOrString, Position, SymbolKind,
 };
-use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
+use orna_compiler::{CompilerDiagnostic, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
+use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
     ObjectTypeDeclaration, OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration,
     QualifiedName, RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration,
-    SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
+    ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -30,14 +30,15 @@ pub struct StandardLibrary {
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V10 standard library snapshot.
+    /// Loads and verifies the retained V11 standard library.
     ///
     /// This runs once per server process. The checked library is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
-        let snapshot = retained_standard_library_snapshot().map_err(|error| error.to_string())?;
+        let snapshot =
+            retained_standard_library_v11_snapshot().map_err(|error| error.to_string())?;
         let verified =
-            verify_standard_library_snapshot(snapshot).map_err(|error| error.to_string())?;
+            verify_standard_library_v11_snapshot(snapshot).map_err(|error| error.to_string())?;
         let checked =
             check_standard_library_source(&verified).map_err(|error| error.to_string())?;
         Ok(Self { checked })
@@ -72,8 +73,6 @@ pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> V
         })
         .collect()
 }
-
-/// Returns the full compiler diagnostics of one document.
 pub fn check_document(
     document: &Document,
     standard: Option<&StandardLibrary>,
@@ -88,10 +87,16 @@ pub fn check_document(
             Ok(bundle) => bundle,
             Err(_) => return syntax_diagnostics(document, mapper),
         };
-    let report = match check_new_application(&bundle, &standard.checked) {
-        Ok(report) => report,
-        Err(_) => return syntax_diagnostics(document, mapper),
-    };
+    let application = orna_core::catalogue::CatalogueSnapshot::new(
+        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("the empty application catalogue is valid");
+    let context =
+        orna_compiler::StandardApplicationCheckContext::try_new(&application, &standard.checked)
+            .expect("the empty application catalogue is valid for the checked standard");
+    let report = orna_compiler::check_standard_application(&bundle, &context);
     report
         .diagnostics()
         .iter()
@@ -130,11 +135,17 @@ fn compiler_diagnostic(
 }
 
 fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
-    format!(
-        "{} {}",
+    let mut help = format!(
+        "{} {}: {}",
         diagnostic.code().as_str(),
+        diagnostic.code().title(),
         diagnostic.code().summary()
-    )
+    );
+    if let Some(next_step) = diagnostic.code().help() {
+        help.push_str(" Help: ");
+        help.push_str(next_step);
+    }
+    help
 }
 
 fn syntax_help(message: &str) -> String {
@@ -265,19 +276,19 @@ fn function_symbol<F>(
     mapper: &PositionMapper<'_>,
 ) -> DocumentSymbol
 where
-    F: FunctionLike,
+    F: FunctionDeclarationView,
 {
     let children = declaration
-        .parameter_names()
-        .into_iter()
-        .map(|(name, span)| DocumentSymbol {
-            name,
+        .parameters()
+        .iter()
+        .map(|parameter| DocumentSymbol {
+            name: parameter.name.text.clone(),
             detail: Some("parameter".to_owned()),
             kind: SymbolKind::VARIABLE,
             tags: None,
             deprecated: None,
-            range: mapper.range(&span),
-            selection_range: mapper.range(&span),
+            range: mapper.range(&parameter.name.span),
+            selection_range: mapper.range(&parameter.name.span),
             children: None,
         })
         .collect();
@@ -294,13 +305,13 @@ where
 }
 
 /// A common view over SERVER and CLIENT function declarations.
-pub trait FunctionLike {
+pub trait FunctionDeclarationView {
     fn name(&self) -> &QualifiedName;
     fn span(&self) -> &SourceSpan;
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)>;
+    fn parameters(&self) -> &[ServerFunctionParameter];
 }
 
-impl FunctionLike for ServerFunctionDeclaration {
+impl FunctionDeclarationView for ServerFunctionDeclaration {
     fn name(&self) -> &QualifiedName {
         &self.name
     }
@@ -309,15 +320,12 @@ impl FunctionLike for ServerFunctionDeclaration {
         &self.span
     }
 
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
+    fn parameters(&self) -> &[ServerFunctionParameter] {
+        &self.parameters
     }
 }
 
-impl FunctionLike for ClientFunctionDeclaration {
+impl FunctionDeclarationView for ClientFunctionDeclaration {
     fn name(&self) -> &QualifiedName {
         &self.name
     }
@@ -326,11 +334,8 @@ impl FunctionLike for ClientFunctionDeclaration {
         &self.span
     }
 
-    fn parameter_names(&self) -> Vec<(String, SourceSpan)> {
-        self.parameters
-            .iter()
-            .map(|parameter| (parameter.name.text.clone(), parameter.name.span.clone()))
-            .collect()
+    fn parameters(&self) -> &[ServerFunctionParameter] {
+        &self.parameters
     }
 }
 
@@ -3227,10 +3232,6 @@ fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
 fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
     slice.map(|slice| slice.text.as_str())
 }
-#[allow(dead_code)]
-pub fn completion(parse: &Parse, standard: Option<&StandardLibrary>) -> Vec<CompletionItem> {
-    completion_at(parse, standard, None, None)
-}
 
 /// Returns global completion items plus fields for an accepted CLIENT path at
 /// the requested source byte.
@@ -3679,7 +3680,8 @@ fn client_field_path_at_byte(
 #[cfg(test)]
 mod tests {
     use super::{
-        StandardLibrary, completion, declaration_at, hover, references, type_owner_name_from_source,
+        StandardLibrary, completion_at, declaration_at, hover, references,
+        type_owner_name_from_source,
     };
     use crate::documents::{Document, PositionMapper};
     use lsp_types::{Hover, HoverContents, Position, Range};
@@ -3699,24 +3701,24 @@ mod tests {
     }
 
     #[test]
-    fn standard_library_loads_verified_current_snapshot() {
-        let standard = StandardLibrary::load().expect("retained standard must load");
+    fn standard_library_loads_verified_v11_snapshot() {
+        let standard = StandardLibrary::load().expect("retained V11 standard must load");
         let snapshot = standard.checked.verified_snapshot();
 
         assert_eq!(
             snapshot.revision(),
-            orna_standard::STANDARD_LIBRARY_REVISION_ID
+            orna_standard::STANDARD_LIBRARY_V11_REVISION_ID
         );
         assert_eq!(
             snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_REVISION_ID
+            orna_standard::STANDARD_SOURCE_V11_REVISION_ID
         );
     }
 
     #[test]
     fn completion_includes_canonical_scalar_type_spellings() {
         let parse = orna_syntax::parse("");
-        let labels: Vec<_> = completion(&parse, None)
+        let labels: Vec<_> = completion_at(&parse, None, None, None)
             .into_iter()
             .map(|item| item.label)
             .collect();

@@ -11,41 +11,48 @@ Give Orna compiler failures the same practical quality as Rust, SQLite, Turso, P
 - keep wording stable, direct, and free of internal implementation terms
 - keep machine-readable output separate from human terminal output
 
-## Current boundary
+## Current implementation
 
-`CompilerDiagnostic` contains a stable code, a raw message, a logical path, and an exclusive UTF-8 byte span. `ParseReport` retains the exact source text in each `ParsedSourceUnit`. The server currently discards that text before rendering and emits one escaped line:
+`CompilerDiagnostic` contains a stable code, raw message, logical path, and
+exclusive UTF-8 byte span. `ParseReport` retains the exact source text in each
+`ParsedSourceUnit`.
 
-```
-path:start..end: ORNA0001: message
-```
+The server exposes two diagnostic renderings:
 
-The LSP maps the same raw message and byte span to an LSP diagnostic. The raw-call protocol is not a compiler-diagnostic transport and should not be changed for this work.
+- the established machine format, which preserves byte spans and escaped
+  messages; and
+- a Rust-style human format with line/column locations, source context,
+  underlines, optional colour, and bounded help text.
 
-The current one-line output is an established contract in ADR 0018 and in the source-check, editor-tooling, and LSP tests. A human formatter must therefore be additive or explicitly versioned. It must not silently change the machine contract.
+Source commands keep the machine format for non-terminal output. Human output
+is selected for terminal diagnostics without changing the machine contract.
+The LSP maps the same raw message and byte span to an LSP diagnostic. The
+raw-call protocol is not a compiler-diagnostic transport and is unchanged.
 
-## Proposed phases
+## Implementation phases
 
-### Phase 1: source-aware presentation layer
+### Phase 1: source-aware presentation layer (partially implemented)
 
-Add a renderer-facing source context type. It should derive, without rereading files:
+The initial renderer derives, without rereading files:
 
 - one-based line and column for display
 - the complete source line containing the start of the span
-- a UTF-8-safe underline range
-- a bounded set of adjacent lines for multi-line spans
-- an explicit EOF marker for zero-width end-of-file diagnostics
+- a caret range for the source line
+- a fallback location when the diagnostic path is absent from the report
 
-Keep the original byte offsets and raw message unchanged. Use `ParsedSourceUnit::source_text()` and avoid `syntax_text()`, which allocates a new string.
+The implementation keeps the original byte offsets and raw message unchanged.
+It uses `ParsedSourceUnit::source_text()` and avoids `syntax_text()`, which
+allocates a new string.
 
-Add focused tests for:
+Focused regression coverage currently covers:
 
-- ASCII source
-- CRLF source
-- multibyte and combining characters
+- an ASCII source diagnostic with line, column, source context, and help
 - tabs
-- zero-width EOF spans
-- multiline spans
-- a diagnostic whose path is not found in the supplied report
+- the machine-format contract
+- opt-in ANSI output
+
+Bounded long-line rendering, explicit EOF handling, and readable multiline
+spans remain open work.
 
 ### Phase 2: structured diagnostic metadata
 
@@ -69,9 +76,10 @@ Create a central wording catalogue for parser and semantic diagnostics. Each ent
 
 Use direct wording. Do not mention parser state, implementation gaps, or internal phase names.
 
-### Phase 3: human terminal formatter
+### Phase 3: human terminal formatter (initial implementation)
 
-Add an explicit human format for source commands. The formatter should follow the useful parts of rustc and database CLIs:
+The source commands expose an initial human format that follows the useful
+parts of rustc and database CLIs:
 
 ```
 error[ORNA0001]: expected a schema name after CREATE SCHEMA
@@ -83,17 +91,19 @@ error[ORNA0001]: expected a schema name after CREATE SCHEMA
    = help: write a schema name before the semicolon
 ```
 
-Rules:
+The current implementation:
 
-- plain output remains safe when stderr is not a terminal
-- colour follows `--color auto|always|never`
-- no colour appears in machine output
-- diagnostics remain on stderr; successful result data remains on stdout
-- multiple diagnostics retain compiler order
-- long lines and multiline spans are bounded and readable
-- control characters in source excerpts are escaped or displayed safely
+- selects human output for terminal diagnostics and preserves machine output
+  for the non-terminal default
+- follows `--color auto|always|never` where coloured human output is exposed
+- emits no colour in machine output
+- keeps diagnostics on stderr and successful result data on stdout
+- retains compiler order for multiple diagnostics
 
-Possible command shape: retain the current machine output as the default for compatibility and add `--format human|machine`, or make human output the terminal default while requiring `--format machine` for scripts. This choice needs an ADR update and migration tests.
+The compatibility rule is terminal-sensitive rather than a new `--format`
+flag: existing machine output remains available for scripts, while terminal
+users receive the human presentation. Bounded long-line and multiline
+rendering, and safe control-character presentation, remain open work.
 
 ### Phase 4: semantic precision and intelligent suggestions
 
@@ -115,7 +125,7 @@ Each improvement needs a focused regression test and must preserve LSP raw messa
 - no compiler protocol changes
 - no rewrite of the resolver
 - no changes to runtime invocation failure messages
-- no silent change to existing one-line source-check output
+- no change to the machine-readable one-line source-check output
 - no speculative suggestions based on fuzzy or incomplete catalogue data
 
 ## Validation
@@ -129,4 +139,6 @@ For each phase:
 - run the relevant package check
 - inspect plain, colour-disabled, and colour-enabled output manually
 
-Before completion, update ADR 0018 and the source/apply/diff/editor-tooling documentation to describe the chosen formats and compatibility rules.
+ADR 0018 and editor-tooling document the current compatibility rules. Update
+them, and any source/apply/diff documentation added later, whenever a remaining
+phase changes the diagnostic format.

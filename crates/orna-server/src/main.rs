@@ -1,3 +1,4 @@
+#![allow(clippy::single_element_loop)]
 use std::{
     io::{self, IsTerminal, Write},
     process::ExitCode,
@@ -47,6 +48,7 @@ fn main() -> ExitCode {
                 | Command::SourceApply(_)
                 | Command::SourceDiff(_)
                 | Command::Invoke(_)
+                | Command::State(_)
                 | Command::SecurityGrantExecute(_)
                 | Command::SecurityAdmin(_)
                 | Command::Inspect(_)
@@ -330,9 +332,12 @@ fn main() -> ExitCode {
                 arguments.explain,
                 arguments.runtime,
             );
-            let result = match endpoint {
+            let result = match &endpoint {
                 orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
                     orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
+                }
+                _ if endpoint_explicit => {
+                    orna_server::run_installed_invoke_at(&endpoint, request, &mut stdout, &mut stderr)
                 }
                 _ => orna_server::run_installed_invoke(request, &mut stdout, &mut stderr),
             };
@@ -1201,7 +1206,7 @@ mod tests {
             vec!["orna", "server", "backend-shell", "select 1"],
             vec!["orna", "server", "upgrade", "--force"],
         ] {
-            assert_eq!(parse_command(arguments(&values)), None);
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
     }
 
@@ -1611,11 +1616,13 @@ mod tests {
                 Some(RuntimeFamily::Qt),
             ))
         );
+        assert_eq!(
+            parse_command(arguments(&["orna", "--runtime", "tty"])),
+            parse_command(arguments(&["orna", "--runtime", "tty", "repl"])),
+        );
         for values in [
             vec!["orna", "--runtime", "gtk", "invoke", "std.invoke.echo"],
             vec!["orna", "--runtime"],
-            vec!["orna", "--runtime", "tty"],
-            vec!["orna", "--runtime", "tty", "invoke"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
@@ -2235,17 +2242,28 @@ mod tests {
     }
 
     #[test]
-    fn help_text_is_short_and_describes_the_session_workflow() {
+    fn help_text_describes_the_direct_session_commands() {
         let top_level = help_text(HelpTopic::TopLevel);
         assert!(top_level.contains("Orna command line"));
         assert!(top_level.contains("function-backed REPL"));
-        for command in ["invoke", "source", "inspect", "repl", "--daemon", "--db"] {
+        for command in [
+            "invoke",
+            "repl",
+            "source",
+            "inspect",
+            "--daemon",
+            "--db",
+            "--runtime",
+        ] {
             assert!(
                 top_level.contains(command),
                 "{command} is missing from top-level help",
             );
         }
-        assert!(!top_level.contains("security ..."));
+        assert!(top_level.contains("Operational Commands:"));
+        assert!(top_level.contains("server ..."));
+        assert!(top_level.contains("security ..."));
+        assert!(top_level.contains("raw-call ..."));
         assert!(!top_level.contains("runtime ..."));
         assert!(help_text(HelpTopic::Invoke).contains("--runtime <family>"));
         assert!(help_text(HelpTopic::State).contains("--value-file <path>"));
@@ -2257,9 +2275,14 @@ mod tests {
     }
 
     #[test]
-    fn usage_diagnostic_keeps_the_stable_command_list() {
-        assert!(USAGE.starts_with("Usage:\n  orna\n"));
-        assert!(USAGE.contains("orna raw-call"));
+    fn usage_diagnostic_keeps_the_direct_command_list() {
+        assert!(USAGE.starts_with(
+            "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n"
+        ));
+        for command in ["invoke", "repl", "source", "inspect", "raw-call"] {
+            assert!(USAGE.contains(command));
+        }
+        assert!(USAGE.contains("orna raw-call <canonical-function-id>"));
         assert!(!USAGE.ends_with('\n'));
         assert_ne!(USAGE, HELP_TOP_LEVEL);
     }
@@ -2382,7 +2405,6 @@ mod tests {
 
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
-        assert!(coloured.contains("\x1b[1;36mHost Mode:\x1b[0m"));
-        assert!(coloured.contains("function-backed REPL"));
+        assert!(coloured.contains("\x1b[1;36mCommands:\x1b[0m"));
     }
 }
