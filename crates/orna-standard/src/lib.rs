@@ -2852,6 +2852,24 @@ pub fn prepare_standard_upgrade_v9_to_v10(
     )
 }
 
+/// Prepares the append-only `orna.std/10` to `orna.std/11` standard upgrade.
+pub fn prepare_standard_upgrade_v10_to_v11(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    require_standard_upgrade_parent(active, STANDARD_LIBRARY_V10_REVISION_ID)?;
+    let version_ten = retained_standard_library_v10_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v10_snapshot(version_ten)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v11_snapshot,
+        verify_standard_library_v11_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
 fn require_standard_upgrade_parent(
     active: &ActiveDatabaseRevision,
     expected: StandardLibraryRevisionId,
