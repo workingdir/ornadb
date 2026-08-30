@@ -15,6 +15,7 @@ mod tests {
         retained_standard_library_v9_snapshot, verify_standard_library_v9_snapshot,
     };
 
+    #[test]
     fn checks_new_application_source_against_verified_v9_standard() {
         let snapshot = retained_standard_library_v9_snapshot()
             .and_then(verify_standard_library_v9_snapshot)
@@ -103,25 +104,11 @@ mod tests {
     }
 }
 
-use crate::source_diagnostics;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SourceCheckResult {
     Success,
     Failure,
     Usage,
-}
-
-pub(super) fn run(path: &str, output: &mut impl Write) -> SourceCheckResult {
-    run_with_output(path, output, false, false)
-}
-
-pub(super) fn run_with_human_output(
-    path: &str,
-    output: &mut impl Write,
-    human_output: bool,
-) -> SourceCheckResult {
-    run_with_output(path, output, human_output, false)
 }
 
 pub(super) fn run_with_output(

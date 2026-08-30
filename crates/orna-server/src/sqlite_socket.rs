@@ -133,12 +133,11 @@ async fn run_sqlite_server_async(database_path: PathBuf) -> Result<(), SqliteSoc
     ApplicationRevisionStore::bootstrap(&store)
         .await
         .map_err(|source| storage_error("could not bootstrap SQLite database", source))?;
-    let active = ApplicationRevisionStore::recover(&store)
+    ApplicationRevisionStore::recover(&store)
         .await
         .map_err(|source| storage_error("could not recover SQLite database", source))?;
-    let versions = ProtocolVersions::new(active);
     let (listener, _cleanup) = bind_socket(&socket_path)?;
-    run_listener(listener, Arc::new(store), versions).await
+    run_listener(listener, Arc::new(store)).await
 }
 
 fn sqlite_error(context: &'static str, source: SqliteError) -> SqliteSocketError {
@@ -433,7 +432,6 @@ impl RequestedVersion {
 async fn run_listener(
     listener: UnixListener,
     store: Arc<SqliteRevisionStore>,
-    versions: ProtocolVersions,
 ) -> Result<(), SqliteSocketError> {
     let mut interrupt = signal(SignalKind::interrupt())
         .map_err(|source| SqliteSocketError::io("could not install SIGINT handler", source))?;
@@ -456,10 +454,9 @@ async fn run_listener(
                     continue;
                 };
                 let store = Arc::clone(&store);
-                let versions = versions.clone();
                 workers.spawn(async move {
                     let _connection_permit = connection_permit;
-                    let _ = serve_connection(store, versions, stream).await;
+                    let _ = serve_connection(store, stream).await;
                 });
             }
             finished = workers.join_next(), if !workers.is_empty() => {
@@ -476,7 +473,6 @@ async fn run_listener(
 
 async fn serve_connection(
     store: Arc<SqliteRevisionStore>,
-    versions: ProtocolVersions,
     mut stream: UnixStream,
 ) -> Result<(), SqliteSocketError> {
     let mut hello = [0_u8; 12];
@@ -495,6 +491,10 @@ async fn serve_connection(
     let Some(requested) = RequestedVersion::from_hello(&hello) else {
         return Ok(());
     };
+    let active = ApplicationRevisionStore::recover(store.as_ref())
+        .await
+        .map_err(|source| storage_error("could not recover SQLite database", source))?;
+    let versions = ProtocolVersions::new(active);
     stream
         .write_all(requested.acknowledgement())
         .await

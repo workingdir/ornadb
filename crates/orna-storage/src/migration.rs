@@ -1959,14 +1959,14 @@ mod tests {
         assert_eq!(migration.version(), 46);
         assert_eq!(migration.name().as_str(), "application_migrations");
         assert_eq!(migration.schemas().len(), 1);
-        assert_eq!(migration.tables().len(), 6);
+        assert_eq!(migration.tables().len(), 7);
         assert_eq!(
             migration
                 .tables()
                 .iter()
                 .filter(|table| table.target() == MigrationBackendTarget::Sqlite)
                 .count(),
-            5
+            6
         );
         let ledger = migration
             .tables()

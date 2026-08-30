@@ -206,8 +206,8 @@ use orna_protocol::{
     decode_retained_invoke_request, encode_active_value, encode_rows_value,
 };
 use orna_standard::{
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    STD_INVOKE_ECHO_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
 };
 use sha2::{Digest, Sha256};
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
@@ -541,9 +541,13 @@ struct ResourceProducerLifecycle {
 enum ResourceProducerFailureStage {
     None,
     PreAcceptance,
+    #[cfg(feature = "test-hooks")]
     PostAcceptance,
+    #[cfg(feature = "test-hooks")]
     PostAcceptanceAudit,
+    #[cfg(feature = "test-hooks")]
     PostAcceptanceAuditCancellation,
+    #[cfg(feature = "test-hooks")]
     PostAcceptanceCancelledExitAudit,
 }
 
@@ -4770,6 +4774,7 @@ async fn run_authenticated_server_resource_producer_task_body(
         .await;
         return finish_resource_producer_failure(lifecycle, operation);
     }
+    #[cfg(feature = "test-hooks")]
     if failure_stage == ResourceProducerFailureStage::PostAcceptanceAuditCancellation {
         cancellation.request_cancel();
     }
@@ -4787,6 +4792,7 @@ async fn run_authenticated_server_resource_producer_task_body(
         if !security_snapshots_match(&execution_security, &security) {
             return Err(PostgresKernelError::SecurityFunctionSetMismatch);
         }
+        #[cfg(feature = "test-hooks")]
         if matches!(
             failure_stage,
             ResourceProducerFailureStage::PostAcceptanceAudit
@@ -4839,6 +4845,7 @@ async fn run_authenticated_server_resource_producer_task_body(
         },
     };
     send_resource_producer_ready(ready_sender, Ok(ResourceProducerReady::Accepted(accepted)));
+    #[cfg(feature = "test-hooks")]
     if failure_stage == ResourceProducerFailureStage::PostAcceptance {
         transaction
             .query_one(
@@ -4848,6 +4855,7 @@ async fn run_authenticated_server_resource_producer_task_body(
             .await
             .map_err(PostgresKernelError::Database)?;
     }
+    #[cfg(feature = "test-hooks")]
     if failure_stage == ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit {
         cancellation.request_cancel();
     }
@@ -4960,6 +4968,7 @@ async fn run_authenticated_server_resource_producer_task_body(
             if commit_started {
                 lifecycle.terminal_commit_started = true;
             }
+            #[cfg(feature = "test-hooks")]
             if failure_stage == ResourceProducerFailureStage::PostAcceptanceCancelledExitAudit {
                 transaction
                     .query_one(

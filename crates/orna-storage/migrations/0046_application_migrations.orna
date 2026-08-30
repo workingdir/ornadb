@@ -110,6 +110,17 @@ MIGRATION 46 application_migrations {
         CHECK (octet_length(digest) = 32);
     }
 
+    TABLE SQLITE _orna_kernel.revision_snapshots {
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN payload BYTES NOT NULL;
+
+        PRIMARY KEY (source_revision_id, catalogue_revision_id);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (octet_length(catalogue_revision_id) = 16);
+        CHECK (octet_length(payload) > 0);
+    }
+
     REVOKE POSTGRES ALL PRIVILEGES ON SCHEMA _orna_kernel FROM PUBLIC;
     REVOKE POSTGRES ALL PRIVILEGES ON TABLE _orna_kernel.application_migrations FROM PUBLIC;
 }

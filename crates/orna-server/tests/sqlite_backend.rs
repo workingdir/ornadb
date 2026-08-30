@@ -7,7 +7,20 @@
 
 #![cfg(unix)]
 
-use orna_protocol::{ClientFrame, ServerFrame, decode_server_frame, encode_client_frame};
+use nix::{
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
+use orna_core::{
+    FunctionId,
+    revision::{ActiveDatabaseRevision, RevisionPair},
+};
+use orna_protocol::{
+    ClientFrame, ServerFrame, decode_catalogue_server_frame, decode_server_frame,
+    encode_catalogue_client_frame, encode_client_frame,
+};
+use orna_sqlite::{SqliteConfig, SqliteRevisionStore};
+use orna_storage::MigrationLedgerEntry;
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -29,6 +42,9 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const FRAME_HEADER_LENGTH: usize = 18;
 const V1_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const V1_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
+const V2_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
+const V2_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00";
+const UNSUPPORTED_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x06\x00\x00\x00\x00";
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 const SERVER_FUNCTION_FIXTURE: &[u8] = include_bytes!("fixtures/server_function_dogfood.orna");
@@ -144,9 +160,13 @@ impl RunningServer {
         wait_for_socket(self.child_mut(), path)
     }
 
-    fn stop(mut self) -> io::Result<Output> {
-        let mut child = self.child.take().expect("running server child");
-        let _ = child.kill();
+    fn stop_with_signal(mut self, signal: Signal) -> io::Result<Output> {
+        let child = self.child.take().expect("running server child");
+        let pid = Pid::from_raw(
+            i32::try_from(child.id())
+                .map_err(|_| io::Error::other("SQLite server process id overflow"))?,
+        );
+        kill(pid, signal).map_err(io::Error::other)?;
         wait_bounded(child)
     }
 }
@@ -204,6 +224,14 @@ fn complete_v1_handshake(stream: &mut UnixStream) -> io::Result<()> {
     assert_eq!(acknowledgement, V1_ACK, "v1 handshake acknowledgement");
     Ok(())
 }
+fn complete_v2_handshake(stream: &mut UnixStream) -> io::Result<()> {
+    stream.write_all(&V2_HELLO)?;
+    stream.flush()?;
+    let mut acknowledgement = [0_u8; V2_ACK.len()];
+    stream.read_exact(&mut acknowledgement)?;
+    assert_eq!(acknowledgement, V2_ACK, "v2 handshake acknowledgement");
+    Ok(())
+}
 
 fn read_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut header = [0_u8; FRAME_HEADER_LENGTH];
@@ -233,6 +261,35 @@ fn source_arguments(database: &Path, command: &str, source: &Path) -> Vec<OsStri
         OsString::from(command),
         source.as_os_str().to_os_string(),
     ]
+}
+fn sqlite_revision_state(database: &Path) -> (RevisionPair, Vec<MigrationLedgerEntry>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite state runtime");
+    runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(database.to_owned()))
+            .await
+            .expect("open SQLite state");
+        let active = store.recover().await.expect("recover SQLite state");
+        let ledger = store.read_ledger().await.expect("read SQLite ledger");
+        (active.pair(), ledger)
+    })
+}
+fn sqlite_active(database: &Path) -> ActiveDatabaseRevision {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite active revision runtime");
+    runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(database.to_owned()))
+            .await
+            .expect("open SQLite active revision");
+        store
+            .recover()
+            .await
+            .expect("recover SQLite active revision")
+    })
 }
 
 #[test]
@@ -320,6 +377,109 @@ fn local_source_apply_emits_json_and_same_source_diff_is_empty() {
         "empty semantic diff has two lines"
     );
 }
+#[test]
+fn local_source_diff_is_read_only_and_rejects_fresh_database() {
+    let directory = TestDirectory::new("source-diff").expect("scratch directory");
+    let database = directory.path().join("source-diff.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+
+    let missing = run_orna(
+        directory.path(),
+        &source_arguments(&database, "diff", &source),
+    )
+    .expect("bounded fresh-database diff");
+    assert_eq!(missing.status.code(), Some(1), "fresh diff: {missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("could not open SQLite database"),
+        "fresh diff must report the missing database: {:?}",
+        missing.stderr
+    );
+    assert!(
+        !database.exists(),
+        "fresh-file source diff must not create a database"
+    );
+
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("bounded source apply");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let before = sqlite_revision_state(&database);
+
+    let reduced = directory.path().join("reduced.orna");
+    fs::write(&reduced, b"CREATE SCHEMA dogfood;\n").expect("write reduced source");
+    let reduced_diff = run_orna(
+        directory.path(),
+        &source_arguments(&database, "diff", &reduced),
+    )
+    .expect("bounded semantic source diff");
+    assert_eq!(
+        reduced_diff.status.code(),
+        Some(0),
+        "semantic source diff: {reduced_diff:?}"
+    );
+    assert!(
+        reduced_diff.stderr.is_empty(),
+        "semantic source diff must not write stderr: {:?}",
+        reduced_diff.stderr
+    );
+    let reduced_text =
+        String::from_utf8(reduced_diff.stdout).expect("semantic source diff output is UTF-8");
+    assert!(
+        reduced_text.starts_with("semantic diff ") && reduced_text.contains("\n- "),
+        "semantic source diff must render dropped definitions: {reduced_text:?}"
+    );
+    assert_eq!(
+        sqlite_revision_state(&database),
+        before,
+        "source diff must not mutate active state or migration ledger"
+    );
+}
+
+#[test]
+fn local_source_apply_diagnostics_leave_active_state_and_ledger_unchanged() {
+    let directory = TestDirectory::new("source-diagnostics").expect("scratch directory");
+    let database = directory.path().join("source-diagnostics.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("bounded source apply");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let before = sqlite_revision_state(&database);
+
+    let invalid = directory.path().join("invalid.orna");
+    fs::write(&invalid, b"CREATE SCHEMA ;\n").expect("write invalid source");
+    let failed = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &invalid),
+    )
+    .expect("bounded diagnostic source apply");
+    assert_eq!(
+        failed.status.code(),
+        Some(1),
+        "diagnostic apply: {failed:?}"
+    );
+    assert!(
+        failed.stdout.is_empty(),
+        "diagnostic source apply must not emit a success document: {:?}",
+        failed.stdout
+    );
+    assert!(
+        !failed.stderr.is_empty(),
+        "diagnostic source apply must report diagnostics"
+    );
+    assert_eq!(
+        sqlite_revision_state(&database),
+        before,
+        "diagnostic source apply must not mutate active state or migration ledger"
+    );
+}
 
 #[test]
 fn local_sqlite_server_has_private_v1_socket_and_ping_pong() {
@@ -355,6 +515,181 @@ fn local_sqlite_server_has_private_v1_socket_and_ping_pong() {
         "SQLite socket must echo one valid v1 Ping token as Pong"
     );
     drop(stream);
+}
+#[test]
+fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
+    let directory = TestDirectory::new("socket-call").expect("scratch directory");
+    let database = directory.path().join("socket-call.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for raw socket call");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let document: Value = serde_json::from_slice(&applied.stdout).expect("source apply JSON");
+    let function = document["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions.iter().find(|entry| {
+                entry["qualified_name"]
+                    == Value::Array(vec![
+                        Value::String("dogfood".to_owned()),
+                        Value::String("read".to_owned()),
+                    ])
+            })
+        })
+        .and_then(|entry| entry["function_id"].as_str())
+        .and_then(|canonical| FunctionId::from_canonical(canonical).ok())
+        .expect("dogfood.read function identity");
+
+    let socket = socket_path(&database);
+    let mut server = RunningServer::spawn(directory.path(), &database).expect("SQLite server");
+    server
+        .wait_for_socket(&socket)
+        .expect("bounded socket readiness");
+    let mut stream = connect_socket(&socket).expect("connect raw-call socket");
+    complete_v1_handshake(&mut stream).expect("raw-call v1 handshake");
+
+    for frame in [
+        ClientFrame::CallRawStart {
+            stream: 1,
+            function,
+        },
+        ClientFrame::CallArgumentsComplete { stream: 1 },
+    ] {
+        stream
+            .write_all(&encode_client_frame(&frame).expect("encode raw-call frame"))
+            .expect("write raw-call frame");
+    }
+    stream.flush().expect("flush raw-call frames");
+    let mut accepted = false;
+    let mut completed = false;
+    for _ in 0..3 {
+        match decode_server_frame(&read_frame(&mut stream).expect("read raw-call response"))
+            .expect("decode raw-call response")
+        {
+            ServerFrame::CallAccepted {
+                stream: response_stream,
+                ..
+            } => {
+                assert_eq!(response_stream, 1);
+                accepted = true;
+            }
+            ServerFrame::EventBatch {
+                stream: response_stream,
+                ..
+            } => assert_eq!(response_stream, 1),
+            ServerFrame::CallCompleted {
+                stream: response_stream,
+            } => {
+                assert_eq!(response_stream, 1);
+                completed = true;
+                break;
+            }
+            response => panic!("unexpected raw-call response: {response:?}"),
+        }
+    }
+    assert!(accepted, "raw call must be accepted");
+    assert!(completed, "raw call must complete");
+
+    for frame in [
+        ClientFrame::CallRawStart {
+            stream: 2,
+            function: FunctionId::from_bytes([0xff; 16]),
+        },
+        ClientFrame::CallArgumentsComplete { stream: 2 },
+    ] {
+        stream
+            .write_all(&encode_client_frame(&frame).expect("encode unknown-target frame"))
+            .expect("write unknown-target frame");
+    }
+    stream.flush().expect("flush unknown-target frames");
+    assert_eq!(
+        decode_server_frame(&read_frame(&mut stream).expect("read unknown-target response"))
+            .expect("decode unknown-target response"),
+        ServerFrame::CallFailed {
+            stream: 2,
+            failure: orna_protocol::CallFailure::TargetUnavailable,
+        }
+    );
+}
+#[test]
+fn local_sqlite_socket_supports_v2_catalogue_calls() {
+    let directory = TestDirectory::new("socket-v2").expect("scratch directory");
+    let database = directory.path().join("socket-v2.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for v2 socket call");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let document: Value = serde_json::from_slice(&applied.stdout).expect("source apply JSON");
+    let function = document["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions.iter().find(|entry| {
+                entry["qualified_name"]
+                    == Value::Array(vec![
+                        Value::String("dogfood".to_owned()),
+                        Value::String("read".to_owned()),
+                    ])
+            })
+        })
+        .and_then(|entry| entry["function_id"].as_str())
+        .and_then(|canonical| FunctionId::from_canonical(canonical).ok())
+        .expect("dogfood.read function identity");
+    let active = sqlite_active(&database);
+
+    let socket = socket_path(&database);
+    let mut server = RunningServer::spawn(directory.path(), &database).expect("SQLite server");
+    server
+        .wait_for_socket(&socket)
+        .expect("bounded socket readiness");
+    let mut stream = connect_socket(&socket).expect("connect v2 socket");
+    complete_v2_handshake(&mut stream).expect("v2 handshake");
+    for frame in [
+        ClientFrame::CallRawStart {
+            stream: 1,
+            function,
+        },
+        ClientFrame::CallArgumentsComplete { stream: 1 },
+    ] {
+        stream
+            .write_all(
+                &encode_catalogue_client_frame(active.catalogue(), &frame)
+                    .expect("encode v2 call frame"),
+            )
+            .expect("write v2 call frame");
+    }
+    stream.flush().expect("flush v2 call frames");
+    let mut accepted = false;
+    let mut completed = false;
+    for _ in 0..3 {
+        match decode_catalogue_server_frame(
+            active.catalogue(),
+            &read_frame(&mut stream).expect("read v2 call response"),
+        )
+        .expect("decode v2 call response")
+        {
+            ServerFrame::CallAccepted { stream, .. } => {
+                assert_eq!(stream, 1);
+                accepted = true;
+            }
+            ServerFrame::EventBatch { stream, .. } => assert_eq!(stream, 1),
+            ServerFrame::CallCompleted { stream } => {
+                assert_eq!(stream, 1);
+                completed = true;
+                break;
+            }
+            response => panic!("unexpected v2 call response: {response:?}"),
+        }
+    }
+    assert!(accepted, "v2 raw call must be accepted");
+    assert!(completed, "v2 raw call must complete");
 }
 
 #[test]
@@ -409,7 +744,14 @@ fn sqlite_socket_preserves_regular_occupants_stale_socket_replacement_and_live_s
     let mut stale_stream = connect_socket(&socket).expect("connect replacement server");
     complete_v1_handshake(&mut stale_stream).expect("replacement server v1 handshake");
     drop(stale_stream);
-    let _ = stale_server.stop().expect("bounded stale server shutdown");
+    let stale_output = stale_server
+        .stop_with_signal(Signal::SIGINT)
+        .expect("bounded stale server shutdown");
+    assert!(stale_output.status.success());
+    assert!(
+        !socket.exists(),
+        "graceful stale-server shutdown removes socket"
+    );
 
     let mut live_server = RunningServer::spawn(directory.path(), &database).expect("live server");
     live_server
@@ -437,7 +779,72 @@ fn sqlite_socket_preserves_regular_occupants_stale_socket_replacement_and_live_s
     let mut live_stream = connect_socket(&socket).expect("live socket remains connectable");
     complete_v1_handshake(&mut live_stream).expect("live server remains responsive");
     drop(live_stream);
-    let _ = live_server.stop().expect("bounded live server shutdown");
+    let live_output = live_server
+        .stop_with_signal(Signal::SIGTERM)
+        .expect("bounded live server shutdown");
+    assert!(live_output.status.success());
+    assert!(
+        !socket.exists(),
+        "graceful live-server shutdown removes socket"
+    );
+}
+#[test]
+fn local_sqlite_socket_rejects_unknown_versions_and_handles_concurrent_clients() {
+    let directory = TestDirectory::new("socket-concurrency").expect("scratch directory");
+    let database = directory.path().join("concurrency.sqlite");
+    let socket = socket_path(&database);
+    let mut server = RunningServer::spawn(directory.path(), &database).expect("SQLite server");
+    server
+        .wait_for_socket(&socket)
+        .expect("bounded socket readiness");
+
+    let mut unsupported = connect_socket(&socket).expect("connect unsupported-version socket");
+    unsupported
+        .write_all(&UNSUPPORTED_HELLO)
+        .expect("write unsupported hello");
+    unsupported.flush().expect("flush unsupported hello");
+    let mut acknowledgement = [0_u8; 12];
+    let bytes_read = unsupported
+        .read(&mut acknowledgement)
+        .expect("read unsupported-version response");
+    assert_eq!(
+        bytes_read, 0,
+        "unsupported protocol versions must receive no acknowledgement"
+    );
+
+    let mut clients = Vec::new();
+    for index in 0_u8..8 {
+        let socket = socket.clone();
+        clients.push(thread::spawn(move || -> io::Result<()> {
+            let mut stream = connect_socket(&socket)?;
+            complete_v1_handshake(&mut stream)?;
+            let token = [index; 8];
+            stream.write_all(
+                &encode_client_frame(&ClientFrame::Ping { token }).map_err(io::Error::other)?,
+            )?;
+            stream.flush()?;
+            let frame = read_frame(&mut stream)?;
+            assert_eq!(
+                decode_server_frame(&frame).map_err(io::Error::other)?,
+                ServerFrame::Pong { token }
+            );
+            Ok(())
+        }));
+    }
+    for client in clients {
+        client
+            .join()
+            .expect("concurrent socket client thread")
+            .expect("concurrent socket client");
+    }
+    let output = server
+        .stop_with_signal(Signal::SIGTERM)
+        .expect("bounded concurrent server shutdown");
+    assert!(output.status.success());
+    assert!(
+        !socket.exists(),
+        "graceful shutdown removes concurrent socket"
+    );
 }
 
 fn run_orna_async_child(directory: &Path, database: &Path) -> io::Result<Child> {

@@ -2,24 +2,30 @@
 
 **Status:** Accepted design direction
 
+This ADR records an accepted design direction only. The current checkout retains
+the standard-library chain through V9; no V10 source unit, exports, or math test
+suite is claimed as implemented here.
+
 ## Decision
 
-`orna.std/10` appends `stdlib/std/math.orna` to the accepted standard-library
-source bundle. The unit defines three pure CLIENT functions:
+The proposed `orna.std/10` would append `stdlib/std/math.orna` to the accepted
+standard-library source bundle. The unit would define three pure CLIENT
+functions:
 
 * `std.math.increment(p_value INTEGER) RETURNS INTEGER`
 * `std.math.decrement(p_value INTEGER) RETURNS INTEGER`
 * `std.math.is_zero(p_value INTEGER) RETURNS BOOLEAN`
 
-The function bodies are ordinary Orna expressions. The compiler lowers their
-arithmetic and comparison expressions to the version-10 CLIENT control-flow
-artifact. The standard source checker, retained snapshot, upgrade preparation,
-and client evaluator use the same durable function, parameter, revision,
-reference, and artifact identities.
+The function bodies would be ordinary Orna expressions. The compiler would
+lower their arithmetic and comparison expressions to the version-10 CLIENT
+control-flow artifact. If implemented, the standard source checker, retained
+snapshot, upgrade preparation, and client evaluator would use the same durable
+function, parameter, revision, reference, and artifact identities.
 
-The V10 source unit is an append-only child of V9. Earlier standard snapshots
-remain immutable. The source unit, catalogue revision, source revision, and
-function revisions have fixed identities and canonical digest checks.
+If implemented, the V10 source unit would be an append-only child of V9.
+Earlier standard snapshots would remain immutable. The source unit, catalogue
+revision, source revision, and function revisions would have fixed identities
+and canonical digest checks.
 
 The CLIENT execution-fuel and call-depth limits remain host safety controls.
 They do not change the source language model. `std.math` is pure and does not
@@ -27,12 +33,12 @@ perform database, filesystem, process, network, or runtime operations.
 
 ## Rationale
 
-A standard function must be readable and changeable as `.orna` source, not only
-represented by a Rust intrinsic. A small arithmetic family gives application
-source a useful standard dependency while exercising the existing typed CLIENT
-expression and control-flow path. An application fixture uses all three
-functions inside a `WHILE` loop and runs through source checking, preparation,
-authorisation, and evaluation.
+A standard function should be readable and changeable as `.orna` source, not
+only represented by a Rust intrinsic. A small arithmetic family would give
+application source a useful standard dependency while exercising the existing
+typed CLIENT expression and control-flow path. A future application fixture
+would use all three functions inside a `WHILE` loop and run through source
+checking, preparation, authorisation, and evaluation.
 
 This slice does not accept SERVER procedural bodies, `FOR` loops, general
 collection semantics, exception tails, or unbounded host execution. Those are
@@ -58,15 +64,13 @@ Rejected for this slice. SERVER procedural execution needs a separate SQL
 statement plan, transaction, audit, and PostgreSQL execution contract. Mixing
 it with standard-source versioning would make the change hard to verify.
 
-## Evidence
+## Proposed evidence
 
-* `stdlib/std/math.orna` is the retained source unit.
-* `crates/orna-compiler/src/resolver.rs` checks the source and builds the
-  canonical CLIENT control-flow executable records.
-* `crates/orna-standard/src/lib.rs` retains, verifies, and prepares V10.
-* `crates/orna-server/tests/fixtures/std_math_dogfood.orna` uses the standard
-  functions from ordinary Orna control flow.
-* `crates/orna-standard/tests/v10_math.rs` verifies the retained source and
-  artifact shape.
-* `crates/orna-server/tests/v10_math_dogfood.rs` proves the normal offline
-  check, prepare, authorise, and evaluate path.
+The following evidence is required before this design can be promoted to an
+implemented slice; these paths are not present in the current checkout:
+
+* a retained `stdlib/std/math.orna` source unit and V10 standard export;
+* compiler coverage for the canonical CLIENT control-flow executable records;
+* an adapter/standard test that verifies retained source and artifact shape;
+* an application fixture proving the normal offline check, prepare, authorise,
+  and evaluate path.

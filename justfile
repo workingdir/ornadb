@@ -3,6 +3,16 @@ default: check
 # Run the default local fmt/build/lint/non-ignored test gate; CI also runs separate editor-tooling and Compose kernel gates.
 check: fmt build lint test
 
+# Check the SQLite adapter, storage contract, and local CLI binary offline.
+sqlite-check:
+    cargo check --offline -p orna-storage -p orna-sqlite
+    cargo check --offline -p orna-server --bin orna
+
+# Run the deterministic SQLite adapter and process-boundary smoke tests offline.
+sqlite-smoke:
+    cargo run --offline -p orna-sqlite --example revision_store_smoke
+    cargo test --offline -p orna-server --test sqlite_backend -- --nocapture
+
 # Verify formatting without changing source files.
 fmt:
     cargo fmt --all -- --check

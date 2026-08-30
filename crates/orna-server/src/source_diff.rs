@@ -3,9 +3,9 @@
 //! [`run_installed_source_diff`] checks one application source file against
 //! the fixed private instance, prepares its candidate revision without
 //! applying it, and renders semantic changes between the candidate and active
-//! catalogues and their executable function revisions. The command never
-//! writes a standard stream, never installs a candidate, and never changes the
-//! active revision pair.
+//! catalogues and their executable function revisions. It writes only the
+//! rendered report to its caller-provided output; it never installs a
+//! candidate and never changes the active revision pair.
 
 use std::{
     error::Error,

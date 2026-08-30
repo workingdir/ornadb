@@ -12,8 +12,9 @@ semantic diff` checklist item (LOCKED: "human source plus resolved
 stable-ID semantic graph").
 
 The command runs in-process against the fixed private instance, exactly like
-`orna source apply` (work ADR 0038). It never writes a standard stream, never
-installs a candidate, and never changes the active revision pair.
+`orna source apply` (work ADR 0038). It writes only its rendered report to the
+caller-selected output stream; it never installs a candidate and never changes
+the active revision pair.
 
 ## Surface
 

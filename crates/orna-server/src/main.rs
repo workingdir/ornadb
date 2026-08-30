@@ -7,7 +7,6 @@ use orna_protocol::CallFailure;
 
 mod cli;
 mod source_check;
-mod source_diagnostics;
 
 use cli::{Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help};
 

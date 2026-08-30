@@ -68,6 +68,8 @@ pub enum SqliteCapability {
     ObjectType,
     /// A by-value catalogue type definition.
     ValueType,
+    /// A legacy scalar that SQLite cannot encode as a canonical runtime value.
+    ScalarType,
     /// An enum catalogue type definition.
     EnumType,
     /// A record-value catalogue type definition.
@@ -93,6 +95,7 @@ impl fmt::Display for SqliteCapability {
         let name = match self {
             Self::ObjectType => "object type",
             Self::ValueType => "value type",
+            Self::ScalarType => "scalar type",
             Self::EnumType => "enum type",
             Self::RecordValueType => "record value type",
             Self::TypeBinding => "type binding",
@@ -209,6 +212,24 @@ impl PersistedActiveRevision {
     }
 
     fn into_active(self) -> Result<ActiveDatabaseRevision, SqliteError> {
+        let expected_bundle_hash = source_bundle_digest(self.source.units())
+            .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        if expected_bundle_hash != self.source.bundle_hash() {
+            return Err(SqliteError::InvalidPersistedData(
+                "revision snapshot source bundle hash mismatch",
+            ));
+        }
+        let expected_source_hash = source_revision_record_digest(
+            self.source.bundle(),
+            self.source.parent(),
+            self.source.bundle_hash(),
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        if expected_source_hash != self.source.revision_hash() {
+            return Err(SqliteError::InvalidPersistedData(
+                "revision snapshot source hash mismatch",
+            ));
+        }
         let source = StoredSourceRevision::new(
             self.source.bundle(),
             self.source.id(),
@@ -273,6 +294,20 @@ impl SqliteRevisionStore {
         let database = Builder::new_local(path).build().await?;
         let mut connection = database.connect()?;
         ensure_schema(&mut connection).await?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+    /// Opens an existing local database without write access or schema setup.
+    pub async fn open_read_only(config: &SqliteConfig) -> Result<Self, SqliteError> {
+        let path = config
+            .path
+            .to_str()
+            .ok_or(SqliteError::InvalidPersistedData(
+                "database path is not UTF-8",
+            ))?;
+        let database = Builder::new_local(path).read_only(true).build().await?;
+        let connection = database.connect()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -840,20 +875,12 @@ fn runtime_value_from_sql(
                 .map(RuntimeValue::Integer)
                 .map_err(|_| SqliteError::InvalidPersistedData("SQLite INTEGER is out of range")),
             (StandardScalar::BigInt, Value::Integer(value)) => Ok(RuntimeValue::BigInt(value)),
-            (StandardScalar::Float | StandardScalar::Decimal, Value::Real(value)) => {
-                RuntimeFloat::new(value)
-                    .map(RuntimeValue::Float)
-                    .map_err(|error| SqliteError::Domain(error.to_string()))
+            (StandardScalar::Float, Value::Real(value)) => RuntimeFloat::new(value)
+                .map(RuntimeValue::Float)
+                .map_err(|error| SqliteError::Domain(error.to_string())),
+            (StandardScalar::CharacterLargeObject, Value::Text(value)) => {
+                Ok(RuntimeValue::Text(value))
             }
-            (
-                StandardScalar::CharacterLargeObject
-                | StandardScalar::Uuid
-                | StandardScalar::Date
-                | StandardScalar::Time
-                | StandardScalar::Timestamp
-                | StandardScalar::Duration,
-                Value::Text(value),
-            ) => Ok(RuntimeValue::Text(value)),
             (StandardScalar::BinaryLargeObject, Value::Blob(value)) => {
                 Ok(RuntimeValue::Bytes(value))
             }
@@ -1669,9 +1696,17 @@ async fn load_persisted_active(
         return Ok(None);
     };
     let payload = row.get::<Vec<u8>>(0)?;
+    drop(rows);
     let persisted = serde_json::from_slice::<PersistedActiveRevision>(&payload)
         .map_err(|error| SqliteError::Domain(format!("invalid revision snapshot: {error}")))?;
     let active = persisted.into_active()?;
+    let durable_source =
+        load_source_revision_from(connection, metadata.source_id, metadata.source).await?;
+    if active.source() != &durable_source {
+        return Err(SqliteError::InvalidPersistedData(
+            "revision snapshot source does not match durable source revision",
+        ));
+    }
     if active.pair() != RevisionPair::new(metadata.source_id, metadata.catalogue_id)
         || active.source().bundle() != metadata.source.bundle
         || active.source().parent() != metadata.source.parent
@@ -1901,7 +1936,7 @@ async fn validate_catalogue_revision(
         let persisted = serde_json::from_slice::<PersistedActiveRevision>(&payload)
             .map_err(|error| SqliteError::Domain(format!("invalid revision snapshot: {error}")))?;
         let snapshot_active = persisted.into_active()?;
-        if snapshot_active.source().id() != source.id()
+        if snapshot_active.source() != source
             || snapshot_active.pair().catalogue() != revision
             || snapshot_active.catalogue_hash() != registry.hash
         {
@@ -2212,25 +2247,22 @@ fn field_definition(field: &CreateField) -> Result<String, SqliteError> {
     ))
 }
 
-fn sqlite_scalar_type(
-    scalar: orna_core::types::StandardScalar,
-) -> Result<&'static str, SqliteError> {
+fn sqlite_scalar_type(scalar: StandardScalar) -> Result<&'static str, SqliteError> {
     match scalar {
-        orna_core::types::StandardScalar::Boolean
-        | orna_core::types::StandardScalar::Integer
-        | orna_core::types::StandardScalar::BigInt => Ok("INTEGER"),
-        orna_core::types::StandardScalar::Float | orna_core::types::StandardScalar::Decimal => {
-            Ok("REAL")
-        }
-        orna_core::types::StandardScalar::CharacterLargeObject
-        | orna_core::types::StandardScalar::Uuid
-        | orna_core::types::StandardScalar::Date
-        | orna_core::types::StandardScalar::Time
-        | orna_core::types::StandardScalar::Timestamp
-        | orna_core::types::StandardScalar::Duration => Ok("TEXT"),
-        orna_core::types::StandardScalar::BinaryLargeObject => Ok("BLOB"),
-        orna_core::types::StandardScalar::Void => Err(SqliteError::Domain(
+        StandardScalar::Boolean | StandardScalar::Integer | StandardScalar::BigInt => Ok("INTEGER"),
+        StandardScalar::Float => Ok("REAL"),
+        StandardScalar::CharacterLargeObject => Ok("TEXT"),
+        StandardScalar::BinaryLargeObject => Ok("BLOB"),
+        StandardScalar::Void => Err(SqliteError::Domain(
             "SQLite object fields cannot use VOID".to_owned(),
+        )),
+        StandardScalar::Decimal
+        | StandardScalar::Uuid
+        | StandardScalar::Date
+        | StandardScalar::Time
+        | StandardScalar::Timestamp
+        | StandardScalar::Duration => Err(SqliteError::UnsupportedCapability(
+            SqliteCapability::ScalarType,
         )),
     }
 }
@@ -2285,6 +2317,28 @@ fn ensure_supported_candidate(candidate: &DeployableRevision) -> Result<(), Sqli
     if !catalogue.type_bindings().is_empty() {
         return Err(SqliteError::UnsupportedCapability(
             SqliteCapability::TypeBinding,
+        ));
+    }
+
+    if catalogue.object_types().iter().any(|object| {
+        object.fields().iter().any(|field| {
+            matches!(
+                field.resolved_type().legacy_scalar(),
+                Some(scalar)
+                    if !matches!(
+                        scalar,
+                        StandardScalar::Boolean
+                            | StandardScalar::Integer
+                            | StandardScalar::BigInt
+                            | StandardScalar::Float
+                            | StandardScalar::CharacterLargeObject
+                            | StandardScalar::BinaryLargeObject
+                    )
+            )
+        })
+    }) {
+        return Err(SqliteError::UnsupportedCapability(
+            SqliteCapability::ScalarType,
         ));
     }
     if candidate.catalogue_hash_context().version() != CatalogueHashVersion::Version1 {
@@ -3365,6 +3419,148 @@ mod tests {
         assert_eq!(recovered.catalogue().schemas().len(), 1);
         assert_eq!(recovered.origins().len(), 1);
         assert_eq!(reopened.read_ledger().await.unwrap(), ledger);
+        let _ = std::fs::remove_file(path);
+    }
+    #[tokio::test]
+    async fn rejects_tampered_active_snapshot_source_after_reopen() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+        let candidate = schema_candidate(&initial, 0x91, 0x92, 0x93);
+        let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
+        ApplicationRevisionStore::apply(&store, &candidate, &artifact)
+            .await
+            .unwrap();
+
+        let connection = store.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT payload FROM orna_revision_snapshots
+                 WHERE source_revision_id = ?1 AND catalogue_revision_id = ?2",
+                [
+                    Value::Blob(candidate.source().id().to_bytes().to_vec()),
+                    Value::Blob(candidate.candidate_pair().catalogue().to_bytes().to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("active snapshot");
+        let payload = row.get::<Vec<u8>>(0).unwrap();
+        drop(rows);
+        let mut snapshot =
+            serde_json::from_slice::<serde_json::Value>(&payload).expect("snapshot JSON");
+        let tampered_content = "tampered active snapshot\n";
+        let tampered_hash = source_unit_content_digest(tampered_content).unwrap();
+        snapshot["source"]["units"][0]["content"] =
+            serde_json::Value::String(tampered_content.to_owned());
+        snapshot["source"]["units"][0]["content_hash"] =
+            serde_json::to_value(tampered_hash).unwrap();
+        let updated = connection
+            .execute(
+                "UPDATE orna_revision_snapshots SET payload = ?1
+                 WHERE source_revision_id = ?2 AND catalogue_revision_id = ?3",
+                [
+                    Value::Blob(serde_json::to_vec(&snapshot).unwrap()),
+                    Value::Blob(candidate.source().id().to_bytes().to_vec()),
+                    Value::Blob(candidate.candidate_pair().catalogue().to_bytes().to_vec()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        drop(connection);
+        drop(store);
+
+        let reopened = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        assert!(matches!(
+            reopened.recover().await.unwrap_err(),
+            StorageError::Backend(SqliteError::InvalidPersistedData(
+                "revision snapshot source bundle hash mismatch"
+            ))
+        ));
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_ledger_fields_after_reopen() {
+        let path = temp_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+            .await
+            .unwrap();
+        store.bootstrap().await.unwrap();
+        let initial = store.recover().await.unwrap();
+        let candidate = schema_candidate(&initial, 0xa1, 0xa2, 0xa3);
+        let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
+        ApplicationRevisionStore::apply(&store, &candidate, &artifact)
+            .await
+            .unwrap();
+        let ledger_entry = MigrationLedgerEntry::from_artifact(&artifact);
+        drop(store);
+
+        let mut corrupted_canonical = artifact.canonical_bytes().to_owned();
+        corrupted_canonical[0] ^= 0xff;
+        let mut corrupted_digest = artifact.digest().to_bytes().to_vec();
+        corrupted_digest[0] ^= 1;
+        let cases = vec![
+            (
+                "format",
+                Value::Text("ORNA-OTHER-FORMAT".to_owned()),
+                Value::Text(ledger_entry.format().to_owned()),
+            ),
+            (
+                "version",
+                Value::Integer(i64::from(ledger_entry.version()) + 1),
+                Value::Integer(i64::from(ledger_entry.version())),
+            ),
+            (
+                "canonical_bytes",
+                Value::Blob(corrupted_canonical),
+                Value::Blob(artifact.canonical_bytes().to_owned()),
+            ),
+            (
+                "digest",
+                Value::Blob(corrupted_digest),
+                Value::Blob(artifact.digest().to_bytes().to_vec()),
+            ),
+        ];
+        for (column, corrupted, original) in cases {
+            let store = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+                .await
+                .unwrap();
+            let connection = store.connection.lock().await;
+            let statement =
+                format!("UPDATE orna_application_migrations SET {column} = ?1 WHERE ordinal = 0");
+            assert_eq!(
+                connection.execute(&statement, [corrupted]).await.unwrap(),
+                1
+            );
+            drop(connection);
+            drop(store);
+
+            let reopened = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+                .await
+                .unwrap();
+            assert!(matches!(
+                reopened.recover().await.unwrap_err(),
+                StorageError::Backend(SqliteError::Domain(message))
+                    if message.contains("invalid migration ledger entry at ordinal 0")
+            ));
+            drop(reopened);
+
+            let repaired = SqliteRevisionStore::open(&SqliteConfig::new(&path))
+                .await
+                .unwrap();
+            let connection = repaired.connection.lock().await;
+            assert_eq!(connection.execute(&statement, [original]).await.unwrap(), 1);
+            drop(connection);
+            drop(repaired);
+        }
         let _ = std::fs::remove_file(path);
     }
 
