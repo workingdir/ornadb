@@ -1,4 +1,3 @@
-
 use crate::canonical_hash::{
     calculate_standard_library_digest_for_test, source_bundle_digest,
     source_revision_record_digest, source_unit_content_digest, verify_standard_library_snapshot,
