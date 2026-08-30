@@ -83,7 +83,7 @@ library-level revision-store adapter. Its persisted state covers source and
 catalogue identities/lineage, source units, semantic revision snapshots, the
 application migration ledger, and generated object tables with reference
 foreign keys for supported object changes. Unsupported value, enum, record,
-and binding shapes fail closed.
+binding, scalar, and artifact shapes fail closed.
 
 The SQLite execution surface is similarly bounded: its local socket accepts
 only the supported server-plan/parameter-echo execution subset. Unsupported
@@ -97,12 +97,12 @@ foreign-key checks. This scope does not prove full physical or runtime parity
 between PostgreSQL and SQLite; do not record that claim without fresh,
 dedicated evidence.
 
-`just check` and its workspace `cargo check`/`cargo test` coverage include
-workspace targets, but that coverage is not a dedicated SQLite parity or CLI
-adoption proof. The standalone adapter example,
-`cargo run --locked -p orna-sqlite --example revision_store_smoke`, is a local
-library smoke only; it does not exercise the SQLite socket's full protocol or
-command matrix.
+`just sqlite-check` is the dedicated offline compile gate for the storage,
+SQLite, and local CLI binary targets. `just sqlite-smoke` runs the deterministic
+revision-store example and the focused SQLite process/socket integration target.
+These recipes provide a dedicated SQLite parity/adoption proof; the standalone
+adapter example remains a library smoke and does not exercise the socket by
+itself.
 
 The accepted standard-library revision chain is V1 through V9 only; there is no
 V10 revision.
@@ -222,10 +222,11 @@ An explicit `LocalPath` is accepted only for `server run`, `source check`,
 `source apply`, and `source diff`; unsupported commands fail before selecting a
 backend. `orna server run` opens and bootstraps the database before exposing
 `<database>.orna.sock`; the foreground Unix listener enforces mode `0600`.
-Its handshake accepts protocol versions v1 through v5: v1 supplies the call
-path, and v5 supplies liveness where applicable. The socket shares the public
-raw-call wire protocol, but only the bounded server-plan/parameter-echo
-execution subset can produce a successful result.
+Its handshake recognises protocol versions v1 through v5. Versions v1 through
+v3 have typed handling in the bounded SQLite surface; v4 and v5 use the
+protocol fallback when their opaque codec registry is unavailable. The socket
+shares the public raw-call wire protocol, but only the bounded
+server-plan/parameter-echo execution subset can produce a successful result.
 
 For an explicit endpoint (`--db` or a positional endpoint), the CLI currently
 accepts `ManagedLocal` and `LocalPath`. Explicit Unix-socket and remote-TLS
@@ -249,7 +250,8 @@ Managed local operations authenticate the operating-system peer. The server
 obtains the Unix peer UID, maps it to the session principal, and keeps the
 principal out of request payloads. A caller cannot supply a replacement
 principal. The bounded SQLite socket relies on its `0600` filesystem mode and
-does not expose PostgreSQL administration, invoke, state, or inspect surfaces.
+does not expose PostgreSQL administration, invoke, state, inspect, security, or
+resource-dispatch surfaces.
 
 Keep secrets out of source, argument files, state value files, shell history,
 CI logs, and evidence artifacts. The Compose password is a repository-visible
@@ -260,7 +262,8 @@ Treat source apply and recovery as transactional operations:
 1. Source apply reads one regular UTF-8 file and fails closed for invalid input.
 2. Managed PostgreSQL source apply records its protected audit event and cannot
    choose an audit principal from the request. SQLite source apply records its
-   typed migration and snapshot transaction but has no PostgreSQL audit store.
+   typed migration and snapshot transaction but has no PostgreSQL protected
+   audit store or resource-dispatch path.
 3. Recovery must reproduce the candidate source and catalogue hashes. A
    recovery mismatch, session-close failure, or audit invariant failure is an
    operational failure.
@@ -273,18 +276,17 @@ Treat source apply and recovery as transactional operations:
 Use `just kernel-test` for the Compose-gated apply, rollback, tamper, retained
 listing, recovery, and user-state integration matrix.
 
-## Resource durability boundary
+Resource payloads and results are process-local. In the PostgreSQL resource
+transport, `Values` batches and completed result values are owned by the
+producer/transport and emitted as connection-local frames; they are not durable
+resource payload rows. SQLite LocalPath has no resource-dispatch protocol.
 
-Resource payloads and results are process-local. Resource `Values` batches and
-completed result values are owned by the producer/transport and emitted as
-connection-local frames; they are not durable resource payload rows.
-
-Where implemented, persisted resource request history/audit is redacted
-metadata: request, parent/call-site, target/revision/principal identities,
-decision/terminal outcomes, and optional item/byte counts. It deliberately
-does not retain arguments or returned values. This is redacted history/audit,
-not durable `Resources` streaming; do not document it as durable payload/result
-storage.
+Where implemented, PostgreSQL persisted resource request history/audit is
+redacted metadata: request, parent/call-site, target/revision/principal
+identities, decision/terminal outcomes, and optional item/byte counts. It
+deliberately does not retain arguments or returned values. This is redacted
+history/audit, not durable `Resources` streaming; do not document it as durable
+payload/result storage.
 
 ## Issue ledger and status
 
@@ -305,6 +307,13 @@ ci-evidence/check.log
 ci-evidence/editor-tooling.log
 ci-evidence/kernel-test.log
 ci-evidence/postgres.log
+```
+
+The dedicated SQLite workflow uploads:
+
+```text
+ci-evidence/sqlite-check.log
+ci-evidence/sqlite-smoke.log
 ```
 
 The embedded PostgreSQL workflow stores its lifecycle output under

@@ -1,6 +1,12 @@
 //! Direct local-file command support for the SQLite backend.
 
-use std::{error::Error, fmt, fs, path::PathBuf};
+use std::{
+    error::Error,
+    fmt, fs,
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
 
 use orna_compiler::{check, prepare};
 use orna_core::{
@@ -96,10 +102,12 @@ pub fn run_sqlite_source_diff(
     database_path: impl Into<PathBuf>,
     source_path: &str,
 ) -> Result<SqliteSourceDiffOutcome, SqliteBackendError> {
+    let database_path = database_path.into();
+    ensure_existing_database(&database_path)?;
     let source = read_source(source_path)?;
     let bundle = SourceBundle::new([SourceUnit::new(source_path, source)])
         .map_err(SqliteBackendError::from_error)?;
-    match run_with_runtime(database_path.into(), bundle, SqliteCommand::Diff)? {
+    match run_with_runtime(database_path, bundle, SqliteCommand::Diff)? {
         SqliteCommandOutcome::Apply(_) => Err(SqliteBackendError::new(
             "orna: local SQLite backend returned the wrong source result",
         )),
@@ -107,14 +115,47 @@ pub fn run_sqlite_source_diff(
     }
 }
 
+fn ensure_existing_database(path: &Path) -> Result<(), SqliteBackendError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        SqliteBackendError::new(format!("orna: could not open SQLite database: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(SqliteBackendError::new(format!(
+            "orna: SQLite database path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn read_source(path: &str) -> Result<String, SqliteBackendError> {
-    let bytes = fs::read(path).map_err(|error| {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            SqliteBackendError::new(format!("orna: could not read source file: {error}"))
+        })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            SqliteBackendError::new(format!("orna: could not read source file: {error}"))
+        })?
+        .is_file()
+    {
+        return Err(SqliteBackendError::new(format!(
+            "orna: source path is not a regular file: {path}"
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
         SqliteBackendError::new(format!("orna: could not read source file: {error}"))
     })?;
     String::from_utf8(bytes)
         .map_err(|_| SqliteBackendError::new("orna: source file is not valid UTF-8"))
 }
 
+#[derive(Clone, Copy)]
 enum SqliteCommand {
     Apply,
     Diff,
@@ -142,12 +183,23 @@ async fn run_async(
     bundle: SourceBundle,
     command: SqliteCommand,
 ) -> Result<SqliteCommandOutcome, SqliteBackendError> {
-    let store = SqliteRevisionStore::open(&SqliteConfig::new(database_path))
-        .await
-        .map_err(map_sqlite_error)?;
-    ApplicationRevisionStore::bootstrap(&store)
-        .await
-        .map_err(map_storage_error)?;
+    let store = match command {
+        SqliteCommand::Apply => {
+            let store = SqliteRevisionStore::open(&SqliteConfig::new(database_path.clone()))
+                .await
+                .map_err(map_sqlite_error)?;
+            ApplicationRevisionStore::bootstrap(&store)
+                .await
+                .map_err(map_storage_error)?;
+            store
+        }
+        SqliteCommand::Diff => {
+            ensure_existing_database(&database_path)?;
+            SqliteRevisionStore::open_read_only(&SqliteConfig::new(database_path))
+                .await
+                .map_err(map_sqlite_error)?
+        }
+    };
     let active = ApplicationRevisionStore::recover(&store)
         .await
         .map_err(map_storage_error)?;
@@ -181,20 +233,25 @@ async fn run_async(
             }
         });
     }
+    let operation = match command {
+        SqliteCommand::Apply => "source apply",
+        SqliteCommand::Diff => "source diff",
+    };
     let candidate = prepare(&report, active.pair(), &active).map_err(|error| {
         SqliteBackendError::new(format!(
-            "orna: source apply could not prepare the source: {error}"
+            "orna: {operation} could not prepare the source: {error}"
         ))
     })?;
-    let artifact =
-        PhysicalMigrationArtifact::from_revisions(&active, &candidate).map_err(|error| {
-            SqliteBackendError::new(format!(
-                "orna: source apply could not prepare the source: {error}"
-            ))
-        })?;
 
     match command {
         SqliteCommand::Apply => {
+            let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).map_err(
+                |error| {
+                    SqliteBackendError::new(format!(
+                        "orna: source apply could not prepare the source: {error}"
+                    ))
+                },
+            )?;
             let committed =
                 ApplicationRevisionStore::apply_source_apply(&store, &candidate, &artifact)
                     .await
