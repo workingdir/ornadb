@@ -12,6 +12,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 
 use orna_artifact::server_parameter_echo::ServerParameterEcho;
@@ -20,8 +21,8 @@ use orna_artifact::server_plan::{
     SelectBindValue, ServerPlan, UniqueTextSelectedServerPlan,
 };
 use orna_core::{
-    CatalogueRevisionId, FieldId, ObjectId, ParameterId, SchemaId, SourceBundleId,
-    SourceRevisionId, SourceUnitId, TypeId,
+    CatalogueRevisionId, FieldId, FunctionId, InspectEpochId, InvocationId, ObjectId, ParameterId,
+    PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StateSlotId, TypeId,
     canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
     catalogue::{
         CatalogueSnapshot, EnumTypeDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
@@ -38,9 +39,21 @@ use orna_core::{
         FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
         StoredSourceUnit,
     },
+    security::{
+        AuthenticatedSession, AuthorisedInvocation, CATALOGUE_HEALTH_FUNCTION_ID,
+        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDecision, ExecuteDenial, ExecuteGrant,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, PrivilegeClass,
+        PrivilegeDecision, PrivilegeGrant, RoleMembership, SecuritySnapshot,
+    },
+    state::{
+        UserStateCell, UserStateChange, UserStateError, UserStateKey, UserStateWriteOutcome,
+        UserStateWriteResult, apply_change,
+    },
+    system::system_function_by_id,
     types::{ResolvedType, StandardScalar},
     value::{RuntimeFloat, RuntimeType, RuntimeValue},
 };
+use orna_protocol::{decode_value, encode_value};
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
     DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID, FLOAT_TYPE_ID, INTEGER_TYPE_ID, TIME_TYPE_ID,
@@ -54,7 +67,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Value};
 
-const SCHEMA: &str = include_str!("../migrations/0001_revision_store.sql");
+const SCHEMA: &str = concat!(
+    include_str!("../migrations/0001_revision_store.sql"),
+    include_str!("../migrations/0002_security_runtime.sql"),
+);
 
 /// A candidate capability that the SQLite revision store does not yet accept.
 ///
@@ -268,6 +284,170 @@ impl PersistedActiveRevision {
     }
 }
 
+/// One persisted SQLite security-admin mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteSecurityMutation {
+    /// Creates an active principal.
+    CreatePrincipal {
+        /// The principal identity.
+        principal: PrincipalId,
+        /// The principal kind.
+        kind: PrincipalKind,
+    },
+    /// Disables a principal.
+    DisablePrincipal {
+        /// The principal identity.
+        principal: PrincipalId,
+    },
+    /// Creates an active role.
+    CreateRole {
+        /// The role identity.
+        role: PrincipalId,
+    },
+    /// Adds one role membership.
+    GrantRole {
+        /// The role identity.
+        role: PrincipalId,
+        /// The member identity.
+        member: PrincipalId,
+    },
+    /// Removes one role membership.
+    RevokeRole {
+        /// The role identity.
+        role: PrincipalId,
+        /// The member identity.
+        member: PrincipalId,
+    },
+    /// Adds one privilege grant.
+    GrantPrivilege {
+        /// The grantee identity.
+        grantee: PrincipalId,
+        /// The privilege class.
+        class: PrivilegeClass,
+        /// The optional function object.
+        object: Option<orna_core::FunctionId>,
+    },
+    /// Removes one privilege grant.
+    RevokePrivilege {
+        /// The grantee identity.
+        grantee: PrincipalId,
+        /// The privilege class.
+        class: PrivilegeClass,
+        /// The optional function object.
+        object: Option<orna_core::FunctionId>,
+    },
+    /// Adds one direct function execute grant.
+    GrantExecute {
+        /// The grantee identity.
+        grantee: PrincipalId,
+        /// The function identity.
+        function: orna_core::FunctionId,
+    },
+}
+
+/// The result of one local-peer authorization and pinned SERVER execution.
+#[derive(Debug)]
+pub enum SqliteExecutionResult {
+    /// The call was authorized and executed against the supplied revision.
+    Allowed {
+        /// The session authenticated from the local operating-system peer.
+        session: AuthenticatedSession,
+        /// The immutable authorization evidence for the call.
+        authorisation: AuthorisedInvocation,
+        /// The canonical runtime values returned by the call.
+        values: Vec<RuntimeValue>,
+    },
+    /// The local peer authenticated, but no execute grant admitted the call.
+    Denied {
+        /// The session authenticated from the local operating-system peer.
+        session: AuthenticatedSession,
+        /// The closed authorization denial.
+        reason: ExecuteDenial,
+    },
+    /// The call was authorized but its supported executor failed.
+    Failed {
+        /// The session authenticated from the local operating-system peer.
+        session: AuthenticatedSession,
+        /// The immutable authorization evidence for the call.
+        authorisation: AuthorisedInvocation,
+        /// The redacted execution failure.
+        error: SqliteError,
+    },
+}
+
+/// Redacted durable evidence for one local invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteInvocationAuditEvent {
+    /// Stable invocation identity.
+    pub invocation: InvocationId,
+    /// Closed terminal outcome (`allowed`, `denied`, `completed`, or `failed`).
+    pub outcome: String,
+    /// Authenticated session principal.
+    pub session_principal: PrincipalId,
+    /// Effective principal, when one was selected.
+    pub effective_principal: Option<PrincipalId>,
+    /// Principal whose grant authorised execution, when one was selected.
+    pub authorising_principal: Option<PrincipalId>,
+    /// Invoked function, when target resolution succeeded.
+    pub function: Option<orna_core::FunctionId>,
+    /// Active source revision at decision time.
+    pub source_revision: Option<SourceRevisionId>,
+    /// Active catalogue revision at decision time.
+    pub catalogue_revision: Option<CatalogueRevisionId>,
+    /// Stable failure or denial code, without arguments or result payloads.
+    pub error_code: Option<String>,
+}
+
+/// Redacted durable summary for one inspection epoch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteInspectSnapshotRecord {
+    /// Stable inspection epoch identity.
+    pub epoch: InspectEpochId,
+    /// Invocation represented by this epoch.
+    pub invocation: InvocationId,
+    /// Principal that owns the epoch.
+    pub owner: PrincipalId,
+    /// Source revision pinned by the epoch.
+    pub source_revision: SourceRevisionId,
+    /// Catalogue revision pinned by the epoch.
+    pub catalogue_revision: CatalogueRevisionId,
+    /// Bounded canonical summary bytes; never resource or value payloads.
+    pub summary: Vec<u8>,
+}
+
+/// One bounded redacted inspection trace event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteInspectTraceEvent {
+    /// Invocation whose trace is streamed.
+    pub invocation: InvocationId,
+    /// Monotonic sequence within the invocation.
+    pub sequence: u64,
+    /// Closed trace kind.
+    pub kind: String,
+    /// Bounded canonical event payload.
+    pub payload: Vec<u8>,
+    /// Observer invocation, when the event was produced by an observer.
+    pub observer_invocation: Option<InvocationId>,
+}
+
+/// Redacted durable evidence for one USER-state operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteUserStateAuditEvent {
+    /// Stable audit identity.
+    pub audit_id: InvocationId,
+    /// Closed operation (`load` or `write`).
+    pub operation: String,
+    /// Closed outcome (`completed` or `conflict`).
+    pub outcome: String,
+    /// Authenticated session principal.
+    pub session_principal: PrincipalId,
+    /// USER-state root function.
+    pub root_function: orna_core::FunctionId,
+    /// USER-state profile.
+    pub state_profile: String,
+    /// Number of cells selected or changed.
+    pub cell_count: u64,
+}
 impl SqliteConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -311,6 +491,1135 @@ impl SqliteRevisionStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+    /// Provisions the current local UID as a durable SQLite peer identity.
+    ///
+    /// Provisioning is idempotent for an existing UID. A newly provisioned
+    /// local owner receives the class-wide privileges needed to operate the
+    /// local database; subsequent security administration can disable or
+    /// narrow that identity through the persisted security tables.
+    pub async fn provision_local_peer(&self, uid: u32) -> Result<PrincipalId, SqliteError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+
+        let result = async {
+            let reserved = CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID.to_bytes().to_vec();
+            let mut rows = transaction
+                .query(
+                    "SELECT kind, status
+                     FROM orna_security_principals
+                     WHERE principal_id = ?1",
+                    [Value::Blob(reserved.clone())],
+                )
+                .await?;
+            if let Some(row) = rows.next().await? {
+                if row.get::<String>(0)? != "service" || row.get::<String>(1)? != "active" {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "reserved catalogue-health service principal is invalid",
+                    ));
+                }
+            } else {
+                let inserted = transaction
+                    .execute(
+                        "INSERT INTO orna_security_principals
+                         (principal_id, kind, status)
+                         VALUES (?1, 'service', 'active')",
+                        [Value::Blob(reserved)],
+                    )
+                    .await?;
+                if inserted != 1 {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "reserved service principal insert affected an unexpected number of rows",
+                    ));
+                }
+            }
+            drop(rows);
+            let mut rows = transaction
+                .query(
+                    "SELECT principal_id
+                     FROM orna_security_local_peer_credentials
+                     WHERE uid = ?1",
+                    [Value::Integer(i64::from(uid))],
+                )
+                .await?;
+            if let Some(row) = rows.next().await? {
+                return Ok(PrincipalId::from_bytes(id16(
+                    row.get::<Vec<u8>>(0)?,
+                    "local peer principal id",
+                )?));
+            }
+            drop(rows);
+
+            let principal = local_peer_principal_id(uid);
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO orna_security_principals
+                     (principal_id, kind, status)
+                     VALUES (?1, 'user', 'active')",
+                    [Value::Blob(principal.to_bytes().to_vec())],
+                )
+                .await?;
+            if inserted != 1 {
+                return Err(SqliteError::InvalidPersistedData(
+                    "local peer principal insert affected an unexpected number of rows",
+                ));
+            }
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO orna_security_local_peer_credentials
+                     (uid, principal_id)
+                     VALUES (?1, ?2)",
+                    [
+                        Value::Integer(i64::from(uid)),
+                        Value::Blob(principal.to_bytes().to_vec()),
+                    ],
+                )
+                .await?;
+            if inserted != 1 {
+                return Err(SqliteError::InvalidPersistedData(
+                    "local peer credential insert affected an unexpected number of rows",
+                ));
+            }
+            for privilege in [
+                "execute",
+                "security_admin",
+                "inspect:own-invocation",
+                "inspect:session-invocations",
+                "inspect:any-invocation",
+                "inspect:values",
+                "inspect:source",
+                "inspect:security-details",
+                "inspect:runtime-internals",
+            ] {
+                let inserted = transaction
+                    .execute(
+                        "INSERT INTO orna_security_privilege_grants
+                         (grantee_id, privilege, object_id)
+                         VALUES (?1, ?2, NULL)",
+                        [
+                            Value::Blob(principal.to_bytes().to_vec()),
+                            Value::Text(privilege.to_owned()),
+                        ],
+                    )
+                    .await?;
+                if inserted != 1 {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "local peer privilege insert affected an unexpected number of rows",
+                    ));
+                }
+            }
+            Ok(principal)
+        }
+        .await;
+
+        match result {
+            Ok(principal) => {
+                transaction.commit().await?;
+                Ok(principal)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
+    }
+
+    /// Reconstructs the validated security snapshot for the active revision.
+    pub async fn security_snapshot(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<SecuritySnapshot, SqliteError> {
+        let connection = self.connection.lock().await;
+        load_security_snapshot(&connection, active).await
+    }
+
+    /// Authenticates one kernel-supplied local UID against the durable
+    /// protected peer-credential mapping.
+    pub async fn authenticate_local_peer(
+        &self,
+        active: &ActiveDatabaseRevision,
+        uid: u32,
+    ) -> Result<AuthenticatedSession, SqliteError> {
+        let snapshot = self.security_snapshot(active).await?;
+        snapshot.authenticate_local_peer(uid).map_err(|error| {
+            SqliteError::Domain(format!("local peer authentication failed: {error}"))
+        })
+    }
+
+    /// Evaluates the durable local-peer `EXECUTE` decision for one function.
+    pub async fn authorise_local_execute(
+        &self,
+        active: &ActiveDatabaseRevision,
+        session: &AuthenticatedSession,
+        function_id: orna_core::FunctionId,
+    ) -> Result<ExecuteDecision, SqliteError> {
+        let snapshot = self.security_snapshot(active).await?;
+        Ok(snapshot.authorise_execute(
+            session,
+            orna_core::security::InvocationTarget::new(function_id, active.pair()),
+        ))
+    }
+
+    /// Loads every durable USER-state cell for one authenticated principal
+    /// and root scope.
+    pub async fn load_user_state(
+        &self,
+        principal: PrincipalId,
+        root_function: orna_core::FunctionId,
+        state_profile: &str,
+    ) -> Result<Vec<UserStateCell>, SqliteError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = async {
+            let mut rows = transaction
+                .query(
+                    "SELECT function_id, function_instance_key, state_slot_id,
+                            value_bytes, value_type_id, revision
+                     FROM orna_user_state_cells
+                     WHERE principal_id = ?1
+                       AND root_function_id = ?2
+                       AND root_state_profile = ?3
+                     ORDER BY function_id, function_instance_key, state_slot_id",
+                    [
+                        Value::Blob(principal.to_bytes().to_vec()),
+                        Value::Blob(root_function.to_bytes().to_vec()),
+                        Value::Text(state_profile.to_owned()),
+                    ],
+                )
+                .await?;
+            let mut cells = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let function = orna_core::FunctionId::from_bytes(id16(
+                    row.get::<Vec<u8>>(0)?,
+                    "USER state function id",
+                )?);
+                let instance_key = row.get::<String>(1)?;
+                let state_slot =
+                    StateSlotId::from_bytes(id16(row.get::<Vec<u8>>(2)?, "USER state slot id")?);
+                let value_bytes = row.get::<Vec<u8>>(3)?;
+                let value = decode_value(&value_bytes)
+                    .map_err(|_| SqliteError::InvalidPersistedData("USER state value encoding"))?;
+                let value_type =
+                    TypeId::from_bytes(id16(row.get::<Vec<u8>>(4)?, "USER state value type id")?);
+                let revision = u64::try_from(row.get::<i64>(5)?)
+                    .map_err(|_| SqliteError::InvalidPersistedData("USER state revision"))?;
+                let key = UserStateKey::new(
+                    principal,
+                    root_function,
+                    state_profile.to_owned(),
+                    function,
+                    instance_key,
+                    state_slot,
+                )
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                cells.push(UserStateCell::new(
+                    key,
+                    value,
+                    value_type,
+                    revision,
+                    SystemTime::now(),
+                ));
+            }
+            drop(rows);
+            Self::record_user_state_audit_on(
+                &transaction,
+                &SqliteUserStateAuditEvent {
+                    audit_id: InvocationId::new(),
+                    operation: "load".to_owned(),
+                    outcome: "completed".to_owned(),
+                    session_principal: principal,
+                    root_function,
+                    state_profile: state_profile.to_owned(),
+                    cell_count: cells.len() as u64,
+                },
+            )
+            .await?;
+            Ok(cells)
+        }
+        .await;
+        match result {
+            Ok(cells) => {
+                transaction.commit().await?;
+                Ok(cells)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
+    }
+
+    /// Applies one authenticated USER-state change atomically.
+    pub async fn write_user_state(
+        &self,
+        principal: PrincipalId,
+        change: &UserStateChange,
+    ) -> Result<UserStateWriteResult, SqliteError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = async {
+            let mut rows = transaction
+                .query(
+                    "SELECT function_id, function_instance_key, state_slot_id,
+                            value_bytes, value_type_id, revision
+                     FROM orna_user_state_cells
+                     WHERE principal_id = ?1
+                       AND root_function_id = ?2
+                       AND root_state_profile = ?3
+                       AND function_id = ?4
+                       AND function_instance_key = ?5
+                       AND state_slot_id = ?6",
+                    [
+                        Value::Blob(principal.to_bytes().to_vec()),
+                        Value::Blob(change.root_function().to_bytes().to_vec()),
+                        Value::Text(change.state_profile().to_owned()),
+                        Value::Blob(change.function().to_bytes().to_vec()),
+                        Value::Text(change.instance_key().to_owned()),
+                        Value::Blob(change.state_slot().to_bytes().to_vec()),
+                    ],
+                )
+                .await?;
+            let current = if let Some(row) = rows.next().await? {
+                let function = orna_core::FunctionId::from_bytes(id16(
+                    row.get::<Vec<u8>>(0)?,
+                    "USER state function id",
+                )?);
+                let instance_key = row.get::<String>(1)?;
+                let state_slot =
+                    StateSlotId::from_bytes(id16(row.get::<Vec<u8>>(2)?, "USER state slot id")?);
+                let value = decode_value(&row.get::<Vec<u8>>(3)?)
+                    .map_err(|_| SqliteError::InvalidPersistedData("USER state value encoding"))?;
+                let value_type =
+                    TypeId::from_bytes(id16(row.get::<Vec<u8>>(4)?, "USER state value type id")?);
+                let revision = u64::try_from(row.get::<i64>(5)?)
+                    .map_err(|_| SqliteError::InvalidPersistedData("USER state revision"))?;
+                let key = UserStateKey::new(
+                    principal,
+                    change.root_function(),
+                    change.state_profile().to_owned(),
+                    function,
+                    instance_key,
+                    state_slot,
+                )
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                Some(UserStateCell::new(
+                    key,
+                    value,
+                    value_type,
+                    revision,
+                    SystemTime::now(),
+                ))
+            } else {
+                None
+            };
+            drop(rows);
+            if let Some(current) = current.as_ref()
+                && current.value_type() != change.value_type()
+            {
+                return Err(SqliteError::Domain(
+                    "USER state value type does not match the existing cell".to_owned(),
+                ));
+            }
+            let result = match apply_change(current.as_ref(), change, principal) {
+                Ok(result) => result,
+                Err(UserStateError::RevisionConflict { current, .. }) => UserStateWriteResult::new(
+                    change.key_without_principal(),
+                    UserStateWriteOutcome::Conflict {
+                        current_revision: current,
+                    },
+                ),
+                Err(error) => return Err(SqliteError::Domain(error.to_string())),
+            };
+            if let UserStateWriteOutcome::Written { revision } = result.outcome() {
+                let value_bytes = encode_value(change.value()).map_err(|_| {
+                    SqliteError::Domain("USER state value cannot be encoded as ORV5".to_owned())
+                })?;
+                let updated = transaction
+                    .execute(
+                        "INSERT INTO orna_user_state_cells
+                         (principal_id, root_function_id, root_state_profile,
+                          function_id, function_instance_key, state_slot_id,
+                          value_bytes, value_type_id, revision)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                         ON CONFLICT (
+                             principal_id, root_function_id, root_state_profile,
+                             function_id, function_instance_key, state_slot_id
+                         ) DO UPDATE SET
+                             value_bytes = excluded.value_bytes,
+                             value_type_id = excluded.value_type_id,
+                             revision = excluded.revision,
+                             updated_at = CURRENT_TIMESTAMP",
+                        [
+                            Value::Blob(principal.to_bytes().to_vec()),
+                            Value::Blob(change.root_function().to_bytes().to_vec()),
+                            Value::Text(change.state_profile().to_owned()),
+                            Value::Blob(change.function().to_bytes().to_vec()),
+                            Value::Text(change.instance_key().to_owned()),
+                            Value::Blob(change.state_slot().to_bytes().to_vec()),
+                            Value::Blob(value_bytes),
+                            Value::Blob(change.value_type().to_bytes().to_vec()),
+                            Value::Integer(i64::try_from(revision).map_err(|_| {
+                                SqliteError::Domain("USER state revision overflow".to_owned())
+                            })?),
+                        ],
+                    )
+                    .await?;
+                if updated != 1 {
+                    return Err(SqliteError::InvalidPersistedData(
+                        "USER state write affected an unexpected number of rows",
+                    ));
+                }
+            }
+            let outcome = match result.outcome() {
+                UserStateWriteOutcome::Written { .. } => "completed",
+                UserStateWriteOutcome::Conflict { .. } => "conflict",
+            };
+            Self::record_user_state_audit_on(
+                &transaction,
+                &SqliteUserStateAuditEvent {
+                    audit_id: InvocationId::new(),
+                    operation: "write".to_owned(),
+                    outcome: outcome.to_owned(),
+                    session_principal: principal,
+                    root_function: change.root_function(),
+                    state_profile: change.state_profile().to_owned(),
+                    cell_count: 1,
+                },
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        match result {
+            Ok(result) => {
+                transaction.commit().await?;
+                Ok(result)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
+    }
+
+    /// Applies one security-admin mutation under an authenticated local
+    /// session and returns the rebuilt validated snapshot.
+    pub async fn apply_security_mutation(
+        &self,
+        active: &ActiveDatabaseRevision,
+        session: &AuthenticatedSession,
+        mutation: SqliteSecurityMutation,
+    ) -> Result<SecuritySnapshot, SqliteError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let result = async {
+            let current_active = load_active_from(&transaction).await?;
+            if current_active.pair() != active.pair() {
+                return Err(SqliteError::Domain(
+                    "the active SQLite revision changed before the security mutation".to_owned(),
+                ));
+            }
+            let active = &current_active;
+            let current = load_security_snapshot(&transaction, active).await?;
+            let bound_session = current
+                .bind_authenticated_session(session.principal(), session.active_roles().to_vec())
+                .map_err(|_| {
+                    SqliteError::Domain("security administration was denied".to_owned())
+                })?;
+            let mut granted = current
+                .privilege_grants()
+                .filter(|grant| grant.grantee() == bound_session.principal())
+                .map(PrivilegeGrant::class)
+                .collect::<Vec<_>>();
+            for role in bound_session.active_roles() {
+                granted.extend(
+                    current
+                        .privilege_grants()
+                        .filter(|grant| grant.grantee() == *role)
+                        .map(PrivilegeGrant::class),
+                );
+            }
+            if matches!(
+                orna_core::security::authorise_privilege(
+                    bound_session.principal(),
+                    PrivilegeClass::SecurityAdmin,
+                    None,
+                    &granted,
+                ),
+                PrivilegeDecision::Denied(_)
+            ) {
+                return Err(SqliteError::Domain(
+                    "security administration was denied".to_owned(),
+                ));
+            }
+
+            match mutation {
+                SqliteSecurityMutation::CreatePrincipal { principal, kind } => {
+                    if principal == PrincipalId::from_bytes([0; 16]) {
+                        return Err(SqliteError::Domain(
+                            "the principal identity must not be empty".to_owned(),
+                        ));
+                    }
+                    if kind == PrincipalKind::Role {
+                        return Err(SqliteError::Domain(
+                            "roles must be created through the role operation".to_owned(),
+                        ));
+                    }
+                    if principal == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the reserved catalogue-health service cannot be created here"
+                                .to_owned(),
+                        ));
+                    }
+                    Principal::try_new(principal, kind, PrincipalStatus::Active)
+                        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                    if current.principals().any(|value| value.id() == principal) {
+                        return Err(SqliteError::Domain(
+                            "the security principal already exists".to_owned(),
+                        ));
+                    }
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "INSERT INTO orna_security_principals
+                         (principal_id, kind, status)
+                         VALUES (?1, ?2, 'active')",
+                        [
+                            Value::Blob(principal.to_bytes().to_vec()),
+                            Value::Text(principal_kind_text(kind).to_owned()),
+                        ],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::DisablePrincipal { principal } => {
+                    if principal == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the reserved catalogue-health service cannot be disabled".to_owned(),
+                        ));
+                    }
+                    require_security_principal(&current, principal)?;
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "UPDATE orna_security_principals
+                         SET status = 'disabled'
+                         WHERE principal_id = ?1",
+                        [Value::Blob(principal.to_bytes().to_vec())],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::CreateRole { role } => {
+                    if role == PrincipalId::from_bytes([0; 16]) {
+                        return Err(SqliteError::Domain(
+                            "the role identity must not be empty".to_owned(),
+                        ));
+                    }
+                    if role == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the reserved catalogue-health service cannot be a role".to_owned(),
+                        ));
+                    }
+                    Principal::try_new(role, PrincipalKind::Role, PrincipalStatus::Active)
+                        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                    if current.principals().any(|value| value.id() == role) {
+                        return Err(SqliteError::Domain(
+                            "the security role already exists".to_owned(),
+                        ));
+                    }
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "INSERT INTO orna_security_principals
+                         (principal_id, kind, status)
+                         VALUES (?1, 'role', 'active')",
+                        [Value::Blob(role.to_bytes().to_vec())],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::GrantRole { role, member } => {
+                    require_security_role(&current, role)?;
+                    require_security_principal(&current, member)?;
+                    if member == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the reserved catalogue-health service cannot become a role member"
+                                .to_owned(),
+                        ));
+                    }
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "INSERT INTO orna_security_role_memberships (role_id, member_id)
+                         VALUES (?1, ?2)",
+                        [
+                            Value::Blob(role.to_bytes().to_vec()),
+                            Value::Blob(member.to_bytes().to_vec()),
+                        ],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::RevokeRole { role, member } => {
+                    require_security_role(&current, role)?;
+                    require_security_principal(&current, member)?;
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "DELETE FROM orna_security_role_memberships
+                         WHERE role_id = ?1 AND member_id = ?2",
+                        [
+                            Value::Blob(role.to_bytes().to_vec()),
+                            Value::Blob(member.to_bytes().to_vec()),
+                        ],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::GrantPrivilege {
+                    grantee,
+                    class,
+                    object,
+                } => {
+                    require_security_principal(&current, grantee)?;
+                    if grantee == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the reserved catalogue-health service cannot receive privilege grants"
+                                .to_owned(),
+                        ));
+                    }
+                    let grant = PrivilegeGrant::new(grantee, class, object)
+                        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                    if let Some(function) = object {
+                        require_security_privilege_object(active, function)?;
+                    }
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "INSERT INTO orna_security_privilege_grants
+                         (grantee_id, privilege, object_id)
+                         VALUES (?1, ?2, ?3)",
+                        [
+                            Value::Blob(grant.grantee().to_bytes().to_vec()),
+                            Value::Text(grant.class().to_string()),
+                            grant.object().map_or(Value::Null, |function| {
+                                Value::Blob(function.to_bytes().to_vec())
+                            }),
+                        ],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::RevokePrivilege {
+                    grantee,
+                    class,
+                    object,
+                } => {
+                    require_security_principal(&current, grantee)?;
+                    let grant = PrivilegeGrant::new(grantee, class, object)
+                        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+                    if let Some(function) = object {
+                        require_security_privilege_object(active, function)?;
+                    }
+                    Self::mutate_security_rows_on(
+                        &transaction,
+                        "DELETE FROM orna_security_privilege_grants
+                         WHERE grantee_id = ?1 AND privilege = ?2
+                           AND ((object_id IS NULL AND ?3 IS NULL) OR object_id = ?3)",
+                        [
+                            Value::Blob(grant.grantee().to_bytes().to_vec()),
+                            Value::Text(grant.class().to_string()),
+                            grant.object().map_or(Value::Null, |function| {
+                                Value::Blob(function.to_bytes().to_vec())
+                            }),
+                        ],
+                    )
+                    .await?;
+                }
+                SqliteSecurityMutation::GrantExecute { grantee, function } => {
+                    if grantee != CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID {
+                        return Err(SqliteError::Domain(
+                            "the fixed execute grant must target the catalogue-health service"
+                                .to_owned(),
+                        ));
+                    }
+                    if function == CATALOGUE_HEALTH_FUNCTION_ID {
+                        return Err(SqliteError::Domain(
+                            "the catalogue-health intrinsic cannot receive an application grant"
+                                .to_owned(),
+                        ));
+                    }
+                    require_security_principal(&current, grantee)?;
+                    if active.catalogue().function_by_id(function).is_none() {
+                        return Err(SqliteError::Domain(
+                            "the execute target function is not installed".to_owned(),
+                        ));
+                    }
+                    let changed = transaction
+                        .execute(
+                            "INSERT INTO orna_security_execute_grants (grantee_id, function_id)
+                             VALUES (?1, ?2)
+                             ON CONFLICT (grantee_id, function_id) DO NOTHING",
+                            [
+                                Value::Blob(grantee.to_bytes().to_vec()),
+                                Value::Blob(function.to_bytes().to_vec()),
+                            ],
+                        )
+                        .await?;
+                    if changed > 1 {
+                        return Err(SqliteError::InvalidPersistedData(
+                            "execute grant write affected an unexpected number of rows",
+                        ));
+                    }
+                }
+            }
+            load_security_snapshot(&transaction, active).await
+        }
+        .await;
+        match result {
+            Ok(updated) => {
+                transaction.commit().await?;
+                Ok(updated)
+            }
+            Err(error) => match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(SqliteError::from(rollback)),
+            },
+        }
+    }
+
+    /// Records redacted invocation evidence without arguments, results, or
+    /// resource payloads.
+    pub async fn record_invocation_audit(
+        &self,
+        event: &SqliteInvocationAuditEvent,
+    ) -> Result<(), SqliteError> {
+        let connection = self.connection.lock().await;
+        Self::record_invocation_audit_on(&connection, event).await
+    }
+
+    async fn record_invocation_audit_on(
+        connection: &Connection,
+        event: &SqliteInvocationAuditEvent,
+    ) -> Result<(), SqliteError> {
+        let changed = connection
+            .execute(
+                "INSERT INTO orna_invocation_audit_events
+                 (invocation_id, outcome, session_principal_id,
+                  effective_principal_id, authorising_principal_id, function_id,
+                  source_revision_id, catalogue_revision_id, error_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT (invocation_id) DO UPDATE SET
+                     outcome = excluded.outcome,
+                     session_principal_id = excluded.session_principal_id,
+                     effective_principal_id = excluded.effective_principal_id,
+                     authorising_principal_id = excluded.authorising_principal_id,
+                     function_id = excluded.function_id,
+                     source_revision_id = excluded.source_revision_id,
+                     catalogue_revision_id = excluded.catalogue_revision_id,
+                     error_code = excluded.error_code",
+                [
+                    Value::Blob(event.invocation.to_bytes().to_vec()),
+                    Value::Text(event.outcome.clone()),
+                    Value::Blob(event.session_principal.to_bytes().to_vec()),
+                    event
+                        .effective_principal
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                    event
+                        .authorising_principal
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                    event
+                        .function
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                    event
+                        .source_revision
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                    event
+                        .catalogue_revision
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                    event
+                        .error_code
+                        .as_ref()
+                        .map_or(Value::Null, |value| Value::Text(value.clone())),
+                ],
+            )
+            .await?;
+        if changed != 1 {
+            return Err(SqliteError::InvalidPersistedData(
+                "invocation audit write affected an unexpected number of rows",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads one redacted invocation evidence record.
+    pub async fn load_invocation_audit(
+        &self,
+        invocation: InvocationId,
+    ) -> Result<Option<SqliteInvocationAuditEvent>, SqliteError> {
+        let connection = self.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT outcome, session_principal_id, effective_principal_id,
+                        authorising_principal_id, function_id, source_revision_id,
+                        catalogue_revision_id, error_code
+                 FROM orna_invocation_audit_events
+                 WHERE invocation_id = ?1",
+                [Value::Blob(invocation.to_bytes().to_vec())],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let session_principal = PrincipalId::from_bytes(id16(
+            row.get::<Vec<u8>>(1)?,
+            "invocation audit session principal",
+        )?);
+        let effective_principal = row
+            .get::<Option<Vec<u8>>>(2)?
+            .map(|bytes| id16(bytes, "invocation audit effective principal"))
+            .transpose()?
+            .map(PrincipalId::from_bytes);
+        let authorising_principal = row
+            .get::<Option<Vec<u8>>>(3)?
+            .map(|bytes| id16(bytes, "invocation audit authorising principal"))
+            .transpose()?
+            .map(PrincipalId::from_bytes);
+        let function = row
+            .get::<Option<Vec<u8>>>(4)?
+            .map(|bytes| id16(bytes, "invocation audit function"))
+            .transpose()?
+            .map(orna_core::FunctionId::from_bytes);
+        let source_revision = row
+            .get::<Option<Vec<u8>>>(5)?
+            .map(|bytes| id16(bytes, "invocation audit source revision"))
+            .transpose()?
+            .map(SourceRevisionId::from_bytes);
+        let catalogue_revision = row
+            .get::<Option<Vec<u8>>>(6)?
+            .map(|bytes| id16(bytes, "invocation audit catalogue revision"))
+            .transpose()?
+            .map(CatalogueRevisionId::from_bytes);
+        Ok(Some(SqliteInvocationAuditEvent {
+            invocation,
+            outcome: row.get(0)?,
+            session_principal,
+            effective_principal,
+            authorising_principal,
+            function,
+            source_revision,
+            catalogue_revision,
+            error_code: row.get(7)?,
+        }))
+    }
+
+    /// Loads the most recently recorded invocation for one local principal.
+    pub async fn load_latest_invocation_audit(
+        &self,
+        principal: PrincipalId,
+    ) -> Result<Option<SqliteInvocationAuditEvent>, SqliteError> {
+        let connection = self.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT invocation_id
+                 FROM orna_invocation_audit_events
+                 WHERE session_principal_id = ?1
+                 ORDER BY rowid DESC LIMIT 1",
+                [Value::Blob(principal.to_bytes().to_vec())],
+            )
+            .await?;
+        let bytes = if let Some(row) = rows.next().await? {
+            Some(row.get::<Vec<u8>>(0)?)
+        } else {
+            None
+        };
+        let invocation = bytes
+            .map(|bytes| id16(bytes, "latest invocation audit identity"))
+            .transpose()?
+            .map(InvocationId::from_bytes);
+        drop(connection);
+        match invocation {
+            Some(invocation) => self.load_invocation_audit(invocation).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Persists one bounded redacted inspection epoch summary.
+    pub async fn record_inspect_snapshot(
+        &self,
+        record: &SqliteInspectSnapshotRecord,
+    ) -> Result<(), SqliteError> {
+        let connection = self.connection.lock().await;
+        Self::record_inspect_snapshot_on(&connection, record).await
+    }
+
+    async fn record_inspect_snapshot_on(
+        connection: &Connection,
+        record: &SqliteInspectSnapshotRecord,
+    ) -> Result<(), SqliteError> {
+        ensure_evidence_size(&record.summary, "inspection summary")?;
+        let changed = connection
+            .execute(
+                "INSERT INTO orna_inspect_snapshots
+                 (epoch_id, invocation_id, owner_principal_id,
+                  source_revision_id, catalogue_revision_id, summary_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (invocation_id) DO UPDATE SET
+                     epoch_id = excluded.epoch_id,
+                     owner_principal_id = excluded.owner_principal_id,
+                     source_revision_id = excluded.source_revision_id,
+                     catalogue_revision_id = excluded.catalogue_revision_id,
+                     summary_bytes = excluded.summary_bytes,
+                     recorded_at = CURRENT_TIMESTAMP",
+                [
+                    Value::Blob(record.epoch.to_bytes().to_vec()),
+                    Value::Blob(record.invocation.to_bytes().to_vec()),
+                    Value::Blob(record.owner.to_bytes().to_vec()),
+                    Value::Blob(record.source_revision.to_bytes().to_vec()),
+                    Value::Blob(record.catalogue_revision.to_bytes().to_vec()),
+                    Value::Blob(record.summary.clone()),
+                ],
+            )
+            .await?;
+        if changed != 1 {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection summary write affected an unexpected number of rows",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads an exact inspection epoch or the latest epoch for an invocation.
+    pub async fn load_inspect_snapshot(
+        &self,
+        invocation: InvocationId,
+        epoch: Option<InspectEpochId>,
+    ) -> Result<Option<SqliteInspectSnapshotRecord>, SqliteError> {
+        let connection = self.connection.lock().await;
+        let (sql, params): (&str, Vec<Value>) = match epoch {
+            Some(epoch) => (
+                "SELECT epoch_id, owner_principal_id, source_revision_id,
+                        catalogue_revision_id, summary_bytes
+                 FROM orna_inspect_snapshots
+                 WHERE invocation_id = ?1 AND epoch_id = ?2",
+                vec![
+                    Value::Blob(invocation.to_bytes().to_vec()),
+                    Value::Blob(epoch.to_bytes().to_vec()),
+                ],
+            ),
+            None => (
+                "SELECT epoch_id, owner_principal_id, source_revision_id,
+                        catalogue_revision_id, summary_bytes
+                 FROM orna_inspect_snapshots
+                 WHERE invocation_id = ?1
+                 ORDER BY rowid DESC LIMIT 1",
+                vec![Value::Blob(invocation.to_bytes().to_vec())],
+            ),
+        };
+        let mut rows = connection.query(sql, params).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(SqliteInspectSnapshotRecord {
+            epoch: InspectEpochId::from_bytes(id16(row.get(0)?, "inspection epoch")?),
+            invocation,
+            owner: PrincipalId::from_bytes(id16(row.get(1)?, "inspection owner")?),
+            source_revision: SourceRevisionId::from_bytes(id16(
+                row.get(2)?,
+                "inspection source revision",
+            )?),
+            catalogue_revision: CatalogueRevisionId::from_bytes(id16(
+                row.get(3)?,
+                "inspection catalogue revision",
+            )?),
+            summary: row.get(4)?,
+        }))
+    }
+
+    /// Persists one bounded redacted inspection trace event.
+    pub async fn record_inspect_trace_event(
+        &self,
+        event: &SqliteInspectTraceEvent,
+    ) -> Result<(), SqliteError> {
+        let connection = self.connection.lock().await;
+        Self::record_inspect_trace_event_on(&connection, event).await
+    }
+
+    async fn record_inspect_trace_event_on(
+        connection: &Connection,
+        event: &SqliteInspectTraceEvent,
+    ) -> Result<(), SqliteError> {
+        ensure_evidence_size(&event.payload, "inspection trace payload")?;
+        let sequence = i64::try_from(event.sequence)
+            .map_err(|_| SqliteError::Domain("inspection trace sequence overflow".to_owned()))?;
+        let changed = connection
+            .execute(
+                "INSERT INTO orna_inspect_trace_events
+                 (invocation_id, sequence, kind, payload_bytes, observer_invocation_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (invocation_id, sequence) DO UPDATE SET
+                     kind = excluded.kind,
+                     payload_bytes = excluded.payload_bytes,
+                     observer_invocation_id = excluded.observer_invocation_id,
+                     recorded_at = CURRENT_TIMESTAMP",
+                [
+                    Value::Blob(event.invocation.to_bytes().to_vec()),
+                    Value::Integer(sequence),
+                    Value::Text(event.kind.clone()),
+                    Value::Blob(event.payload.clone()),
+                    event
+                        .observer_invocation
+                        .map_or(Value::Null, |value| Value::Blob(value.to_bytes().to_vec())),
+                ],
+            )
+            .await?;
+        if changed != 1 {
+            return Err(SqliteError::InvalidPersistedData(
+                "inspection trace write affected an unexpected number of rows",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads bounded trace events after a resume sequence.
+    pub async fn load_inspect_trace_events(
+        &self,
+        invocation: InvocationId,
+        after_sequence: u64,
+    ) -> Result<Vec<SqliteInspectTraceEvent>, SqliteError> {
+        let after = i64::try_from(after_sequence)
+            .map_err(|_| SqliteError::Domain("inspection trace sequence overflow".to_owned()))?;
+        let connection = self.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT sequence, kind, payload_bytes, observer_invocation_id
+                 FROM orna_inspect_trace_events
+                 WHERE invocation_id = ?1 AND sequence > ?2
+                 ORDER BY sequence",
+                [
+                    Value::Blob(invocation.to_bytes().to_vec()),
+                    Value::Integer(after),
+                ],
+            )
+            .await?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let sequence = u64::try_from(row.get::<i64>(0)?)
+                .map_err(|_| SqliteError::InvalidPersistedData("inspection trace sequence"))?;
+            let observer_invocation = row
+                .get::<Option<Vec<u8>>>(3)?
+                .map(|bytes| id16(bytes, "inspection observer invocation"))
+                .transpose()?
+                .map(InvocationId::from_bytes);
+            events.push(SqliteInspectTraceEvent {
+                invocation,
+                sequence,
+                kind: row.get(1)?,
+                payload: row.get(2)?,
+                observer_invocation,
+            });
+        }
+        Ok(events)
+    }
+
+    /// Persists one redacted USER-state operation record.
+    pub async fn record_user_state_audit(
+        &self,
+        event: &SqliteUserStateAuditEvent,
+    ) -> Result<(), SqliteError> {
+        let connection = self.connection.lock().await;
+        Self::record_user_state_audit_on(&connection, event).await
+    }
+
+    async fn record_user_state_audit_on(
+        connection: &Connection,
+        event: &SqliteUserStateAuditEvent,
+    ) -> Result<(), SqliteError> {
+        let cell_count = i64::try_from(event.cell_count)
+            .map_err(|_| SqliteError::Domain("USER state audit cell count overflow".to_owned()))?;
+        let changed = connection
+            .execute(
+                "INSERT INTO orna_user_state_audit_events
+                 (audit_id, operation, outcome, session_principal_id,
+                  root_function_id, root_state_profile, cell_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                [
+                    Value::Blob(event.audit_id.to_bytes().to_vec()),
+                    Value::Text(event.operation.clone()),
+                    Value::Text(event.outcome.clone()),
+                    Value::Blob(event.session_principal.to_bytes().to_vec()),
+                    Value::Blob(event.root_function.to_bytes().to_vec()),
+                    Value::Text(event.state_profile.clone()),
+                    Value::Integer(cell_count),
+                ],
+            )
+            .await?;
+        if changed != 1 {
+            return Err(SqliteError::InvalidPersistedData(
+                "USER state audit write affected an unexpected number of rows",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Loads redacted USER-state operation records for one local principal.
+    pub async fn load_user_state_audit(
+        &self,
+        principal: PrincipalId,
+        root_function: orna_core::FunctionId,
+        state_profile: &str,
+    ) -> Result<Vec<SqliteUserStateAuditEvent>, SqliteError> {
+        let connection = self.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT audit_id, operation, outcome, root_state_profile,
+                        cell_count
+                 FROM orna_user_state_audit_events
+                 WHERE session_principal_id = ?1
+                   AND root_function_id = ?2
+                   AND root_state_profile = ?3
+                 ORDER BY rowid",
+                [
+                    Value::Blob(principal.to_bytes().to_vec()),
+                    Value::Blob(root_function.to_bytes().to_vec()),
+                    Value::Text(state_profile.to_owned()),
+                ],
+            )
+            .await?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let cell_count = u64::try_from(row.get::<i64>(4)?)
+                .map_err(|_| SqliteError::InvalidPersistedData("USER state audit cell count"))?;
+            events.push(SqliteUserStateAuditEvent {
+                audit_id: InvocationId::from_bytes(id16(row.get(0)?, "USER state audit id")?),
+                operation: row.get(1)?,
+                outcome: row.get(2)?,
+                session_principal: principal,
+                root_function,
+                state_profile: row.get(3)?,
+                cell_count,
+            });
+        }
+        Ok(events)
+    }
+
+    async fn mutate_security_rows_on(
+        connection: &Connection,
+        statement: &str,
+        parameters: impl turso::IntoParams,
+    ) -> Result<(), SqliteError> {
+        let changed = connection.execute(statement, parameters).await?;
+        if changed != 1 {
+            return Err(SqliteError::Domain(
+                "security mutation affected an unexpected number of rows".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn seed_pair(&self) -> Result<BootstrapRevision, SqliteError> {
@@ -405,6 +1714,225 @@ impl SqliteRevisionStore {
         arguments: &[(ParameterId, RuntimeValue)],
     ) -> Result<Vec<RuntimeValue>, SqliteError> {
         let active = self.recover().await.map_err(storage_error_to_sqlite)?;
+        self.execute_server_function_at(&active, function_id, arguments)
+            .await
+    }
+
+    /// Executes one supported SERVER function against a caller-pinned active
+    /// revision.
+    ///
+    /// Routes that authenticate and authorize against a recovered revision
+    /// should use this entry point so execution cannot silently switch to a
+    /// newer catalogue or executable artifact between those checks and the
+    /// call.
+    pub async fn execute_server_function_at(
+        &self,
+        active: &ActiveDatabaseRevision,
+        function_id: orna_core::FunctionId,
+        arguments: &[(ParameterId, RuntimeValue)],
+    ) -> Result<Vec<RuntimeValue>, SqliteError> {
+        let connection = self.connection.lock().await;
+        self.execute_server_function_at_with_connection(&connection, active, function_id, arguments)
+            .await
+    }
+
+    /// Authenticates the local peer, authorizes one SERVER call, and executes
+    /// it under one SQLite write transaction against the pinned revision.
+    pub async fn execute_local_peer_server_function_at(
+        &self,
+        active: &ActiveDatabaseRevision,
+        uid: u32,
+        invocation: InvocationId,
+        function_id: orna_core::FunctionId,
+        arguments: &[(ParameterId, RuntimeValue)],
+    ) -> Result<SqliteExecutionResult, SqliteError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = turso::transaction::Transaction::new(
+            &mut connection,
+            turso::transaction::TransactionBehavior::Immediate,
+        )
+        .await?;
+        let current_active = match load_active_from(&transaction).await {
+            Ok(active) => active,
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                return Err(error);
+            }
+        };
+        if current_active.pair() != active.pair() {
+            let _ = transaction.rollback().await;
+            return Err(SqliteError::Domain(
+                "the active SQLite revision changed before execution".to_owned(),
+            ));
+        }
+        let active = &current_active;
+        let snapshot = match load_security_snapshot(&transaction, active).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                return Err(error);
+            }
+        };
+        let session = snapshot.authenticate_local_peer(uid).map_err(|error| {
+            SqliteError::Domain(format!("local peer authentication failed: {error}"))
+        })?;
+        let decision = snapshot.authorise_execute(
+            &session,
+            orna_core::security::InvocationTarget::new(function_id, active.pair()),
+        );
+        let authorisation = match decision {
+            ExecuteDecision::Allowed(authorisation) => authorisation,
+            ExecuteDecision::Denied(reason) => {
+                Self::record_invocation_audit_on(
+                    &transaction,
+                    &SqliteInvocationAuditEvent {
+                        invocation,
+                        outcome: "denied".to_owned(),
+                        session_principal: session.principal(),
+                        effective_principal: None,
+                        authorising_principal: None,
+                        function: Some(function_id),
+                        source_revision: Some(active.pair().source()),
+                        catalogue_revision: Some(active.pair().catalogue()),
+                        error_code: Some("execution.execute_denied".to_owned()),
+                    },
+                )
+                .await?;
+                transaction.commit().await?;
+                return Ok(SqliteExecutionResult::Denied { session, reason });
+            }
+        };
+        Self::record_invocation_audit_on(
+            &transaction,
+            &SqliteInvocationAuditEvent {
+                invocation,
+                outcome: "allowed".to_owned(),
+                session_principal: session.principal(),
+                effective_principal: Some(authorisation.effective_principal()),
+                authorising_principal: Some(authorisation.authorising_principal()),
+                function: Some(function_id),
+                source_revision: Some(active.pair().source()),
+                catalogue_revision: Some(active.pair().catalogue()),
+                error_code: None,
+            },
+        )
+        .await?;
+        let values = match self
+            .execute_server_function_at_with_connection(
+                &transaction,
+                active,
+                function_id,
+                arguments,
+            )
+            .await
+        {
+            Ok(values) => values,
+            Err(error) => {
+                Self::record_invocation_audit_on(
+                    &transaction,
+                    &SqliteInvocationAuditEvent {
+                        invocation,
+                        outcome: "failed".to_owned(),
+                        session_principal: session.principal(),
+                        effective_principal: Some(authorisation.effective_principal()),
+                        authorising_principal: Some(authorisation.authorising_principal()),
+                        function: Some(function_id),
+                        source_revision: Some(active.pair().source()),
+                        catalogue_revision: Some(active.pair().catalogue()),
+                        error_code: Some("execution.target_failure".to_owned()),
+                    },
+                )
+                .await?;
+                transaction.commit().await?;
+                return Ok(SqliteExecutionResult::Failed {
+                    session,
+                    authorisation,
+                    error,
+                });
+            }
+        };
+        let summary = serde_json::to_vec(&serde_json::json!({
+            "record": "inspect_summary",
+            "invocation_id": invocation.canonical(),
+            "owner_principal": session.principal().canonical(),
+            "source_revision_id": active.pair().source().canonical(),
+            "catalogue_revision_id": active.pair().catalogue().canonical(),
+            "function_id": function_id.canonical(),
+            "outcome": "completed",
+            "result_count": values.len(),
+            "calls": [{
+                "function_id": function_id.canonical(),
+                "outcome": "completed",
+                "result_count": values.len(),
+            }],
+            "resources": [],
+            "state_cells": [],
+        }))
+        .map_err(|error| {
+            SqliteError::Domain(format!("could not encode inspection summary: {error}"))
+        })?;
+        Self::record_inspect_snapshot_on(
+            &transaction,
+            &SqliteInspectSnapshotRecord {
+                epoch: InspectEpochId::new(),
+                invocation,
+                owner: session.principal(),
+                source_revision: active.pair().source(),
+                catalogue_revision: active.pair().catalogue(),
+                summary,
+            },
+        )
+        .await?;
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "record": "inspect_trace",
+            "invocation_id": invocation.canonical(),
+            "function_id": function_id.canonical(),
+            "outcome": "completed",
+        }))
+        .map_err(|error| {
+            SqliteError::Domain(format!("could not encode inspection trace event: {error}"))
+        })?;
+        Self::record_inspect_trace_event_on(
+            &transaction,
+            &SqliteInspectTraceEvent {
+                invocation,
+                sequence: 1,
+                kind: "invocation.completed".to_owned(),
+                payload,
+                observer_invocation: None,
+            },
+        )
+        .await?;
+        Self::record_invocation_audit_on(
+            &transaction,
+            &SqliteInvocationAuditEvent {
+                invocation,
+                outcome: "completed".to_owned(),
+                session_principal: session.principal(),
+                effective_principal: Some(authorisation.effective_principal()),
+                authorising_principal: Some(authorisation.authorising_principal()),
+                function: Some(function_id),
+                source_revision: Some(active.pair().source()),
+                catalogue_revision: Some(active.pair().catalogue()),
+                error_code: None,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(SqliteExecutionResult::Allowed {
+            session,
+            authorisation,
+            values,
+        })
+    }
+
+    async fn execute_server_function_at_with_connection(
+        &self,
+        connection: &Connection,
+        active: &ActiveDatabaseRevision,
+        function_id: orna_core::FunctionId,
+        arguments: &[(ParameterId, RuntimeValue)],
+    ) -> Result<Vec<RuntimeValue>, SqliteError> {
         let function = active
             .catalogue()
             .function_by_id(function_id)
@@ -468,7 +1996,7 @@ impl SqliteRevisionStore {
         }
         if revision.artifact().format() == orna_artifact::server_plan::FORMAT_IDENTITY {
             return self
-                .execute_server_plan(&active, function, revision, arguments)
+                .execute_server_plan(connection, active, function, revision, arguments)
                 .await;
         }
         Err(SqliteError::Domain(format!(
@@ -479,6 +2007,7 @@ impl SqliteRevisionStore {
 
     async fn execute_server_plan(
         &self,
+        connection: &Connection,
         active: &ActiveDatabaseRevision,
         function: &FunctionDefinition,
         revision: &FunctionRevisionRecord,
@@ -515,7 +2044,6 @@ impl SqliteRevisionStore {
             object_table_name(object.id()),
             object_id_column()
         );
-        let connection = self.connection.lock().await;
         let mut rows = connection.query(&query, ()).await?;
         let mut output_rows: Vec<Vec<RuntimeValue>> = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -621,6 +2149,251 @@ fn storage_error_to_sqlite(error: StorageError<SqliteError>) -> SqliteError {
         StorageError::Backend(error) => error,
         StorageError::InvalidRequest(error) => SqliteError::Domain(error.to_string()),
     }
+}
+
+async fn load_security_snapshot(
+    connection: &Connection,
+    active: &ActiveDatabaseRevision,
+) -> Result<SecuritySnapshot, SqliteError> {
+    let mut principals = Vec::new();
+    let mut rows = connection
+        .query(
+            "SELECT principal_id, kind, status
+             FROM orna_security_principals
+             ORDER BY principal_id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let principal_id =
+            PrincipalId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "security principal id")?);
+        let kind = match row.get::<String>(1)?.as_str() {
+            "user" => PrincipalKind::User,
+            "role" => PrincipalKind::Role,
+            "service" => PrincipalKind::Service,
+            _ => {
+                return Err(SqliteError::InvalidPersistedData(
+                    "security principal kind is invalid",
+                ));
+            }
+        };
+        let status = match row.get::<String>(2)?.as_str() {
+            "active" => PrincipalStatus::Active,
+            "disabled" => PrincipalStatus::Disabled,
+            _ => {
+                return Err(SqliteError::InvalidPersistedData(
+                    "security principal status is invalid",
+                ));
+            }
+        };
+        principals.push(Principal::new(principal_id, kind, status));
+    }
+    drop(rows);
+
+    let mut memberships = Vec::new();
+    let mut rows = connection
+        .query(
+            "SELECT role_id, member_id
+             FROM orna_security_role_memberships
+             ORDER BY member_id, role_id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        memberships.push(RoleMembership::new(
+            PrincipalId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "security role id")?),
+            PrincipalId::from_bytes(id16(
+                row.get::<Vec<u8>>(1)?,
+                "security membership member id",
+            )?),
+        ));
+    }
+    drop(rows);
+
+    let mut execute_grants = Vec::new();
+    let mut rows = connection
+        .query(
+            "SELECT grantee_id, function_id
+             FROM orna_security_execute_grants
+             ORDER BY grantee_id, function_id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        execute_grants.push(ExecuteGrant::new(
+            PrincipalId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "execute grantee id")?),
+            orna_core::FunctionId::from_bytes(id16(row.get::<Vec<u8>>(1)?, "execute function id")?),
+        ));
+    }
+    drop(rows);
+
+    let mut local_peer_credentials = Vec::new();
+    let mut rows = connection
+        .query(
+            "SELECT uid, principal_id
+             FROM orna_security_local_peer_credentials
+             ORDER BY uid",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let uid = u32::try_from(row.get::<i64>(0)?)
+            .map_err(|_| SqliteError::InvalidPersistedData("local peer UID is invalid"))?;
+        local_peer_credentials.push(LocalPeerCredential::new(
+            uid,
+            PrincipalId::from_bytes(id16(row.get::<Vec<u8>>(1)?, "local peer principal id")?),
+        ));
+    }
+    drop(rows);
+
+    let mut privilege_grants = Vec::new();
+    let mut rows = connection
+        .query(
+            "SELECT grantee_id, privilege, object_id
+             FROM orna_security_privilege_grants
+             ORDER BY grantee_id, privilege, object_id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let grantee =
+            PrincipalId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "privilege grantee id")?);
+        let class = parse_privilege_class(&row.get::<String>(1)?)?;
+        let object = match row.get_value(2)? {
+            Value::Null => None,
+            Value::Blob(value) => Some(orna_core::FunctionId::from_bytes(id16(
+                value,
+                "privilege object id",
+            )?)),
+            _ => {
+                return Err(SqliteError::InvalidPersistedData(
+                    "privilege object id is not a BLOB or NULL",
+                ));
+            }
+        };
+        privilege_grants.push(
+            PrivilegeGrant::new(grantee, class, object)
+                .map_err(|_| SqliteError::InvalidPersistedData("invalid privilege grant"))?,
+        );
+    }
+    drop(rows);
+
+    SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+        active.pair(),
+        active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| orna_core::security::SecurityFunctionTarget::application(function.id()))
+            .collect(),
+        principals,
+        memberships,
+        execute_grants,
+        local_peer_credentials,
+        privilege_grants,
+    )
+    .map_err(|error| SqliteError::Domain(format!("invalid SQLite security snapshot: {error}")))
+}
+
+fn parse_privilege_class(value: &str) -> Result<PrivilegeClass, SqliteError> {
+    match value {
+        "execute" => Ok(PrivilegeClass::Execute),
+        "security_admin" => Ok(PrivilegeClass::SecurityAdmin),
+        "inspect:own-invocation" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::OwnInvocation,
+        )),
+        "inspect:session-invocations" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::SessionInvocations,
+        )),
+        "inspect:any-invocation" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::AnyInvocation,
+        )),
+        "inspect:values" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::Values,
+        )),
+        "inspect:source" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::Source,
+        )),
+        "inspect:security-details" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::SecurityDetails,
+        )),
+        "inspect:runtime-internals" => Ok(PrivilegeClass::Inspect(
+            orna_core::inspect::InspectPrivilege::RuntimeInternals,
+        )),
+        _ => Err(SqliteError::InvalidPersistedData(
+            "security privilege class is invalid",
+        )),
+    }
+}
+
+fn local_peer_principal_id(uid: u32) -> PrincipalId {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(b"ORNAUID\0");
+    bytes[8..12].copy_from_slice(&uid.to_be_bytes());
+    bytes[12..].copy_from_slice(&(!uid).to_be_bytes());
+    PrincipalId::from_bytes(bytes)
+}
+
+fn principal_kind_text(kind: PrincipalKind) -> &'static str {
+    match kind {
+        PrincipalKind::User => "user",
+        PrincipalKind::Role => "role",
+        PrincipalKind::Service => "service",
+    }
+}
+
+fn require_security_principal(
+    snapshot: &SecuritySnapshot,
+    principal: PrincipalId,
+) -> Result<(), SqliteError> {
+    if snapshot.principals().any(|value| value.id() == principal) {
+        Ok(())
+    } else {
+        Err(SqliteError::Domain(
+            "the security principal is not installed".to_owned(),
+        ))
+    }
+}
+
+fn require_security_role(
+    snapshot: &SecuritySnapshot,
+    role: PrincipalId,
+) -> Result<(), SqliteError> {
+    let Some(principal) = snapshot.principals().find(|value| value.id() == role) else {
+        return Err(SqliteError::Domain(
+            "the security role is not installed".to_owned(),
+        ));
+    };
+    if principal.kind() != PrincipalKind::Role {
+        return Err(SqliteError::Domain(
+            "the membership target is not a role".to_owned(),
+        ));
+    }
+    Ok(())
+}
+fn require_security_privilege_object(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Result<(), SqliteError> {
+    if active.catalogue().function_by_id(function).is_some()
+        || system_function_by_id(function).is_some()
+    {
+        Ok(())
+    } else {
+        Err(SqliteError::Domain(
+            "the privilege object function is not installed".to_owned(),
+        ))
+    }
+}
+
+fn ensure_evidence_size(bytes: &[u8], label: &'static str) -> Result<(), SqliteError> {
+    const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
+    if bytes.len() > MAX_EVIDENCE_BYTES {
+        return Err(SqliteError::Domain(format!(
+            "{label} exceeds the {MAX_EVIDENCE_BYTES} byte SQLite evidence limit"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_function_arguments(
