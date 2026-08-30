@@ -1105,13 +1105,15 @@ fn version_one_preparation_revalidates_headers_facts_and_evidence_before_encodin
             transaction,
             volatility,
         );
-        assert!(version_one_query_plan(
-            &plan,
-            &accepted,
-            &object_types,
-            &version_one_query_reference_sequence(&plan, &accepted),
-        )
-        .is_ok());
+        assert!(
+            version_one_query_plan(
+                &plan,
+                &accepted,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &accepted),
+            )
+            .is_ok()
+        );
     }
 
     assert_preparation_reason(
@@ -1835,16 +1837,18 @@ fn distinct_preparation_has_an_exhaustive_projection_domain_and_boolean_selectio
         );
     let reference_function =
         distinct_function_with_completed_type(&function, ResolvedType::reference(person.id()));
-    assert!(distinct_query_plan(
-        &reference_plan,
-        &reference_function,
-        &object_types_with_distinct_completed_type(
-            &object_types,
-            ResolvedType::reference(person.id()),
-        ),
-        &distinct_query_reference_sequence(&reference_plan, &reference_function),
-    )
-    .is_ok());
+    assert!(
+        distinct_query_plan(
+            &reference_plan,
+            &reference_function,
+            &object_types_with_distinct_completed_type(
+                &object_types,
+                ResolvedType::reference(person.id()),
+            ),
+            &distinct_query_reference_sequence(&reference_plan, &reference_function),
+        )
+        .is_ok()
+    );
 
     let named_plan = plan
         .with_test_mutation(crate::relational::DistinctQueryTestMutation::ClearSelection)

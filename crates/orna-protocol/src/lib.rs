@@ -1010,7 +1010,7 @@ fn encode_registered_value_with_marker(
 ) -> Result<Vec<u8>, ValueCodecError> {
     match value {
         RuntimeValue::Opaque(value) => {
-            let checked = OpaqueValue::new(
+            let checked = construct_opaque_value(
                 active,
                 registry,
                 value.opaque_type(),
@@ -1029,6 +1029,19 @@ fn encode_registered_value_with_marker(
             encoded[..marker.len()].copy_from_slice(marker);
             encoded
         }),
+    }
+}
+
+fn construct_opaque_value(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    opaque_type: TypeId,
+    payload: &[u8],
+) -> Result<OpaqueValue, OpaqueValueError> {
+    if opaque_type == orna_core::system::SYS_SOURCE_FUNCTION_TYPE_ID {
+        OpaqueValue::new_source_metadata_carrier(active, opaque_type, payload)
+    } else {
+        OpaqueValue::new(active, registry, opaque_type, payload)
     }
 }
 
@@ -1057,12 +1070,13 @@ fn decode_registered_value_with_marker(
     let (tag, type_id, payload) = decode_envelope(encoded, marker)?;
     match tag {
         RECORD_TAG => decode_record_value_with_marker(active, type_id, payload, marker),
-        OPAQUE_TAG => OpaqueValue::new(active, registry, type_id, payload)
+        OPAQUE_TAG => construct_opaque_value(active, registry, type_id, payload)
             .map(RuntimeValue::Opaque)
             .map_err(|source| ValueCodecError::OpaqueValue { source }),
         _ => decode_catalogue_value_parts(active.catalogue(), tag, type_id, payload),
     }
 }
+
 /// Encodes one complete ORV5/ORV6 runtime value.
 ///
 /// ORV5 retains every ORV4 value and adds checked OPTION, LIST, and MAP values.

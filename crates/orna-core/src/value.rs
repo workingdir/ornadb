@@ -859,6 +859,16 @@ fn preflight_collection_descriptor(
         }
         TypeDescriptorKind::Map { key, value } => {
             path.push(CollectionValuePathSegment::MapKeyChild);
+            if matches!(
+                key.kind(),
+                TypeDescriptorKind::Named(type_id)
+                    if type_id == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
+            ) {
+                return Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: key.clone(),
+                });
+            }
             if !matches!(
                 key.kind(),
                 TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_)
@@ -871,7 +881,18 @@ fn preflight_collection_descriptor(
             preflight_collection_descriptor(active, key, path)?;
             path.pop();
             path.push(CollectionValuePathSegment::MapValueChild);
-            let result = preflight_collection_descriptor(active, value, path);
+            let result = if matches!(
+                value.kind(),
+                TypeDescriptorKind::Named(type_id)
+                    if type_id == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
+            ) {
+                Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: value.clone(),
+                })
+            } else {
+                preflight_collection_descriptor(active, value, path)
+            };
             if result.is_ok() {
                 path.pop();
             }
@@ -914,13 +935,25 @@ fn classify_collection_named_descriptor(
             descriptor: descriptor.clone(),
         });
     };
-    let catalogue = active.catalogue();
+    if type_id == crate::system::SYS_SOURCE_FUNCTION_TYPE_ID
+        && ((!path.is_empty()
+            && path.iter().all(|segment| {
+                matches!(
+                    segment,
+                    CollectionValuePathSegment::OptionChild | CollectionValuePathSegment::ListChild
+                )
+            }))
+            || matches!(path, [CollectionValuePathSegment::SetChild]))
+    {
+        return Ok(RecordValueFieldDescriptorClass::SealedSourceMetadata);
+    }
     let Some(standard) = active.catalogue_hash_context().standard() else {
         return Err(CollectionValueError::UnsupportedDescriptor {
             path: collection_value_path(path),
             descriptor: descriptor.clone(),
         });
     };
+    let catalogue = active.catalogue();
     let standard = standard.catalogue();
     if catalogue.type_definition_by_id(type_id).is_some()
         && standard.type_definition_by_id(type_id).is_some()
@@ -958,11 +991,16 @@ fn validate_collection_runtime_value(
                         path: collection_value_path(path),
                     }
                 })?;
-            let Some(expected) = active.record_value_field_descriptor_runtime_type(descriptor)
-            else {
-                return Err(CollectionValueError::InactiveValue {
-                    path: collection_value_path(path),
-                });
+            let expected = if class == RecordValueFieldDescriptorClass::SealedSourceMetadata {
+                ResolvedType::value(crate::system::SYS_SOURCE_FUNCTION_TYPE_ID)
+            } else {
+                let Some(expected) = active.record_value_field_descriptor_runtime_type(descriptor)
+                else {
+                    return Err(CollectionValueError::InactiveValue {
+                        path: collection_value_path(path),
+                    });
+                };
+                expected
             };
             if value.runtime_type() != RuntimeType::Flat(expected) {
                 return Err(CollectionValueError::ValueTypeMismatch {
@@ -985,7 +1023,8 @@ fn validate_collection_runtime_value(
                     validate_record_value_semantics(active, record, path)
                         .map_err(|failure| collection_error_from_record_failure(failure, path))
                 }
-                RecordValueFieldDescriptorClass::StandardPrimitive(_) => Ok(()),
+                RecordValueFieldDescriptorClass::StandardPrimitive(_)
+                | RecordValueFieldDescriptorClass::SealedSourceMetadata => Ok(()),
             }
         }
         TypeDescriptorKind::Reference(target) => {
@@ -1203,6 +1242,13 @@ fn compare_map_key(
                 }
                 RecordValueFieldDescriptorClass::StandardPrimitive(_) => {
                     compare_standard_primitive_map_key(left, right)
+                }
+                RecordValueFieldDescriptorClass::SealedSourceMetadata => {
+                    let (RuntimeValue::Opaque(left), RuntimeValue::Opaque(right)) = (left, right)
+                    else {
+                        return Ordering::Equal;
+                    };
+                    left.canonical_payload().cmp(right.canonical_payload())
                 }
             }
         }

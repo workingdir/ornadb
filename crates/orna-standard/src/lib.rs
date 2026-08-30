@@ -28,7 +28,7 @@ use orna_core::{
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        ActiveDatabaseRevision, ActiveRevisionContent, ActiveDatabaseRevisionInput,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
         FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair, Sha256Digest,
@@ -46,6 +46,7 @@ use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeEx
 mod codecs;
 mod executables;
 mod retained;
+mod snapshot_builders;
 
 pub use codecs::{
     RegisteredOpaqueCodecsError, is_registered_inspect_carrier_type,
@@ -63,6 +64,15 @@ use retained::{
     reconcile_retained_window_source, retained_standard_library_snapshot_from_source,
     retained_standard_library_v2_snapshot_from_source,
     retained_standard_library_v3_snapshot_from_source,
+};
+use snapshot_builders::{
+    retained_standard_library_v4_snapshot_from_source,
+    retained_standard_library_v5_snapshot_from_source,
+    retained_standard_library_v6_snapshot_from_source,
+    retained_standard_library_v7_snapshot_from_source,
+    retained_standard_library_v8_snapshot_from_source,
+    retained_standard_library_v9_snapshot_from_source,
+    retained_standard_library_v10_snapshot_from_source,
 };
 
 pub use orna_compiler::StandardUpgradeIdentity;
@@ -644,6 +654,22 @@ pub const STD_MATH_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reser
 pub const STD_MATH_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(11));
 const RETAINED_STANDARD_MATH_SOURCE: &str = include_str!("../../../stdlib/std/math.orna");
 const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
+const ACCEPTED_V11_MATH_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x9b, 0x57, 0x8c, 0xcd, 0x92, 0x78, 0x63, 0xfa, 0xfe, 0x37, 0x71, 0x1c, 0x1c, 0x69, 0x59, 0x85,
+    0x29, 0x91, 0x9f, 0x3d, 0x28, 0x66, 0xe2, 0x95, 0xd8, 0x60, 0xd1, 0x32, 0x8d, 0x74, 0x52, 0x7f,
+]);
+const ACCEPTED_V11_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0xe3, 0xae, 0xda, 0xa3, 0x6c, 0x16, 0xc7, 0x91, 0x2a, 0x60, 0x55, 0xf7, 0xe3, 0xf4, 0x55, 0x74,
+    0x3b, 0x65, 0xd8, 0x9d, 0xb7, 0x9d, 0xc2, 0xe1, 0x48, 0x97, 0x66, 0xe2, 0xff, 0x01, 0xea, 0xb8,
+]);
+const ACCEPTED_V11_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x72, 0x40, 0x86, 0x61, 0xd2, 0xa8, 0x96, 0x0a, 0x84, 0xd9, 0xa6, 0x09, 0x11, 0x02, 0x02, 0x89,
+    0x91, 0x0a, 0xb2, 0x67, 0x49, 0x09, 0x3e, 0x6a, 0x13, 0xa5, 0xd7, 0x11, 0xbb, 0x26, 0x3c, 0x6f,
+]);
+const ACCEPTED_V11_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
+    0x19, 0xc8, 0x28, 0xa7, 0x7e, 0xef, 0xfe, 0xac, 0x5a, 0x95, 0xb6, 0xd0, 0x6c, 0xbe, 0x91, 0x2c,
+    0x9c, 0x22, 0xab, 0xce, 0xc5, 0x18, 0x3c, 0x1e, 0xfa, 0xde, 0xe9, 0x3d, 0x72, 0x3d, 0x91, 0x98,
+]);
 const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x1e, 0x99, 0xf3, 0x2f, 0xf7, 0xc2, 0xf0, 0x65, 0x4d, 0x67, 0x61, 0xa6, 0xa9, 0xce, 0xd8, 0x26,
     0x95, 0x6c, 0x09, 0x5d, 0xdf, 0xd1, 0x2e, 0xbb, 0xdc, 0xc1, 0x8e, 0xc4, 0xe9, 0xab, 0x19, 0xc4,
@@ -2317,7 +2343,12 @@ fn standard_math_function_definitions()
         ("is_zero", 0x32_u8, 0x42_u8, &["p_value"][..]),
         ("min", 0x33_u8, 0x43_u8, &["p_left", "p_right"][..]),
         ("max", 0x34_u8, 0x44_u8, &["p_left", "p_right"][..]),
-        ("clamp", 0x35_u8, 0x45_u8, &["p_value", "p_min", "p_max"][..]),
+        (
+            "clamp",
+            0x35_u8,
+            0x45_u8,
+            &["p_value", "p_min", "p_max"][..],
+        ),
     ];
     definitions
         .into_iter()
@@ -3130,267 +3161,6 @@ pub fn verify_standard_library_v5_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
-fn retained_standard_library_v4_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v4_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    let output_origins = reconcile_retained_output_source(output_source, catalogue)?;
-    origins.extend(output_origins.iter().cloned());
-    let ui_origins = reconcile_retained_ui_source(ui_source, catalogue)?;
-    origins.extend(ui_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V4_TYPES_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if invoke_content_hash != ACCEPTED_V4_INVOKE_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if output_content_hash != ACCEPTED_V4_OUTPUT_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if ui_content_hash != ACCEPTED_V4_UI_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let types_unit = StoredSourceUnit::new(
-        STD_TYPES_SOURCE_UNIT_ID,
-        0,
-        SOURCE_LOGICAL_PATH,
-        types_source,
-        types_content_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let invoke_unit = StoredSourceUnit::new(
-        STD_INVOKE_SOURCE_UNIT_ID,
-        1,
-        STD_INVOKE_SOURCE_LOGICAL_PATH,
-        invoke_source,
-        invoke_content_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let output_unit = StoredSourceUnit::new(
-        STD_OUTPUT_SOURCE_UNIT_ID,
-        2,
-        STD_OUTPUT_SOURCE_LOGICAL_PATH,
-        output_source,
-        output_content_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let ui_unit = StoredSourceUnit::new(
-        STD_UI_SOURCE_UNIT_ID,
-        3,
-        STD_UI_SOURCE_LOGICAL_PATH,
-        ui_source,
-        ui_content_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let units = vec![types_unit, invoke_unit, output_unit, ui_unit];
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V4_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V4_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V3_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V4_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V4_BUNDLE_ID,
-        STANDARD_SOURCE_V4_REVISION_ID,
-        Some(STANDARD_SOURCE_V3_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-
-    // `orna.std/4` retains the exact V2 parameter-echo executable unchanged;
-    // its artifact and semantic digests are the V3 goldens, pinned here as the
-    // V4 goldens so the retained path fails closed on any drift.
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V4_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V4_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V4_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        vec![executable],
-        origins,
-        ACCEPTED_V4_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let _ = standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-
-    Ok(snapshot)
-}
-
-fn retained_standard_library_v5_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-    json_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v5_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
-    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
-    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
-    origins.extend(json_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let json_content_hash = source_unit_content_digest(json_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V5_TYPES_CONTENT_DIGEST
-        || invoke_content_hash != ACCEPTED_V5_INVOKE_CONTENT_DIGEST
-        || output_content_hash != ACCEPTED_V5_OUTPUT_CONTENT_DIGEST
-        || ui_content_hash != ACCEPTED_V5_UI_CONTENT_DIGEST
-        || json_content_hash != ACCEPTED_V5_JSON_CONTENT_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let units = vec![
-        StoredSourceUnit::new(
-            STD_TYPES_SOURCE_UNIT_ID,
-            0,
-            SOURCE_LOGICAL_PATH,
-            types_source,
-            types_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_INVOKE_SOURCE_UNIT_ID,
-            1,
-            STD_INVOKE_SOURCE_LOGICAL_PATH,
-            invoke_source,
-            invoke_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_OUTPUT_SOURCE_UNIT_ID,
-            2,
-            STD_OUTPUT_SOURCE_LOGICAL_PATH,
-            output_source,
-            output_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_SOURCE_UNIT_ID,
-            3,
-            STD_UI_SOURCE_LOGICAL_PATH,
-            ui_source,
-            ui_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_JSON_SOURCE_UNIT_ID,
-            4,
-            STD_JSON_SOURCE_LOGICAL_PATH,
-            json_source,
-            json_content_hash,
-        ),
-    ]
-    .into_iter()
-    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
-    .collect::<Result<Vec<_>, _>>()?;
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V5_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V5_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V4_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V5_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V5_BUNDLE_ID,
-        STANDARD_SOURCE_V5_REVISION_ID,
-        Some(STANDARD_SOURCE_V4_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V5_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V5_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V5_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        vec![executable, json_executable],
-        origins,
-        ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let actual_digest = calculate_standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if actual_digest != ACCEPTED_V5_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V5_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    Ok(snapshot)
-}
-
 /// Retains the canonical V6 action standard source as an unverified snapshot.
 pub fn retained_standard_library_v6_snapshot()
 -> Result<StandardLibrarySnapshot, StandardLibraryError> {
@@ -3693,12 +3463,18 @@ pub fn retained_standard_library_v11_snapshot()
     units.push(math_unit);
     let bundle_hash = source_bundle_digest(&units)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if bundle_hash != ACCEPTED_V11_SOURCE_BUNDLE_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     let revision_hash = source_revision_record_digest(
         STANDARD_SOURCE_V11_BUNDLE_ID,
         Some(STANDARD_SOURCE_V10_REVISION_ID),
         bundle_hash,
     )
     .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if revision_hash != ACCEPTED_V11_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     let parent_manifest = standard_library_v10_manifest()
         .map_err(|source| StandardLibraryError::Manifest { source })?;
     let mut catalogue_functions = parent_manifest.catalogue().functions().to_vec();
@@ -3759,6 +3535,9 @@ pub fn retained_standard_library_v11_snapshot()
     .map_err(|source| StandardLibraryError::Revision { source })?;
     let digest = calculate_standard_library_digest(&provisional)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    if digest != ACCEPTED_V11_STANDARD_LIBRARY_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
     StandardLibrarySnapshot::new_with_executables(
         STANDARD_LIBRARY_V11_REVISION_ID,
         StandardLibraryDigestVersion::Version2,
@@ -3828,9 +3607,7 @@ fn prepare_retained_v11_math() -> Result<DeployableRevision, StandardLibraryErro
             .map(|(index, function)| {
                 (0..function.parameters.len())
                     .map(|parameter| {
-                        ParameterId::from_bytes(reserved_id(
-                            0xB0 + (index * 4 + parameter) as u8,
-                        ))
+                        ParameterId::from_bytes(reserved_id(0xB0 + (index * 4 + parameter) as u8))
                     })
                     .collect()
             })
@@ -3854,10 +3631,24 @@ pub fn verify_standard_library_v11_snapshot(
         || snapshot.source().parent() != Some(STANDARD_SOURCE_V10_REVISION_ID)
         || snapshot.source().units().len() != 11
         || snapshot.executables().len() != 18
-        || snapshot.source().units()[10].id() != STD_MATH_SOURCE_UNIT_ID
-        || snapshot.source().units()[10].logical_path() != STD_MATH_SOURCE_LOGICAL_PATH
-        || snapshot.source().units()[10].content() != RETAINED_STANDARD_MATH_SOURCE
     {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let Some(math_unit) = snapshot.source().units().iter().find(|unit| {
+        unit.id() == STD_MATH_SOURCE_UNIT_ID && unit.logical_path() == STD_MATH_SOURCE_LOGICAL_PATH
+    }) else {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    };
+    if math_unit.content() != RETAINED_STANDARD_MATH_SOURCE {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    if math_unit.content_hash() != ACCEPTED_V11_MATH_CONTENT_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    if snapshot.source().revision_hash() != ACCEPTED_V11_SOURCE_REVISION_DIGEST {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    if snapshot.digest() != ACCEPTED_V11_STANDARD_LIBRARY_DIGEST {
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
     verify_canonical_standard_library_v2_snapshot(snapshot)
@@ -3928,850 +3719,6 @@ pub fn verify_standard_library_v10_snapshot(
     }
     verify_canonical_standard_library_v2_snapshot(snapshot)
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
-}
-
-fn retained_standard_library_v10_snapshot_from_source(
-    cli_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let parent = retained_standard_library_v9_snapshot()?;
-    let manifest = standard_library_v10_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let cli_content_hash = source_unit_content_digest(cli_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if cli_content_hash != ACCEPTED_V10_CLI_CONTENT_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let cli_unit = StoredSourceUnit::new(
-        STD_CLI_SOURCE_UNIT_ID,
-        parent.source().units().len() as u32,
-        STD_CLI_SOURCE_LOGICAL_PATH,
-        cli_source,
-        cli_content_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let parsed = orna_syntax::parse(cli_source);
-    if !parsed.diagnostics().is_empty()
-        || parsed.syntax().text() != cli_source
-        || parsed.schemas().len() != 1
-        || parsed.client_functions().len() != 1
-        || !parsed.object_types().is_empty()
-        || !parsed.field_renames().is_empty()
-        || !parsed.server_functions().is_empty()
-        || !parsed.primitive_value_types().is_empty()
-        || !parsed.opaque_value_types().is_empty()
-        || !parsed.record_value_types().is_empty()
-        || !parsed.enum_types().is_empty()
-        || !parsed.type_exports().is_empty()
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let origin = |span: &orna_syntax::SourceSpan| -> Result<SourceOrigin, StandardLibraryError> {
-        let start =
-            u32::try_from(span.start).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        let end =
-            u32::try_from(span.end).map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-        SourceOrigin::new(STD_CLI_SOURCE_UNIT_ID, start, end)
-            .map_err(|source| StandardLibraryError::Revision { source })
-    };
-    let cli_origins = vec![
-        DefinitionOrigin::new(
-            DefinitionIdentity::Schema(STD_CLI_SCHEMA_ID),
-            origin(&parsed.schemas()[0].span)?,
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::Function(STD_CLI_REPL_FUNCTION_ID),
-            origin(&parsed.client_functions()[0].span)?,
-        ),
-    ];
-    let checked = orna_compiler::check_standard_cli_repl(
-        &parsed.client_functions()[0],
-        manifest.catalogue(),
-        &cli_origins,
-        &cli_unit,
-    )
-    .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
-    let revision = FunctionRevisionRecord::new(
-        checked.function_id(),
-        checked.revision_id(),
-        checked.revision_number(),
-        checked.declaration_origin(),
-        checked.declaration_content_hash(),
-        checked.semantic_hash(),
-        checked.language_version(),
-        checked.artifact().clone(),
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?
-    .with_semantic_hash_version(checked.semantic_hash_version());
-    let executable = StandardExecutable::new(
-        checked.function_id(),
-        revision,
-        checked.references().to_vec(),
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    if checked.artifact().content_hash() != ACCEPTED_V10_CLI_ARTIFACT_DIGEST
-        || checked.semantic_hash() != ACCEPTED_V10_CLI_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let mut units = parent.source().units().to_vec();
-    units.push(cli_unit);
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V10_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V9_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V10_SOURCE_BUNDLE_DIGEST
-        || revision_hash != ACCEPTED_V10_SOURCE_REVISION_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V10_BUNDLE_ID,
-        STANDARD_SOURCE_V10_REVISION_ID,
-        Some(STANDARD_SOURCE_V9_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let mut origins = parent.origins().to_vec();
-    origins.extend(cli_origins);
-    let mut executables = parent.executables().to_vec();
-    executables.push(executable);
-    let provisional = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V10_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        source,
-        LANGUAGE_VERSION_IDENTITY,
-        manifest.catalogue().clone(),
-        executables,
-        origins,
-        Sha256Digest::from_bytes([0; 32]),
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let digest = calculate_standard_library_digest(&provisional)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if digest != ACCEPTED_V10_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V10_STANDARD_LIBRARY_DIGEST,
-            actual: digest,
-        });
-    }
-    StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V10_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        provisional.source().clone(),
-        LANGUAGE_VERSION_IDENTITY,
-        provisional.catalogue().clone(),
-        provisional.executables().to_vec(),
-        provisional.origins().to_vec(),
-        digest,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })
-}
-
-fn retained_standard_library_v6_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-    json_source: &str,
-    action_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v6_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
-    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
-    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
-    origins.extend(json_origins.iter().cloned());
-    let action_origins = reconcile_retained_action_source(action_source, catalogue)?;
-    origins.extend(action_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let json_content_hash = source_unit_content_digest(json_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let action_content_hash = source_unit_content_digest(action_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V6_TYPES_CONTENT_DIGEST
-        || invoke_content_hash != ACCEPTED_V6_INVOKE_CONTENT_DIGEST
-        || output_content_hash != ACCEPTED_V6_OUTPUT_CONTENT_DIGEST
-        || ui_content_hash != ACCEPTED_V6_UI_CONTENT_DIGEST
-        || json_content_hash != ACCEPTED_V6_JSON_CONTENT_DIGEST
-        || action_content_hash != ACCEPTED_V6_ACTION_CONTENT_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let units = vec![
-        StoredSourceUnit::new(
-            STD_TYPES_SOURCE_UNIT_ID,
-            0,
-            SOURCE_LOGICAL_PATH,
-            types_source,
-            types_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_INVOKE_SOURCE_UNIT_ID,
-            1,
-            STD_INVOKE_SOURCE_LOGICAL_PATH,
-            invoke_source,
-            invoke_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_OUTPUT_SOURCE_UNIT_ID,
-            2,
-            STD_OUTPUT_SOURCE_LOGICAL_PATH,
-            output_source,
-            output_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_SOURCE_UNIT_ID,
-            3,
-            STD_UI_SOURCE_LOGICAL_PATH,
-            ui_source,
-            ui_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_JSON_SOURCE_UNIT_ID,
-            4,
-            STD_JSON_SOURCE_LOGICAL_PATH,
-            json_source,
-            json_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_ACTION_SOURCE_UNIT_ID,
-            5,
-            STD_ACTION_SOURCE_LOGICAL_PATH,
-            action_source,
-            action_content_hash,
-        ),
-    ]
-    .into_iter()
-    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
-    .collect::<Result<Vec<_>, _>>()?;
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V6_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V6_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V5_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V6_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V6_BUNDLE_ID,
-        STANDARD_SOURCE_V6_REVISION_ID,
-        Some(STANDARD_SOURCE_V5_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V6_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V6_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V6_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        vec![executable, json_executable],
-        origins,
-        ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let actual_digest = calculate_standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if actual_digest != ACCEPTED_V6_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V6_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    Ok(snapshot)
-}
-
-fn retained_standard_library_v7_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-    json_source: &str,
-    action_source: &str,
-    window_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v7_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
-    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
-    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
-    origins.extend(json_origins.iter().cloned());
-    origins.extend(reconcile_retained_action_source(action_source, catalogue)?);
-    let window_origins = reconcile_retained_window_source(window_source, catalogue)?;
-    origins.extend(window_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let json_content_hash = source_unit_content_digest(json_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let action_content_hash = source_unit_content_digest(action_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let window_content_hash = source_unit_content_digest(window_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V7_TYPES_CONTENT_DIGEST
-        || invoke_content_hash != ACCEPTED_V7_INVOKE_CONTENT_DIGEST
-        || output_content_hash != ACCEPTED_V7_OUTPUT_CONTENT_DIGEST
-        || ui_content_hash != ACCEPTED_V7_UI_CONTENT_DIGEST
-        || json_content_hash != ACCEPTED_V7_JSON_CONTENT_DIGEST
-        || action_content_hash != ACCEPTED_V7_ACTION_CONTENT_DIGEST
-        || window_content_hash != ACCEPTED_V7_WINDOW_CONTENT_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let units = vec![
-        StoredSourceUnit::new(
-            STD_TYPES_SOURCE_UNIT_ID,
-            0,
-            SOURCE_LOGICAL_PATH,
-            types_source,
-            types_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_INVOKE_SOURCE_UNIT_ID,
-            1,
-            STD_INVOKE_SOURCE_LOGICAL_PATH,
-            invoke_source,
-            invoke_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_OUTPUT_SOURCE_UNIT_ID,
-            2,
-            STD_OUTPUT_SOURCE_LOGICAL_PATH,
-            output_source,
-            output_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_SOURCE_UNIT_ID,
-            3,
-            STD_UI_SOURCE_LOGICAL_PATH,
-            ui_source,
-            ui_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_JSON_SOURCE_UNIT_ID,
-            4,
-            STD_JSON_SOURCE_LOGICAL_PATH,
-            json_source,
-            json_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_ACTION_SOURCE_UNIT_ID,
-            5,
-            STD_ACTION_SOURCE_LOGICAL_PATH,
-            action_source,
-            action_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_WINDOW_SOURCE_UNIT_ID,
-            6,
-            STD_WINDOW_SOURCE_LOGICAL_PATH,
-            window_source,
-            window_content_hash,
-        ),
-    ]
-    .into_iter()
-    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
-    .collect::<Result<Vec<_>, _>>()?;
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V7_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V7_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V6_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V7_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V7_BUNDLE_ID,
-        STANDARD_SOURCE_V7_REVISION_ID,
-        Some(STANDARD_SOURCE_V6_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V7_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V7_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
-    let window_executable = retained_window_executable(window_source, catalogue, &window_origins)?;
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V7_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        vec![executable, json_executable, window_executable],
-        origins,
-        ACCEPTED_V7_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let actual_digest = calculate_standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if actual_digest != ACCEPTED_V7_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V7_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    Ok(snapshot)
-}
-#[allow(clippy::too_many_arguments)]
-fn retained_standard_library_v8_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-    json_source: &str,
-    action_source: &str,
-    window_source: &str,
-    data_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v8_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
-    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
-    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
-    origins.extend(json_origins.iter().cloned());
-    origins.extend(reconcile_retained_action_source(action_source, catalogue)?);
-    let window_origins = reconcile_retained_window_source(window_source, catalogue)?;
-    origins.extend(window_origins.iter().cloned());
-    let data_origins = reconcile_retained_data_source(data_source, catalogue)?;
-    origins.extend(data_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let json_content_hash = source_unit_content_digest(json_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let action_content_hash = source_unit_content_digest(action_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let window_content_hash = source_unit_content_digest(window_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let data_content_hash = source_unit_content_digest(data_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V8_TYPES_CONTENT_DIGEST
-        || invoke_content_hash != ACCEPTED_V8_INVOKE_CONTENT_DIGEST
-        || output_content_hash != ACCEPTED_V8_OUTPUT_CONTENT_DIGEST
-        || ui_content_hash != ACCEPTED_V8_UI_CONTENT_DIGEST
-        || json_content_hash != ACCEPTED_V8_JSON_CONTENT_DIGEST
-        || action_content_hash != ACCEPTED_V8_ACTION_CONTENT_DIGEST
-        || window_content_hash != ACCEPTED_V8_WINDOW_CONTENT_DIGEST
-        || data_content_hash != ACCEPTED_V8_DATA_CONTENT_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let units = vec![
-        StoredSourceUnit::new(
-            STD_TYPES_SOURCE_UNIT_ID,
-            0,
-            SOURCE_LOGICAL_PATH,
-            types_source,
-            types_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_INVOKE_SOURCE_UNIT_ID,
-            1,
-            STD_INVOKE_SOURCE_LOGICAL_PATH,
-            invoke_source,
-            invoke_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_OUTPUT_SOURCE_UNIT_ID,
-            2,
-            STD_OUTPUT_SOURCE_LOGICAL_PATH,
-            output_source,
-            output_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_SOURCE_UNIT_ID,
-            3,
-            STD_UI_SOURCE_LOGICAL_PATH,
-            ui_source,
-            ui_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_JSON_SOURCE_UNIT_ID,
-            4,
-            STD_JSON_SOURCE_LOGICAL_PATH,
-            json_source,
-            json_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_ACTION_SOURCE_UNIT_ID,
-            5,
-            STD_ACTION_SOURCE_LOGICAL_PATH,
-            action_source,
-            action_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_WINDOW_SOURCE_UNIT_ID,
-            6,
-            STD_WINDOW_SOURCE_LOGICAL_PATH,
-            window_source,
-            window_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_DATA_SOURCE_UNIT_ID,
-            7,
-            STD_DATA_SOURCE_LOGICAL_PATH,
-            data_source,
-            data_content_hash,
-        ),
-    ]
-    .into_iter()
-    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
-    .collect::<Result<Vec<_>, _>>()?;
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V8_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V8_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V7_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V8_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V8_BUNDLE_ID,
-        STANDARD_SOURCE_V8_REVISION_ID,
-        Some(STANDARD_SOURCE_V7_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V8_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V8_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
-    let window_executable = retained_window_executable(window_source, catalogue, &window_origins)?;
-    let table_executable =
-        retained_terminal_table_executable(data_source, catalogue, &data_origins)?;
-    if table_executable.revision().artifact().content_hash() != ACCEPTED_V8_TABLE_ARTIFACT_DIGEST
-        || table_executable.revision().semantic_hash() != ACCEPTED_V8_TABLE_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V8_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        vec![
-            executable,
-            json_executable,
-            table_executable,
-            window_executable,
-        ],
-        origins,
-        ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let actual_digest = calculate_standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if actual_digest != ACCEPTED_V8_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V8_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    Ok(snapshot)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn retained_standard_library_v9_snapshot_from_source(
-    types_source: &str,
-    invoke_source: &str,
-    output_source: &str,
-    ui_source: &str,
-    json_source: &str,
-    action_source: &str,
-    window_source: &str,
-    data_source: &str,
-    constructors_source: &str,
-) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
-    let manifest = standard_library_v9_manifest()
-        .map_err(|source| StandardLibraryError::Manifest { source })?;
-    let types_manifest =
-        standard_library_manifest().map_err(|source| StandardLibraryError::Manifest { source })?;
-    let catalogue = manifest.catalogue();
-    let mut origins = reconcile_retained_source_with_unit(
-        types_source,
-        &types_manifest,
-        STD_TYPES_SOURCE_UNIT_ID,
-    )?;
-    let invoke_origins = reconcile_retained_invoke_source(invoke_source, catalogue)?;
-    origins.extend(invoke_origins.iter().cloned());
-    origins.extend(reconcile_retained_output_source(output_source, catalogue)?);
-    origins.extend(reconcile_retained_ui_source(ui_source, catalogue)?);
-    let json_origins = reconcile_retained_json_source(json_source, catalogue)?;
-    origins.extend(json_origins.iter().cloned());
-    origins.extend(reconcile_retained_action_source(action_source, catalogue)?);
-    let window_origins = reconcile_retained_window_source(window_source, catalogue)?;
-    origins.extend(window_origins.iter().cloned());
-    let data_origins = reconcile_retained_data_source(data_source, catalogue)?;
-    origins.extend(data_origins.iter().cloned());
-    let constructor_origins =
-        reconcile_retained_ui_constructors_source(constructors_source, catalogue)?;
-    origins.extend(constructor_origins.iter().cloned());
-
-    let types_content_hash = source_unit_content_digest(types_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let invoke_content_hash = source_unit_content_digest(invoke_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let output_content_hash = source_unit_content_digest(output_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let ui_content_hash = source_unit_content_digest(ui_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let json_content_hash = source_unit_content_digest(json_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let action_content_hash = source_unit_content_digest(action_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let window_content_hash = source_unit_content_digest(window_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let data_content_hash = source_unit_content_digest(data_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    let constructors_content_hash = source_unit_content_digest(constructors_source)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if types_content_hash != ACCEPTED_V9_TYPES_CONTENT_DIGEST
-        || invoke_content_hash != ACCEPTED_V9_INVOKE_CONTENT_DIGEST
-        || output_content_hash != ACCEPTED_V9_OUTPUT_CONTENT_DIGEST
-        || ui_content_hash != ACCEPTED_V9_UI_CONTENT_DIGEST
-        || json_content_hash != ACCEPTED_V9_JSON_CONTENT_DIGEST
-        || action_content_hash != ACCEPTED_V9_ACTION_CONTENT_DIGEST
-        || window_content_hash != ACCEPTED_V9_WINDOW_CONTENT_DIGEST
-        || data_content_hash != ACCEPTED_V9_DATA_CONTENT_DIGEST
-        || constructors_content_hash != ACCEPTED_V9_UI_CONSTRUCTORS_CONTENT_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let units = vec![
-        StoredSourceUnit::new(
-            STD_TYPES_SOURCE_UNIT_ID,
-            0,
-            SOURCE_LOGICAL_PATH,
-            types_source,
-            types_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_INVOKE_SOURCE_UNIT_ID,
-            1,
-            STD_INVOKE_SOURCE_LOGICAL_PATH,
-            invoke_source,
-            invoke_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_OUTPUT_SOURCE_UNIT_ID,
-            2,
-            STD_OUTPUT_SOURCE_LOGICAL_PATH,
-            output_source,
-            output_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_SOURCE_UNIT_ID,
-            3,
-            STD_UI_SOURCE_LOGICAL_PATH,
-            ui_source,
-            ui_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_JSON_SOURCE_UNIT_ID,
-            4,
-            STD_JSON_SOURCE_LOGICAL_PATH,
-            json_source,
-            json_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_ACTION_SOURCE_UNIT_ID,
-            5,
-            STD_ACTION_SOURCE_LOGICAL_PATH,
-            action_source,
-            action_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_WINDOW_SOURCE_UNIT_ID,
-            6,
-            STD_WINDOW_SOURCE_LOGICAL_PATH,
-            window_source,
-            window_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_DATA_SOURCE_UNIT_ID,
-            7,
-            STD_DATA_SOURCE_LOGICAL_PATH,
-            data_source,
-            data_content_hash,
-        ),
-        StoredSourceUnit::new(
-            STD_UI_CONSTRUCTORS_SOURCE_UNIT_ID,
-            8,
-            STD_UI_CONSTRUCTORS_SOURCE_LOGICAL_PATH,
-            constructors_source,
-            constructors_content_hash,
-        ),
-    ]
-    .into_iter()
-    .map(|unit| unit.map_err(|source| StandardLibraryError::Revision { source }))
-    .collect::<Result<Vec<_>, _>>()?;
-    let bundle_hash = source_bundle_digest(&units)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if bundle_hash != ACCEPTED_V9_SOURCE_BUNDLE_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let revision_hash = source_revision_record_digest(
-        STANDARD_SOURCE_V9_BUNDLE_ID,
-        Some(STANDARD_SOURCE_V8_REVISION_ID),
-        bundle_hash,
-    )
-    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if revision_hash != ACCEPTED_V9_SOURCE_REVISION_DIGEST {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let retained_source = StoredSourceRevision::new(
-        STANDARD_SOURCE_V9_BUNDLE_ID,
-        STANDARD_SOURCE_V9_REVISION_ID,
-        Some(STANDARD_SOURCE_V8_REVISION_ID),
-        units,
-        bundle_hash,
-        revision_hash,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-
-    let executable = retained_v2_executable(invoke_source, catalogue, &invoke_origins)?;
-    if executable.revision().artifact().content_hash() != ACCEPTED_V9_ARTIFACT_DIGEST
-        || executable.revision().semantic_hash() != ACCEPTED_V9_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let json_executable = retained_json_executable(json_source, catalogue, &json_origins)?;
-    let window_executable = retained_window_executable(window_source, catalogue, &window_origins)?;
-    let table_executable =
-        retained_terminal_table_executable(data_source, catalogue, &data_origins)?;
-    if table_executable.revision().artifact().content_hash() != ACCEPTED_V9_TABLE_ARTIFACT_DIGEST
-        || table_executable.revision().semantic_hash() != ACCEPTED_V9_TABLE_SEMANTIC_DIGEST
-    {
-        return Err(StandardLibraryError::RetainedSourceMismatch);
-    }
-    let constructor_executables =
-        retained_ui_constructor_executables(constructors_source, catalogue, &constructor_origins)?;
-    let snapshot = StandardLibrarySnapshot::new_with_executables(
-        STANDARD_LIBRARY_V9_REVISION_ID,
-        StandardLibraryDigestVersion::Version2,
-        retained_source,
-        LANGUAGE_VERSION_IDENTITY,
-        catalogue.clone(),
-        [
-            vec![
-                executable,
-                json_executable,
-                table_executable,
-                window_executable,
-            ],
-            constructor_executables,
-        ]
-        .concat(),
-        origins,
-        ACCEPTED_V9_STANDARD_LIBRARY_DIGEST,
-    )
-    .map_err(|source| StandardLibraryError::Revision { source })?;
-    let actual_digest = calculate_standard_library_digest(&snapshot)
-        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
-    if actual_digest != ACCEPTED_V9_STANDARD_LIBRARY_DIGEST {
-        return Err(StandardLibraryError::AcceptedDigestMismatch {
-            expected: ACCEPTED_V9_STANDARD_LIBRARY_DIGEST,
-            actual: actual_digest,
-        });
-    }
-    Ok(snapshot)
 }
 
 fn matches_qualified_export(
