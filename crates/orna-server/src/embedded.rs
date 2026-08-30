@@ -811,6 +811,8 @@ fn instance_manifest_bytes(identity: &EmbeddedEngineIdentity, activation: bool) 
 
 /// Runs the default embedded PostgreSQL instance in the foreground.
 ///
+/// Orna owns the terminal output. PostgreSQL stdout and stderr are captured
+/// in the private engine log and are not copied to the caller's terminal.
 pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
     install_child_subreaper()?;
     install_shutdown_handlers()?;
