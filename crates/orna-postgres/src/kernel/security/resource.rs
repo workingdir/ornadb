@@ -1,12 +1,11 @@
 //! Authenticated SERVER resource producer interface.
 
+use super::resource_finalization::finish_direct_resource_failure;
 use super::resource_producer::{
     ResourceProducerCommand, ResourceProducerFailureStage, ResourceProducerLifecycle,
     ResourceProducerPull, ResourceProducerReady, ResourceProducerStartGuard,
 };
-use super::resource_stream::{
-    finish_direct_resource_failure, run_authenticated_server_resource_producer_task,
-};
+use super::resource_stream::run_authenticated_server_resource_producer_task;
 use super::sealed_server_execution::{
     bind_authenticated_resource_arguments, resource_target_security_is_supported,
     resource_target_shape_is_supported, resource_values_from_server_result,
