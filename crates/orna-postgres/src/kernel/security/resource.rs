@@ -6,7 +6,7 @@ use super::resource_producer::{
     ResourceProducerPull, ResourceProducerReady, ResourceProducerStartGuard,
 };
 use super::resource_stream::run_authenticated_server_resource_producer_task;
-use super::sealed_server_execution::{
+use super::sealed_server_contract::{
     bind_authenticated_resource_arguments, resource_target_security_is_supported,
     resource_target_shape_is_supported, resource_values_from_server_result,
 };
