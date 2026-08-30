@@ -10,8 +10,8 @@
 //! be byte-identical before and after the diff command.
 
 #![cfg(unix)]
+#![allow(dead_code)]
 
-#[allow(dead_code)]
 #[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
