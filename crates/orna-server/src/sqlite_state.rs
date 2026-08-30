@@ -60,10 +60,16 @@ async fn run_sqlite_user_state_async(
         .recover()
         .await
         .map_err(|error| state_error(InstalledUserStateErrorKind::Internal, error.to_string()))?;
-    let session = store
-        .authenticate_local_peer(&active, uid)
+    let security = store
+        .security_snapshot(&active)
         .await
         .map_err(|error| state_sqlite_error(InstalledUserStateErrorKind::Authentication, error))?;
+    let session = security.authenticate_local_peer(uid).map_err(|error| {
+        state_error(
+            InstalledUserStateErrorKind::Authentication,
+            format!("local peer authentication failed: {error}"),
+        )
+    })?;
     let root_function = match &request.operation {
         InstalledUserStateOperation::Load { root_function, .. }
         | InstalledUserStateOperation::Write { root_function, .. } => *root_function,
@@ -80,14 +86,8 @@ async fn run_sqlite_user_state_async(
             validate_state_text(&state_profile)?;
             let instances = plan_instances(&active, &instances)?;
             let expected_types = plan_expected_types(&expected_types);
-            for ((function, state_slot), expected) in &expected_types {
-                let declared = active_user_state_slot_type(&active, *function, *state_slot)?;
-                if declared != *expected {
-                    return Err(state_type_mismatch(*expected, declared));
-                }
-            }
             let cells = store
-                .load_user_state(session.principal(), root_function, &state_profile)
+                .load_user_state(&active, &security, &session, root_function, &state_profile)
                 .await
                 .map_err(|error| {
                     state_sqlite_error(InstalledUserStateErrorKind::Internal, error)
@@ -172,7 +172,7 @@ async fn run_sqlite_user_state_async(
                 None => state_error(InstalledUserStateErrorKind::State, error.to_string()),
             })?;
             let result = store
-                .write_user_state(session.principal(), &change)
+                .write_user_state(&active, &security, &session, &change)
                 .await
                 .map_err(|error| state_sqlite_error(InstalledUserStateErrorKind::State, error))?;
             write_json_line(stdout, &write_record(&result))?;

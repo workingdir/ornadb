@@ -39,24 +39,7 @@ fn main() -> ExitCode {
         endpoint_explicit,
         command,
     } = parsed;
-    let endpoint_is_unsupported = match &endpoint {
-        orna_client::endpoint::DatabaseEndpoint::ManagedLocal { .. } => false,
-        orna_client::endpoint::DatabaseEndpoint::LocalPath { .. } => !matches!(
-            &command,
-            Command::Run
-                | Command::SourceCheck(_)
-                | Command::SourceApply(_)
-                | Command::SourceDiff(_)
-                | Command::Invoke(_)
-                | Command::State(_)
-                | Command::SecurityGrantExecute(_)
-                | Command::SecurityAdmin(_)
-                | Command::Inspect(_)
-                | Command::RawCall(_, _)
-        ),
-        orna_client::endpoint::DatabaseEndpoint::UnixSocket { .. }
-        | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => true,
-    };
+    let endpoint_is_unsupported = endpoint_command_is_unsupported(&endpoint, &command);
     if endpoint_explicit
         && !matches!(&command, Command::Help(_) | Command::Version)
         && endpoint_is_unsupported
@@ -336,9 +319,12 @@ fn main() -> ExitCode {
                 orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
                     orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
                 }
-                _ if endpoint_explicit => {
-                    orna_server::run_installed_invoke_at(&endpoint, request, &mut stdout, &mut stderr)
-                }
+                _ if endpoint_explicit => orna_server::run_installed_invoke_at(
+                    &endpoint,
+                    request,
+                    &mut stdout,
+                    &mut stderr,
+                ),
                 _ => orna_server::run_installed_invoke(request, &mut stdout, &mut stderr),
             };
             match result {
@@ -410,6 +396,30 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+fn endpoint_command_is_unsupported(
+    endpoint: &orna_client::endpoint::DatabaseEndpoint,
+    command: &Command,
+) -> bool {
+    match endpoint {
+        orna_client::endpoint::DatabaseEndpoint::ManagedLocal { .. } => false,
+        orna_client::endpoint::DatabaseEndpoint::LocalPath { .. } => !matches!(
+            command,
+            Command::Run
+                | Command::SourceCheck(_)
+                | Command::SourceApply(_)
+                | Command::SourceDiff(_)
+                | Command::Invoke(_)
+                | Command::State(_)
+                | Command::SecurityGrantExecute(_)
+                | Command::SecurityAdmin(_)
+                | Command::Inspect(_)
+                | Command::RawCall(_, _)
+        ),
+        orna_client::endpoint::DatabaseEndpoint::UnixSocket { .. }
+        | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => true,
     }
 }
 
@@ -1873,6 +1883,33 @@ mod tests {
     }
 
     #[test]
+    fn admits_explicit_local_path_state_to_the_sqlite_route() {
+        let root = FunctionId::from_bytes([0x11; 16]);
+        let parsed = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "state",
+            "get",
+            &root.canonical(),
+        ]))
+        .expect("explicit local path state command should parse");
+
+        assert_eq!(
+            parsed.endpoint,
+            orna_client::endpoint::DatabaseEndpoint::LocalPath {
+                path: PathBuf::from("./state.sqlite"),
+            }
+        );
+        assert!(parsed.endpoint_explicit);
+        assert!(matches!(&parsed.command, Command::State(_)));
+        assert!(
+            !endpoint_command_is_unsupported(&parsed.endpoint, &parsed.command),
+            "the LocalPath capability gate must admit state for the SQLite adapter",
+        );
+    }
+
+    #[test]
     fn accepts_state_get_filters_and_expected_types() {
         let root = FunctionId::from_bytes([0x11; 16]);
         let function = FunctionId::from_bytes([0x21; 16]);
@@ -2272,6 +2309,72 @@ mod tests {
         assert!(help_text(HelpTopic::Security).contains("security grant-execute"));
         assert!(help_text(HelpTopic::RawCall).contains("raw-call"));
         assert!(top_level.contains("--color <auto|always|never>"));
+    }
+
+    #[test]
+    fn local_path_help_matches_sqlite_value_and_trace_contracts() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let parameter = ParameterId::from_bytes([0x22; 16]);
+        let raw_call = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "raw-call",
+            &function.canonical(),
+            &parameter.canonical(),
+        ]))
+        .expect("LocalPath raw-call parameter form should parse");
+        assert!(matches!(
+            raw_call.command,
+            Command::RawCall(_, RawCallParameters::One(parsed)) if parsed == parameter
+        ));
+
+        let raw_help = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "raw-call",
+            "--help",
+        ]))
+        .expect("LocalPath raw-call help should parse");
+        assert_eq!(raw_help.command, Command::Help(HelpTopic::RawCallLocalPath),);
+        let raw_help_text = help_text(HelpTopic::RawCallLocalPath);
+        assert!(raw_help_text.contains("ORV5"));
+        assert!(!raw_help_text.contains("ORV1"));
+        assert!(help_text(HelpTopic::RawCall).contains("ORV1"));
+
+        let invoke_help = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "invoke",
+            "--help",
+        ]))
+        .expect("LocalPath invoke help should parse");
+        assert_eq!(
+            invoke_help.command,
+            Command::Help(HelpTopic::InvokeLocalPath),
+        );
+        let invoke_help_text = help_text(HelpTopic::InvokeLocalPath);
+        assert!(invoke_help_text.contains("SQLite LocalPath"));
+        assert!(invoke_help_text.contains("--trace"));
+        assert!(invoke_help_text.contains("does not support"));
+        assert!(!help_text(HelpTopic::Invoke).contains("SQLite LocalPath"));
+
+        let parsed_invoke = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "invoke",
+            "std.invoke.echo",
+            "--trace",
+            "normal",
+        ]))
+        .expect("LocalPath invoke trace option should remain parseable");
+        let Command::Invoke(arguments) = parsed_invoke.command else {
+            panic!("expected invoke command");
+        };
+        assert_eq!(arguments.trace, Some(InvocationTracePolicy::Normal));
     }
 
     #[test]

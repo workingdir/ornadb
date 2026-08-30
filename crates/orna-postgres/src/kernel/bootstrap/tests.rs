@@ -11,7 +11,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         validated_migration_registry()
             .expect("registry is valid")
             .len(),
-        45
+        47
     );
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[1].version, 2);
@@ -85,6 +85,8 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         "standard table and CSV executable formats"
     );
     assert_eq!(MIGRATIONS[44].name, "inspect snapshot observer context");
+    assert_eq!(MIGRATIONS[45].name, "application_migrations");
+    assert_eq!(MIGRATIONS[46].name, "application migration ledger baseline");
     assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
     assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
     assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -151,6 +153,9 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert!(MIGRATIONS[41].data_step.is_none());
     assert!(MIGRATIONS[42].data_step.is_none());
     assert!(MIGRATIONS[43].data_step.is_none());
+    assert!(MIGRATIONS[44].data_step.is_none());
+    assert!(MIGRATIONS[45].data_step.is_none());
+    assert!(MIGRATIONS[46].data_step.is_some());
 }
 
 #[test]

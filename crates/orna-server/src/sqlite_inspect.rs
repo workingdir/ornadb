@@ -7,7 +7,7 @@ use orna_core::{
     inspect::InspectPrivilege,
     security::{InspectDecision, PrivilegeClass, SecuritySnapshot},
 };
-use orna_sqlite::{SqliteConfig, SqliteInspectSnapshotRecord, SqliteRevisionStore};
+use orna_sqlite::{SqliteConfig, SqliteError, SqliteInspectSnapshotRecord, SqliteRevisionStore};
 
 use crate::{
     InstalledInspectError, InstalledInspectErrorKind, InstalledInspectOutcome,
@@ -48,35 +48,36 @@ async fn run_sqlite_inspect_async(
         .recover()
         .await
         .map_err(|error| inspect_error(InstalledInspectErrorKind::Internal, error.to_string()))?;
-    let session = store
-        .authenticate_local_peer(&active, uid)
-        .await
-        .map_err(|error| inspect_error(InstalledInspectErrorKind::Internal, error.to_string()))?;
-    let snapshot = store
-        .load_inspect_snapshot(request.invocation, request.epoch)
-        .await
-        .map_err(|error| inspect_error(InstalledInspectErrorKind::Internal, error.to_string()))?
-        .ok_or_else(|| {
-            InstalledInspectError::with_code(
-                InstalledInspectErrorKind::Kernel,
-                "the requested invocation has no captured inspection epoch".to_owned(),
-                "inspect.missing_epoch",
-            )
-        })?;
-    validate_snapshot(&snapshot, &active.pair())?;
-
     let security = store
         .security_snapshot(&active)
         .await
         .map_err(|error| inspect_error(InstalledInspectErrorKind::Internal, error.to_string()))?;
-    let session = security
-        .bind_authenticated_session(session.principal(), session.active_roles().to_vec())
-        .map_err(|_| {
-            inspect_error(
-                InstalledInspectErrorKind::Kernel,
-                "inspection authentication is no longer valid",
-            )
-        })?;
+    let session = security.authenticate_local_peer(uid).map_err(|error| {
+        inspect_error(
+            InstalledInspectErrorKind::Internal,
+            format!("local peer authentication failed: {error}"),
+        )
+    })?;
+    let (snapshot, events) = store
+        .read_inspect_at(
+            &active,
+            &security,
+            &session,
+            request.invocation,
+            request.epoch,
+            request.after_sequence,
+            request.trace,
+        )
+        .await
+        .map_err(map_inspect_read_error)?;
+    let snapshot = snapshot.ok_or_else(|| {
+        InstalledInspectError::with_code(
+            InstalledInspectErrorKind::Kernel,
+            "the requested invocation has no captured inspection epoch".to_owned(),
+            "inspect.missing_epoch",
+        )
+    })?;
+    validate_snapshot(&snapshot, &active.pair())?;
     let requested = requested_privilege(&request);
     let granted = inspect_grants(&security, session.principal());
     match orna_core::security::authorise_inspect(
@@ -106,12 +107,6 @@ async fn run_sqlite_inspect_async(
         render_projection(stdout, projection, &summary)?;
     }
     if request.trace {
-        let events = store
-            .load_inspect_trace_events(request.invocation, request.after_sequence)
-            .await
-            .map_err(|error| {
-                inspect_error(InstalledInspectErrorKind::Internal, error.to_string())
-            })?;
         for event in events {
             write_json_bytes(stdout, &event.payload)?;
         }
@@ -120,6 +115,30 @@ async fn run_sqlite_inspect_async(
         write_json_bytes(stdout, &snapshot.summary)?;
     }
     Ok(InstalledInspectOutcome::Completed)
+}
+
+fn map_inspect_read_error(error: SqliteError) -> InstalledInspectError {
+    let epoch_mismatch = match &error {
+        SqliteError::Domain(message) => {
+            message.contains("active SQLite revision")
+                || message.contains("security snapshot")
+                || message.contains("pinned to the active revision")
+        }
+        SqliteError::InvalidPersistedData(message) => {
+            *message == "inspection snapshot is not pinned to the active revision"
+        }
+        _ => false,
+    };
+    let message = error.to_string();
+    if epoch_mismatch {
+        InstalledInspectError::with_code(
+            InstalledInspectErrorKind::Kernel,
+            message,
+            "inspect.epoch_mismatch",
+        )
+    } else {
+        inspect_error(InstalledInspectErrorKind::Internal, message)
+    }
 }
 
 fn validate_snapshot(
@@ -187,7 +206,11 @@ fn render_projection(
         .get(projection_name)
         .and_then(serde_json::Value::as_array)
     else {
-        return Ok(());
+        return Err(InstalledInspectError::with_code(
+            InstalledInspectErrorKind::Kernel,
+            format!("inspection projection {projection_name} is unavailable"),
+            "inspect.projection_failed",
+        ));
     };
     for row in rows {
         let record = serde_json::json!({

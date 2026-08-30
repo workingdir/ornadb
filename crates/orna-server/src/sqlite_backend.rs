@@ -2,17 +2,22 @@
 
 use orna_compiler::{check, prepare};
 use orna_core::{
-    FunctionId, InvocationId, ParameterId,
-    catalogue::{FunctionDefinition, FunctionDomain, FunctionReturn},
+    CatalogueRevisionId, FunctionId, InvocationId, ParameterId, SourceBundleId, SourceRevisionId,
+    canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
+    catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn},
     invocation::{InvocationParameterSelector, InvocationTarget},
     physical::PhysicalMigrationArtifact,
-    revision::ActiveDatabaseRevision,
+    revision::{
+        ActiveDatabaseRevision, CatalogueHashVersion, DeployableRevision, RevisionPair,
+        StoredSourceRevision,
+    },
     security::CATALOGUE_HEALTH_FUNCTION_ID,
     source::{SourceBundle, SourceUnit},
+    types::StandardScalar,
     value::RuntimeValue,
 };
 use orna_protocol::{CallFailure, MAX_FRAME_PAYLOAD_LENGTH, decode_value, encode_value};
-use orna_sqlite::{SqliteConfig, SqliteError, SqliteRevisionStore};
+use orna_sqlite::{SqliteCapability, SqliteConfig, SqliteError, SqliteRevisionStore};
 use orna_storage::{ApplicationRevisionStore, StorageError};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -97,12 +102,96 @@ pub fn run_sqlite_source_apply(
     let source = read_source(source_path)?;
     let bundle = SourceBundle::new([SourceUnit::new(source_path, source)])
         .map_err(SqliteBackendError::from_error)?;
-    match run_with_runtime(database_path.into(), bundle, SqliteCommand::Apply)? {
+    let database_path = database_path.into();
+    if database_path_is_fresh(&database_path)? {
+        if let Some(outcome) = preflight_fresh_source_apply(&bundle)? {
+            return Ok(outcome);
+        }
+    }
+    match run_with_runtime(database_path, bundle, SqliteCommand::Apply)? {
         SqliteCommandOutcome::Apply(outcome) => Ok(outcome),
         SqliteCommandOutcome::Diff(_) => Err(SqliteBackendError::new(
             "orna: local SQLite backend returned the wrong source result",
         )),
     }
+}
+
+fn database_path_is_fresh(path: &Path) -> Result<bool, SqliteBackendError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() == 0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(SqliteBackendError::new(format!(
+            "orna: could not inspect SQLite database: {error}"
+        ))),
+    }
+}
+
+fn preflight_fresh_source_apply(
+    bundle: &SourceBundle,
+) -> Result<Option<SqliteSourceApplyOutcome>, SqliteBackendError> {
+    let active = fresh_validation_active()?;
+    let report = check(bundle, active.catalogue());
+    if !report.diagnostics().is_empty() {
+        return Ok(Some(SqliteSourceApplyOutcome::Diagnostics {
+            bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
+            human_bytes: source_diagnostics::render_human_diagnostics(
+                report.parse_report(),
+                report.diagnostics(),
+                false,
+            ),
+            coloured_bytes: source_diagnostics::render_human_diagnostics(
+                report.parse_report(),
+                report.diagnostics(),
+                true,
+            ),
+        }));
+    }
+    let candidate = prepare(&report, active.pair(), &active).map_err(|error| {
+        SqliteBackendError::new(format!(
+            "orna: source apply could not prepare the source: {error}"
+        ))
+    })?;
+    PhysicalMigrationArtifact::from_revisions(&active, &candidate).map_err(|error| {
+        SqliteBackendError::new(format!(
+            "orna: source apply could not prepare the source: {error}"
+        ))
+    })?;
+    ensure_sqlite_candidate_supported(&candidate)?;
+    Ok(None)
+}
+
+fn fresh_validation_active() -> Result<ActiveDatabaseRevision, SqliteBackendError> {
+    let source_bundle = SourceBundleId::new();
+    let source_revision = SourceRevisionId::new();
+    let catalogue_revision = CatalogueRevisionId::new();
+    let source_bundle_hash = source_bundle_digest(&[]).map_err(SqliteBackendError::from_error)?;
+    let source_revision_hash =
+        source_revision_record_digest(source_bundle, None, source_bundle_hash)
+            .map_err(SqliteBackendError::from_error)?;
+    let source = StoredSourceRevision::new(
+        source_bundle,
+        source_revision,
+        None,
+        Vec::new(),
+        source_bundle_hash,
+        source_revision_hash,
+    )
+    .map_err(SqliteBackendError::from_error)?;
+    let catalogue = CatalogueSnapshot::new(catalogue_revision, Vec::new(), Vec::new())
+        .map_err(SqliteBackendError::from_error)?;
+    let catalogue_hash =
+        catalogue_digest(&catalogue, &[], &[], &[], &[]).map_err(SqliteBackendError::from_error)?;
+    ActiveDatabaseRevision::new(
+        RevisionPair::new(source_revision, catalogue_revision),
+        source,
+        catalogue,
+        catalogue_hash,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(SqliteBackendError::from_error)
 }
 
 /// Runs `source diff` directly against a local SQLite path.
@@ -153,14 +242,6 @@ pub fn run_sqlite_raw_call(
             .recover()
             .await
             .map_err(|_| LocalRawCallError::Connection)?;
-        let Some(definition) = active.catalogue().function_by_id(function) else {
-            return Ok(LocalRawCallOutcome::Failed(CallFailure::TargetUnavailable));
-        };
-        if definition.domain() != FunctionDomain::Server
-            || definition.parameters().len() != parameters.len()
-        {
-            return Ok(LocalRawCallOutcome::Failed(CallFailure::TargetUnavailable));
-        }
         let uid = nix::unistd::geteuid().as_raw();
         store
             .provision_local_peer(uid)
@@ -845,16 +926,16 @@ async fn run_async(
             "orna: {operation} could not prepare the source: {error}"
         ))
     })?;
+    let artifact =
+        PhysicalMigrationArtifact::from_revisions(&active, &candidate).map_err(|error| {
+            SqliteBackendError::new(format!(
+                "orna: {operation} could not prepare the source: {error}"
+            ))
+        })?;
+    ensure_sqlite_candidate_supported(&candidate)?;
 
     match command {
         SqliteCommand::Apply => {
-            let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).map_err(
-                |error| {
-                    SqliteBackendError::new(format!(
-                        "orna: source apply could not prepare the source: {error}"
-                    ))
-                },
-            )?;
             let committed =
                 ApplicationRevisionStore::apply_source_apply(&store, &candidate, &artifact)
                     .await
@@ -872,6 +953,59 @@ async fn run_async(
             )))
         }
     }
+}
+
+fn ensure_sqlite_candidate_supported(
+    candidate: &DeployableRevision,
+) -> Result<(), SqliteBackendError> {
+    let catalogue = candidate.candidate();
+    if !catalogue.value_types().is_empty() {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::ValueType,
+        )));
+    }
+    if !catalogue.enum_types().is_empty() {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::EnumType,
+        )));
+    }
+    if !catalogue.record_value_types().is_empty() {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::RecordValueType,
+        )));
+    }
+    if !catalogue.type_bindings().is_empty() {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::TypeBinding,
+        )));
+    }
+    if catalogue.object_types().iter().any(|object| {
+        object.fields().iter().any(|field| {
+            matches!(
+                field.resolved_type().legacy_scalar(),
+                Some(scalar)
+                    if !matches!(
+                        scalar,
+                        StandardScalar::Boolean
+                            | StandardScalar::Integer
+                            | StandardScalar::BigInt
+                            | StandardScalar::Float
+                            | StandardScalar::CharacterLargeObject
+                            | StandardScalar::BinaryLargeObject
+                    )
+            )
+        })
+    }) {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::ScalarType,
+        )));
+    }
+    if candidate.catalogue_hash_context().version() != CatalogueHashVersion::Version1 {
+        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
+            SqliteCapability::CatalogueHashVersion,
+        )));
+    }
+    Ok(())
 }
 
 fn success_document(active: &ActiveDatabaseRevision) -> Result<Vec<u8>, SqliteBackendError> {
@@ -944,5 +1078,88 @@ fn map_storage_error(error: StorageError<SqliteError>) -> SqliteBackendError {
         StorageError::InvalidRequest(error) => {
             SqliteBackendError::new(format!("orna: local SQLite request was rejected: {error}"))
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "orna-sqlite-source-{label}-{}-{}",
+                std::process::id(),
+                NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir(&path).expect("create SQLite backend test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn fresh_invalid_apply_does_not_create_database() {
+        let directory = TestDirectory::new("invalid-apply");
+        let database = directory.path().join("fresh.sqlite");
+        let source = directory.path().join("invalid.orna");
+        fs::write(&source, b"CREATE SCHEMA ;\n").expect("write invalid source");
+
+        let outcome = run_sqlite_source_apply(&database, source.to_str().unwrap())
+            .expect("invalid source should return compiler diagnostics");
+        assert!(matches!(
+            outcome,
+            SqliteSourceApplyOutcome::Diagnostics { .. }
+        ));
+        assert!(
+            !database.exists(),
+            "diagnostic-only fresh apply must not create SQLite state"
+        );
+    }
+
+    #[test]
+    fn source_diff_rejects_unsupported_physical_candidate() {
+        let directory = TestDirectory::new("unsupported-diff");
+        let database = directory.path().join("database.sqlite");
+        let valid_source = directory.path().join("valid.orna");
+        fs::write(
+            &valid_source,
+            b"CREATE SCHEMA app;\n\
+              CREATE TYPE app.item AS OBJECT (value INTEGER NOT NULL);",
+        )
+        .expect("write valid source");
+        let applied = run_sqlite_source_apply(&database, valid_source.to_str().unwrap())
+            .expect("valid source apply");
+        assert!(matches!(applied, SqliteSourceApplyOutcome::Applied(_)));
+
+        let unsupported_source = directory.path().join("unsupported.orna");
+        fs::write(
+            &unsupported_source,
+            b"CREATE SCHEMA unsupported;\n\
+              CREATE TYPE unsupported.kind AS ENUM ('one');",
+        )
+        .expect("write unsupported source");
+        let error = run_sqlite_source_diff(&database, unsupported_source.to_str().unwrap())
+            .expect_err("unsupported SQLite physical candidate must fail closed");
+        assert!(
+            error.to_string().contains("enum type"),
+            "unsupported diff error should identify the rejected capability: {error}"
+        );
     }
 }

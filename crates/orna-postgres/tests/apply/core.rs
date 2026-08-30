@@ -27,6 +27,51 @@ async fn applies_a_compiler_candidate_and_recovers_exactly() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_a_tampered_application_migration_ledger() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let base = kernel.recover().await?;
+        let candidate = candidate(BASIC_SOURCE, &base)?;
+        kernel.apply(&candidate).await?;
+
+        let session = database.open().await?;
+        let deleted = session
+            .client()
+            .execute(
+                "DELETE FROM _orna_kernel.application_migrations WHERE ordinal = 0",
+                &[],
+            )
+            .await?;
+        session.shutdown().await?;
+        require(
+            deleted == 1,
+            "ledger tamper did not delete the expected application migration",
+        )?;
+
+        let error = kernel
+            .recover()
+            .await
+            .expect_err("recovery must reject a missing application migration");
+        require(
+            matches!(error, PostgresKernelError::CatalogueInvariant(_)),
+            "ledger tamper produced the wrong recovery error",
+        )?;
+        let bootstrap_error = kernel
+            .bootstrap()
+            .await
+            .expect_err("bootstrap must reject a missing application migration");
+        require(
+            matches!(bootstrap_error, PostgresKernelError::CatalogueInvariant(_)),
+            "ledger tamper produced the wrong bootstrap error",
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn applies_source_apply_and_records_one_protected_audit_event() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;

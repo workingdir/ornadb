@@ -15,12 +15,12 @@ pub mod security_admin;
 mod source_apply;
 mod source_diagnostics;
 mod source_diff;
+mod source_support;
 mod sqlite_backend;
 mod sqlite_inspect;
 mod sqlite_security;
 mod sqlite_socket;
 mod sqlite_state;
-mod source_support;
 mod user_state;
 
 /// Renders source diagnostics in the stable machine-readable format.

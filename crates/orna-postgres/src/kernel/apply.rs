@@ -4,7 +4,10 @@
 #![allow(clippy::result_large_err)]
 // Installation preserves the accepted multi-input transaction seam.
 #![allow(clippy::too_many_arguments)]
-use std::{borrow::Cow, collections::{BTreeMap, BTreeSet, HashSet}};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashSet},
+};
 
 use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};
 use orna_core::system::{
@@ -253,7 +256,8 @@ impl PostgresKernel {
             (Ok(active), Ok(())) => Ok(active),
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
-    }    /// Reads the durable application migration ledger oldest-first.
+    }
+    /// Reads the durable application migration ledger oldest-first.
     ///
     /// The canonical post-contract migration supplies
     /// `_orna_kernel.application_migrations`; this adapter intentionally does
