@@ -4291,7 +4291,7 @@ async fn apply_in_transaction(
         .validate(&active, candidate)
         .map_err(StorageError::InvalidRequest)?;
 
-    if let Err(error) = ensure_supported_candidate(candidate) {
+    if let Err(error) = validate_candidate(candidate) {
         return Err(StorageError::Backend(error));
     }
     validate_candidate_records(candidate).map_err(StorageError::InvalidRequest)?;
@@ -4451,7 +4451,11 @@ fn sqlite_on_delete(action: Option<orna_core::catalogue::OnDeleteAction>) -> &'s
     }
 }
 
-fn ensure_supported_candidate(candidate: &DeployableRevision) -> Result<(), SqliteError> {
+/// Validates that a candidate uses only the SQLite adapter's supported subset.
+///
+/// This check is side-effect free, so callers can reject unsupported
+/// candidates before applying or rendering a local diff.
+pub fn validate_candidate(candidate: &DeployableRevision) -> Result<(), SqliteError> {
     let catalogue = candidate.candidate();
 
     if !catalogue.value_types().is_empty() {
@@ -4900,8 +4904,9 @@ mod tests {
         FieldId, StandardLibraryRevisionId, TypeId,
         canonical_hash::{calculate_standard_library_digest, verify_standard_library_v2_snapshot},
         catalogue::{
-            EnumTypeDefinition, RecordValueFieldDefinition, RecordValueTypeDefinition, TypeBinding,
-            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            EnumTypeDefinition, FieldDefinition, RecordValueFieldDefinition,
+            RecordValueTypeDefinition, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{
             CatalogueHashContext, DefinitionReference, DeployableRevisionContent,
@@ -5165,6 +5170,11 @@ mod tests {
         expected: SqliteCapability,
     ) {
         let before = persisted_row_counts(store).await;
+        let validation_error = validate_candidate(candidate).unwrap_err();
+        assert!(matches!(
+            validation_error,
+            SqliteError::UnsupportedCapability(actual) if actual == expected
+        ));
         let error = ApplicationRevisionStore::apply(store, candidate, artifact)
             .await
             .unwrap_err();
@@ -5431,12 +5441,54 @@ mod tests {
             empty_version_two_context(),
         );
 
+        let (schema_id, schema) = unsupported_schema(0x61);
+        let object_id = TypeId::from_bytes([0x62; 16]);
+        let field_id = FieldId::from_bytes([0x63; 16]);
+        let scalar_object = ObjectTypeDefinition::new(
+            object_id,
+            QualifiedSemanticName::new(["schema", "scalar"]).unwrap(),
+            vec![FieldDefinition::new(
+                field_id,
+                "created",
+                0,
+                ResolvedType::scalar(StandardScalar::Date),
+                false,
+                false,
+                None,
+                None,
+            )],
+        );
+        let scalar_catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x64; 16]),
+            vec![schema],
+            vec![scalar_object],
+        )
+        .unwrap();
+        let scalar_candidate = unsupported_candidate(
+            &active,
+            0x65,
+            scalar_catalogue,
+            [
+                DefinitionIdentity::Schema(schema_id),
+                DefinitionIdentity::ObjectType(object_id),
+                DefinitionIdentity::Field {
+                    owner: object_id,
+                    field: field_id,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            CatalogueHashContext::version_one(),
+        );
+
         let cases = [
             (SqliteCapability::ValueType, binary_value_candidate),
             (SqliteCapability::ValueType, array_like_value_candidate),
             (SqliteCapability::ValueType, binding_candidate),
             (SqliteCapability::EnumType, enum_candidate),
             (SqliteCapability::EnumType, record_candidate),
+            (SqliteCapability::ScalarType, scalar_candidate),
             (SqliteCapability::CatalogueHashVersion, hash_candidate),
         ];
         for (expected, candidate) in cases {

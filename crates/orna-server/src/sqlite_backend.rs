@@ -7,17 +7,13 @@ use orna_core::{
     catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn},
     invocation::{InvocationParameterSelector, InvocationTarget},
     physical::PhysicalMigrationArtifact,
-    revision::{
-        ActiveDatabaseRevision, CatalogueHashVersion, DeployableRevision, RevisionPair,
-        StoredSourceRevision,
-    },
+    revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
     security::CATALOGUE_HEALTH_FUNCTION_ID,
     source::{SourceBundle, SourceUnit},
-    types::StandardScalar,
     value::RuntimeValue,
 };
 use orna_protocol::{CallFailure, MAX_FRAME_PAYLOAD_LENGTH, decode_value, encode_value};
-use orna_sqlite::{SqliteCapability, SqliteConfig, SqliteError, SqliteRevisionStore};
+use orna_sqlite::{SqliteConfig, SqliteError, SqliteRevisionStore, validate_candidate};
 use orna_storage::{ApplicationRevisionStore, StorageError};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -156,7 +152,7 @@ fn preflight_fresh_source_apply(
             "orna: source apply could not prepare the source: {error}"
         ))
     })?;
-    ensure_sqlite_candidate_supported(&candidate)?;
+    validate_candidate(&candidate).map_err(map_sqlite_error)?;
     Ok(None)
 }
 
@@ -932,7 +928,7 @@ async fn run_async(
                 "orna: {operation} could not prepare the source: {error}"
             ))
         })?;
-    ensure_sqlite_candidate_supported(&candidate)?;
+    validate_candidate(&candidate).map_err(map_sqlite_error)?;
 
     match command {
         SqliteCommand::Apply => {
@@ -953,59 +949,6 @@ async fn run_async(
             )))
         }
     }
-}
-
-fn ensure_sqlite_candidate_supported(
-    candidate: &DeployableRevision,
-) -> Result<(), SqliteBackendError> {
-    let catalogue = candidate.candidate();
-    if !catalogue.value_types().is_empty() {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::ValueType,
-        )));
-    }
-    if !catalogue.enum_types().is_empty() {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::EnumType,
-        )));
-    }
-    if !catalogue.record_value_types().is_empty() {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::RecordValueType,
-        )));
-    }
-    if !catalogue.type_bindings().is_empty() {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::TypeBinding,
-        )));
-    }
-    if catalogue.object_types().iter().any(|object| {
-        object.fields().iter().any(|field| {
-            matches!(
-                field.resolved_type().legacy_scalar(),
-                Some(scalar)
-                    if !matches!(
-                        scalar,
-                        StandardScalar::Boolean
-                            | StandardScalar::Integer
-                            | StandardScalar::BigInt
-                            | StandardScalar::Float
-                            | StandardScalar::CharacterLargeObject
-                            | StandardScalar::BinaryLargeObject
-                    )
-            )
-        })
-    }) {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::ScalarType,
-        )));
-    }
-    if candidate.catalogue_hash_context().version() != CatalogueHashVersion::Version1 {
-        return Err(map_sqlite_error(SqliteError::UnsupportedCapability(
-            SqliteCapability::CatalogueHashVersion,
-        )));
-    }
-    Ok(())
 }
 
 fn success_document(active: &ActiveDatabaseRevision) -> Result<Vec<u8>, SqliteBackendError> {
