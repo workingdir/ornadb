@@ -7,12 +7,13 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, DeployableRevision},
 };
 use orna_storage::{
-    BootstrapRevision, MigrationLedgerEntry, MigrationLedgerEntryError, RevisionStore, StorageError,
+    ApplicationRevisionStore, BootstrapRevision, MigrationLedgerEntry, MigrationLedgerEntryError,
+    StorageError,
 };
 
 use crate::{PostgresKernel, PostgresKernelError};
 
-impl RevisionStore for PostgresKernel {
+impl ApplicationRevisionStore for PostgresKernel {
     type Error = PostgresKernelError;
 
     fn bootstrap(
@@ -45,6 +46,30 @@ impl RevisionStore for PostgresKernel {
     {
         async move {
             match PostgresKernel::apply_with_artifact(self, candidate, artifact).await {
+                Ok(active) => Ok(active),
+                Err(PostgresKernelError::InvalidLedgerRequest(error)) => {
+                    Err(StorageError::InvalidRequest(error))
+                }
+                Err(PostgresKernelError::ExpectedBaseMismatch { expected, active }) => Err(
+                    StorageError::InvalidRequest(MigrationLedgerEntryError::ActiveBaseMismatch {
+                        expected,
+                        actual: active,
+                    }),
+                ),
+                Err(error) => Err(StorageError::Backend(error)),
+            }
+        }
+    }
+
+    fn apply_source_apply(
+        &self,
+        candidate: &DeployableRevision,
+        artifact: &PhysicalMigrationArtifact,
+    ) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send
+    {
+        async move {
+            match PostgresKernel::apply_source_apply_with_artifact(self, candidate, artifact).await
+            {
                 Ok(active) => Ok(active),
                 Err(PostgresKernelError::InvalidLedgerRequest(error)) => {
                     Err(StorageError::InvalidRequest(error))

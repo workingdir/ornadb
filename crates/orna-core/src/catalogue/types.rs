@@ -1,5 +1,6 @@
 //! Catalogue definitions for object and value types.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -24,7 +25,7 @@ pub enum TypeDefinitionKind {
 
 /// The representation category of a value type.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ValueTypeKind {
     /// A value represented by one kernel primitive contract.
     Primitive,
@@ -34,7 +35,7 @@ pub enum ValueTypeKind {
 
 /// Whether a value type can be stored durably.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ValueTypePersistence {
     /// Values can be persisted in accepted storage positions.
     Persistable,
@@ -44,14 +45,14 @@ pub enum ValueTypePersistence {
 
 /// The mutability contract of a value type.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ValueTypeMutability {
     /// Values have immutable value semantics.
     Immutable,
 }
 
 /// One immutable, persistable enum value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EnumTypeDefinition {
     id: TypeId,
     name: QualifiedSemanticName,
@@ -89,7 +90,7 @@ impl EnumTypeDefinition {
 }
 
 /// One resolved field of a named immutable record value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordValueFieldDefinition {
     id: FieldId,
     name: String,
@@ -175,7 +176,7 @@ impl fmt::Display for RecordValueFieldConstructionError {
 impl std::error::Error for RecordValueFieldConstructionError {}
 
 /// One named immutable, persistable record value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordValueTypeDefinition {
     id: TypeId,
     name: QualifiedSemanticName,
@@ -229,7 +230,7 @@ impl RecordValueTypeDefinition {
 }
 
 /// One resolved catalogue value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ValueTypeDefinition {
     id: TypeId,
     name: QualifiedSemanticName,
@@ -425,7 +426,7 @@ impl<'a> TypeDefinition<'a> {
 }
 
 /// One normalised standard-prelude type spelling.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PreludeTypeName {
     words: Vec<String>,
 }
@@ -479,7 +480,7 @@ impl fmt::Display for PreludeTypeName {
 
 /// A closed type-name namespace used for type lookup.
 #[non_exhaustive]
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum TypeLookupName {
     /// A canonical primary name or schema-qualified binding.
     Qualified(QualifiedSemanticName),
@@ -536,7 +537,7 @@ impl TypeBindingKind {
 }
 
 /// Another source name for one existing type identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TypeBinding {
     id: TypeBindingId,
     name: TypeLookupName,

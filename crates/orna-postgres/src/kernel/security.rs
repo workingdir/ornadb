@@ -5093,7 +5093,6 @@ fn sealed_rows_preservation_is_supported(
                 let revision = standard.revision();
                 revision == STANDARD_LIBRARY_V8_REVISION_ID
                     || revision == STANDARD_LIBRARY_V9_REVISION_ID
-                    || revision == STANDARD_LIBRARY_V9_REVISION_ID
             })
 }
 

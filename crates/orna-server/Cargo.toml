@@ -13,22 +13,23 @@ path = "src/main.rs"
 
 [dependencies]
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user"] }
+orna-client = { path = "../orna-client" }
 orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
 orna-postgres = { path = "../orna-postgres", features = ["embedded"] }
-orna-client = { path = "../orna-client" }
 orna-protocol = { path = "../orna-protocol" }
 orna-runtime-tty = { path = "../orna-runtime-tty" }
+orna-sqlite = { path = "../orna-sqlite" }
 orna-standard = { path = "../orna-standard" }
+orna-storage = { path = "../orna-storage" }
 rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tar = "0.4"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-postgres = "0.7.18"
 
 [dev-dependencies]
 orna-artifact = { path = "../orna-artifact" }
-orna-client = { path = "../orna-client" }
 orna-postgres = { path = "../orna-postgres", features = ["test-hooks"] }
