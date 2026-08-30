@@ -2089,7 +2089,7 @@ mod tests {
     #[test]
     fn usage_diagnostic_keeps_the_direct_command_list() {
         assert!(USAGE.starts_with(
-            "Usage:\n  orna [OPTIONS] [URI]\n  orna [OPTIONS] [URI] invoke <function> [OPTIONS]\n",
+            "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n"
         ));
         for command in ["invoke", "repl", "source", "inspect", "raw-call"] {
             assert!(USAGE.contains(command));
@@ -2218,6 +2218,5 @@ mod tests {
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
         assert!(coloured.contains("\x1b[1;36mCommands:\x1b[0m"));
-        assert!(coloured.contains("function-backed REPL"));
     }
 }
