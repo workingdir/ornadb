@@ -16,8 +16,8 @@ mod resolver;
 
 pub use prepare::{
     PrepareError, PrepareStandardApplicationError, PrepareStandardUpgradeError,
-    PreparedStandardUpgrade, StandardUpgradeIdentity, prepare, prepare_checked_standard_upgrade,
-    prepare_standard_application,
+    PreparedStandardUpgrade, StandardSourceIdentitySeed, StandardUpgradeIdentity, prepare,
+    prepare_checked_standard_upgrade, prepare_standard_application, prepare_standard_source,
 };
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
@@ -25,23 +25,21 @@ pub use resolver::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
     CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
     CheckedDefault, CheckedDefinitionReference, CheckedDefinitionReferenceTarget,
-    CheckedExpressionId, CheckedField, CheckedFieldId, CheckedFunctionId,
-    CheckedObjectReferenceUse, CheckedObjectType, CheckedParameterId, CheckedSchema,
-    CheckedSchemaId, CheckedServerFunction, CheckedServerFunctionParameter,
-    CheckedServerFunctionReturnColumn, CheckedStandardApplicationBundle,
-    CheckedStandardApplicationClientFunction, CheckedStandardApplicationField,
-    CheckedStandardApplicationObjectType, CheckedStandardApplicationParameter,
-    CheckedStandardApplicationRecordValueField, CheckedStandardApplicationRecordValueType,
-    CheckedStandardApplicationReturnColumn, CheckedStandardApplicationServerFunction,
+    CheckedExpressionId, CheckedField, CheckedFieldId, CheckedFunctionId, CheckedParameterId,
+    CheckedSchema, CheckedSchemaId,
+    CheckedObjectReferenceUse, CheckedObjectType,
+    CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardLibrary,
     CheckedStandardParameterEcho, CheckedStandardSchema, CheckedStandardTerminalPresentTable,
     CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardUiConstructor,
     CheckedStandardUiWindow, CheckedStandardValueType, CheckedTypeId, CheckedTypeUseKind,
     CheckedValueTypeUse, ConstantValue, NewApplicationCheckError, ProvisionalExpressionId,
     ProvisionalFieldId, STANDARD_LIBRARY_V3_REVISION_ID, STANDARD_LIBRARY_V4_REVISION_ID,
-    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID, STD_ACTION_SCHEMA_ID,
-    STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID,
-    STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CLI_REPL_FUNCTION_ID,
+    STANDARD_LIBRARY_V5_REVISION_ID, STANDARD_LIBRARY_V6_REVISION_ID,
+    STANDARD_LIBRARY_V7_REVISION_ID, STANDARD_LIBRARY_V8_REVISION_ID,
+    STANDARD_LIBRARY_V9_REVISION_ID, STANDARD_LIBRARY_V10_REVISION_ID,
+    STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
+    STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_CLI_REPL_FUNCTION_ID,
     STD_CLI_REPL_FUNCTION_REVISION_ID, STD_CLI_REPL_REVISION_NUMBER, STD_CLI_SCHEMA_ID,
     STD_CLI_SOURCE_UNIT_ID, STD_CSV_ENCODE_FUNCTION_ID, STD_DATA_ROWS_TYPE_BINDING_ID,
     STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_DATA_SOURCE_UNIT_ID, STD_INTEGER_TYPE_ID,
@@ -73,8 +71,9 @@ pub use resolver::{
     SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
     check_standard_application, check_standard_cli_repl, check_standard_json_encode,
-    check_standard_library_source, check_standard_parameter_echo,
-    check_standard_terminal_present_table, check_standard_ui_constructor, check_standard_ui_window,
+    check_standard_library_source, check_standard_parameter_echo, check_standard_source,
+    check_standard_source_v11, check_standard_terminal_present_table, check_standard_ui_constructor,
+    check_standard_ui_window,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.

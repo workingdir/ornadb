@@ -1707,6 +1707,9 @@ pub const STANDARD_LIBRARY_V4_REVISION_ID: StandardLibraryRevisionId =
 /// The fixed ADR 0075 `orna.std/5` standard-library revision identity: `...05`.
 pub const STANDARD_LIBRARY_V5_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+/// The fixed `orna.std/11` standard-library revision identity.
+pub const STANDARD_LIBRARY_V11_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b]);
 /// The fixed ADR 0079 `orna.std/6` standard-library revision identity: `...06`.
 pub const STANDARD_LIBRARY_V6_REVISION_ID: StandardLibraryRevisionId =
     StandardLibraryRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);

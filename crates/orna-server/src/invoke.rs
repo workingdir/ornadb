@@ -395,6 +395,7 @@ pub(crate) struct SharedInvokeBroker {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct DynamicInvocationContext {
     active: ActiveDatabaseRevision,
     security: orna_core::security::SecuritySnapshot,
@@ -403,6 +404,7 @@ struct DynamicInvocationContext {
 }
 
 impl SharedInvokeBroker {
+    #[allow(dead_code)]
     pub(crate) fn bind_dynamic_context(
         &self,
         active: ActiveDatabaseRevision,
@@ -2158,8 +2160,8 @@ enum ResourceTransportOutcome {
         nested_invocation_id: Option<orna_core::InvocationId>,
     },
 }
-
 #[derive(Debug)]
+#[allow(dead_code)]
 enum ResourceTransportFailure {
     Transport,
     Shape,
@@ -2469,7 +2471,7 @@ impl BrokerSessionDriver {
             })
     }
 }
-
+#[allow(dead_code)]
 async fn handle_shared_session_frame<W>(
     frame: BrokerWireFrame,
     stream: &mut W,

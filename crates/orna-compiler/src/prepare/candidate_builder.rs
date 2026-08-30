@@ -191,6 +191,10 @@ impl<'a> CandidateBuilder<'a> {
             | PreparationMode::StandardV2 {
                 declaration_evidence,
                 ..
+            }
+            | PreparationMode::StandardSource {
+                declaration_evidence,
+                ..
             } => Some(RefCell::new(declaration_evidence.clone())),
         };
         Self {
@@ -2140,7 +2144,6 @@ impl<'a> CandidateBuilder<'a> {
         }
         Ok(references)
     }
-
     fn initial_function_revision(
         &self,
         checked: CheckedFunctionId,
@@ -2153,10 +2156,11 @@ impl<'a> CandidateBuilder<'a> {
                 .function_by_id(function)
                 .ok_or(existing_mismatch(DefinitionIdentity::Function(function)))
                 .map(|definition| definition.current_revision()),
-            CheckedFunctionId::Provisional(_) => Ok(FunctionRevisionId::new()),
+            CheckedFunctionId::Provisional(_) => {
+                Ok(self.mode.source_revision(function).unwrap_or_default())
+            }
         }
     }
-
     fn finalise_function_revision(
         &mut self,
         input: FunctionFinalisation<'_>,

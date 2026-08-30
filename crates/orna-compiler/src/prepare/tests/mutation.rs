@@ -44,11 +44,10 @@ fn prepares_a_complete_server_mutation_artifact_and_reuses_only_equal_semantics(
     assert_eq!(plan.assignments()[1].field(), task.fields()[1].id());
     assert_eq!(plan.assignments()[2].field(), task.fields()[2].id());
     assert_eq!(plan.assignments()[3].field(), task.fields()[3].id());
-    assert!(
-        plan.assignments()
-            .iter()
-            .all(|assignment| assignment.owner() == task.id())
-    );
+    assert!(plan
+        .assignments()
+        .iter()
+        .all(|assignment| assignment.owner() == task.id()));
     assert_eq!(
         plan.assignments()[0].expression().resolved_type(),
         ResolvedType::scalar(StandardScalar::CharacterLargeObject)
@@ -467,10 +466,13 @@ fn mutation_preparation_revalidates_durable_catalogue_and_reference_facts() {
             ),
         ),
     );
-    assert!(
-        validate_mutation_assignments(std::slice::from_ref(&parameter), &target, &function, true,)
-            .is_ok()
-    );
+    assert!(validate_mutation_assignments(
+        std::slice::from_ref(&parameter),
+        &target,
+        &function,
+        true,
+    )
+    .is_ok());
 
     let cross_owner = MutationAssignment::new(
         TypeId::from_bytes([47; 16]),
@@ -566,32 +568,26 @@ fn mutation_preparation_revalidates_durable_catalogue_and_reference_facts() {
             },
         ),
     ];
-    assert!(
-        validate_reference_sequence(
-            &expected,
-            &expected,
-            "mutation definition references differ from the checked body"
-        )
-        .is_ok()
-    );
+    assert!(validate_reference_sequence(
+        &expected,
+        &expected,
+        "mutation definition references differ from the checked body"
+    )
+    .is_ok());
     let mut reordered = expected.clone();
     reordered.reverse();
-    assert!(
-        validate_reference_sequence(
-            &expected,
-            &reordered,
-            "mutation definition references differ from the checked body"
-        )
-        .is_err()
-    );
-    assert!(
-        validate_reference_sequence(
-            &expected,
-            &expected[..1],
-            "mutation definition references differ from the checked body"
-        )
-        .is_err()
-    );
+    assert!(validate_reference_sequence(
+        &expected,
+        &reordered,
+        "mutation definition references differ from the checked body"
+    )
+    .is_err());
+    assert!(validate_reference_sequence(
+        &expected,
+        &expected[..1],
+        "mutation definition references differ from the checked body"
+    )
+    .is_err());
 }
 
 #[test]
@@ -619,15 +615,13 @@ fn record_constructor_preparation_rejects_a_nullable_object_field() {
     let record = RecordValueTypeDefinition::new(
         record_id,
         semantic_name(&["tasks", "flags"]),
-        vec![
-            RecordValueFieldDefinition::try_new_descriptor(
-                record_field_id,
-                "active",
-                0,
-                TypeDescriptor::named(boolean_id),
-            )
-            .unwrap(),
-        ],
+        vec![RecordValueFieldDefinition::try_new_descriptor(
+            record_field_id,
+            "active",
+            0,
+            TypeDescriptor::named(boolean_id),
+        )
+        .unwrap()],
     );
     let target_field = FieldDefinition::new(
         FieldId::from_bytes([0x96; 16]),

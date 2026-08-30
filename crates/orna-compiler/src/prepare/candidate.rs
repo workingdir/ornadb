@@ -70,6 +70,15 @@ impl CandidateIdSource {
 pub(crate) struct CandidateAllocator {
     reserved: Option<ReservedStandardIds>,
     source: CandidateIdSource,
+    standard_source_seed: Option<StandardSourceBoundary>,
+}
+
+#[derive(Clone, Copy)]
+struct StandardSourceBoundary {
+    catalogue_revision: CatalogueRevisionId,
+    source_bundle: SourceBundleId,
+    source_revision: SourceRevisionId,
+    source_unit: SourceUnitId,
 }
 
 impl CandidateAllocator {
@@ -77,6 +86,7 @@ impl CandidateAllocator {
         Self {
             reserved: None,
             source: CandidateIdSource::RANDOM,
+            standard_source_seed: None,
         }
     }
 
@@ -85,6 +95,7 @@ impl CandidateAllocator {
         Self {
             reserved: None,
             source,
+            standard_source_seed: None,
         }
     }
 
@@ -95,14 +106,37 @@ impl CandidateAllocator {
         )
     }
 
+    pub(super) fn standard_source(
+        snapshot: &VerifiedStandardLibrarySnapshot,
+        seed: &StandardSourceIdentitySeed,
+    ) -> Self {
+        Self {
+            reserved: Some(ReservedStandardIds::from_snapshot(snapshot)),
+            source: CandidateIdSource::RANDOM,
+            standard_source_seed: Some(StandardSourceBoundary {
+                catalogue_revision: seed.catalogue_revision,
+                source_bundle: seed.source_bundle,
+                source_revision: seed.source_revision,
+                source_unit: seed
+                    .source_units
+                    .first()
+                    .copied()
+                    .expect("standard source seed requires one source unit"),
+            }),
+        }
+    }
+
     pub(crate) fn with_source(reserved: ReservedStandardIds, source: CandidateIdSource) -> Self {
         Self {
             reserved: Some(reserved),
             source,
+            standard_source_seed: None,
         }
     }
-
     pub(super) fn catalogue_revision(&mut self) -> CatalogueRevisionId {
+        if let Some(seed) = self.standard_source_seed {
+            return seed.catalogue_revision;
+        }
         loop {
             let id = (self.source.catalogue_revision)();
             if self
@@ -116,6 +150,9 @@ impl CandidateAllocator {
     }
 
     pub(super) fn source_bundle(&mut self) -> SourceBundleId {
+        if let Some(seed) = self.standard_source_seed {
+            return seed.source_bundle;
+        }
         loop {
             let id = (self.source.source_bundle)();
             if self
@@ -129,6 +166,9 @@ impl CandidateAllocator {
     }
 
     pub(super) fn source_revision(&mut self) -> SourceRevisionId {
+        if let Some(seed) = self.standard_source_seed {
+            return seed.source_revision;
+        }
         loop {
             let id = (self.source.source_revision)();
             if self
@@ -142,6 +182,9 @@ impl CandidateAllocator {
     }
 
     pub(super) fn source_unit(&mut self) -> SourceUnitId {
+        if let Some(seed) = self.standard_source_seed {
+            return seed.source_unit;
+        }
         loop {
             let id = (self.source.source_unit)();
             if self
@@ -153,7 +196,6 @@ impl CandidateAllocator {
             }
         }
     }
-
     pub(super) fn schema(&mut self) -> SchemaId {
         loop {
             let id = (self.source.schema)();
@@ -197,19 +239,20 @@ pub(super) struct IdentityMap {
 }
 
 impl IdentityMap {
-    pub(super) fn build_legacy(
-        checked: &CheckedBundle,
-        active: &ActiveDatabaseRevision,
-        allocations: &mut CandidateAllocator,
-    ) -> Result<Self, PrepareError> {
-        Self::build(checked, active, allocations, None, true)
-    }
     pub(super) fn build_generic(
         checked: &CheckedBundle,
         active: &ActiveDatabaseRevision,
         allocations: &mut CandidateAllocator,
     ) -> Result<Self, PrepareError> {
-        Self::build(checked, active, allocations, None, true)
+        Self::build(checked, active, allocations, None, true, None)
+    }
+
+    pub(super) fn build_legacy(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        allocations: &mut CandidateAllocator,
+    ) -> Result<Self, PrepareError> {
+        Self::build(checked, active, allocations, None, true, None)
     }
 
     pub(super) fn build_standard(
@@ -217,6 +260,7 @@ impl IdentityMap {
         active: &ActiveDatabaseRevision,
         allocations: &mut CandidateAllocator,
         function_identities: &ValidatedFunctionIdentities,
+        source_seed: Option<&StandardSourceIdentitySeed>,
     ) -> Result<Self, PrepareError> {
         Self::build(
             checked,
@@ -224,6 +268,7 @@ impl IdentityMap {
             allocations,
             Some(function_identities),
             true,
+            source_seed,
         )
     }
 
@@ -239,6 +284,7 @@ impl IdentityMap {
             &mut no_allocations,
             Some(function_identities),
             false,
+            None,
         )
     }
 
@@ -248,12 +294,14 @@ impl IdentityMap {
         allocations: &mut CandidateAllocator,
         function_identities: Option<&ValidatedFunctionIdentities>,
         allow_provisional: bool,
+        source_seed: Option<&StandardSourceIdentitySeed>,
     ) -> Result<Self, PrepareError> {
         Self::validate_existing(checked, active, function_identities.is_none())?;
         let mut result = Self::default();
         for schema in checked.schemas() {
             let id = match schema.id() {
                 CheckedSchemaId::Existing(id) => id,
+                CheckedSchemaId::Provisional(_) if let Some(seed) = source_seed => seed.schema,
                 CheckedSchemaId::Provisional(_) if allow_provisional => allocations.schema(),
                 CheckedSchemaId::Provisional(_) => {
                     return Err(PrepareError::InvalidCheckedBundle {
@@ -386,6 +434,13 @@ impl IdentityMap {
                 for function in checked.client_functions() {
                     let function_id = match function.id() {
                         CheckedFunctionId::Existing(id) => id,
+                        CheckedFunctionId::Provisional(_) if let Some(seed) = source_seed => seed
+                            .functions
+                            .get(result.functions.len())
+                            .copied()
+                            .ok_or(PrepareError::InvalidCheckedBundle {
+                                reason: "standard source function seed count does not match checked source",
+                            })?,
                         CheckedFunctionId::Provisional(_) if allow_provisional => FunctionId::new(),
                         CheckedFunctionId::Provisional(_) => {
                             return Err(PrepareError::InvalidCheckedBundle {
@@ -399,9 +454,17 @@ impl IdentityMap {
                         function_id,
                         "duplicate checked function",
                     )?;
-                    for parameter in function.parameters() {
+                    for (parameter_index, parameter) in function.parameters().iter().enumerate() {
                         let parameter_id = match parameter.id() {
                             CheckedParameterId::Existing(id) => id,
+                            CheckedParameterId::Provisional(_) if let Some(seed) = source_seed => seed
+                                .parameters
+                                .get(result.functions.len() - 1)
+                                .and_then(|parameters| parameters.get(parameter_index))
+                                .copied()
+                                .ok_or(PrepareError::InvalidCheckedBundle {
+                                    reason: "standard source parameter seed shape does not match checked source",
+                                })?,
                             CheckedParameterId::Provisional(_) if allow_provisional => {
                                 ParameterId::new()
                             }
@@ -446,8 +509,22 @@ impl IdentityMap {
                                 .ok_or(PrepareError::InvalidCheckedBundle {
                                     reason: "checked standard function owners do not match declaration evidence",
                                 })?;
+                            let function_index = function_identities
+                                .order()
+                                .iter()
+                                .position(|candidate| candidate == owner)
+                                .ok_or(PrepareError::InvalidCheckedBundle {
+                                    reason: "standard source function order is incomplete",
+                                })?;
                             let function_id = match function.id() {
                                 CheckedFunctionId::Existing(id) => id,
+                                CheckedFunctionId::Provisional(_) if let Some(seed) = source_seed => seed
+                                    .functions
+                                    .get(function_index)
+                                    .copied()
+                                    .ok_or(PrepareError::InvalidCheckedBundle {
+                                        reason: "standard source function seed does not match checked source",
+                                    })?,
                                 CheckedFunctionId::Provisional(_) if allow_provisional => {
                                     FunctionId::new()
                                 }
@@ -458,9 +535,17 @@ impl IdentityMap {
                                 }
                             };
                             result.functions.insert(function.id(), function_id);
-                            for parameter in function.parameters() {
+                            for (parameter_index, parameter) in function.parameters().iter().enumerate() {
                                 let parameter_id = match parameter.id() {
                                     CheckedParameterId::Existing(id) => id,
+                                    CheckedParameterId::Provisional(_) if let Some(seed) = source_seed => seed
+                                        .parameters
+                                        .get(function_index)
+                                        .and_then(|parameters| parameters.get(parameter_index))
+                                        .copied()
+                                        .ok_or(PrepareError::InvalidCheckedBundle {
+                                            reason: "standard source parameter seed shape does not match checked source",
+                                        })?,
                                     CheckedParameterId::Provisional(_) if allow_provisional => {
                                         ParameterId::new()
                                     }
@@ -482,7 +567,6 @@ impl IdentityMap {
                 }
             }
         }
-
         // CLIENT expressions may target functions that are already installed
         // and therefore are not part of this checked bundle.  Their stable
         // function and parameter identities still have to be present in the
