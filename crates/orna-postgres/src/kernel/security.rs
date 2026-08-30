@@ -11,6 +11,8 @@
 #![allow(clippy::match_like_matches_macro)]
 #[path = "security/audit.rs"]
 mod audit;
+#[path = "security/audit_codec.rs"]
+mod audit_codec;
 #[path = "security/audit_recovery.rs"]
 mod audit_recovery;
 #[path = "security/audit_writer.rs"]
@@ -54,8 +56,9 @@ mod sealed_server_execution;
 #[path = "security/target_resolution.rs"]
 mod target_resolution;
 
-pub(crate) use audit::encode_principal_kind;
 use audit::*;
+pub(crate) use audit_codec::encode_principal_kind;
+use audit_codec::*;
 pub(crate) use audit_recovery::recover_invocation_audit_events;
 use audit_recovery::*;
 pub use audit_writer::ResourceAuditTerminalOutcome;
