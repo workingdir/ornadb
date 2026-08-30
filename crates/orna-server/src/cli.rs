@@ -1,3 +1,4 @@
+#![allow(clippy::while_let_loop)]
 use std::{
     ffi::{OsStr, OsString},
     io::{self, Write},
@@ -17,7 +18,35 @@ use orna_core::{
 
 pub(crate) const USAGE: &str = "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n  orna --daemon\n  orna --version\n  orna server run\n  orna server backend-shell\n  orna runtime describe <runtime-shared-library>\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n  orna inspect <invocation-id> [options]";
 
-pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line\n\nRun functions and open a database session.\n\nUsage:\n  orna [GLOBAL OPTIONS] [COMMAND] [OPTIONS]\n\nCommon Commands:\n  (none)       Open the function-backed REPL.\n  repl         Open the function-backed REPL explicitly.\n  invoke ...   Run one stored function.\n  inspect ...  Inspect a completed invocation.\n  source ...   Check or apply one source file.\n\nHost Mode:\n  --daemon, -d Run the Orna server in the foreground for a supervisor.\n\nOptions:\n  --db <target> Select a local path, Unix socket, or remote Orna URI.\n  --help ...    Show help for a command.\n  --version ... Show the Orna version.\n  --color <auto|always|never>  Control terminal colour.\n\nUse `orna COMMAND --help` for command-specific options.\n";
+pub(crate) const HELP_TOP_LEVEL: &str = "Orna command line
+
+Open a database session or run a stored function.
+
+Usage:
+  orna [OPTIONS] [URI]
+  orna [OPTIONS] [URI] invoke <function> [OPTIONS]
+  orna [OPTIONS] -d
+
+Commands:
+  invoke ...   Run one stored function.
+  repl ...     Open the function-backed REPL.
+  inspect ...  Inspect a completed invocation.
+  source ...   Check or apply one source file.
+
+Host Mode:
+  --daemon     Run the local server in the foreground.
+
+Operational Commands:
+  server ...   Manage the server and backend shell.
+  security ... Manage principals and grants.
+  raw-call ... Use the low-level recovery interface.
+
+Options:
+  --db <URI>   Select a local path, Unix socket, or remote Orna URI.
+  --runtime <family>  Select tty or qt for invoke.
+  --color <auto|always|never>  Control terminal colour.
+  -h, --help   Show help for a command.
+  -V, --version  Show the Orna version.";
 const HELP_SERVER: &str = "Manage an Orna server.\n\nUsage:\n  orna server run\n  orna server backend-shell\n\nCommands:\n  run            Start the server in the foreground.\n  backend-shell  Open a shell for the ready server.\n\nRun `orna server COMMAND --help` for more information.\n";
 const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage:\n  orna server run\n\nThis command accepts no options. Use a service manager to supervise the process.\n";
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
@@ -48,7 +77,7 @@ impl ColorChoice {
         }
     }
 
-    fn enabled(self, terminal: bool) -> bool {
+    pub(crate) fn enabled(self, terminal: bool) -> bool {
         match self {
             Self::Auto => terminal,
             Self::Always => true,
@@ -209,8 +238,8 @@ where
         },
         Some(value) if value == OsStr::new("source") => HelpTopic::Source,
         Some(value) if value == OsStr::new("invoke") => HelpTopic::Invoke,
-        Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
         Some(value) if value == OsStr::new("state") => HelpTopic::State,
+        Some(value) if value == OsStr::new("repl") => HelpTopic::Repl,
         Some(value) if value == OsStr::new("inspect") => HelpTopic::Inspect,
         Some(value) if value == OsStr::new("runtime") => HelpTopic::Runtime,
         Some(value) if value == OsStr::new("security") => HelpTopic::Security,
@@ -316,6 +345,8 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "inspect"
                 | "security"
                 | "repl"
+                | "version"
+                | "backend-shell"
         )
     })
 }
@@ -350,10 +381,7 @@ where
     {
         let _ = args.next();
         let value = args.next()?.into_string().ok()?;
-        match orna_server::RuntimeFamily::parse(&value) {
-            Some(runtime) => Some(runtime),
-            None => return None,
-        }
+        Some(orna_server::RuntimeFamily::parse(&value)?)
     } else {
         None
     };
@@ -401,6 +429,7 @@ where
                 default_repl_command(runtime)
             }
         }
+
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
             Some(value) if value == OsStr::new("--help") => args
                 .next()
@@ -986,6 +1015,7 @@ where
             }
             "explain" => explain = true,
             "no-progress" => no_progress = true,
+            "db" => return None,
             _ => {
                 let value = args.next()?.into_string().ok()?;
                 arguments.push(CliArgumentInput::Friendly {
