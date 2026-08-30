@@ -19,7 +19,6 @@ use orna_core::system::{
     SYS_INSPECT_UI_NODES_TYPE_ID,
 };
 use orna_core::{
-    CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
         artifact_payload_digest, calculate_standard_library_digest, catalogue_digest,
         catalogue_digest_with_context, function_semantic_digest_with_version, source_bundle_digest,
@@ -34,15 +33,26 @@ use orna_core::{
         StoredSourceUnit,
     },
     value::{
-        MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_RUNTIME_VALUE_NODES, OpaqueValue, OpaqueValueError,
+        OpaqueValue, OpaqueValueError, MAX_OPAQUE_CODEC_ACTION_ARGUMENTS, MAX_RUNTIME_VALUE_NODES,
     },
+    CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
 };
 
 use super::{
-    ACTION_MAGIC, BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC,
-    CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID,
-    EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, JSON_MAGIC,
-    LANGUAGE_VERSION_IDENTITY, OPAQUE_TOKEN_TYPE_ID, RETAINED_STANDARD_INVOKE_SOURCE,
+    build_type_bindings, is_registered_inspect_carrier_type, prepare_standard_upgrade,
+    prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
+    prepare_standard_upgrade_with, registered_inspect_carrier_codecs, registered_opaque_codecs,
+    retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
+    retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
+    retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
+    standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
+    standard_library_v4_manifest, verify_standard_library_snapshot,
+    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
+    verify_standard_library_v4_snapshot, StandardLibraryError, StandardLibraryManifestError,
+    StandardUpgradeError, ACTION_MAGIC, BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID,
+    BOOLEAN_TYPE_ID, BYTE_STREAM_MAGIC, CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID,
+    DECIMAL_TYPE_ID, DURATION_TYPE_ID, EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID,
+    JSON_MAGIC, LANGUAGE_VERSION_IDENTITY, OPAQUE_TOKEN_TYPE_ID, RETAINED_STANDARD_INVOKE_SOURCE,
     RETAINED_STANDARD_OUTPUT_SOURCE, RETAINED_STANDARD_SOURCE, RETAINED_STANDARD_UI_SOURCE,
     SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID, STANDARD_CATALOGUE_V2_REVISION_ID,
     STANDARD_CATALOGUE_V3_REVISION_ID, STANDARD_CATALOGUE_V4_REVISION_ID,
@@ -68,18 +78,7 @@ use super::{
     STD_SCHEMA_ID, STD_TERMINAL_DOCUMENT_CONTRACT, STD_TERMINAL_DOCUMENT_TYPE_ID,
     STD_TERMINAL_SCHEMA_ID, STD_TYPES_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, STD_UI_CONTRACT,
     STD_UI_SCHEMA_ID, STD_UI_SOURCE_LOGICAL_PATH, STD_UI_SOURCE_UNIT_ID, STD_UI_TYPE_ID,
-    StandardLibraryError, StandardLibraryManifestError, StandardUpgradeError,
-    TERMINAL_DOCUMENT_MAGIC, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UI_MAGIC, UUID_TYPE_ID, VOID_TYPE_ID,
-    build_type_bindings, is_registered_inspect_carrier_type, prepare_standard_upgrade,
-    prepare_standard_upgrade_v1_to_v2, prepare_standard_upgrade_v2_to_v3,
-    prepare_standard_upgrade_with, registered_inspect_carrier_codecs, registered_opaque_codecs,
-    retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
-    retained_standard_library_v2_snapshot, retained_standard_library_v2_snapshot_from_source,
-    retained_standard_library_v3_snapshot, retained_standard_library_v4_snapshot,
-    standard_library_manifest, standard_library_v2_manifest, standard_library_v3_manifest,
-    standard_library_v4_manifest, verify_standard_library_snapshot,
-    verify_standard_library_v2_snapshot, verify_standard_library_v3_snapshot,
-    verify_standard_library_v4_snapshot,
+    TERMINAL_DOCUMENT_MAGIC, TIMESTAMP_TYPE_ID, TIME_TYPE_ID, UI_MAGIC, UUID_TYPE_ID, VOID_TYPE_ID,
 };
 
 const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -302,6 +301,7 @@ fn empty_version_two_active_revision(
 mod v1;
 mod v2_v4;
 mod v5_v10;
+mod v11;
 
 use v1::EXPECTED_RETAINED_INVOKE_SOURCE;
 use v2_v4::EXPECTED_RETAINED_ACTION_SOURCE;

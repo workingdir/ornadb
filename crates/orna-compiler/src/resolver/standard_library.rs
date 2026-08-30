@@ -1,4 +1,5 @@
 use super::*;
+use orna_core::catalogue::FunctionDefinition;
 
 /// Checks retained standard source against its verified catalogue and origins.
 ///
@@ -30,7 +31,27 @@ pub fn check_standard_library_source(
     match snapshot.digest_version() {
         StandardLibraryDigestVersion::Version1 => check_standard_library_source_v1(snapshot),
         StandardLibraryDigestVersion::Version2 => match snapshot.revision() {
-            STANDARD_LIBRARY_V10_REVISION_ID => check_standard_library_source_v10(snapshot),
+            STANDARD_LIBRARY_V11_REVISION_ID => check_standard_source_v11(snapshot),
+            STANDARD_LIBRARY_V10_REVISION_ID => {
+                let source_units = snapshot.source().units();
+                let executables = snapshot.executables();
+                if source_units.len() != 10 || executables.len() != 12 {
+                    return Err(StandardLibraryCheckError::SourceMismatch);
+                }
+                let (families, checked_executables) = check_standard_library_source_v10(
+                    source_units,
+                    snapshot.catalogue(),
+                    snapshot.origins(),
+                    executables,
+                )?;
+                Ok(CheckedStandardLibrary {
+                    verified_snapshot: snapshot.clone(),
+                    schemas: families.schemas,
+                    value_types: families.value_types,
+                    type_bindings: families.type_bindings,
+                    checked_executables,
+                })
+            }
             STANDARD_LIBRARY_V9_REVISION_ID => check_standard_library_source_v9(snapshot),
             STANDARD_LIBRARY_V8_REVISION_ID => check_standard_library_source_v8(snapshot),
             STANDARD_LIBRARY_V7_REVISION_ID => check_standard_library_source_v7(snapshot),
@@ -43,7 +64,205 @@ pub fn check_standard_library_source(
         _ => Err(StandardLibraryCheckError::SourceMismatch),
     }
 }
-
+pub fn check_standard_source_v11(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let source_units = snapshot.source().units();
+    if source_units.len() != 11 {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    }
+    if snapshot.executables().len() != 18 {
+        return Err(StandardLibraryCheckError::ExecutableCount {
+            actual: snapshot.executables().len(),
+        });
+    }
+    let bundle = SourceBundle::new(
+        source_units
+            .iter()
+            .map(|unit| SourceUnit::new(unit.logical_path(), unit.content())),
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let math_schema = snapshot
+        .catalogue()
+        .schemas()
+        .iter()
+        .find(|schema| {
+            schema.name().parts().len() == 2
+                && schema.name().parts()[0] == "std"
+                && schema.name().parts()[1] == "math"
+        })
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let math_namespace = math_schema.name().clone();
+    let math_function_ids = snapshot
+        .catalogue()
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.name().parts().len() == 3
+                && function.name().parts()[..2] == math_namespace.parts()[..]
+        })
+        .map(FunctionDefinition::id)
+        .collect::<std::collections::HashSet<_>>();
+    if math_function_ids.len() != 6 {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    let parent_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        snapshot.catalogue().revision(),
+        snapshot
+            .catalogue()
+            .schemas()
+            .iter()
+            .filter(|schema| schema.id() != math_schema.id())
+            .cloned()
+            .collect(),
+        snapshot.catalogue().object_types().to_vec(),
+        snapshot.catalogue().value_types().to_vec(),
+        snapshot.catalogue().type_bindings().to_vec(),
+        snapshot
+            .catalogue()
+            .functions()
+            .iter()
+            .filter(|function| !math_function_ids.contains(&function.id()))
+            .cloned()
+            .collect(),
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let parent_origins = snapshot
+        .origins()
+        .iter()
+        .filter(|origin| origin.source().source_unit() != source_units[10].id())
+        .cloned()
+        .collect::<Vec<_>>();
+    let (parent_families, parent_executables) = check_standard_library_source_v10(
+        &source_units[..10],
+        &parent_catalogue,
+        &parent_origins,
+        &snapshot.executables()[..12],
+    )?;
+    let parent = CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: parent_families.schemas,
+        value_types: parent_families.value_types,
+        type_bindings: parent_families.type_bindings,
+        checked_executables: parent_executables,
+    };
+    let math_units = &source_units[10..];
+    let math_bundle = SourceBundle::new(
+        math_units
+            .iter()
+            .map(|unit| SourceUnit::new(unit.logical_path(), unit.content())),
+    )
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let math_report =
+        crate::resolver::check_standard_source(&math_bundle, snapshot.catalogue(), &parent);
+    if !math_report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: math_report.diagnostics().to_vec(),
+        });
+    }
+    let checked_bundle = math_report
+        .checked_bundle()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let mut checked_executables = parent.checked_executables().to_vec();
+    let math_functions = checked_bundle.client_functions().collect::<Vec<_>>();
+    if math_functions.len() != 6 {
+        return Err(StandardLibraryCheckError::ExecutableMismatch);
+    }
+    for (stored, checked) in snapshot.executables()[12..]
+        .iter()
+        .zip(math_functions.iter())
+    {
+        let function = snapshot
+            .catalogue()
+            .function_by_id(stored.function())
+            .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
+        if checked.parameters().len() != function.parameters().len()
+            || checked.domain() != function.domain()
+        {
+            return Err(StandardLibraryCheckError::ExecutableMismatch);
+        }
+        let revision = stored.revision();
+        let schema_name = QualifiedSemanticName::new(
+            function
+                .name()
+                .parts()
+                .iter()
+                .take(function.name().parts().len() - 1)
+                .cloned(),
+        )
+        .map_err(|_| StandardLibraryCheckError::ExecutableMismatch)?;
+        let schema_id = snapshot
+            .catalogue()
+            .schema_by_name(&schema_name)
+            .ok_or(StandardLibraryCheckError::ExecutableMismatch)?
+            .id();
+        let schema_origin = snapshot
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::Schema(schema_id))
+            .ok_or(StandardLibraryCheckError::ExecutableMismatch)?
+            .source();
+        let function_origin = snapshot
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::Function(stored.function()))
+            .ok_or(StandardLibraryCheckError::ExecutableMismatch)?
+            .source();
+        let parameter_origins = function
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                snapshot
+                    .origins()
+                    .iter()
+                    .find(|origin| {
+                        origin.identity()
+                            == DefinitionIdentity::Parameter {
+                                owner: stored.function(),
+                                parameter: parameter.id(),
+                            }
+                    })
+                    .ok_or(StandardLibraryCheckError::ExecutableMismatch)
+                    .map(DefinitionOrigin::source)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        checked_executables.push(CheckedStandardExecutable {
+            function_id: stored.function(),
+            parameter_ids: function
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.id())
+                .collect(),
+            revision_id: revision.id(),
+            revision_number: revision.revision_number(),
+            declaration_origin: revision.declaration_origin(),
+            declaration_content_hash: revision.declaration_content_hash(),
+            semantic_hash: revision.semantic_hash(),
+            semantic_hash_version: revision.semantic_hash_version(),
+            language_version: revision.language_version().to_owned(),
+            artifact: revision.artifact().clone(),
+            references: stored.references().to_vec(),
+            schema_origin,
+            function_origin,
+            parameter_origins,
+        });
+    }
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: parent.schemas().to_vec(),
+        value_types: parent.value_types().to_vec(),
+        type_bindings: parent.type_bindings().to_vec(),
+        checked_executables,
+    })
+}
 const STANDARD_SOURCE_UNIT_ID: SourceUnitId =
     SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
@@ -548,15 +767,8 @@ fn check_standard_library_source_v7_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-        window_unit,
-    ] = source_units
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit, window_unit] =
+        source_units
     else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -731,16 +943,8 @@ fn check_standard_library_source_v8_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-        window_unit,
-        data_unit,
-    ] = source_units
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit, window_unit, data_unit] =
+        source_units
     else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -1093,70 +1297,26 @@ pub fn check_standard_cli_repl(
 }
 
 fn check_standard_library_source_v10(
-    snapshot: &VerifiedStandardLibrarySnapshot,
-) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
-    let source_units = snapshot.source().units();
-    let executables = snapshot.executables();
-    if source_units.len() != 10 {
-        return Err(StandardLibraryCheckError::SourceUnitCount {
-            actual: source_units.len(),
-        });
+    source_units: &[StoredSourceUnit],
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
+    if source_units.len() != 10 || executables.len() != 12 {
+        return Err(StandardLibraryCheckError::SourceMismatch);
     }
-    if executables.len() != 12 {
-        return Err(StandardLibraryCheckError::ExecutableCount {
-            actual: executables.len(),
-        });
-    }
-    let expected_functions = [
-        STD_INVOKE_ECHO_FUNCTION_ID,
-        STD_JSON_ENCODE_FUNCTION_ID,
-        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
-        STD_UI_WINDOW_FUNCTION_ID,
-        STD_UI_TEXT_FUNCTION_ID,
-        STD_UI_BUTTON_FUNCTION_ID,
-        STD_UI_PANEL_FUNCTION_ID,
-        STD_UI_ROW_FUNCTION_ID,
-        STD_UI_COLUMN_FUNCTION_ID,
-        STD_UI_TEXT_INPUT_FUNCTION_ID,
-        STD_UI_TABS_FUNCTION_ID,
-        STD_CLI_REPL_FUNCTION_ID,
-    ];
-    if executables
-        .iter()
-        .map(StandardExecutable::function)
-        .ne(expected_functions)
-    {
-        return Err(StandardLibraryCheckError::ExecutableMismatch);
-    }
-    let cli_unit = source_units
-        .last()
-        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-    let cli_origins = snapshot
-        .origins()
-        .iter()
-        .filter(|origin| origin.source().source_unit() == STD_CLI_SOURCE_UNIT_ID)
-        .cloned()
-        .collect::<Vec<_>>();
-    let parent_origins = snapshot
-        .origins()
-        .iter()
-        .filter(|origin| origin.source().source_unit() != STD_CLI_SOURCE_UNIT_ID)
-        .cloned()
-        .collect::<Vec<_>>();
     let parent_catalogue = CatalogueSnapshot::new_with_functions_and_types(
-        snapshot.catalogue().revision(),
-        snapshot
-            .catalogue()
+        catalogue.revision(),
+        catalogue
             .schemas()
             .iter()
             .filter(|schema| schema.id() != STD_CLI_SCHEMA_ID)
             .cloned()
             .collect(),
-        snapshot.catalogue().object_types().to_vec(),
-        snapshot.catalogue().value_types().to_vec(),
-        snapshot.catalogue().type_bindings().to_vec(),
-        snapshot
-            .catalogue()
+        catalogue.object_types().to_vec(),
+        catalogue.value_types().to_vec(),
+        catalogue.type_bindings().to_vec(),
+        catalogue
             .functions()
             .iter()
             .filter(|function| function.id() != STD_CLI_REPL_FUNCTION_ID)
@@ -1164,58 +1324,45 @@ fn check_standard_library_source_v10(
             .collect(),
     )
     .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
-    let (mut families, mut checked_executables) = check_standard_library_source_v9_parts(
+    let parent_origins = origins
+        .iter()
+        .filter(|origin| origin.source().source_unit() != STD_CLI_SOURCE_UNIT_ID)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (families, checked) = check_standard_library_source_v9_parts(
         &source_units[..9],
         &parent_catalogue,
         &parent_origins,
         &executables[..11],
     )?;
+    let cli_unit = &source_units[9];
     let cli_bundle =
         SourceBundle::new([SourceUnit::new(cli_unit.logical_path(), cli_unit.content())])
             .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
     let cli_report = parse_bundle(&cli_bundle);
-    if !cli_report.diagnostics().is_empty() {
-        return Err(StandardLibraryCheckError::Diagnostics {
-            diagnostics: cli_report.diagnostics().to_vec(),
-        });
-    }
     let [parsed_cli] = cli_report.units() else {
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
-    if parsed_cli.source_text() != cli_unit.content()
-        || parsed_cli.source_text() != parsed_cli.syntax_text()
-        || parsed_cli.parsed().schemas().len() != 1
-        || parsed_cli.parsed().client_functions().len() != 1
-        || !parsed_cli.parsed().server_functions().is_empty()
-        || !parsed_cli.parsed().object_types().is_empty()
-        || !parsed_cli.parsed().enum_types().is_empty()
-        || !parsed_cli.parsed().primitive_value_types().is_empty()
-        || !parsed_cli.parsed().opaque_value_types().is_empty()
-        || !parsed_cli.parsed().record_value_types().is_empty()
-        || !parsed_cli.parsed().field_renames().is_empty()
-        || !parsed_cli.parsed().type_exports().is_empty()
-    {
-        return Err(StandardLibraryCheckError::SourceMismatch);
-    }
-    let checked_cli = check_standard_cli_repl(
+    let cli_origins = origins
+        .iter()
+        .filter(|origin| origin.source().source_unit() == STD_CLI_SOURCE_UNIT_ID)
+        .cloned()
+        .collect::<Vec<_>>();
+    let cli = check_standard_cli_repl(
         &parsed_cli.parsed().client_functions()[0],
-        snapshot.catalogue(),
+        catalogue,
         &cli_origins,
         cli_unit,
     )?;
+    let mut families = families;
     families.schemas.push(CheckedStandardSchema {
         id: STD_CLI_SCHEMA_ID,
         name: unquoted_semantic_name(&parsed_cli.parsed().schemas()[0].name)?,
-        origin: checked_cli.schema_origin(),
+        origin: cli.schema_origin(),
     });
-    checked_executables.push(checked_cli);
-    Ok(CheckedStandardLibrary {
-        verified_snapshot: snapshot.clone(),
-        schemas: families.schemas,
-        value_types: families.value_types,
-        type_bindings: families.type_bindings,
-        checked_executables,
-    })
+    let mut checked = checked;
+    checked.push(cli);
+    Ok((families, checked))
 }
 fn check_standard_library_source_v9_parts(
     source_units: &[StoredSourceUnit],
@@ -1223,17 +1370,8 @@ fn check_standard_library_source_v9_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, Vec<CheckedStandardExecutable>), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-        window_unit,
-        data_unit,
-        constructors_unit,
-    ] = source_units
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit, window_unit, data_unit, constructors_unit] =
+        source_units
     else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -1597,14 +1735,7 @@ pub(super) fn check_standard_library_source_v6_parts(
     origins: &[DefinitionOrigin],
     executables: &[StandardExecutable],
 ) -> Result<(StandardSourceFamilies, CheckedStandardExecutable), StandardLibraryCheckError> {
-    let [
-        types_unit,
-        invoke_unit,
-        output_unit,
-        ui_unit,
-        json_unit,
-        action_unit,
-    ] = source_units
+    let [types_unit, invoke_unit, output_unit, ui_unit, json_unit, action_unit] = source_units
     else {
         return Err(StandardLibraryCheckError::SourceUnitCount {
             actual: source_units.len(),
@@ -1701,13 +1832,7 @@ pub(super) fn check_standard_library_source_v5_parts(
             diagnostics: report.diagnostics().to_vec(),
         });
     }
-    let [
-        parsed_types,
-        parsed_invoke,
-        parsed_output,
-        parsed_ui,
-        parsed_json,
-    ] = report.units()
+    let [parsed_types, parsed_invoke, parsed_output, parsed_ui, parsed_json] = report.units()
     else {
         return Err(StandardLibraryCheckError::SourceMismatch);
     };
@@ -4454,6 +4579,7 @@ pub(super) fn match_standard_source_facts(
                     id: binding.id(),
                     kind: binding.kind(),
                     name: binding.name().clone(),
+
                     target: binding.target(),
                     span: declaration.span.clone(),
                 });

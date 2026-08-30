@@ -1,7 +1,7 @@
 //! Preparation of checked standard-library upgrades.
 
 use super::*;
-
+use crate::{StandardApplicationCheckContext, check_standard_application};
 /// A compiler-prepared standard upgrade that remains non-installable until the
 /// standard-library wrapper accepts it.
 #[derive(Clone, Debug)]
