@@ -1124,7 +1124,9 @@ fn should_cancel_on_disconnect(completion: &DispatchCompletion) -> bool {
             .cancellation_token
             .as_ref()
             .is_some_and(ResourceCancellation::is_requested)
-        && (completion.sealed_invocation.is_none() || !completion.start_delivered)
+        && (completion.sealed_invocation.is_none()
+            || !completion.start_delivered
+            || !completion.worker_completed)
 }
 
 fn queue_cancellation_actions(completion: &mut DispatchCompletion, stream: u64) {
