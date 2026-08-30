@@ -15,12 +15,18 @@ mod audit;
 mod audit_writer;
 #[path = "security/authenticated_select.rs"]
 mod authenticated_select;
+#[path = "security/authentication.rs"]
+mod authentication;
+#[path = "security/client_evaluation.rs"]
+mod client_evaluation;
 #[path = "security/local_identity.rs"]
 mod local_identity;
 #[path = "security/persistence.rs"]
 mod persistence;
 #[path = "security/raw_call.rs"]
 mod raw_call;
+#[path = "security/recovery.rs"]
+mod recovery;
 #[path = "security/resource.rs"]
 mod resource;
 #[path = "security/resource_cancellation.rs"]
@@ -44,8 +50,7 @@ pub(crate) use audit_writer::{
 };
 use audit_writer::{
     resource_audit_invariant, resource_parent_invocation_is_owned_in_transaction,
-    resource_parent_invocation_unavailable, validate_resource_audit_lineage,
-    validate_resource_lineage, validate_resource_state_context,
+    validate_resource_audit_lineage, validate_resource_lineage, validate_resource_state_context,
 };
 use local_identity::append_client_capability_audit;
 pub(crate) use local_identity::security_snapshots_match;
@@ -1094,267 +1099,6 @@ impl PostgresKernel {
         }
         .await;
         finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
-    }
-
-    /// Revalidates raw record arguments against one transactional active revision.
-    ///
-    /// An empty list performs no PostgreSQL operation. A non-empty list opens
-    /// one read-only, repeatable-read transaction and returns only whether all
-    /// record values remain canonical for its recovered active revision. This
-    /// operation does not select, authorise, audit, or execute a target.
-    pub async fn preflight_record_arguments(
-        &self,
-        records: Vec<RecordValue>,
-    ) -> Result<RecordArgumentPreflight, PostgresKernelError> {
-        if records.is_empty() {
-            return Ok(RecordArgumentPreflight::NotRequired);
-        }
-        let mut session = self.open().await?;
-        let operation = async {
-            let transaction = session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let active = recover_active_revision(&transaction).await?;
-            let mut outcome = RecordArgumentPreflight::Current;
-            for record in records {
-                if encode_active_value(&active, &RuntimeValue::Record(record)).is_err() {
-                    outcome = RecordArgumentPreflight::Stale;
-                }
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(outcome)
-        }
-        .await;
-        finish_security_session(operation, session.shutdown().await)
-    }
-
-    /// Authenticates a kernel-supplied Linux peer UID with no selected roles.
-    ///
-    /// The operation appends and commits one protected audit record before it
-    /// returns either the authenticated session or an expected typed denial.
-    /// Database insertion, commit, or session shutdown failure replaces the
-    /// authentication result with a kernel failure.
-    pub async fn authenticate_local_peer(
-        &self,
-        uid: u32,
-    ) -> Result<AuthenticatedSession, PostgresKernelError> {
-        let mut database_session = self.open().await?;
-        let operation = async {
-            let transaction = database_session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let security = recover_security_snapshot(&transaction).await?;
-            let mapped_principal = security
-                .local_peer_credentials()
-                .find(|credential| credential.uid() == uid)
-                .map(LocalPeerCredential::principal);
-            let authentication = security.authenticate_local_peer(uid);
-            let decision = match &authentication {
-                Ok(session) => SecurityAuditDecision::authentication_allowed(session),
-                Err(reason) => SecurityAuditDecision::authentication_denied(
-                    mapped_principal,
-                    *reason,
-                )
-                .map_err(|_| PostgresKernelError::DurableInvariant {
-                    relation: "_orna_kernel security snapshot",
-                    record: "local peer authentication".to_owned(),
-                    rule: "mapped principal evidence must agree with the authentication result",
-                })?,
-            };
-            append_security_audit_event(&transaction, decision).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(authentication)
-        }
-        .await;
-        finish_security_session(operation, database_session.shutdown().await)?
-            .map_err(PostgresKernelError::LocalPeerAuthentication)
-    }
-
-    /// Authorises and evaluates one CLIENT function against one active snapshot.
-    ///
-    /// The operation appends and commits the protected `EXECUTE` decision
-    /// before it returns a value, a typed denial, or a pure evaluator failure.
-    /// Database insertion, commit, or session shutdown failure replaces that
-    /// operation result with a kernel failure.
-    pub async fn evaluate_client_function(
-        &self,
-        authenticated_session: &AuthenticatedSession,
-        function: FunctionId,
-    ) -> Result<ClientExecutionResult, PostgresKernelError> {
-        let mut database_session = self.open().await?;
-        let operation = async {
-            let transaction = database_session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let active = recover_active_revision(&transaction).await?;
-            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
-            let target = InvocationTarget::new(function, active.pair());
-            let (decision, execution) =
-                match security.authorise_execute(authenticated_session, target) {
-                    ExecuteDecision::Allowed(authorisation) => {
-                        let decision = SecurityAuditDecision::execute_allowed(&authorisation);
-                        let execution = evaluate_authorised_client_function(
-                            &active,
-                            &authorisation,
-                            &[],
-                            &self.capability_grants,
-                        )
-                        .map_err(PostgresKernelError::ClientExecution);
-                        (decision, execution)
-                    }
-                    ExecuteDecision::Denied(reason) => {
-                        let decision = SecurityAuditDecision::execute_denied(
-                            authenticated_session,
-                            target,
-                            reason,
-                        );
-                        let execution = Err(PostgresKernelError::ClientExecuteDenied {
-                            pair: active.pair(),
-                            function,
-                            reason,
-                        });
-                        (decision, execution)
-                    }
-                };
-            append_security_audit_event(&transaction, decision).await?;
-            append_client_capability_audit(
-                &transaction,
-                authenticated_session,
-                &active,
-                target,
-                &execution,
-            )
-            .await?;
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(execution)
-        }
-        .await;
-        finish_security_session(operation, database_session.shutdown().await)?
-    }
-
-    /// Recovers the security decision snapshot for the active revision.
-    pub async fn recover_security_snapshot(&self) -> Result<SecuritySnapshot, PostgresKernelError> {
-        let mut session = self.open().await?;
-        let operation = async {
-            let transaction = session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            require_current_migrations(&transaction).await?;
-            let snapshot = recover_security_snapshot(&transaction).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(snapshot)
-        }
-        .await;
-        finish_security_session(operation, session.shutdown().await)
-    }
-
-    /// Recovers protected security audit history in database sequence order.
-    pub async fn recover_security_audit_events(
-        &self,
-    ) -> Result<Vec<SecurityAuditEvent>, PostgresKernelError> {
-        let mut session = self.open().await?;
-        let operation = async {
-            let transaction = session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            establish_trusted_search_path(&transaction).await?;
-            require_current_migrations(&transaction).await?;
-            let events = load_security_audit_events(&transaction).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            Ok(events)
-        }
-        .await;
-        finish_security_session(operation, session.shutdown().await)
-    }
-
-    /// Records a redacted cancelled resource terminal in its own transaction.
-    ///
-    /// The request is untrusted metadata: no target or nested invocation identity
-    /// is retained before RESOURCE_ACCEPTED.
-    pub async fn record_cancelled_resource_audit(
-        &self,
-        authenticated_session: &AuthenticatedSession,
-        request: &ResourceRequest,
-    ) -> Result<(), PostgresKernelError> {
-        validate_resource_lineage(request)?;
-        validate_resource_state_context(request)?;
-        if !self
-            .resource_parent_invocation_is_owned(authenticated_session, request)
-            .await?
-        {
-            return Err(resource_parent_invocation_unavailable(request));
-        }
-        let mut session = self.open().await?;
-        let operation = async {
-            let transaction = session
-                .client
-                .build_transaction()
-                .isolation_level(IsolationLevel::ReadCommitted)
-                .start()
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            establish_trusted_search_path(&transaction).await?;
-            require_current_migrations(&transaction).await?;
-            append_resource_audit_event(
-                &transaction,
-                authenticated_session,
-                request,
-                None,
-                SecurityAuditOutcome::Denied,
-                ResourceAuditTerminalOutcome::Cancelled,
-                None,
-                None,
-                None,
-            )
-            .await?;
-            transaction
-                .commit()
-                .await
-                .map_err(PostgresKernelError::Database)
-        }
-        .await;
-        finish_security_session(operation, session.shutdown().await)
     }
 }
 
