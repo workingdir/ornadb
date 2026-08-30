@@ -6,15 +6,17 @@ use orna_artifact::client_plan::{ClientExpressionNode, ExpressionClientPlan};
 use orna_artifact::server_terminal_table;
 use orna_compiler::{
     CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
-    StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
+    StandardLibraryCheckError, StandardSourceIdentitySeed, check_standard_library_source,
+    check_standard_source, prepare_checked_standard_upgrade, prepare_standard_source,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId, SourceBundleId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceBundleId,
     SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, calculate_standard_library_digest,
-        function_declaration_digest, function_semantic_digest_with_version, source_bundle_digest,
-        source_revision_record_digest, source_unit_content_digest, standard_library_digest,
+        catalogue_digest_with_context, function_declaration_digest,
+        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest, standard_library_digest,
         verify_standard_library_snapshot as verify_canonical_standard_library_snapshot,
         verify_standard_library_v2_snapshot as verify_canonical_standard_library_v2_snapshot,
     },
@@ -26,10 +28,11 @@ use orna_core::{
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+        ActiveDatabaseRevision, ActiveRevisionContent, ActiveDatabaseRevisionInput,
+        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
         ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
-        FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
-        StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair, Sha256Digest,
+        SourceOrigin, StandardExecutable, StandardLibraryDigestVersion, StandardLibrarySnapshot,
         StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
@@ -626,6 +629,20 @@ pub const STD_CLI_REPL_FUNCTION_ID: FunctionId = FunctionId::from_bytes(reserved
 pub const STD_CLI_REPL_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes(reserved_id(0x1C));
 pub const STD_CLI_REPL_REVISION_NUMBER: u64 = 1;
+/// The standard-library version represented by the V11 manifest.
+pub const STANDARD_LIBRARY_V11_VERSION_IDENTITY: &str = "orna.std/11";
+pub const STANDARD_LIBRARY_V11_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(11));
+pub const STANDARD_CATALOGUE_V11_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(11));
+pub const STANDARD_SOURCE_V11_BUNDLE_ID: SourceBundleId =
+    SourceBundleId::from_bytes(reserved_id(11));
+pub const STANDARD_SOURCE_V11_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(11));
+pub const STD_MATH_SOURCE_LOGICAL_PATH: &str = "std/math.orna";
+pub const STD_MATH_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(12));
+pub const STD_MATH_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(11));
+const RETAINED_STANDARD_MATH_SOURCE: &str = include_str!("../../../stdlib/std/math.orna");
 const RETAINED_STANDARD_CLI_SOURCE: &str = include_str!("../../../stdlib/std/cli.orna");
 const ACCEPTED_V10_CLI_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
     0x1e, 0x99, 0xf3, 0x2f, 0xf7, 0xc2, 0xf0, 0x65, 0x4d, 0x67, 0x61, 0xa6, 0xa9, 0xce, 0xd8, 0x26,
@@ -2292,8 +2309,53 @@ fn semantic_name<const N: usize>(
     })
 }
 
-/// An error returned when the compiled standard facts cannot form a valid manifest.
-#[non_exhaustive]
+fn standard_math_function_definitions()
+-> Result<Vec<FunctionDefinition>, StandardLibraryManifestError> {
+    let definitions = [
+        ("increment", 0x30_u8, 0x40_u8, &["p_value"][..]),
+        ("decrement", 0x31_u8, 0x41_u8, &["p_value"][..]),
+        ("is_zero", 0x32_u8, 0x42_u8, &["p_value"][..]),
+        ("min", 0x33_u8, 0x43_u8, &["p_left", "p_right"][..]),
+        ("max", 0x34_u8, 0x44_u8, &["p_left", "p_right"][..]),
+        ("clamp", 0x35_u8, 0x45_u8, &["p_value", "p_min", "p_max"][..]),
+    ];
+    definitions
+        .into_iter()
+        .map(|(name, function_byte, revision_byte, parameter_names)| {
+            let parameters = parameter_names
+                .iter()
+                .enumerate()
+                .map(|(ordinal, parameter_name)| {
+                    ParameterDefinition::new(
+                        ParameterId::from_bytes(reserved_id(
+                            0xB0 + (function_byte - 0x30) * 4 + ordinal as u8,
+                        )),
+                        *parameter_name,
+                        ordinal as u32,
+                        ResolvedType::value(INTEGER_TYPE_ID),
+                        None,
+                    )
+                })
+                .collect();
+            let return_type = if name == "is_zero" {
+                ResolvedType::value(BOOLEAN_TYPE_ID)
+            } else {
+                ResolvedType::value(INTEGER_TYPE_ID)
+            };
+            Ok(FunctionDefinition::new(
+                FunctionId::from_bytes(reserved_id(0xA0 + function_byte - 0x30)),
+                semantic_name(format!("std.math.{name}"), ["std", "math", name])?,
+                FunctionDomain::Client,
+                parameters,
+                FunctionReturn::Single(return_type),
+                FunctionRevisionId::from_bytes(reserved_id(0xC0 + revision_byte - 0x40)),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            ))
+        })
+        .collect()
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StandardLibraryManifestError {
     /// One accepted qualified name is not valid under the core name contract.
@@ -3457,12 +3519,70 @@ pub fn verify_standard_library_v9_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
+/// Source-independent facts required to recognise `orna.std/11`.
+#[derive(Clone, Debug)]
+pub struct StandardLibraryV11Manifest {
+    catalogue: CatalogueSnapshot,
+}
+
+impl StandardLibraryV11Manifest {
+    pub const fn standard_library_version(&self) -> &'static str {
+        STANDARD_LIBRARY_V11_VERSION_IDENTITY
+    }
+
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        STANDARD_LIBRARY_V11_REVISION_ID
+    }
+
+    pub const fn language_version(&self) -> &'static str {
+        LANGUAGE_VERSION_IDENTITY
+    }
+
+    pub const fn source_bundle(&self) -> SourceBundleId {
+        STANDARD_SOURCE_V11_BUNDLE_ID
+    }
+
+    pub const fn source_revision(&self) -> SourceRevisionId {
+        STANDARD_SOURCE_V11_REVISION_ID
+    }
+
+    pub const fn math_source_unit(&self) -> SourceUnitId {
+        STD_MATH_SOURCE_UNIT_ID
+    }
+
+    pub const fn catalogue(&self) -> &CatalogueSnapshot {
+        &self.catalogue
+    }
+}
+
+/// Builds the append-only V11 catalogue over V10.
+pub fn standard_library_v11_manifest()
+-> Result<StandardLibraryV11Manifest, StandardLibraryManifestError> {
+    let version_ten = standard_library_v10_manifest()?;
+    let mut schemas = version_ten.catalogue().schemas().to_vec();
+    schemas.push(SchemaDefinition::new(
+        STD_MATH_SCHEMA_ID,
+        semantic_name("std.math", ["std", "math"])?,
+    ));
+    let mut functions = version_ten.catalogue().functions().to_vec();
+    functions.extend(standard_math_function_definitions()?);
+    functions.sort_by_key(|function| function.id());
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V11_REVISION_ID,
+        schemas,
+        version_ten.catalogue().object_types().to_vec(),
+        version_ten.catalogue().value_types().to_vec(),
+        version_ten.catalogue().type_bindings().to_vec(),
+        functions,
+    )
+    .map_err(|source| StandardLibraryManifestError::Catalogue { source })?;
+    Ok(StandardLibraryV11Manifest { catalogue })
+}
 /// Source-independent facts required to recognise `orna.std/10`.
 #[derive(Clone, Debug)]
 pub struct StandardLibraryV10Manifest {
     catalogue: CatalogueSnapshot,
 }
-
 impl StandardLibraryV10Manifest {
     pub const fn standard_library_version(&self) -> &'static str {
         STANDARD_LIBRARY_V10_VERSION_IDENTITY
@@ -3531,6 +3651,199 @@ impl StandardLibraryV10Manifest {
     pub const fn catalogue(&self) -> &CatalogueSnapshot {
         &self.catalogue
     }
+}
+/// Retains the source-authored V11 math unit.
+pub fn retained_standard_library_v11_snapshot()
+-> Result<StandardLibrarySnapshot, StandardLibraryError> {
+    let parent = retained_standard_library_v10_snapshot()?;
+    let prepared = prepare_retained_v11_math()?;
+    let math_unit = prepared
+        .source()
+        .units()
+        .first()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?
+        .clone();
+    let mut units = parent.source().units().to_vec();
+    let math_unit = StoredSourceUnit::new(
+        math_unit.id(),
+        units.len() as u32,
+        math_unit.logical_path(),
+        math_unit.content(),
+        math_unit.content_hash(),
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    units.push(math_unit);
+    let bundle_hash = source_bundle_digest(&units)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let revision_hash = source_revision_record_digest(
+        STANDARD_SOURCE_V11_BUNDLE_ID,
+        Some(STANDARD_SOURCE_V10_REVISION_ID),
+        bundle_hash,
+    )
+    .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let parent_manifest = standard_library_v10_manifest()
+        .map_err(|source| StandardLibraryError::Manifest { source })?;
+    let mut catalogue_functions = parent_manifest.catalogue().functions().to_vec();
+    catalogue_functions.extend(prepared.candidate().functions().iter().cloned());
+    let mut catalogue_schemas = parent_manifest.catalogue().schemas().to_vec();
+    catalogue_schemas.extend(prepared.candidate().schemas().iter().cloned());
+    let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+        STANDARD_CATALOGUE_V11_REVISION_ID,
+        catalogue_schemas,
+        parent_manifest.catalogue().object_types().to_vec(),
+        parent_manifest.catalogue().value_types().to_vec(),
+        parent_manifest.catalogue().type_bindings().to_vec(),
+        catalogue_functions,
+    )
+    .map_err(|source| StandardLibraryError::Manifest {
+        source: StandardLibraryManifestError::Catalogue { source },
+    })?;
+    let mut origins = parent.origins().to_vec();
+    origins.extend(prepared.origins().iter().cloned());
+    let mut executables = parent.executables().to_vec();
+    let math_executables = prepared
+        .new_function_revisions()
+        .iter()
+        .map(|revision| {
+            StandardExecutable::new(
+                revision.function(),
+                revision.clone(),
+                prepared
+                    .references()
+                    .iter()
+                    .filter(|reference| reference.source_function() == revision.function())
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|source| StandardLibraryError::Revision { source })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    executables.extend(math_executables);
+    let source = StoredSourceRevision::new(
+        STANDARD_SOURCE_V11_BUNDLE_ID,
+        STANDARD_SOURCE_V11_REVISION_ID,
+        Some(STANDARD_SOURCE_V10_REVISION_ID),
+        units,
+        bundle_hash,
+        revision_hash,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let provisional = StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V11_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        source,
+        LANGUAGE_VERSION_IDENTITY,
+        catalogue,
+        executables,
+        origins,
+        Sha256Digest::from_bytes([0; 32]),
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let digest = calculate_standard_library_digest(&provisional)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    StandardLibrarySnapshot::new_with_executables(
+        STANDARD_LIBRARY_V11_REVISION_ID,
+        StandardLibraryDigestVersion::Version2,
+        provisional.source().clone(),
+        LANGUAGE_VERSION_IDENTITY,
+        provisional.catalogue().clone(),
+        provisional.executables().to_vec(),
+        provisional.origins().to_vec(),
+        digest,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })
+}
+
+fn prepare_retained_v11_math() -> Result<DeployableRevision, StandardLibraryError> {
+    let parent = retained_standard_library_v10_snapshot()?;
+    let verified = verify_standard_library_v10_snapshot(parent.clone())?;
+    let checked = check_standard_library_source(&verified)
+        .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+    let bundle = orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+        STD_MATH_SOURCE_LOGICAL_PATH,
+        RETAINED_STANDARD_MATH_SOURCE,
+    )])
+    .map_err(|_| StandardLibraryError::RetainedSourceMismatch)?;
+    let base = CatalogueSnapshot::new_with_functions_and_types(
+        CatalogueRevisionId::from_bytes([0x21; 16]),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(|source| StandardLibraryError::Manifest {
+        source: StandardLibraryManifestError::Catalogue { source },
+    })?;
+    let context = CatalogueHashContext::version_two(verified.clone());
+    let catalogue_hash = catalogue_digest_with_context(&context, &base, &[], &[], &[], &[])
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })?;
+    let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(verified.source().id(), base.revision()),
+            parent.source().clone(),
+            base.clone(),
+            catalogue_hash,
+            ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        ),
+        context,
+    )
+    .map_err(|source| StandardLibraryError::Revision { source })?;
+    let report = check_standard_source(&bundle, active.catalogue(), &checked);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    let parsed = orna_syntax::parse(RETAINED_STANDARD_MATH_SOURCE);
+    let functions = parsed.client_functions();
+    let seed = StandardSourceIdentitySeed {
+        catalogue_revision: STANDARD_CATALOGUE_V11_REVISION_ID,
+        source_bundle: STANDARD_SOURCE_V11_BUNDLE_ID,
+        source_revision: STANDARD_SOURCE_V11_REVISION_ID,
+        source_units: vec![STD_MATH_SOURCE_UNIT_ID],
+        schema: STD_MATH_SCHEMA_ID,
+        functions: (0..functions.len())
+            .map(|index| FunctionId::from_bytes(reserved_id(0xA0 + index as u8)))
+            .collect(),
+        parameters: functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| {
+                (0..function.parameters.len())
+                    .map(|parameter| {
+                        ParameterId::from_bytes(reserved_id(
+                            0xB0 + (index * 4 + parameter) as u8,
+                        ))
+                    })
+                    .collect()
+            })
+            .collect(),
+        revisions: (0..functions.len())
+            .map(|index| FunctionRevisionId::from_bytes(reserved_id(0xC0 + index as u8)))
+            .collect(),
+    };
+    prepare_standard_source(&report, active.pair(), &active, &seed)
+        .map_err(|_| StandardLibraryError::RetainedSourceMismatch)
+}
+
+/// Verifies the retained V11 snapshot and its canonical source structure.
+pub fn verify_standard_library_v11_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError> {
+    if snapshot.revision() != STANDARD_LIBRARY_V11_REVISION_ID
+        || snapshot.catalogue().revision() != STANDARD_CATALOGUE_V11_REVISION_ID
+        || snapshot.source().id() != STANDARD_SOURCE_V11_REVISION_ID
+        || snapshot.source().bundle() != STANDARD_SOURCE_V11_BUNDLE_ID
+        || snapshot.source().parent() != Some(STANDARD_SOURCE_V10_REVISION_ID)
+        || snapshot.source().units().len() != 11
+        || snapshot.executables().len() != 18
+        || snapshot.source().units()[10].id() != STD_MATH_SOURCE_UNIT_ID
+        || snapshot.source().units()[10].logical_path() != STD_MATH_SOURCE_LOGICAL_PATH
+        || snapshot.source().units()[10].content() != RETAINED_STANDARD_MATH_SOURCE
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    verify_canonical_standard_library_v2_snapshot(snapshot)
+        .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
 /// Builds the append-only V10 catalogue over V9.

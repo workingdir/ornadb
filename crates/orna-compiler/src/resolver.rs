@@ -27,21 +27,16 @@ pub use identity::{
 
 pub use standard_library::{
     check_standard_cli_repl, check_standard_json_encode, check_standard_library_source,
-    check_standard_parameter_echo, check_standard_terminal_present_table,
+    check_standard_parameter_echo, check_standard_source_v11, check_standard_terminal_present_table,
     check_standard_ui_constructor, check_standard_ui_window,
 };
-
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
     CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
     CheckedDefault, CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
     CheckedObjectReferenceUse, CheckedObjectType, CheckedSchema, CheckedServerFunction,
     CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
-    CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
-    CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
-    CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
-    CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardJsonEncode,
+    CheckedStandardApplicationBundle, CheckedStandardExecutable, CheckedStandardJsonEncode,
     CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
     CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
     CheckedStandardUiConstructor, CheckedStandardUiWindow, CheckedStandardValueType,
@@ -49,8 +44,9 @@ pub use model::{
     STANDARD_LIBRARY_V4_REVISION_ID, STANDARD_LIBRARY_V5_REVISION_ID,
     STANDARD_LIBRARY_V6_REVISION_ID, STANDARD_LIBRARY_V7_REVISION_ID,
     STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID,
-    STANDARD_LIBRARY_V10_REVISION_ID, STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID,
-    STD_ACTION_TYPE_ID, STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
+    STANDARD_LIBRARY_V10_REVISION_ID, STANDARD_LIBRARY_V11_REVISION_ID,
+    STD_ACTION_SCHEMA_ID, STD_ACTION_SOURCE_UNIT_ID, STD_ACTION_TYPE_ID,
+    STD_BOOLEAN_TYPE_ID, STD_CHARACTER_LARGE_OBJECT_TYPE_ID,
     STD_CLI_REPL_FUNCTION_ID, STD_CLI_REPL_FUNCTION_REVISION_ID, STD_CLI_REPL_REVISION_NUMBER,
     STD_CLI_SCHEMA_ID, STD_CLI_SOURCE_UNIT_ID, STD_CSV_ENCODE_FUNCTION_ID,
     STD_DATA_ROWS_TYPE_BINDING_ID, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID,
@@ -378,6 +374,7 @@ pub fn check_standard_application(
         parse_bundle(bundle),
         context.application,
         Some(context.standard),
+        true,
     );
     sort_standard_type_uses(&mut result.uses, &result.parse_report);
     let ApplicationCheckResult {
@@ -417,6 +414,19 @@ pub fn check_standard_application(
         diagnostics,
         checked_bundle,
     }
+}
+
+/// Checks source authored inside the standard namespace.
+pub fn check_standard_source(
+    bundle: &SourceBundle,
+    base: &CatalogueSnapshot,
+    standard: &CheckedStandardLibrary,
+) -> StandardApplicationCheckReport {
+    let context = StandardApplicationCheckContext {
+        application: base,
+        standard,
+    };
+    check_standard_application(bundle, &context)
 }
 
 fn decode_string_literal(slice: &SourceSlice) -> Option<String> {
@@ -595,7 +605,7 @@ struct ResolvedServerFunctionInput<'a> {
 }
 
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
-    let result = check_application_parsed(parse_report, base, None);
+    let result = check_application_parsed(parse_report, base, None, false);
     CheckReport {
         parse_report: result.parse_report,
         diagnostics: result.diagnostics,
@@ -614,13 +624,17 @@ fn check_application_parsed(
     parse_report: ParseReport,
     base: &CatalogueSnapshot,
     standard: Option<&CheckedStandardLibrary>,
+    allow_standard_namespace: bool,
 ) -> ApplicationCheckResult {
     let mut diagnostics = parse_report.diagnostics().to_vec();
     if !diagnostics.is_empty() {
         return application_failed(parse_report, diagnostics);
     }
 
-    diagnostics.extend(check_protected_source(&parse_report));
+    diagnostics.extend(check_protected_source(
+        &parse_report,
+        allow_standard_namespace,
+    ));
     if !diagnostics.is_empty() {
         return application_failed(parse_report, diagnostics);
     }
@@ -1145,7 +1159,7 @@ fn check_application_parsed(
     }
 }
 
-fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic> {
+fn check_protected_source(parse_report: &ParseReport, allow_standard_namespace: bool) -> Vec<CompilerDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut protected_declarations = HashSet::new();
 
@@ -1189,7 +1203,18 @@ fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic>
         }
         owners.sort_by_key(|(_, _, declaration_span)| declaration_span.start);
         for (name, span, declaration_span) in owners {
-            if name
+            if allow_standard_namespace
+                && name
+                    .parts
+                    .first()
+                    .is_some_and(|part| semantic_part(part) == "std")
+            {
+                protected_declarations.insert((
+                    unit_index,
+                    declaration_span.start,
+                    declaration_span.end,
+                ));
+            } else if name
                 .parts
                 .first()
                 .is_some_and(|part| semantic_part(part) == "std")

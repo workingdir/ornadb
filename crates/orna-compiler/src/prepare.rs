@@ -111,8 +111,7 @@ use crate::{
     CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId, CheckedTypeId,
     CompilerDiagnostic, ConstantValue, ParseReport, STD_BOOLEAN_TYPE_ID,
     STD_CHARACTER_LARGE_OBJECT_TYPE_ID, STD_INTEGER_TYPE_ID, SemanticType, SourceLocation,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
-    StandardApplicationContextError, check_standard_application,
+    StandardApplicationCheckReport, StandardApplicationContextError,
 };
 use crate::{
     mutation::{
@@ -129,6 +128,26 @@ use crate::{
         durable_state_slot_id, supports_unique_text_or_required_reference,
     },
 };
+/// Durable identities allocated by the standard source boundary.
+pub struct StandardSourceIdentitySeed {
+    /// Durable catalogue revision identity for the source-authored candidate.
+    pub catalogue_revision: CatalogueRevisionId,
+    /// Durable source bundle identity for the source-authored candidate.
+    pub source_bundle: SourceBundleId,
+    /// Durable source revision identity for the source-authored candidate.
+    pub source_revision: SourceRevisionId,
+    /// Durable source-unit identities in parsed source order.
+    pub source_units: Vec<SourceUnitId>,
+    /// Durable schema identity for the source-authored standard namespace.
+    pub schema: SchemaId,
+    /// Durable function identities in checked source order.
+    pub functions: Vec<FunctionId>,
+    /// Durable parameter identities grouped in checked function order.
+    pub parameters: Vec<Vec<ParameterId>>,
+    /// Durable function-revision identities in checked function order.
+    pub revisions: Vec<FunctionRevisionId>,
+}
+
 mod standard_upgrade;
 
 #[cfg(test)]
@@ -423,14 +442,36 @@ pub fn prepare_standard_application(
     active: &ActiveDatabaseRevision,
 ) -> Result<DeployableRevision, PrepareStandardApplicationError> {
     let allocations = CandidateAllocator::standard(report.standard_library().verified_snapshot());
-    prepare_standard_application_with_allocator(report, expected_base, active, allocations)
+    prepare_standard_application_with_seed(report, expected_base, active, allocations, None)
 }
 
+pub fn prepare_standard_source(
+    report: &StandardApplicationCheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+    seed: &StandardSourceIdentitySeed,
+) -> Result<DeployableRevision, PrepareStandardApplicationError> {
+    let allocations =
+        CandidateAllocator::standard_source(report.standard_library().verified_snapshot(), seed);
+    prepare_standard_application_with_seed(report, expected_base, active, allocations, Some(seed))
+}
+#[allow(dead_code)]
 pub(crate) fn prepare_standard_application_with_allocator(
     report: &StandardApplicationCheckReport,
     expected_base: RevisionPair,
     active: &ActiveDatabaseRevision,
+    allocations: CandidateAllocator,
+) -> Result<DeployableRevision, PrepareStandardApplicationError> {
+    prepare_standard_application_with_seed(report, expected_base, active, allocations, None)
+}
+
+
+fn prepare_standard_application_with_seed(
+    report: &StandardApplicationCheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
     mut allocations: CandidateAllocator,
+    source_seed: Option<&StandardSourceIdentitySeed>,
 ) -> Result<DeployableRevision, PrepareStandardApplicationError> {
     let Some(view) = report.preparation_view() else {
         return Err(PrepareStandardApplicationError::CheckNotComplete {
@@ -498,6 +539,7 @@ pub(crate) fn prepare_standard_application_with_allocator(
         active,
         &mut allocations,
         &standard_preflight.function_identities,
+        source_seed,
     )
     .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let catalogue_revision = allocations.catalogue_revision();
@@ -506,18 +548,44 @@ pub(crate) fn prepare_standard_application_with_allocator(
     let source =
         PreparedSource::from_ids(report.parse_report(), expected_base.source(), source_ids)
             .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
+    let mode = if let Some(seed) = source_seed {
+        let revisions = standard_preflight
+            .function_identities
+            .order()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, owner)| {
+                view.checked()
+                    .client_functions()
+                    .iter()
+                    .find(|function| function.id() == *owner)
+                    .and_then(|function| {
+                        Some((identities.functions[&function.id()], *seed.revisions.get(index)?))
+                    })
+            })
+            .collect();
+        PreparationMode::StandardSource {
+            standard: report.standard_library(),
+            declaration_evidence,
+            signature_evidence,
+            standard_preflight: Box::new(standard_preflight),
+            revisions,
+        }
+    } else {
+        PreparationMode::StandardV2 {
+            standard: report.standard_library(),
+            declaration_evidence,
+            signature_evidence,
+            standard_preflight: Box::new(standard_preflight),
+        }
+    };
     CandidateBuilder::new(
         report.parse_report(),
         view.checked(),
         active,
         identities,
         source,
-        PreparationMode::StandardV2 {
-            standard: report.standard_library(),
-            declaration_evidence,
-            signature_evidence,
-            standard_preflight: Box::new(standard_preflight),
-        },
+        mode,
         catalogue_revision,
     )
     .build()
@@ -655,6 +723,13 @@ enum PreparationMode<'a> {
         declaration_evidence: DeclarationEvidence,
         signature_evidence: SignatureEvidence,
         standard_preflight: Box<StandardPreflight>,
+    },
+    StandardSource {
+        standard: &'a crate::CheckedStandardLibrary,
+        declaration_evidence: DeclarationEvidence,
+        signature_evidence: SignatureEvidence,
+        standard_preflight: Box<StandardPreflight>,
+        revisions: HashMap<FunctionId, FunctionRevisionId>,
     },
 }
 
@@ -842,17 +917,18 @@ impl PreparationMode<'_> {
             Self::LegacyV1 => CandidateLoweringMode::LegacyV1,
             Self::StandardV1Match { .. } => CandidateLoweringMode::StandardV1Match,
             Self::StandardV2Plan { .. } => CandidateLoweringMode::StandardV2Plan,
-            Self::StandardV2 { .. } => CandidateLoweringMode::StandardV2,
+            Self::StandardV2 { .. } | Self::StandardSource { .. } => {
+                CandidateLoweringMode::StandardV2
+            }
         }
     }
-
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
             Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
                 CatalogueHashContext::version_one()
             }
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
-            Self::StandardV2 { standard, .. } => {
+            Self::StandardV2 { standard, .. } | Self::StandardSource { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
             }
         }
@@ -860,12 +936,11 @@ impl PreparationMode<'_> {
     fn durable_standard_catalogue(&self) -> Option<&CatalogueSnapshot> {
         match self {
             Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
-            Self::StandardV2Plan { standard, .. } | Self::StandardV2 { standard, .. } => {
-                Some(standard.verified_snapshot().catalogue())
-            }
+            Self::StandardV2Plan { standard, .. }
+            | Self::StandardV2 { standard, .. }
+            | Self::StandardSource { standard, .. } => Some(standard.verified_snapshot().catalogue()),
         }
     }
-
     fn standard_preflight(&self) -> Option<&StandardPreflight> {
         match self {
             Self::Generic | Self::LegacyV1 => None,
@@ -876,6 +951,9 @@ impl PreparationMode<'_> {
                 standard_preflight, ..
             }
             | Self::StandardV2 {
+                standard_preflight, ..
+            }
+            | Self::StandardSource {
                 standard_preflight, ..
             } => Some(standard_preflight),
         }
@@ -888,8 +966,17 @@ impl PreparationMode<'_> {
             }
             | Self::StandardV2Plan {
                 signature_evidence, ..
+            }
+            | Self::StandardSource {
+                signature_evidence, ..
             } => Some(signature_evidence),
             Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+        }
+    }
+    fn source_revision(&self, function: FunctionId) -> Option<FunctionRevisionId> {
+        match self {
+            Self::StandardSource { revisions, .. } => revisions.get(&function).copied(),
+            _ => None,
         }
     }
 
@@ -901,14 +988,14 @@ impl PreparationMode<'_> {
             Self::Generic | Self::LegacyV1 | Self::StandardV1Match { .. } => {
                 FunctionSemanticHashVersion::Version1
             }
-            Self::StandardV2Plan { .. } | Self::StandardV2 { .. }
+            Self::StandardV2Plan { .. } | Self::StandardV2 { .. } | Self::StandardSource { .. }
                 if references.iter().any(|reference| {
                     matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
                 }) =>
             {
                 FunctionSemanticHashVersion::Version2
             }
-            Self::StandardV2Plan { .. } | Self::StandardV2 { .. } => {
+            Self::StandardV2Plan { .. } | Self::StandardV2 { .. } | Self::StandardSource { .. } => {
                 FunctionSemanticHashVersion::Version1
             }
         }

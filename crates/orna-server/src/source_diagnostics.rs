@@ -223,7 +223,6 @@ fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<(
 mod tests {
     use super::*;
     use orna_core::source::{SourceBundle, SourceUnit};
-    use orna_compiler::CompilerDiagnostic;
 
     fn broken_report() -> orna_compiler::StandardApplicationCheckReport {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])

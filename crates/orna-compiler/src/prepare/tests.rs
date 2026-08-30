@@ -34,12 +34,12 @@ use orna_core::{
 
 use super::*;
 use crate::{
-    StandardApplicationCheckContext, check, check_standard_application,
-    check_standard_library_source,
+    check, check_standard_application, check_standard_library_source,
     mutation::{
         MutationAssignment, MutationExpression, MutationExpressionKind,
         MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
     },
+    prepare_standard_source, StandardApplicationCheckContext, StandardSourceIdentitySeed,
 };
 mod client;
 mod mutation;
@@ -130,12 +130,10 @@ fn legacy_preparation_reaches_the_explicit_enum_hash_version_gate() {
     let enum_type = &material.catalogue.enum_types()[0];
     assert_eq!(enum_type.name(), &semantic_name(&["crm", "stage"]));
     assert_eq!(enum_type.labels(), &["lead", "customer"]);
-    assert!(
-        material
-            .origins
-            .iter()
-            .any(|origin| { origin.identity() == DefinitionIdentity::ValueType(enum_type.id()) })
-    );
+    assert!(material
+        .origins
+        .iter()
+        .any(|origin| { origin.identity() == DefinitionIdentity::ValueType(enum_type.id()) }));
 
     assert!(matches!(
         prepare(&report, active.pair(), &active),
@@ -301,7 +299,8 @@ fn mapped_candidate_type_selection_is_closed_and_retains_standard_identity() {
         assert!(matches!(
             error,
             PrepareError::InvalidCheckedBundle {
-                reason: "checked standard declaration type evidence disagrees with its semantic type",
+                reason:
+                    "checked standard declaration type evidence disagrees with its semantic type",
             }
         ));
     }
@@ -803,6 +802,133 @@ fn empty_standard_application_active(
 }
 
 #[test]
+fn prepares_source_authored_math_with_seeded_identities() {
+    let verified = crate::tests::verified_canonical_standard_source_fixture();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let source = include_str!("../../../../stdlib/std/math.orna");
+    let bundle = SourceBundle::new([SourceUnit::new("std/math.orna", source)]).unwrap();
+    let report = check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let seed = StandardSourceIdentitySeed {
+        catalogue_revision: CatalogueRevisionId::from_bytes([0x11; 16]),
+        source_bundle: SourceBundleId::from_bytes([0x12; 16]),
+        source_revision: SourceRevisionId::from_bytes([0x13; 16]),
+        source_units: vec![SourceUnitId::from_bytes([0x14; 16])],
+        schema: SchemaId::from_bytes([0x10; 16]),
+        functions: (0x15..=0x1a)
+            .map(|value| FunctionId::from_bytes([value; 16]))
+            .collect(),
+        parameters: vec![
+            vec![ParameterId::from_bytes([0x21; 16])],
+            vec![ParameterId::from_bytes([0x22; 16])],
+            vec![ParameterId::from_bytes([0x23; 16])],
+            vec![
+                ParameterId::from_bytes([0x24; 16]),
+                ParameterId::from_bytes([0x25; 16]),
+            ],
+            vec![
+                ParameterId::from_bytes([0x26; 16]),
+                ParameterId::from_bytes([0x27; 16]),
+            ],
+            vec![
+                ParameterId::from_bytes([0x28; 16]),
+                ParameterId::from_bytes([0x29; 16]),
+                ParameterId::from_bytes([0x2a; 16]),
+            ],
+        ],
+        revisions: (0x31..=0x36)
+            .map(|value| FunctionRevisionId::from_bytes([value; 16]))
+            .collect(),
+    };
+    let prepared = prepare_standard_source(&report, active.pair(), &active, &seed).unwrap();
+    assert_eq!(
+        prepared
+            .candidate()
+            .schema_by_name(&semantic_name(&["std", "math"]))
+            .unwrap()
+            .id(),
+        seed.schema
+    );
+    for (index, name) in ["increment", "decrement", "is_zero", "min", "max", "clamp"]
+        .iter()
+        .enumerate()
+    {
+        let function = prepared
+            .candidate()
+            .function_by_name(&semantic_name(&["std", "math", name]))
+            .unwrap();
+        assert_eq!(function.id(), seed.functions[index]);
+        assert_eq!(
+            function
+                .parameters()
+                .iter()
+                .map(ParameterDefinition::id)
+                .collect::<Vec<_>>(),
+            seed.parameters[index]
+        );
+        assert_eq!(
+            prepared
+                .new_function_revisions()
+                .iter()
+                .find(|revision| revision.function() == function.id())
+                .unwrap()
+                .id(),
+            seed.revisions[index]
+        );
+    }
+    assert_eq!(
+        prepared.new_function_revisions().len(),
+        seed.revisions.len()
+    );
+    assert!(prepared
+        .new_function_revisions()
+        .iter()
+        .all(|revision| !revision.artifact().payload().is_empty()));
+}
+
+#[test]
+fn standard_source_revision_seed_must_match_checked_functions() {
+    let verified = crate::tests::verified_canonical_standard_source_fixture();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "std/math.orna",
+        include_str!("../../../../stdlib/std/math.orna"),
+    )])
+    .unwrap();
+    let report = check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    let seed = StandardSourceIdentitySeed {
+        catalogue_revision: CatalogueRevisionId::from_bytes([0x11; 16]),
+        source_bundle: SourceBundleId::from_bytes([0x12; 16]),
+        source_revision: SourceRevisionId::from_bytes([0x13; 16]),
+        source_units: vec![SourceUnitId::from_bytes([0x14; 16])],
+        schema: SchemaId::from_bytes([0x10; 16]),
+        functions: Vec::new(),
+        parameters: Vec::new(),
+        revisions: Vec::new(),
+    };
+    let error = prepare_standard_source(&report, active.pair(), &active, &seed).unwrap_err();
+    assert!(matches!(
+        error,
+        PrepareStandardApplicationError::Prepare {
+            source: PrepareError::InvalidCheckedBundle { .. },
+        }
+    ));
+}
+
+#[test]
 fn application_and_standard_preparation_retry_all_invocation_carriers_before_candidates() {
     assert_eq!(
         INVOCATION_CARRIERS
@@ -1276,10 +1402,11 @@ fn active_field_rename_states_are_exact_and_fail_closed() {
     assert!(
         validate_active_field_rename(&object(vec![field(field_id, "email", 0)]), &rename).is_ok()
     );
-    assert!(
-        validate_active_field_rename(&object(vec![field(field_id, "primary_email", 0)]), &rename)
-            .is_ok()
-    );
+    assert!(validate_active_field_rename(
+        &object(vec![field(field_id, "primary_email", 0)]),
+        &rename
+    )
+    .is_ok());
     assert!(matches!(
         validate_active_field_rename(
             &object(vec![
