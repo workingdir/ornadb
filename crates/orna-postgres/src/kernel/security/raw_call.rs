@@ -609,4 +609,44 @@ impl PostgresKernel {
         .await;
         finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
     }
+    /// Revalidates raw record arguments against one transactional active revision.
+    ///
+    /// An empty list performs no PostgreSQL operation. A non-empty list opens
+    /// one read-only, repeatable-read transaction and returns only whether all
+    /// record values remain canonical for its recovered active revision. This
+    /// operation does not select, authorise, audit, or execute a target.
+    pub async fn preflight_record_arguments(
+        &self,
+        records: Vec<RecordValue>,
+    ) -> Result<RecordArgumentPreflight, PostgresKernelError> {
+        if records.is_empty() {
+            return Ok(RecordArgumentPreflight::NotRequired);
+        }
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = recover_active_revision(&transaction).await?;
+            let mut outcome = RecordArgumentPreflight::Current;
+            for record in records {
+                if encode_active_value(&active, &RuntimeValue::Record(record)).is_err() {
+                    outcome = RecordArgumentPreflight::Stale;
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(outcome)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
 }
