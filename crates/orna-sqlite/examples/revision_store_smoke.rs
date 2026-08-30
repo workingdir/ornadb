@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_sqlite::{SqliteConfig, SqliteRevisionStore};
-use orna_storage::RevisionStore;
+use orna_storage::ApplicationRevisionStore;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

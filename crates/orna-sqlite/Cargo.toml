@@ -8,7 +8,11 @@ publish = false
 
 [dependencies]
 orna-core = { path = "../orna-core" }
+orna-artifact = { path = "../orna-artifact" }
 orna-storage = { path = "../orna-storage" }
+orna-standard = { path = "../orna-standard" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 turso = { version = "0.8.0-pre.7", default-features = false }
 tokio = { version = "1.53.1", features = ["rt", "sync"] }
 
