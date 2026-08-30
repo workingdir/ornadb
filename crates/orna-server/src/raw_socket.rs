@@ -1134,7 +1134,9 @@ fn should_cancel_on_disconnect(completion: &DispatchCompletion) -> bool {
             .cancellation_token
             .as_ref()
             .is_some_and(ResourceCancellation::is_requested)
-        && (completion.sealed_invocation.is_none() || !completion.start_delivered)
+        && (completion.sealed_invocation.is_none()
+            || !completion.start_delivered
+            || completion.sealed_producer.is_none())
 }
 
 fn queue_cancellation_actions(completion: &mut DispatchCompletion, stream: u64) {
@@ -2439,6 +2441,21 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
 
     reader_task.abort();
     let _ = reader_task.await;
+    // Cancel pending work before closing the bridge. This wakes a synchronous
+    // std.cli.input() call while its cancellation token is still associated
+    // with the root invocation.
+    let unstarted_streams: BTreeSet<_> = unstarted.iter().map(|dispatch| dispatch.stream).collect();
+    for dispatch in &unstarted {
+        dispatcher.cancelled(dispatch.stream);
+    }
+    for (stream_id, completion) in &pending {
+        if !unstarted_streams.contains(stream_id) && should_cancel_on_disconnect(completion) {
+            dispatcher.cancelled(*stream_id);
+        }
+    }
+    for stream_id in preflight_pending.iter().copied() {
+        dispatcher.cancelled(stream_id);
+    }
     if let Some(bridge) = dispatcher.session_bridge() {
         bridge.close();
     }
@@ -2447,9 +2464,6 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     // not remain open while its completion boundary is drained below.
     let _ = writer.shutdown().await;
     drop(writer);
-    // Disconnect is an implicit cancellation boundary only before a sealed
-    // invocation start Event is delivered. Started sealed workers stay owned
-    // by this connection until their durable terminal result is produced.
     let unstarted_streams: BTreeSet<_> = unstarted.iter().map(|dispatch| dispatch.stream).collect();
     for dispatch in &unstarted {
         dispatcher.cancelled(dispatch.stream);
