@@ -36,6 +36,7 @@ use inspection::{
 
 const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "active_revision",
+    "application_migrations",
     "catalogue_enum_types",
     "catalogue_expressions",
     "catalogue_fields",
@@ -402,6 +403,7 @@ struct CatalogueSurfaceSnapshot {
 
 fn is_later_catalogue_relation(relation: &str) -> bool {
     relation.starts_with("security_")
+        || relation.starts_with("application_migrations")
         || relation.starts_with("catalogue_enum_types")
         || relation.starts_with("catalogue_record_value")
         || relation.starts_with("standard_catalogue_enum_types")
