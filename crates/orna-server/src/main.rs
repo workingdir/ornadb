@@ -768,6 +768,14 @@ mod tests {
     }
 
     #[test]
+    fn accepts_runtime_describe_help() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "runtime", "describe", "--help"])),
+            Some(Command::Help(HelpTopic::Runtime))
+        );
+    }
+
+    #[test]
     fn rejects_malformed_and_extra_runtime_describe_shapes() {
         for values in [
             vec!["orna", "runtime"],
@@ -786,6 +794,7 @@ mod tests {
                 "extra",
             ],
             vec!["orna", "runtime", "describe", "/first", "/second"],
+            vec!["orna", "runtime", "describe", "--help", "extra"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
@@ -2240,6 +2249,10 @@ mod tests {
             (vec!["orna", "state", "--help"], HelpTopic::State),
             (vec!["orna", "inspect", "--help"], HelpTopic::Inspect),
             (vec!["orna", "runtime", "--help"], HelpTopic::Runtime),
+            (
+                vec!["orna", "runtime", "describe", "--help"],
+                HelpTopic::Runtime,
+            ),
             (vec!["orna", "security", "--help"], HelpTopic::Security),
             (vec!["orna", "raw-call", "--help"], HelpTopic::RawCall),
         ] {
@@ -2268,6 +2281,7 @@ mod tests {
             vec!["orna", "inspect", "--help", "extra"],
             vec!["orna", "runtime", "--help", "extra"],
             vec!["orna", "security", "--help", "extra"],
+            vec!["orna", "runtime", "describe", "--help", "extra"],
             vec!["orna", "raw-call", "--help", "extra"],
             vec!["orna", "--runtime", "tty", "--help"],
             vec!["orna", "--runtime", "tty", "help"],
