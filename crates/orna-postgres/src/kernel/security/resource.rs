@@ -688,10 +688,8 @@ impl PostgresKernel {
             Ok(Some(result))
         }
         .await;
-        let result = finish_authenticated_server_select_session(
-            operation,
-            database_session.shutdown().await,
-        );
+        let result =
+            finish_authenticated_dispatch_session(operation, database_session.shutdown().await);
         match result {
             Ok(Some(result)) => Ok(Some(result)),
             Ok(None) => match self
