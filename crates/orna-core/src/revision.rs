@@ -11,6 +11,7 @@
 //! `recover` validates durable rows, hashes, links, and physical naming. Those
 //! checks need base or storage context and do not belong in this module.
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
@@ -89,7 +90,7 @@ impl TryFrom<u32> for CatalogueHashVersion {
 
 /// A durable function semantic-hash contract version.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum FunctionSemanticHashVersion {
     /// The original semantic hash.
     Version1,
@@ -197,7 +198,7 @@ impl fmt::Display for HashVersionError {
 impl Error for HashVersionError {}
 
 /// A SHA-256 digest retained as exactly thirty-two bytes.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
@@ -213,7 +214,7 @@ impl Sha256Digest {
 }
 
 /// The source and catalogue revisions that become active together.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct RevisionPair {
     source: SourceRevisionId,
     catalogue: CatalogueRevisionId,
@@ -237,7 +238,7 @@ impl RevisionPair {
 }
 
 /// A half-open byte range in one stored source unit.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SourceOrigin {
     source_unit: SourceUnitId,
     byte_start: u32,
@@ -283,7 +284,7 @@ impl SourceOrigin {
 }
 
 /// One exact source file retained in a durable source revision.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredSourceUnit {
     id: SourceUnitId,
     ordinal: u32,
@@ -346,7 +347,7 @@ impl StoredSourceUnit {
 }
 
 /// One immutable, ordered durable source snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredSourceRevision {
     bundle: SourceBundleId,
     id: SourceRevisionId,
@@ -676,7 +677,7 @@ impl CatalogueHashContext {
 
 /// The identity of a catalogue member that owns a source origin.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum DefinitionIdentity {
     /// A declared logical schema.
     Schema(SchemaId),
@@ -717,7 +718,7 @@ pub enum DefinitionIdentity {
 ///
 /// Result columns are catalogue subobjects identified by function and ordinal,
 /// so they can own source origins but are not reference targets in this model.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum DefinitionReferenceTarget {
     /// A durable object type.
@@ -760,7 +761,7 @@ impl From<DefinitionReferenceTarget> for DefinitionIdentity {
 }
 
 /// The source declaration range for one stable definition.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DefinitionOrigin {
     identity: DefinitionIdentity,
     source: SourceOrigin,
@@ -784,7 +785,7 @@ impl DefinitionOrigin {
 }
 
 /// The shared versioned bytes of a durable artifact.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct VersionedArtifactBytes {
     format: String,
     version: u32,
@@ -811,7 +812,7 @@ impl VersionedArtifactBytes {
 }
 
 /// One versioned compiled expression artifact.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExpressionArtifact {
     id: ExpressionId,
     bytes: VersionedArtifactBytes,
@@ -859,7 +860,7 @@ impl ExpressionArtifact {
 }
 
 /// The execution domain encoded by a versioned executable artifact.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum ExecutableArtifactKind {
     /// An artifact that executes in the database server runtime.
     Server,
@@ -868,7 +869,7 @@ pub enum ExecutableArtifactKind {
 }
 
 /// A complete versioned executable artifact.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ExecutableArtifact {
     kind: ExecutableArtifactKind,
     bytes: VersionedArtifactBytes,
@@ -916,7 +917,7 @@ impl ExecutableArtifact {
 }
 
 /// One immutable revision of an executable function.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FunctionRevisionRecord {
     function: FunctionId,
     id: FunctionRevisionId,
@@ -1022,7 +1023,7 @@ impl FunctionRevisionRecord {
 
 /// The explicit semantic relation recorded between durable definitions.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum DefinitionReferenceKind {
     /// A function invokes another function.
     FunctionCall,
@@ -1045,7 +1046,7 @@ pub enum DefinitionReferenceKind {
 }
 
 /// One resolved definition reference from an immutable function revision.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DefinitionReference {
     source_function: FunctionId,
     source_revision: FunctionRevisionId,

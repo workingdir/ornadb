@@ -39,7 +39,7 @@ snapshot, and sealed `sys.invoke` path.
 ## Trusted evaluator and action rules
 
 The evaluator entry point
-`work/crates/orna-client/src/lib.rs::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation`
+`crates/orna-client/src/lib.rs::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation`
 seeds the enclosing invocation and state context. Its resource evaluation
 branch in `evaluate_function_with_fuel` uses `lineage.current` with the
 compiled operation's `call_site_id` when it builds a
@@ -54,7 +54,7 @@ builds the request. Every trigger also gets a fresh request identity and
 resource generation. This fresh call-site rule is intentionally retained.
 
 Installed execution continues to bind the typed context to the authenticated
-resource path. `work/crates/orna-server/src/invoke.rs::InstalledClientResourceExecutor::execute`
+resource path. `crates/orna-server/src/invoke.rs::InstalledClientResourceExecutor::execute`
 converts the validated `ClientResourceRequest` context into an
 `ORNA-RESOURCE/1` `ResourceRequest`; the PostgreSQL kernel then performs the
 authenticated target and security checks before creating nested invocation
@@ -79,14 +79,14 @@ not turn the existing low-level seams into a plugin surface.
 
 This decision preserves the existing validation and proofs:
 
-* `work/crates/orna-client/src/lib.rs::ClientResourceRequest::new` validates
+* `crates/orna-client/src/lib.rs::ClientResourceRequest::new` validates
   the active revision, target, result type, arguments, digest, non-zero
   invocation identities, and NUL-free context text before accepting a request.
-* `work/crates/orna-protocol/src/frame.rs::encode_resource_request` and
+* `crates/orna-protocol/src/frame.rs::encode_resource_request` and
   `decode_resource_request`, using `require_resource_invocation_id` and
   `require_resource_call_site_id`, enforce the canonical `ORNA-RESOURCE/1`
   shape and non-zero `parent_invocation_id` and `call_site_id` values.
-* `work/crates/orna-postgres/src/kernel/security.rs::validate_resource_lineage`
+* `crates/orna-postgres/src/kernel/security.rs::validate_resource_lineage`
   rejects zero request, parent, or call-site identities before state mutation.
   `resource_parent_invocation_is_owned` binds the parent to the authenticated
   session before request reservation or target dispatch.
@@ -129,14 +129,14 @@ without an identified privilege or cross-principal failure.
 Evidence for this decision is the accepted contract in spec ADR 0017 and work
 ADRs 0071, 0074, and 0077-0079, plus the implementation paths cited above.
 The focused evidence includes
-`work/crates/orna-client/src/lib.rs::resource_request_rejects_zero_lineage_before_loading`,
-`work/crates/orna-client/src/lib.rs::action_trigger_does_not_forward_forged_call_site_metadata`,
+`crates/orna-client/src/lib.rs::resource_request_rejects_zero_lineage_before_loading`,
+`crates/orna-client/src/lib.rs::action_trigger_does_not_forward_forged_call_site_metadata`,
 and
-`work/crates/orna-client/src/lib.rs::action_trigger_after_terminal_completion_allocates_fresh_request_identity`.
+`crates/orna-client/src/lib.rs::action_trigger_after_terminal_completion_allocates_fresh_request_identity`.
 The PostgreSQL validation evidence includes
-`work/crates/orna-postgres/src/kernel/security.rs::resource_lineage_validation_rejects_zero_parent_before_other_request_validation`,
+`crates/orna-postgres/src/kernel/security.rs::resource_lineage_validation_rejects_zero_parent_before_other_request_validation`,
 and the installed resource proof is
-`work/crates/orna-server/tests/standard_database.rs::installed_resource_socket_delivers_values_and_enforces_windows_and_grants`.
+`crates/orna-server/tests/standard_database.rs::installed_resource_socket_delivers_values_and_enforces_windows_and_grants`.
 The installed PostgreSQL proof is environment-gated (`#[ignore]`) where its
 ADR says so; this record claims the existing focused and installed proof paths,
 not an additional local live run.

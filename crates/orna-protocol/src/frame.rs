@@ -530,7 +530,6 @@ pub struct ResourceCancel {
 
 /// Named aliases for integrations that suffix wire structures with Frame.
 pub type ResourceRequestFrame = ResourceRequest;
-pub type ResourceAcceptedFrame = ResourceAccepted;
 pub type ResourceValuesFrame = ResourceValues;
 pub type ResourceCompletedFrame = ResourceCompleted;
 pub type ResourceFailedFrame = ResourceFailed;

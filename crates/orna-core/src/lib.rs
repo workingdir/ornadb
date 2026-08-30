@@ -22,6 +22,7 @@ pub mod system;
 pub mod types;
 pub mod value;
 
+use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
 const BASE32_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
@@ -89,7 +90,7 @@ fn decode_id(encoded: &str) -> Result<[u8; 16], InvalidCanonicalId> {
 macro_rules! define_id_common {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("An opaque Orna ", stringify!($name), ".")]
-        #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Copy, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
         pub struct $name([u8; 16]);
 
         impl $name {

@@ -120,7 +120,7 @@ pub async fn run_invoke_with_kernel(
     host_invoke(kernel, request, stdout, stderr, InvokeTransport::InProcess).await
 }
 
-pub(super) fn bind_installed_cli_arguments(
+pub(crate) fn bind_installed_cli_arguments(
     application: &orna_core::catalogue::CatalogueSnapshot,
     standard: Option<&VerifiedStandardLibrarySnapshot>,
     function: &FunctionDefinition,

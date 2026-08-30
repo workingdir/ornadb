@@ -4,7 +4,10 @@
 #![allow(clippy::result_large_err)]
 // Installation preserves the accepted multi-input transaction seam.
 #![allow(clippy::too_many_arguments)]
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashSet},
+};
 
 use orna_core::security::{CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, SecurityAuditDecision};
 use orna_core::system::{
@@ -23,7 +26,7 @@ use orna_core::{
         FunctionVolatility, OnDeleteAction, QualifiedSemanticName, TypeBindingKind, TypeLookupName,
         ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
-    physical::plan_physical_changes,
+    physical::{PhysicalMigrationArtifact, PhysicalMigrationArtifactError, plan_physical_changes},
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
@@ -38,11 +41,12 @@ use orna_standard::{
     STANDARD_SOURCE_REVISION_ID, StandardUpgrade, StandardUpgradeIdentity,
     retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
+use orna_storage::{MigrationLedgerEntry, MigrationLedgerEntryError};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
     PostgresKernel, PostgresKernelError,
-    decode::{DurableRecord, identity_bytes},
+    decode::{DurableRecord, digest_bytes, identity_bytes, optional_identity_bytes, u32_from_i64},
     is_sealed_inspect_type_id,
     physical::{establish_trusted_search_path, install_physical_plan},
     recovery::recover_active_revision,
@@ -73,6 +77,7 @@ use preflight::*;
 use reserved_identities::scan_reserved_standard_identities;
 use standard::*;
 
+const APPLICATION_MIGRATIONS_RELATION: &str = "_orna_kernel.application_migrations";
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
 const CONTRACT_VERSION: i16 = 1;
 
@@ -149,7 +154,26 @@ impl PostgresKernel {
         candidate: &DeployableRevision,
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
-        let apply_result = apply_client(&mut session.client, candidate, false).await;
+        let apply_result = apply_client(&mut session.client, candidate, None, false).await;
+        let shutdown_result = session.shutdown().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Applies a compiler-supplied artifact after locking and re-reading the
+    /// active revision. This is the backend-neutral
+    /// [`orna_storage::ApplicationRevisionStore`] entry point; unlike
+    /// [`Self::apply`], it never regenerates or ignores the caller's artifact.
+    pub(crate) async fn apply_with_artifact(
+        &self,
+        candidate: &DeployableRevision,
+        artifact: &PhysicalMigrationArtifact,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result =
+            apply_client(&mut session.client, candidate, Some(artifact), false).await;
         let shutdown_result = session.shutdown().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),
@@ -167,7 +191,27 @@ impl PostgresKernel {
         candidate: &DeployableRevision,
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
-        let apply_result = apply_client(&mut session.client, candidate, true).await;
+        let apply_result = apply_client(&mut session.client, candidate, None, true).await;
+        let shutdown_result = session.shutdown_for_source_apply().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Applies a compiler-supplied source-apply artifact and records its
+    /// committed candidate pair in protected audit using the reserved
+    /// catalogue-health principal.
+    ///
+    /// The principal is fixed by the installed host contract; callers cannot
+    /// provide request-derived audit identity.
+    pub(crate) async fn apply_source_apply_with_artifact(
+        &self,
+        candidate: &DeployableRevision,
+        artifact: &PhysicalMigrationArtifact,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result = apply_client(&mut session.client, candidate, Some(artifact), true).await;
         let shutdown_result = session.shutdown_for_source_apply().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),
@@ -213,11 +257,26 @@ impl PostgresKernel {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
     }
+    /// Reads the durable application migration ledger oldest-first.
+    ///
+    /// The canonical post-contract migration supplies
+    /// `_orna_kernel.application_migrations`; this adapter intentionally does
+    /// not create or synthesize the relation when it is absent.
+    pub async fn read_ledger(&self) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let ledger_result = read_ledger_client(&mut session.client).await;
+        let shutdown_result = session.shutdown().await;
+        match (ledger_result, shutdown_result) {
+            (Ok(entries), Ok(())) => Ok(entries),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
 }
 
 async fn apply_client(
     client: &mut Client,
     candidate: &DeployableRevision,
+    artifact: Option<&PhysicalMigrationArtifact>,
     source_apply_audit: bool,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let transaction = client
@@ -227,7 +286,7 @@ async fn apply_client(
         .start()
         .await
         .map_err(PostgresKernelError::Database)?;
-    let result = apply_transaction(&transaction, candidate, source_apply_audit).await;
+    let result = apply_transaction(&transaction, candidate, artifact, source_apply_audit).await;
     match result {
         Ok(active) => transaction
             .commit()
@@ -239,6 +298,405 @@ async fn apply_client(
             Err(rollback) => Err(PostgresKernelError::Database(rollback)),
         },
     }
+}
+
+async fn read_ledger_client(
+    client: &mut Client,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let result = read_ledger_transaction(&transaction).await;
+    match result {
+        Ok(entries) => transaction
+            .commit()
+            .await
+            .map(|()| entries)
+            .map_err(PostgresKernelError::Database),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(PostgresKernelError::Database(rollback)),
+        },
+    }
+}
+
+async fn read_ledger_transaction(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let active = recover_active_revision(transaction).await?;
+    load_and_validate_migration_ledger(transaction, Some(&active)).await
+}
+
+async fn load_migration_ledger(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT ordinal, format, version,
+                    expected_source_revision_id, expected_catalogue_revision_id,
+                    candidate_source_revision_id, candidate_catalogue_revision_id,
+                    canonical_bytes, digest
+             FROM _orna_kernel.application_migrations
+             ORDER BY ordinal ASC",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let record = DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, format!("row={index}"));
+        let ordinal: i64 = record.column(row, "ordinal", "ledger ordinal must be bigint")?;
+        if ordinal < 0 {
+            return Err(record.invariant("ledger ordinal must be non-negative"));
+        }
+        let expected_ordinal = i64::try_from(index)
+            .map_err(|_| record.invariant("ledger ordinal index must fit bigint"))?;
+        if ordinal != expected_ordinal {
+            return Err(record.invariant("ledger ordinals must be contiguous and zero-based"));
+        }
+        let format: String = record.column(row, "format", "ledger format must be text")?;
+        let version = u32_from_i64(
+            record.column(row, "version", "ledger version must be bigint")?,
+            &record,
+            "ledger version must be a positive u32",
+        )?;
+        let expected_source = SourceRevisionId::from_bytes(identity_bytes(
+            record.column(
+                row,
+                "expected_source_revision_id",
+                "ledger expected source identity must be 16 bytes",
+            )?,
+            &record,
+            "ledger expected source identity must be 16 bytes",
+        )?);
+        let expected_catalogue = CatalogueRevisionId::from_bytes(identity_bytes(
+            record.column(
+                row,
+                "expected_catalogue_revision_id",
+                "ledger expected catalogue identity must be 16 bytes",
+            )?,
+            &record,
+            "ledger expected catalogue identity must be 16 bytes",
+        )?);
+        let candidate_source = SourceRevisionId::from_bytes(identity_bytes(
+            record.column(
+                row,
+                "candidate_source_revision_id",
+                "ledger candidate source identity must be 16 bytes",
+            )?,
+            &record,
+            "ledger candidate source identity must be 16 bytes",
+        )?);
+        let candidate_catalogue = CatalogueRevisionId::from_bytes(identity_bytes(
+            record.column(
+                row,
+                "candidate_catalogue_revision_id",
+                "ledger candidate catalogue identity must be 16 bytes",
+            )?,
+            &record,
+            "ledger candidate catalogue identity must be 16 bytes",
+        )?);
+        let canonical_bytes: Vec<u8> = record.column(
+            row,
+            "canonical_bytes",
+            "ledger canonical bytes must be bytea",
+        )?;
+        let digest = Sha256Digest::from_bytes(digest_bytes(
+            record.column(row, "digest", "ledger digest must be bytea")?,
+            &record,
+            "ledger digest must be exactly 32 bytes",
+        )?);
+        let entry = MigrationLedgerEntry::from_parts(
+            format,
+            version,
+            RevisionPair::new(expected_source, expected_catalogue),
+            RevisionPair::new(candidate_source, candidate_catalogue),
+            canonical_bytes,
+            digest,
+        )
+        .map_err(PostgresKernelError::InvalidLedgerRequest)?;
+        entries.push(entry);
+    }
+
+    Ok(entries)
+}
+
+pub(crate) async fn load_and_validate_migration_ledger(
+    transaction: &Transaction<'_>,
+    active: Option<&ActiveDatabaseRevision>,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let entries = load_migration_ledger(transaction).await?;
+    validate_ledger_chain(&entries, active)?;
+    validate_ledger_registries(transaction, &entries, true).await?;
+    Ok(entries)
+}
+/// Loads the application migration ledger and validates its durable history
+/// while allowing recovery of any revision represented by that history.
+pub(crate) async fn load_and_validate_migration_ledger_for_recovery(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let entries = load_migration_ledger(transaction).await?;
+    validate_ledger_chain(&entries, None)?;
+    validate_recovery_active_pair(&entries, active)?;
+    validate_ledger_registries(transaction, &entries, true).await?;
+    Ok(entries)
+}
+
+fn validate_recovery_active_pair(
+    entries: &[MigrationLedgerEntry],
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PostgresKernelError> {
+    let active_pair = active.pair();
+    if entries.is_empty() {
+        if active.source().parent().is_some() {
+            return Err(DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "empty")
+                .invariant("an empty migration ledger requires an active root source revision"));
+        }
+        return Ok(());
+    }
+
+    if entries
+        .first()
+        .is_some_and(|entry| entry.expected_base() == active_pair)
+        || entries
+            .iter()
+            .any(|entry| entry.candidate_pair() == active_pair)
+    {
+        return Ok(());
+    }
+
+    Err(
+        DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "active")
+            .invariant("active revision must be represented by migration ledger history"),
+    )
+}
+
+pub(crate) async fn load_and_validate_migration_ledger_suffix(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let entries = load_migration_ledger(transaction).await?;
+    validate_ledger_chain(&entries, None)?;
+    validate_ledger_registries(transaction, &entries, false).await?;
+    Ok(entries)
+}
+
+fn validate_ledger_chain(
+    entries: &[MigrationLedgerEntry],
+    active: Option<&ActiveDatabaseRevision>,
+) -> Result<(), PostgresKernelError> {
+    if entries.is_empty() {
+        if active.is_some_and(|active| active.source().parent().is_some()) {
+            return Err(DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "empty")
+                .invariant("an empty migration ledger requires an active root source revision"));
+        }
+        return Ok(());
+    }
+
+    for (index, pair) in entries.windows(2).enumerate() {
+        if pair[1].expected_base() != pair[0].candidate_pair() {
+            return Err(DurableRecord::new(
+                APPLICATION_MIGRATIONS_RELATION,
+                format!("row={}", index + 1),
+            )
+            .invariant("ledger expected base must equal the previous candidate pair"));
+        }
+    }
+
+    if let Some(active) = active {
+        let last = entries
+            .last()
+            .expect("non-empty migration ledger has a final entry");
+        if last.candidate_pair() != active.pair() {
+            return Err(DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "final")
+                .invariant("migration ledger must end at the active revision pair"));
+        }
+    }
+    Ok(())
+}
+async fn validate_ledger_registries(
+    transaction: &Transaction<'_>,
+    entries: &[MigrationLedgerEntry],
+    require_root: bool,
+) -> Result<(), PostgresKernelError> {
+    let Some(first) = entries.first() else {
+        return Ok(());
+    };
+
+    let first_expected_source = first.expected_base().source();
+    let first_source_record = DurableRecord::new(
+        "_orna_kernel.source_revisions",
+        first_expected_source.canonical(),
+    );
+    let first_source_row = transaction
+        .query_opt(
+            "SELECT parent_source_revision_id
+             FROM _orna_kernel.source_revisions
+             WHERE id = $1",
+            &[&bytes(first_expected_source)],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let Some(first_source_row) = first_source_row else {
+        return Err(first_source_record.invariant(
+            "the first ledger expected source revision must have a durable registry row",
+        ));
+    };
+    let first_source_parent = optional_identity_bytes(
+        first_source_record.column(
+            &first_source_row,
+            "parent_source_revision_id",
+            "source parent identity must be null or 16 bytes",
+        )?,
+        &first_source_record,
+        "source parent identity must be null or 16 bytes",
+    )?
+    .map(SourceRevisionId::from_bytes);
+    if require_root && first_source_parent.is_some() {
+        return Err(first_source_record
+            .invariant("the first ledger expected source revision must be a root"));
+    }
+
+    let first_expected_catalogue = first.expected_base().catalogue();
+    let first_catalogue_record = DurableRecord::new(
+        "_orna_kernel.catalogue_revisions",
+        first_expected_catalogue.canonical(),
+    );
+    let first_catalogue_row = transaction
+        .query_opt(
+            "SELECT source_revision_id, parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = $1",
+            &[&bytes(first_expected_catalogue)],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let Some(first_catalogue_row) = first_catalogue_row else {
+        return Err(first_catalogue_record.invariant(
+            "the first ledger expected catalogue revision must have a durable registry row",
+        ));
+    };
+    let first_catalogue_source = SourceRevisionId::from_bytes(identity_bytes(
+        first_catalogue_record.column(
+            &first_catalogue_row,
+            "source_revision_id",
+            "catalogue source identity must be 16 bytes",
+        )?,
+        &first_catalogue_record,
+        "catalogue source identity must be 16 bytes",
+    )?);
+    if first_catalogue_source != first_expected_source {
+        return Err(first_catalogue_record.invariant(
+            "the first ledger expected catalogue revision must belong to its expected source",
+        ));
+    }
+    let first_catalogue_parent = optional_identity_bytes(
+        first_catalogue_record.column(
+            &first_catalogue_row,
+            "parent_catalogue_revision_id",
+            "catalogue parent identity must be null or 16 bytes",
+        )?,
+        &first_catalogue_record,
+        "catalogue parent identity must be null or 16 bytes",
+    )?
+    .map(CatalogueRevisionId::from_bytes);
+    if require_root && first_catalogue_parent.is_some() {
+        return Err(first_catalogue_record
+            .invariant("the first ledger expected catalogue revision must be a root"));
+    }
+
+    for entry in entries {
+        let expected_base = entry.expected_base();
+        let candidate_source = entry.candidate_pair().source();
+        let source_record = DurableRecord::new(
+            "_orna_kernel.source_revisions",
+            candidate_source.canonical(),
+        );
+        let source_row = transaction
+            .query_opt(
+                "SELECT parent_source_revision_id
+                 FROM _orna_kernel.source_revisions
+                 WHERE id = $1",
+                &[&bytes(candidate_source)],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        let Some(source_row) = source_row else {
+            return Err(source_record.invariant(
+                "each ledger candidate source revision must have a durable registry row",
+            ));
+        };
+        let parent = optional_identity_bytes(
+            source_record.column(
+                &source_row,
+                "parent_source_revision_id",
+                "source parent identity must be null or 16 bytes",
+            )?,
+            &source_record,
+            "source parent identity must be null or 16 bytes",
+        )?
+        .map(SourceRevisionId::from_bytes);
+        if parent != Some(expected_base.source()) {
+            return Err(source_record.invariant(
+                "each ledger candidate source revision must have its expected source parent",
+            ));
+        }
+
+        let candidate_catalogue = entry.candidate_pair().catalogue();
+        let catalogue_record = DurableRecord::new(
+            "_orna_kernel.catalogue_revisions",
+            candidate_catalogue.canonical(),
+        );
+        let catalogue_row = transaction
+            .query_opt(
+                "SELECT source_revision_id, parent_catalogue_revision_id
+                 FROM _orna_kernel.catalogue_revisions
+                 WHERE id = $1",
+                &[&bytes(candidate_catalogue)],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        let Some(catalogue_row) = catalogue_row else {
+            return Err(catalogue_record.invariant(
+                "each ledger candidate catalogue revision must have a durable registry row",
+            ));
+        };
+        let catalogue_source = SourceRevisionId::from_bytes(identity_bytes(
+            catalogue_record.column(
+                &catalogue_row,
+                "source_revision_id",
+                "catalogue source identity must be 16 bytes",
+            )?,
+            &catalogue_record,
+            "catalogue source identity must be 16 bytes",
+        )?);
+        if catalogue_source != candidate_source {
+            return Err(catalogue_record.invariant(
+                "each ledger candidate catalogue revision must belong to its candidate source",
+            ));
+        }
+        let catalogue_parent = optional_identity_bytes(
+            catalogue_record.column(
+                &catalogue_row,
+                "parent_catalogue_revision_id",
+                "catalogue parent identity must be null or 16 bytes",
+            )?,
+            &catalogue_record,
+            "catalogue parent identity must be null or 16 bytes",
+        )?
+        .map(CatalogueRevisionId::from_bytes);
+        if catalogue_parent != Some(expected_base.catalogue()) {
+            return Err(catalogue_record.invariant(
+                "each ledger candidate catalogue revision must have its expected catalogue parent",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn apply_standard_upgrade_client(
@@ -272,6 +730,7 @@ async fn apply_standard_upgrade_client(
 async fn apply_transaction(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    artifact: Option<&PhysicalMigrationArtifact>,
     source_apply_audit: bool,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     // This must remain the first statement. It prevents untrusted schemas from
@@ -285,24 +744,60 @@ async fn apply_transaction(
         ));
     }
     validate_candidate_preflight(&active, candidate)?;
+    let artifact = resolve_artifact(&active, candidate, artifact)?;
+    validate_migration_artifact(&active, candidate, &artifact)?;
+    let existing_ledger = load_and_validate_migration_ledger(transaction, Some(&active)).await?;
     validate_durable_grant_targets(transaction, candidate).await?;
 
     let materialized = materialize(candidate, &active)?;
     verify_candidate_hashes(candidate, &materialized)?;
     let encoder = CandidateEncoder::new(candidate.catalogue_hash_context(), candidate.candidate());
     validate_postgres_encodings(candidate, &encoder)?;
-
     apply_materialized_candidate(
         transaction,
         candidate,
         &active,
+        &existing_ledger,
         &materialized,
         &encoder,
+        &artifact,
         None,
         candidate.catalogue_hash_context().standard(),
         source_apply_audit,
     )
     .await
+}
+
+fn resolve_artifact<'a>(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+    supplied: Option<&'a PhysicalMigrationArtifact>,
+) -> Result<Cow<'a, PhysicalMigrationArtifact>, PostgresKernelError> {
+    match supplied {
+        Some(artifact) => Ok(Cow::Borrowed(artifact)),
+        None => PhysicalMigrationArtifact::from_revisions(active, candidate)
+            .map(Cow::Owned)
+            .map_err(map_artifact_build_error),
+    }
+}
+
+fn validate_migration_artifact(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+    artifact: &PhysicalMigrationArtifact,
+) -> Result<(), PostgresKernelError> {
+    MigrationLedgerEntry::from_artifact(artifact)
+        .validate(active, candidate)
+        .map_err(PostgresKernelError::InvalidLedgerRequest)
+}
+
+fn map_artifact_build_error(error: PhysicalMigrationArtifactError) -> PostgresKernelError {
+    match error {
+        PhysicalMigrationArtifactError::Planning(error) => PostgresKernelError::PhysicalPlan(error),
+        error => PostgresKernelError::InvalidLedgerRequest(
+            MigrationLedgerEntryError::PhysicalArtifact(error),
+        ),
+    }
 }
 
 async fn apply_standard_upgrade_transaction(
@@ -330,9 +825,12 @@ async fn apply_standard_upgrade_transaction(
             "standard upgrade candidate must select the supplied standard snapshot",
         ));
     }
+    let existing_ledger = load_and_validate_migration_ledger(transaction, Some(&active)).await?;
     validate_durable_grant_targets(transaction, candidate).await?;
     scan_reserved_standard_identities(transaction, &active, standard).await?;
     persist_retained_v1_standard_parent(transaction, standard).await?;
+    let artifact = resolve_artifact(&active, candidate, None)?;
+    validate_migration_artifact(&active, candidate, &artifact)?;
 
     let materialized = materialize(candidate, &active)?;
     let encoder = CandidateEncoder::new(candidate.catalogue_hash_context(), candidate.candidate());
@@ -341,8 +839,10 @@ async fn apply_standard_upgrade_transaction(
         transaction,
         candidate,
         &active,
+        &existing_ledger,
         &materialized,
         &encoder,
+        &artifact,
         Some(standard),
         Some(standard),
         false,
@@ -354,8 +854,10 @@ async fn apply_materialized_candidate(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
     active: &ActiveDatabaseRevision,
+    existing_ledger: &[MigrationLedgerEntry],
     materialized: &Materialized,
     encoder: &CandidateEncoder<'_>,
+    artifact: &PhysicalMigrationArtifact,
     install_standard: Option<&VerifiedStandardLibrarySnapshot>,
     authority_standard: Option<&VerifiedStandardLibrarySnapshot>,
     source_apply_audit: bool,
@@ -390,6 +892,7 @@ async fn apply_materialized_candidate(
             "post-apply recovery must exactly reproduce the candidate hashes",
         ));
     }
+    persist_migration_ledger(transaction, artifact, existing_ledger).await?;
     if source_apply_audit {
         append_security_audit_event(
             transaction,
@@ -401,6 +904,49 @@ async fn apply_materialized_candidate(
         .await?;
     }
     Ok(recovered)
+}
+
+/// Appends exactly one artifact row while the caller still holds the
+/// `_orna_kernel.active_revision` row lock. `existing_ledger` was loaded and
+/// validated under that same lock before any candidate rows were persisted.
+/// The canonical post-contract migration supplies this relation; a missing
+/// relation is deliberately returned as a database error so the surrounding
+/// transaction rolls back.
+async fn persist_migration_ledger(
+    transaction: &Transaction<'_>,
+    artifact: &PhysicalMigrationArtifact,
+    existing_ledger: &[MigrationLedgerEntry],
+) -> Result<(), PostgresKernelError> {
+    let record = DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "next ordinal");
+    let ordinal = i64::try_from(existing_ledger.len())
+        .map_err(|_| record.invariant("ledger ordinal must fit bigint"))?;
+    let entry = MigrationLedgerEntry::from_artifact(artifact);
+    let expected_base = entry.expected_base();
+    let candidate_pair = entry.candidate_pair();
+    let version = i64::from(entry.version());
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.application_migrations
+                (ordinal, format, version,
+                 expected_source_revision_id, expected_catalogue_revision_id,
+                 candidate_source_revision_id, candidate_catalogue_revision_id,
+                 canonical_bytes, digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &ordinal,
+                &entry.format(),
+                &version,
+                &bytes(expected_base.source()),
+                &bytes(expected_base.catalogue()),
+                &bytes(candidate_pair.source()),
+                &bytes(candidate_pair.catalogue()),
+                &entry.canonical_bytes(),
+                &digest(entry.digest()),
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(())
 }
 
 async fn lock_active_pair(

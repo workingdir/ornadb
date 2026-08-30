@@ -237,14 +237,13 @@ fn read_server_frame<S: Read>(stream: &mut S) -> Result<Vec<u8>, InvocationConne
 mod tests {
     use std::io::{self, Cursor, Read, Write};
 
+    use super::*;
     #[cfg(unix)]
     use std::{
         fs,
         os::unix::net::{UnixListener, UnixStream},
         thread,
     };
-
-    use super::*;
 
     struct MemoryStream {
         input: Cursor<Vec<u8>>,

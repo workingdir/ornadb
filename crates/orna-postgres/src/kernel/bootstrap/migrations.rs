@@ -2,6 +2,13 @@
 
 use super::*;
 
+use orna_core::{
+    physical::{PhysicalMigrationArtifact, PhysicalPlan},
+    revision::RevisionPair,
+};
+use orna_storage::MigrationLedgerEntry;
+use std::collections::HashSet;
+
 pub(super) struct Migration {
     pub(super) version: i64,
     pub(super) name: &'static str,
@@ -12,6 +19,7 @@ pub(super) struct Migration {
 #[derive(Clone, Copy)]
 pub(super) enum MigrationDataStep {
     CanonicalHashV1EmptySeed,
+    BackfillApplicationMigrationLedger,
 }
 
 pub(super) const MIGRATIONS: &[Migration] = &[
@@ -285,9 +293,23 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../../migrations/0045_inspect_snapshot_observer_context.sql"),
         data_step: None,
     },
+    Migration {
+        version: 46,
+        name: "application_migrations",
+        sql: include_str!("../../../migrations/0046_application_migrations.sql"),
+        data_step: None,
+    },
+    Migration {
+        version: 47,
+        name: "application migration ledger baseline",
+        sql: include_str!("../../../migrations/0047_application_migration_ledger_baseline.sql"),
+        data_step: Some(MigrationDataStep::BackfillApplicationMigrationLedger),
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
+const APPLICATION_MIGRATION_LEDGER_BASELINE_STEP: &[u8] =
+    b"application-migration-ledger-baseline/v1";
 pub(super) const MIGRATION_REGISTRY_SQL: &str = "
     CREATE SCHEMA IF NOT EXISTS _orna_kernel;
     REVOKE ALL ON SCHEMA _orna_kernel FROM PUBLIC;
@@ -449,6 +471,7 @@ impl MigrationDataStep {
     const fn identity(self) -> &'static [u8] {
         match self {
             Self::CanonicalHashV1EmptySeed => CANONICAL_HASH_V1_EMPTY_SEED_STEP,
+            Self::BackfillApplicationMigrationLedger => APPLICATION_MIGRATION_LEDGER_BASELINE_STEP,
         }
     }
 }
@@ -462,5 +485,302 @@ async fn apply_migration_data_step(
         Some(MigrationDataStep::CanonicalHashV1EmptySeed) => {
             rewrite_legacy_empty_hashes(transaction).await
         }
+        Some(MigrationDataStep::BackfillApplicationMigrationLedger) => {
+            backfill_application_migration_ledger(transaction).await
+        }
     }
+}
+
+/// Records the pre-ledger revision path as an explicit historical baseline.
+///
+/// Before migration 46, physical changes were already applied atomically with
+/// revision persistence but no replayable artifact was retained. The baseline
+/// therefore binds each existing source/catalogue edge to an empty artifact:
+/// it preserves lineage without pretending that old physical operations can be
+/// reconstructed.
+async fn backfill_application_migration_ledger(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let existing_ledger =
+        crate::kernel::apply::load_and_validate_migration_ledger_suffix(transaction).await?;
+    let Some(active_row) = transaction
+        .query_opt(
+            "SELECT source_revision_id, catalogue_revision_id
+             FROM _orna_kernel.active_revision
+             WHERE singleton = true",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?
+    else {
+        if existing_ledger.is_empty() {
+            return Ok(());
+        }
+        return Err(PostgresKernelError::CatalogueInvariant(
+            "application migration ledger exists without an active revision",
+        ));
+    };
+
+    let mut source = SourceRevisionId::from_bytes(exact_id_bytes(
+        active_row
+            .try_get("source_revision_id")
+            .map_err(PostgresKernelError::Database)?,
+        "active source revision identity is not 16 bytes",
+    )?);
+    let mut catalogue = CatalogueRevisionId::from_bytes(exact_id_bytes(
+        active_row
+            .try_get("catalogue_revision_id")
+            .map_err(PostgresKernelError::Database)?,
+        "active catalogue revision identity is not 16 bytes",
+    )?);
+    let mut reverse_path = Vec::new();
+    let mut seen_pairs = HashSet::new();
+
+    loop {
+        let pair = RevisionPair::new(source, catalogue);
+        if !seen_pairs.insert(pair) {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "legacy revision ancestry contains a cycle",
+            ));
+        }
+
+        let source_bytes = source.to_bytes().to_vec();
+        let source_row = transaction
+            .query_opt(
+                "SELECT parent_source_revision_id
+                 FROM _orna_kernel.source_revisions
+                 WHERE id = $1",
+                &[&source_bytes],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+            .ok_or(PostgresKernelError::CatalogueInvariant(
+                "legacy active source revision is missing",
+            ))?;
+        let source_parent = optional_id_bytes(
+            source_row
+                .try_get("parent_source_revision_id")
+                .map_err(PostgresKernelError::Database)?,
+            "legacy parent source revision identity is not 16 bytes",
+        )?
+        .map(SourceRevisionId::from_bytes);
+
+        let catalogue_bytes = catalogue.to_bytes().to_vec();
+        let catalogue_row = transaction
+            .query_opt(
+                "SELECT source_revision_id, parent_catalogue_revision_id
+                 FROM _orna_kernel.catalogue_revisions
+                 WHERE id = $1",
+                &[&catalogue_bytes],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+            .ok_or(PostgresKernelError::CatalogueInvariant(
+                "legacy active catalogue revision is missing",
+            ))?;
+        let catalogue_source = SourceRevisionId::from_bytes(exact_id_bytes(
+            catalogue_row
+                .try_get::<_, Vec<u8>>("source_revision_id")
+                .map_err(PostgresKernelError::Database)?,
+            "legacy catalogue source revision identity is not 16 bytes",
+        )?);
+        if catalogue_source != source {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "legacy catalogue revision is bound to another source revision",
+            ));
+        }
+        let catalogue_parent = optional_id_bytes(
+            catalogue_row
+                .try_get("parent_catalogue_revision_id")
+                .map_err(PostgresKernelError::Database)?,
+            "legacy parent catalogue revision identity is not 16 bytes",
+        )?
+        .map(CatalogueRevisionId::from_bytes);
+
+        reverse_path.push(pair);
+        match (source_parent, catalogue_parent) {
+            (None, None) => break,
+            (Some(next_source), Some(next_catalogue)) => {
+                source = next_source;
+                catalogue = next_catalogue;
+            }
+            _ => {
+                return Err(PostgresKernelError::CatalogueInvariant(
+                    "legacy source and catalogue ancestry are not aligned",
+                ));
+            }
+        }
+    }
+
+    reverse_path.reverse();
+    let baseline_edge_count = if let Some(first) = existing_ledger.first() {
+        let Some(start) = reverse_path
+            .iter()
+            .position(|pair| *pair == first.expected_base())
+        else {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "existing migration ledger does not follow legacy revision ancestry",
+            ));
+        };
+        for (offset, entry) in existing_ledger.iter().enumerate() {
+            let expected_index =
+                start
+                    .checked_add(offset)
+                    .ok_or(PostgresKernelError::CatalogueInvariant(
+                        "legacy revision path index exceeds platform limits",
+                    ))?;
+            let expected_base =
+                reverse_path
+                    .get(expected_index)
+                    .ok_or(PostgresKernelError::CatalogueInvariant(
+                        "existing migration ledger starts beyond legacy revision ancestry",
+                    ))?;
+            let candidate = reverse_path.get(expected_index + 1).ok_or(
+                PostgresKernelError::CatalogueInvariant(
+                    "existing migration ledger extends beyond legacy revision ancestry",
+                ),
+            )?;
+            if entry.expected_base() != *expected_base || entry.candidate_pair() != *candidate {
+                return Err(PostgresKernelError::CatalogueInvariant(
+                    "existing migration ledger does not follow legacy revision ancestry",
+                ));
+            }
+        }
+        if start.checked_add(existing_ledger.len()) != Some(reverse_path.len() - 1) {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "existing migration ledger does not cover the active revision ancestry",
+            ));
+        }
+        start
+    } else {
+        reverse_path.len() - 1
+    };
+
+    if baseline_edge_count > 0 && !existing_ledger.is_empty() {
+        let baseline_count = i64::try_from(baseline_edge_count).map_err(|_| {
+            PostgresKernelError::CatalogueInvariant("legacy revision path exceeds bigint ordinals")
+        })?;
+        let existing_count = i64::try_from(existing_ledger.len()).map_err(|_| {
+            PostgresKernelError::CatalogueInvariant("existing ledger exceeds bigint ordinals")
+        })?;
+        let temporary_offset = existing_count
+            .checked_add(baseline_count)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(PostgresKernelError::CatalogueInvariant(
+                "legacy ledger ordinal shift exceeds bigint",
+            ))?;
+        for ordinal in (0..existing_ledger.len()).rev() {
+            let ordinal = i64::try_from(ordinal).map_err(|_| {
+                PostgresKernelError::CatalogueInvariant("existing ledger ordinal exceeds bigint")
+            })?;
+            let updated = transaction
+                .execute(
+                    "UPDATE _orna_kernel.application_migrations
+                     SET ordinal = ordinal + $1
+                     WHERE ordinal = $2",
+                    &[&temporary_offset, &ordinal],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            if updated != 1 {
+                return Err(PostgresKernelError::CatalogueInvariant(
+                    "existing ledger ordinal disappeared during baseline shift",
+                ));
+            }
+        }
+        let final_shift = temporary_offset
+            .checked_sub(baseline_count)
+            .expect("temporary ledger offset includes the baseline count");
+        for ordinal in 0..existing_ledger.len() {
+            let ordinal = i64::try_from(ordinal).map_err(|_| {
+                PostgresKernelError::CatalogueInvariant("existing ledger ordinal exceeds bigint")
+            })?;
+            let shifted_ordinal = ordinal.checked_add(temporary_offset).ok_or(
+                PostgresKernelError::CatalogueInvariant(
+                    "existing ledger ordinal shift exceeds bigint",
+                ),
+            )?;
+            let updated = transaction
+                .execute(
+                    "UPDATE _orna_kernel.application_migrations
+                     SET ordinal = ordinal - $1
+                     WHERE ordinal = $2",
+                    &[&final_shift, &shifted_ordinal],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            if updated != 1 {
+                return Err(PostgresKernelError::CatalogueInvariant(
+                    "existing ledger ordinal disappeared during baseline shift",
+                ));
+            }
+        }
+    }
+
+    for (ordinal, window) in reverse_path
+        .windows(2)
+        .take(baseline_edge_count)
+        .enumerate()
+    {
+        let [expected_base, candidate_pair] = window else {
+            unreachable!("windows(2) always yields pairs");
+        };
+        let artifact = PhysicalMigrationArtifact::from_plan(
+            *expected_base,
+            *candidate_pair,
+            &PhysicalPlan::empty(),
+        )
+        .map_err(|_| {
+            PostgresKernelError::CatalogueInvariant("legacy revision baseline could not be encoded")
+        })?;
+        let entry = MigrationLedgerEntry::from_artifact(&artifact);
+        let ordinal = i64::try_from(ordinal).map_err(|_| {
+            PostgresKernelError::CatalogueInvariant("legacy revision path exceeds bigint ordinals")
+        })?;
+        let expected_source = entry.expected_base().source().to_bytes().to_vec();
+        let expected_catalogue = entry.expected_base().catalogue().to_bytes().to_vec();
+        let candidate_source = entry.candidate_pair().source().to_bytes().to_vec();
+        let candidate_catalogue = entry.candidate_pair().catalogue().to_bytes().to_vec();
+        let version = i64::from(entry.version());
+        let digest = entry.digest().to_bytes().to_vec();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.application_migrations
+                    (ordinal, format, version,
+                     expected_source_revision_id, expected_catalogue_revision_id,
+                     candidate_source_revision_id, candidate_catalogue_revision_id,
+                     canonical_bytes, digest)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &ordinal,
+                    &entry.format(),
+                    &version,
+                    &expected_source,
+                    &expected_catalogue,
+                    &candidate_source,
+                    &candidate_catalogue,
+                    &entry.canonical_bytes(),
+                    &digest,
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
+    Ok(())
+}
+
+fn exact_id_bytes(bytes: Vec<u8>, message: &'static str) -> Result<[u8; 16], PostgresKernelError> {
+    bytes
+        .try_into()
+        .map_err(|_| PostgresKernelError::CatalogueInvariant(message))
+}
+
+fn optional_id_bytes(
+    bytes: Option<Vec<u8>>,
+    message: &'static str,
+) -> Result<Option<[u8; 16]>, PostgresKernelError> {
+    bytes
+        .map(|bytes| exact_id_bytes(bytes, message))
+        .transpose()
 }

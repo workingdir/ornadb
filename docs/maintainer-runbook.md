@@ -31,16 +31,19 @@ local substitute.
 1. `Cargo.toml`, `Cargo.lock`: workspace definition and locked dependencies.
 2. `crates/`: the Rust implementation packages, including the server/CLI,
    client, compiler, protocol, standard library, LSP, and PostgreSQL kernel.
-3. `stdlib/std/`: source-authored standard-library declarations.
-4. `runtimes/qt/`: the separate Qt runtime CMake project.
-5. `editors/`: editor integrations and grammar metadata.
-6. `scripts/`: static editor-tooling and accepted demo runners.
-7. `postgresql/`: the embedded PostgreSQL engine build and lifecycle tooling.
-8. `compose.yaml`: the loopback-only PostgreSQL development service.
-9. `.github/workflows/`: quality and embedded PostgreSQL workflows.
-10. `.beads/`: the tracked issue ledger; preserve it when cleaning other
+3. `crates/orna-storage/`: backend-neutral application revision and typed
+   migration contracts.
+4. `crates/orna-sqlite/`: the local Turso revision-store adapter.
+5. `stdlib/std/`: source-authored standard-library declarations.
+6. `runtimes/qt/`: the separate Qt runtime CMake project.
+7. `editors/`: editor integrations and grammar metadata.
+8. `scripts/`: static editor-tooling and accepted demo runners.
+9. `postgresql/`: the embedded PostgreSQL engine build and lifecycle tooling.
+10. `compose.yaml`: the loopback-only PostgreSQL development service.
+11. `.github/workflows/`: quality and embedded PostgreSQL workflows.
+12. `.beads/`: the tracked issue ledger; preserve it when cleaning other
     repository state.
-11. `docs/`: maintained operator guidance and historical design decisions.
+13. `docs/`: maintained operator guidance and historical design decisions.
 
 The repository intentionally has no website, distribution package, or generated
 root status ledger. Keep planning and issue state in the issue ledger and
@@ -69,6 +72,42 @@ manifest order and skips Compose-only entries.
 `just demo-suite` combines the offline checks, TTY renderer demo, client
 artifact-integrity demo, and local capability-matching demo. It does not run
 the local PostgreSQL CLI demo or Qt/Studio smoke commands.
+
+## Application revisions and SQLite boundary
+
+`orna-storage` defines the backend-neutral `ApplicationRevisionStore`
+lifecycle and typed migration contracts. It carries compiler-produced
+`PhysicalMigrationArtifact` values as exact canonical bytes and digests for
+durable ledger entries. `orna-sqlite` opens a local Turso database as a
+library-level revision-store adapter. Its persisted state covers source and
+catalogue identities/lineage, source units, semantic revision snapshots, the
+application migration ledger, and generated object tables with reference
+foreign keys for supported object changes. Unsupported value, enum, record,
+binding, scalar, and artifact shapes fail closed.
+
+`LocalPath` also has direct routes for SERVER-only `invoke` and `raw-call`,
+principal-scoped USER state, security administration, and redacted invocation
+inspection. Local invocation evidence stores only bounded structural summaries,
+terminal audit fields, and trace records; arguments, result values, source text,
+and resource payloads are not persisted. The private SQLite socket continues to
+serve protocol raw calls and applies the same local-peer/execute gate.
+
+Migration validation is bounded to typed migration artifacts and deterministic
+PostgreSQL/SQLite artifact checks, plus SQLite schema/data lineage,
+revision-ledger integrity, semantic snapshot, generated object-table/
+foreign-key checks, and bounded runtime evidence. This scope does not prove
+full physical or runtime parity between PostgreSQL and SQLite; do not record
+that claim without fresh, dedicated evidence. CLIENT/Qt execution, protected
+standard transports, and resource transport remain PostgreSQL/runtime-only.
+
+`just sqlite-check` is the dedicated offline compile gate for the storage,
+SQLite, and local CLI binary targets. `just sqlite-smoke` runs the deterministic
+revision-store example and the focused SQLite process/socket integration target.
+These recipes provide a dedicated SQLite adoption proof; the standalone adapter
+example remains a library smoke and does not exercise the socket by itself.
+
+The accepted standard-library revision chain is V1 through V9 only; there is no
+V10 revision.
 
 ## PostgreSQL Compose lifecycle
 
@@ -162,16 +201,48 @@ orna security check has-privilege <canonical-principal-id> <class> [canonical-fu
 orna security whoami
 ```
 
-`orna server run` starts the embedded PostgreSQL instance in the foreground
-using user-owned state and runtime directories selected by XDG environment
-variables, with safe fallbacks under `/tmp`. An external process supervisor may
-run the foreground command, but no service account or package installation is
-required.
+`orna server run` with the default managed-local endpoint starts the embedded
+PostgreSQL instance in the foreground, using user-owned state and runtime
+directories selected by XDG environment variables, with safe fallbacks under
+`/tmp`. An explicit `LocalPath` instead starts the local SQLite server and
+exposes the `<database>.orna.sock` Unix socket described below.
 
-The local server supports `invoke`, `state`, `inspect`, `raw-call`,
-`backend-shell`, source apply/diff, and security administration through the same
-peer-authenticated instance. `source check` remains offline and does not need
-PostgreSQL, network access, configuration, or writes.
+The managed PostgreSQL server supports `invoke`, `state`, `inspect`, `raw-call`,
+`backend-shell`, source apply/diff, and security administration through the
+same peer-authenticated instance. Explicit `LocalPath` uses direct SQLite
+routes for source apply/diff, SERVER-only invoke/raw-call, USER state, security
+administration, and redacted invocation inspection. `source check` remains
+offline and does not need PostgreSQL, network access, configuration, or writes.
+
+## Endpoint and command-routing boundary
+
+`DatabaseEndpoint::parse` treats a value without `://` as
+`DatabaseEndpoint::LocalPath`; `Display` renders that path directly. Parsing
+and display do not imply that every command is routed.
+
+An explicit `LocalPath` is accepted for `server run`, `source check`, source
+apply/diff, SERVER-only `invoke` and `raw-call`, `state`, `inspect`, and
+security administration. Unsupported commands fail before selecting a backend.
+`orna server run` opens and bootstraps the database before exposing
+`<database>.orna.sock`; the foreground Unix listener enforces mode `0600`.
+Its handshake recognises protocol versions v1 through v5. Versions v1 through
+v3 have typed handling in the bounded SQLite surface; v4 and v5 use the
+protocol fallback when their opaque codec registry is unavailable. The socket
+shares the public raw-call wire protocol, but only the bounded
+server-plan/parameter-echo execution subset can produce a successful result.
+
+LocalPath inspection is deliberately narrower than PostgreSQL inspection:
+successful direct invocations persist a bounded structural summary and trace
+event, while value-bearing projections, source text, and resource payloads are
+not stored. LocalPath security mutations are authorized by the durable local
+peer principal and `SecurityAdmin` privilege; USER state is principal-scoped
+and uses canonical ORV5 values with optimistic revisions.
+
+For an explicit endpoint (`--db` or a positional endpoint), the CLI currently
+accepts `ManagedLocal` and `LocalPath`. Explicit Unix-socket and remote-TLS
+endpoints remain rejected until their route wiring is available. ManagedLocal
+routes installed commands to the fixed embedded PostgreSQL host; LocalPath
+routes the supported local surface to SQLite without a PostgreSQL fallback.
 
 Run the complete local binary demo with:
 
@@ -184,19 +255,25 @@ readiness, invokes `std.invoke.echo`, and removes its temporary state.
 
 ## Security, sessions, and recovery
 
-Local operations authenticate the operating-system peer. The server obtains the
-Unix peer UID, maps it to the session principal, and keeps the principal out of
-request payloads. A caller cannot supply a replacement principal.
+Managed local operations authenticate the operating-system peer. The server
+obtains the Unix peer UID, maps it to the session principal, and keeps the
+principal out of request payloads. A caller cannot supply a replacement
+principal. The bounded SQLite socket relies on its `0600` filesystem mode and
+applies the same local-peer and execute checks as the direct LocalPath routes.
+SQLite LocalPath does not expose PostgreSQL CLIENT/Qt execution, standard
+protected transports, or resource dispatch.
 
 Keep secrets out of source, argument files, state value files, shell history,
 CI logs, and evidence artifacts. The Compose password is a repository-visible
 development fixture, not a production credential.
 
-Treat source apply and recovery as transactional operations:
+Treat source apply, runtime evidence, and recovery as transactional operations:
 
 1. Source apply reads one regular UTF-8 file and fails closed for invalid input.
-2. A successful apply records its protected audit event and cannot choose an
-   audit principal from the request.
+2. Managed PostgreSQL source apply records its protected audit event and cannot
+   choose an audit principal from the request. SQLite source apply records its
+   typed migration and snapshot transaction; SQLite runtime commands record
+   only bounded redacted invocation/inspection metadata.
 3. Recovery must reproduce the candidate source and catalogue hashes. A
    recovery mismatch, session-close failure, or audit invariant failure is an
    operational failure.
@@ -208,6 +285,18 @@ Treat source apply and recovery as transactional operations:
 
 Use `just kernel-test` for the Compose-gated apply, rollback, tamper, retained
 listing, recovery, and user-state integration matrix.
+
+Resource payloads and results are process-local. In the PostgreSQL resource
+transport, `Values` batches and completed result values are owned by the
+producer/transport and emitted as connection-local frames; they are not durable
+resource payload rows. SQLite LocalPath has no resource-dispatch protocol.
+
+Where implemented, PostgreSQL persisted resource request history/audit is
+redacted metadata: request, parent/call-site, target/revision/principal
+identities, decision/terminal outcomes, and optional item/byte counts. It
+deliberately does not retain arguments or returned values. This is redacted
+history/audit, not durable `Resources` streaming; do not document it as durable
+payload/result storage.
 
 ## Issue ledger and status
 
@@ -228,6 +317,13 @@ ci-evidence/check.log
 ci-evidence/editor-tooling.log
 ci-evidence/kernel-test.log
 ci-evidence/postgres.log
+```
+
+The dedicated SQLite workflow uploads:
+
+```text
+ci-evidence/sqlite-check.log
+ci-evidence/sqlite-smoke.log
 ```
 
 The embedded PostgreSQL workflow stores its lifecycle output under

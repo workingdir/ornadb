@@ -1,0 +1,126 @@
+MIGRATION 46 application_migrations {
+    SCHEMA _orna_kernel;
+
+    TABLE SQLITE _orna_kernel.active_revision {
+        COLUMN singleton INTEGER NOT NULL;
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN source_parent_revision_id BYTES NULL;
+        COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN source_bundle_id BYTES NOT NULL;
+        COLUMN source_bundle_hash BYTES NOT NULL;
+        COLUMN source_revision_hash BYTES NOT NULL;
+        COLUMN catalogue_hash BYTES NOT NULL;
+
+        PRIMARY KEY (singleton);
+        UNIQUE (source_revision_id);
+        UNIQUE (catalogue_revision_id);
+        CHECK (singleton = 1);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (source_parent_revision_id IS NULL OR length(source_parent_revision_id) = 16);
+        CHECK (octet_length(catalogue_revision_id) = 16);
+        CHECK (octet_length(source_bundle_id) = 16);
+        CHECK (octet_length(source_bundle_hash) = 32);
+        CHECK (octet_length(source_revision_hash) = 32);
+        CHECK (octet_length(catalogue_hash) = 32);
+    }
+
+    TABLE SQLITE _orna_kernel.source_revisions {
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN source_parent_revision_id BYTES NULL;
+        COLUMN source_bundle_id BYTES NOT NULL;
+        COLUMN source_bundle_hash BYTES NOT NULL;
+        COLUMN source_revision_hash BYTES NOT NULL;
+
+        PRIMARY KEY (source_revision_id);
+        UNIQUE (source_bundle_id);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (source_parent_revision_id IS NULL OR length(source_parent_revision_id) = 16);
+        CHECK (octet_length(source_bundle_id) = 16);
+        CHECK (octet_length(source_bundle_hash) = 32);
+        CHECK (octet_length(source_revision_hash) = 32);
+    }
+
+    TABLE SQLITE _orna_kernel.catalogue_revisions {
+        COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN parent_catalogue_revision_id BYTES NULL;
+        COLUMN catalogue_hash BYTES NOT NULL;
+
+        PRIMARY KEY (catalogue_revision_id);
+        CHECK (octet_length(catalogue_revision_id) = 16);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (parent_catalogue_revision_id IS NULL OR length(parent_catalogue_revision_id) = 16);
+        CHECK (octet_length(catalogue_hash) = 32);
+    }
+
+    TABLE SQLITE _orna_kernel.source_units {
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN source_unit_id BYTES NOT NULL;
+        COLUMN ordinal INTEGER NOT NULL;
+        COLUMN logical_path TEXT NOT NULL;
+        COLUMN content TEXT NOT NULL;
+        COLUMN content_hash BYTES NOT NULL;
+
+        PRIMARY KEY (source_revision_id, source_unit_id);
+        UNIQUE (source_unit_id);
+        UNIQUE (source_revision_id, ordinal);
+        UNIQUE (source_revision_id, logical_path);
+        CHECK (octet_length(source_unit_id) = 16);
+        CHECK (ordinal >= 0);
+        CHECK (octet_length(content_hash) = 32);
+    }
+
+    TABLE SQLITE _orna_kernel.catalogue_schemas {
+        COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN schema_id BYTES NOT NULL;
+        COLUMN name_parts TEXT NOT NULL;
+        COLUMN source_unit_id BYTES NOT NULL;
+        COLUMN source_start INTEGER NOT NULL;
+        COLUMN source_end INTEGER NOT NULL;
+
+        PRIMARY KEY (catalogue_revision_id, schema_id);
+        CHECK (octet_length(schema_id) = 16);
+        CHECK (octet_length(source_unit_id) = 16);
+        CHECK (source_start >= 0);
+        CHECK (source_end >= source_start);
+    }
+
+    TABLE _orna_kernel.application_migrations {
+        COLUMN ordinal BIGINT NOT NULL;
+        COLUMN format TEXT NOT NULL;
+        COLUMN version BIGINT NOT NULL;
+        COLUMN expected_source_revision_id BYTES NOT NULL;
+        COLUMN expected_catalogue_revision_id BYTES NOT NULL;
+        COLUMN candidate_source_revision_id BYTES NOT NULL;
+        COLUMN candidate_catalogue_revision_id BYTES NOT NULL;
+        COLUMN canonical_bytes BYTES NOT NULL;
+        COLUMN digest BYTES NOT NULL;
+        COLUMN applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+        PRIMARY KEY (ordinal);
+        UNIQUE (candidate_source_revision_id, candidate_catalogue_revision_id);
+        CHECK (ordinal >= 0);
+        CHECK (length(format) > 0);
+        CHECK (version > 0);
+        CHECK (octet_length(expected_source_revision_id) = 16);
+        CHECK (octet_length(expected_catalogue_revision_id) = 16);
+        CHECK (octet_length(candidate_source_revision_id) = 16);
+        CHECK (octet_length(candidate_catalogue_revision_id) = 16);
+        CHECK (octet_length(canonical_bytes) > 0);
+        CHECK (octet_length(digest) = 32);
+    }
+
+    TABLE SQLITE _orna_kernel.revision_snapshots {
+        COLUMN source_revision_id BYTES NOT NULL;
+        COLUMN catalogue_revision_id BYTES NOT NULL;
+        COLUMN payload BYTES NOT NULL;
+
+        PRIMARY KEY (source_revision_id, catalogue_revision_id);
+        CHECK (octet_length(source_revision_id) = 16);
+        CHECK (octet_length(catalogue_revision_id) = 16);
+        CHECK (octet_length(payload) > 0);
+    }
+
+    REVOKE POSTGRES ALL PRIVILEGES ON SCHEMA _orna_kernel FROM PUBLIC;
+    REVOKE POSTGRES ALL PRIVILEGES ON TABLE _orna_kernel.application_migrations FROM PUBLIC;
+}

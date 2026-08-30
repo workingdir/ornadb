@@ -52,6 +52,7 @@ const HELP_SERVER_RUN: &str = "Start the Orna server in the foreground.\n\nUsage
 const HELP_SERVER_BACKEND_SHELL: &str = "Open a shell for the ready Orna server.\n\nUsage:\n  orna server backend-shell\n\nThis command accepts no options.\n";
 const HELP_SOURCE: &str = "Work with Orna source.\n\nUsage:\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna source diff <file.orna>\n\nCommands:\n  check  Check one source file without changing the database.\n  apply  Check and apply one source file.\n  diff   Compare one source file with the current database.\n";
 const HELP_INVOKE: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n";
+const HELP_INVOKE_LOCAL_PATH: &str = "Run a stored function.\n\nUsage:\n  orna [--runtime <family>] invoke <qualified-name | canonical-function-id> [options]\n\nOptions:\n  --arg <parameter>=<value>  Bind a parameter.\n  --args-file <path>        Read arguments from a JSON file.\n  --output <value>          Select an output format or type.\n  --trace <policy>          Set tracing: off, basic, normal, verbose, or profile.\n  --runtime <family>        Select tty or qt.\n  --explain                 Show the request without running it.\n  --no-progress             Hide progress diagnostics.\n\nSQLite LocalPath note: the SQLite backend does not support --trace.\n";
 const HELP_REPL: &str = "Open the standard function-backed Orna session.\n\nUsage:\n  orna\n  orna repl\n\nThe session is a normal CLIENT function invocation. The selected local runtime\nowns terminal or graphical surfaces and input events.\n";
 const HELP_STATE: &str = "Read or update user state.\n\nUsage:\n  orna state get <root-function-id> [options]\n  orna state set <root-function-id> [options]\n\nOptions for get:\n  --profile <state-profile>\n  --instance <canonical-function-id> [--instance-key <instance-key>]\n  --expect-type <canonical-function-id> <canonical-state-slot-id> <canonical-type-id>\n\nOptions for set:\n  --function <canonical-function-id>\n  --instance-key <instance-key>\n  --slot <canonical-state-slot-id>\n  --revision <create|revision-number>\n  --type <canonical-type-id>\n  --value-file <path>\n  --profile <state-profile>\n";
 const HELP_INSPECT: &str = "Inspect a completed invocation.\n\nUsage:\n  orna inspect <invocation-id> [options]\n\nOptions:\n  --projection <name>  Select one of: invocation_nodes, calls, resources, state_cells, ui_nodes, presentation_candidates, runtime_bindings, security_decisions.\n  --trace              Include trace events.\n  --after <n>          Resume after a sequence number.\n  --include-values     Include value data where permitted.\n  --include-source     Include source provenance.\n  --include-security   Include security decisions.\n  --include-runtime    Include runtime bindings.\n  --epoch <epoch-id>   Inspect an exact epoch.\n";
@@ -59,6 +60,7 @@ const HELP_INSPECT: &str = "Inspect a completed invocation.\n\nUsage:\n  orna in
 const HELP_RUNTIME: &str = "Describe an installed runtime.\n\nUsage:\n  orna runtime describe <runtime-shared-library>\n\nCommands:\n  describe  Show metadata for an installed runtime.\n";
 const HELP_SECURITY: &str = "Manage users, roles, and grants.\n\nUsage:\n  orna security grant-execute <canonical-function-id>\n  orna security user create|disable <canonical-principal-id>\n  orna security role create|grant|revoke <canonical-principal-id> [canonical-principal-id]\n  orna security grants grant|revoke <canonical-principal-id> <class> [canonical-function-id]\n  orna security grants list <canonical-principal-id>\n  orna security check can-execute <canonical-principal-id> <canonical-function-id>\n  orna security check has-privilege <canonical-principal-id> <class> [canonical-function-id]\n  orna security whoami\n\nPrivilege classes:\n  execute, security_admin, inspect:own-invocation, inspect:session-invocations,\n  inspect:any-invocation, inspect:values, inspect:source,\n  inspect:security-details, inspect:runtime-internals.\n\nUse these commands to administer access and inspect the current principal.\n";
 const HELP_RAW_CALL: &str = "Make a low-level local call.\n\nUsage:\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n\nThe first form sends no arguments. The other forms read one or two complete ORV1 values from standard input.\n";
+const HELP_RAW_CALL_LOCAL_PATH: &str = "Make a low-level local call.\n\nUsage:\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id-1> <canonical-parameter-id-2>\n\nThe first form sends no arguments. The other forms read one or two complete ORV5 values from standard input.\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ColorChoice {
@@ -93,7 +95,6 @@ pub(crate) struct ParsedInvocation {
     pub(crate) endpoint_explicit: bool,
     pub(crate) command: Command,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HelpTopic {
     TopLevel,
@@ -102,12 +103,14 @@ pub(crate) enum HelpTopic {
     ServerBackendShell,
     Source,
     Invoke,
+    InvokeLocalPath,
     Repl,
     State,
     Inspect,
     Runtime,
     Security,
     RawCall,
+    RawCallLocalPath,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,12 +170,14 @@ pub(crate) fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::ServerBackendShell => HELP_SERVER_BACKEND_SHELL,
         HelpTopic::Source => HELP_SOURCE,
         HelpTopic::Invoke => HELP_INVOKE,
+        HelpTopic::InvokeLocalPath => HELP_INVOKE_LOCAL_PATH,
         HelpTopic::Repl => HELP_REPL,
         HelpTopic::State => HELP_STATE,
         HelpTopic::Inspect => HELP_INSPECT,
         HelpTopic::Runtime => HELP_RUNTIME,
         HelpTopic::Security => HELP_SECURITY,
         HelpTopic::RawCall => HELP_RAW_CALL,
+        HelpTopic::RawCallLocalPath => HELP_RAW_CALL_LOCAL_PATH,
     }
 }
 
@@ -316,11 +321,21 @@ where
     }
 
     let command_args = args.collect::<Vec<_>>();
+    let command = parse_command_args(command_args)?;
+    let command = if matches!(&endpoint, DatabaseEndpoint::LocalPath { .. }) {
+        match command {
+            Command::Help(HelpTopic::Invoke) => Command::Help(HelpTopic::InvokeLocalPath),
+            Command::Help(HelpTopic::RawCall) => Command::Help(HelpTopic::RawCallLocalPath),
+            command => command,
+        }
+    } else {
+        command
+    };
     Some(ParsedInvocation {
         color,
         endpoint,
         endpoint_explicit,
-        command: parse_command_args(command_args)?,
+        command,
     })
 }
 
