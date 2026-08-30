@@ -422,3 +422,54 @@ pub(super) fn resource_audit_invariant(record: &str, rule: &'static str) -> Post
         rule,
     }
 }
+
+impl PostgresKernel {
+    /// Records a redacted cancelled resource terminal in its own transaction.
+    ///
+    /// The request is untrusted metadata: no target or nested invocation identity
+    /// is retained before RESOURCE_ACCEPTED.
+    pub async fn record_cancelled_resource_audit(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        request: &ResourceRequest,
+    ) -> Result<(), PostgresKernelError> {
+        validate_resource_lineage(request)?;
+        validate_resource_state_context(request)?;
+        if !self
+            .resource_parent_invocation_is_owned(authenticated_session, request)
+            .await?
+        {
+            return Err(resource_parent_invocation_unavailable(request));
+        }
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::ReadCommitted)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            establish_trusted_search_path(&transaction).await?;
+            require_current_migrations(&transaction).await?;
+            append_resource_audit_event(
+                &transaction,
+                authenticated_session,
+                request,
+                None,
+                SecurityAuditOutcome::Denied,
+                ResourceAuditTerminalOutcome::Cancelled,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+}
