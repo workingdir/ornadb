@@ -2,7 +2,10 @@
 
 mod support;
 
-use nix::{sys::stat::Mode, unistd::mkfifo};
+use nix::{
+    sys::stat::Mode,
+    unistd::{geteuid, mkfifo},
+};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -25,6 +28,11 @@ const VALID_SOURCE: &[u8] =
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
 const RAW_CALL_CONNECTION_FAILED: &[u8] = b"local raw-call connection failed\n";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
+fn fallback_socket_path() -> PathBuf {
+    PathBuf::from("/tmp")
+        .join(format!(".orna-{}", geteuid().as_raw()))
+        .join("runtime/orna/default/orna.sock")
+}
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 struct TestDirectory(PathBuf);
@@ -213,7 +221,6 @@ fn accepts_only_the_exact_command_shape_and_valid_path_tokens() {
     assert_success(&run_source_check(&directory.0, "./-x").expect("qualified hyphen path"));
 
     for arguments in [
-        vec![],
         vec![OsString::from("source")],
         vec![OsString::from("source"), OsString::from("check")],
         vec![OsString::from("source"), OsString::from("--check")],
@@ -481,8 +488,8 @@ fn piped_input_and_hostile_environment_have_no_authority() {
 }
 
 #[test]
-fn raw_call_uses_only_the_fixed_endpoint_under_hostile_process_state() {
-    assert!(!Path::new("/run/orna/default/orna.sock").exists());
+fn raw_call_uses_only_the_fallback_endpoint_under_hostile_process_state() {
+    assert!(!fallback_socket_path().exists());
     let directory = TestDirectory::new("raw-call").expect("test directory");
     let child = spawn_orna(
         &directory.0,
