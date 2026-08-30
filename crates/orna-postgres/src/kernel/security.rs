@@ -37,6 +37,8 @@ mod recovery;
 mod resource;
 #[path = "security/resource_cancellation.rs"]
 mod resource_cancellation;
+#[path = "security/resource_finalization.rs"]
+mod resource_finalization;
 #[path = "security/resource_producer.rs"]
 mod resource_producer;
 #[path = "security/resource_stream.rs"]
