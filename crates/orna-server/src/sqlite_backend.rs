@@ -103,10 +103,10 @@ pub fn run_sqlite_source_apply(
     let bundle = SourceBundle::new([SourceUnit::new(source_path, source)])
         .map_err(SqliteBackendError::from_error)?;
     let database_path = database_path.into();
-    if database_path_is_fresh(&database_path)? {
-        if let Some(outcome) = preflight_fresh_source_apply(&bundle)? {
-            return Ok(outcome);
-        }
+    if database_path_is_fresh(&database_path)?
+        && let Some(outcome) = preflight_fresh_source_apply(&bundle)?
+    {
+        return Ok(outcome);
     }
     match run_with_runtime(database_path, bundle, SqliteCommand::Apply)? {
         SqliteCommandOutcome::Apply(outcome) => Ok(outcome),
