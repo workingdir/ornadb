@@ -81,8 +81,8 @@ pub use source_diff::{
     run_source_diff_with_kernel,
 };
 pub use sqlite_backend::{
-    SqliteBackendError, SqliteSourceApplyOutcome, SqliteSourceDiffOutcome, run_sqlite_invoke,
-    run_sqlite_raw_call, run_sqlite_source_apply, run_sqlite_source_diff,
+    SqliteBackendError, SqliteSourceApplyOutcome, SqliteSourceDiagnostics, SqliteSourceDiffOutcome,
+    run_sqlite_invoke, run_sqlite_raw_call, run_sqlite_source_apply, run_sqlite_source_diff,
 };
 pub use sqlite_inspect::run_sqlite_inspect;
 pub use sqlite_security::{run_sqlite_security_admin, run_sqlite_security_grant_execute};

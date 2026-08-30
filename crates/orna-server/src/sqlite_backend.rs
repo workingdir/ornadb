@@ -32,40 +32,72 @@ use std::{
 
 use crate::{
     InstalledInvokeError, InstalledInvokeErrorKind, InstalledInvokeOutcome, InstalledInvokeRequest,
-    LocalRawCallError, LocalRawCallOutcome, source_diagnostics, source_diff,
+    LocalRawCallError, LocalRawCallOutcome, source_diff, source_support,
 };
+/// Ordered compiler diagnostics produced by a local SQLite source command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteSourceDiagnostics {
+    bytes: Vec<u8>,
+    human_bytes: Vec<u8>,
+    coloured_bytes: Vec<u8>,
+}
+
+impl SqliteSourceDiagnostics {
+    /// Returns the stable machine-readable diagnostics.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns source-aware diagnostics without terminal colour.
+    pub fn human_bytes(&self) -> &[u8] {
+        &self.human_bytes
+    }
+
+    /// Returns source-aware diagnostics with terminal colour.
+    pub fn coloured_bytes(&self) -> &[u8] {
+        &self.coloured_bytes
+    }
+
+    fn render(report: &orna_compiler::CheckReport) -> Self {
+        let (bytes, human_bytes, coloured_bytes) =
+            source_support::render_source_diagnostics(report.parse_report(), report.diagnostics())
+                .into_parts();
+        Self {
+            bytes,
+            human_bytes,
+            coloured_bytes,
+        }
+    }
+}
+
 /// The result of checking or applying one source file against a local SQLite file.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SqliteSourceApplyOutcome {
-    /// Compiler diagnostics prevented preparation or mutation.
-    Diagnostics {
-        /// Stable machine-readable diagnostics.
-        bytes: Vec<u8>,
-        /// Human-readable diagnostics without colour.
-        human_bytes: Vec<u8>,
-        /// Human-readable diagnostics with colour.
-        coloured_bytes: Vec<u8>,
-    },
+    /// Compiler errors prevented preparation or mutation.
+    Diagnostics(SqliteSourceDiagnostics),
     /// The candidate committed and the discovery document is ready.
-    Applied(Vec<u8>),
+    Applied {
+        /// The stable discovery document.
+        document: Vec<u8>,
+        /// Non-blocking compiler warnings emitted before application.
+        warnings: Option<SqliteSourceDiagnostics>,
+    },
 }
 
 /// The result of checking and diffing one source file against a local SQLite file.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SqliteSourceDiffOutcome {
-    /// Compiler diagnostics prevented preparation or mutation.
-    Diagnostics {
-        /// Stable machine-readable diagnostics.
-        bytes: Vec<u8>,
-        /// Human-readable diagnostics without colour.
-        human_bytes: Vec<u8>,
-        /// Human-readable diagnostics with colour.
-        coloured_bytes: Vec<u8>,
-    },
+    /// Compiler errors prevented preparation or mutation.
+    Diagnostics(SqliteSourceDiagnostics),
     /// The deterministic semantic diff document.
-    Diff(Vec<u8>),
+    Diff {
+        /// The stable semantic diff document.
+        document: Vec<u8>,
+        /// Non-blocking compiler warnings emitted while preparing the diff.
+        warnings: Option<SqliteSourceDiagnostics>,
+    },
 }
 
 /// A local SQLite command failed before it could produce a command result.
@@ -131,20 +163,10 @@ fn preflight_fresh_source_apply(
 ) -> Result<Option<SqliteSourceApplyOutcome>, SqliteBackendError> {
     let active = fresh_validation_active()?;
     let report = check(bundle, active.catalogue());
-    if !report.diagnostics().is_empty() {
-        return Ok(Some(SqliteSourceApplyOutcome::Diagnostics {
-            bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
-            human_bytes: source_diagnostics::render_human_diagnostics(
-                report.parse_report(),
-                report.diagnostics(),
-                false,
-            ),
-            coloured_bytes: source_diagnostics::render_human_diagnostics(
-                report.parse_report(),
-                report.diagnostics(),
-                true,
-            ),
-        }));
+    if report.has_errors() {
+        return Ok(Some(SqliteSourceApplyOutcome::Diagnostics(
+            SqliteSourceDiagnostics::render(&report),
+        )));
     }
     let candidate = prepare(&report, active.pair(), &active).map_err(|error| {
         SqliteBackendError::new(format!(
@@ -888,32 +910,16 @@ async fn run_async(
         .await
         .map_err(map_storage_error)?;
     let report = check(&bundle, active.catalogue());
-    if !report.diagnostics().is_empty() {
-        let bytes = source_diagnostics::render_diagnostics(report.diagnostics());
-        let human_bytes = source_diagnostics::render_human_diagnostics(
-            report.parse_report(),
-            report.diagnostics(),
-            false,
-        );
-        let coloured_bytes = source_diagnostics::render_human_diagnostics(
-            report.parse_report(),
-            report.diagnostics(),
-            true,
-        );
+    let rendered_diagnostics =
+        (!report.diagnostics().is_empty()).then(|| SqliteSourceDiagnostics::render(&report));
+    if report.has_errors() {
+        let diagnostics = rendered_diagnostics.expect("an error-level report contains diagnostics");
         return Ok(match command {
             SqliteCommand::Apply => {
-                SqliteCommandOutcome::Apply(SqliteSourceApplyOutcome::Diagnostics {
-                    bytes,
-                    human_bytes,
-                    coloured_bytes,
-                })
+                SqliteCommandOutcome::Apply(SqliteSourceApplyOutcome::Diagnostics(diagnostics))
             }
             SqliteCommand::Diff => {
-                SqliteCommandOutcome::Diff(SqliteSourceDiffOutcome::Diagnostics {
-                    bytes,
-                    human_bytes,
-                    coloured_bytes,
-                })
+                SqliteCommandOutcome::Diff(SqliteSourceDiffOutcome::Diagnostics(diagnostics))
             }
         });
     }
@@ -940,17 +946,21 @@ async fn run_async(
                 ApplicationRevisionStore::apply_source_apply(&store, &candidate, &artifact)
                     .await
                     .map_err(map_storage_error)?;
-            let bytes = success_document(&committed)?;
+            let document = success_document(&committed)?;
             Ok(SqliteCommandOutcome::Apply(
-                SqliteSourceApplyOutcome::Applied(bytes),
+                SqliteSourceApplyOutcome::Applied {
+                    document,
+                    warnings: rendered_diagnostics,
+                },
             ))
         }
         SqliteCommand::Diff => {
-            let bytes = source_diff::render_prepared_source_diff(&active, &candidate)
+            let document = source_diff::render_prepared_source_diff(&active, &candidate)
                 .map_err(|error| SqliteBackendError::new(error.to_string()))?;
-            Ok(SqliteCommandOutcome::Diff(SqliteSourceDiffOutcome::Diff(
-                bytes,
-            )))
+            Ok(SqliteCommandOutcome::Diff(SqliteSourceDiffOutcome::Diff {
+                document,
+                warnings: rendered_diagnostics,
+            }))
         }
     }
 }
@@ -1123,14 +1133,54 @@ mod tests {
 
         let outcome = run_sqlite_source_apply(&database, source.to_str().unwrap())
             .expect("invalid source should return compiler diagnostics");
-        assert!(matches!(
-            outcome,
-            SqliteSourceApplyOutcome::Diagnostics { .. }
-        ));
+        assert!(matches!(outcome, SqliteSourceApplyOutcome::Diagnostics(_)));
         assert!(
             !database.exists(),
             "diagnostic-only fresh apply must not create SQLite state"
         );
+    }
+
+    #[test]
+    fn warnings_do_not_block_sqlite_apply_or_diff() {
+        let directory = TestDirectory::new("warning");
+        let database = directory.path().join("warning.sqlite");
+        let source = directory.path().join("warning.orna");
+        fs::write(
+            &source,
+            b"CREATE SCHEMA app;\n\
+              CREATE CLIENT FUNCTION app.unreachable() RETURNS BOOLEAN IS\n\
+              BEGIN\n\
+                  RETURN TRUE;\n\
+                  LET ignored := FALSE;\n\
+              END;",
+        )
+        .expect("write warning source");
+
+        let applied = run_sqlite_source_apply(&database, source.to_str().unwrap())
+            .expect("warning source should apply");
+        let SqliteSourceApplyOutcome::Applied {
+            warnings: Some(warnings),
+            ..
+        } = applied
+        else {
+            panic!("warning source apply must return warning diagnostics");
+        };
+        assert!(String::from_utf8_lossy(warnings.as_bytes()).contains("ORNA0401"));
+        assert!(
+            database.exists(),
+            "warning-only apply must commit SQLite state"
+        );
+
+        let diff = run_sqlite_source_diff(&database, source.to_str().unwrap())
+            .expect("warning source should diff");
+        let SqliteSourceDiffOutcome::Diff {
+            warnings: Some(warnings),
+            ..
+        } = diff
+        else {
+            panic!("warning source diff must return warning diagnostics");
+        };
+        assert!(String::from_utf8_lossy(warnings.as_bytes()).contains("ORNA0401"));
     }
 
     #[test]
@@ -1146,7 +1196,7 @@ mod tests {
         .expect("write valid source");
         let applied = run_sqlite_source_apply(&database, valid_source.to_str().unwrap())
             .expect("valid source apply");
-        assert!(matches!(applied, SqliteSourceApplyOutcome::Applied(_)));
+        assert!(matches!(applied, SqliteSourceApplyOutcome::Applied { .. }));
 
         let unsupported_source = directory.path().join("unsupported.orna");
         fs::write(
