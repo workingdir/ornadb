@@ -350,10 +350,10 @@ mod tests {
             }
         );
         assert_eq!(
-            DatabaseEndpoint::parse("orna+unix:///run/orna/default/orna.sock")
+            DatabaseEndpoint::parse("orna+unix:///tmp/orna/default/orna.sock")
                 .expect("Unix endpoint"),
             DatabaseEndpoint::UnixSocket {
-                path: PathBuf::from("/run/orna/default/orna.sock"),
+                path: PathBuf::from("/tmp/orna/default/orna.sock"),
             }
         );
         assert_eq!(
@@ -394,7 +394,7 @@ mod tests {
             "orna://local/default/extra",
             "orna://db.example.test/",
             "orna+unix://relative.sock",
-            "orna+unix:///run/orna.sock?x=1",
+            "orna+unix:///tmp/orna.sock?x=1",
             "postgresql://db/work",
         ] {
             assert!(DatabaseEndpoint::parse(value).is_err(), "{value}");

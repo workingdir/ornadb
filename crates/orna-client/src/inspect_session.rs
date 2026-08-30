@@ -98,7 +98,7 @@ impl ClientInspectLifecycleCompletion {
         Self {
             request_id,
             binding,
-            result: Err(crate::stable_inspect_provider_error(&code)),
+            result: Err(crate::execution::stable_inspect_provider_error(&code)),
         }
     }
 
@@ -284,7 +284,7 @@ impl ClientInspectLifecycleSession {
         match completion.result {
             Ok(value) => Ok(value),
             Err(code) => Err(ClientInspectError::Failed(
-                crate::stable_inspect_provider_error(&code),
+                crate::execution::stable_inspect_provider_error(&code),
             )),
         }
     }
