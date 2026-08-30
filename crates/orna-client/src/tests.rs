@@ -3211,6 +3211,24 @@ fn source_metadata_maps_unknown_artifact_versions_to_unknown_body_kind() {
     );
 }
 
+#[test]
+fn source_metadata_maps_malformed_capability_envelope_to_unknown() {
+    let payload = b"not a capability plan".to_vec();
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+        payload.clone(),
+        artifact_payload_digest(&payload).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        super::source_metadata_body_kind(&artifact),
+        orna_core::source_metadata::SourceBodyKind::Unknown
+    );
+}
+
 #[path = "tests/actions.rs"]
 mod actions;
 #[path = "tests/capabilities.rs"]
