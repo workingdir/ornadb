@@ -3074,6 +3074,143 @@ fn version_one_active_with_shape(
     (active, function, pair, function_revision)
 }
 
+#[test]
+fn source_metadata_maps_each_client_body_kind() {
+    let plans = [
+        (
+            orna_artifact::client_plan::FORMAT_VERSION,
+            orna_artifact::client_plan::ClientPlan::return_boolean(true).encode(),
+            orna_core::source_metadata::SourceBodyKind::BooleanLiteral,
+        ),
+        (
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            orna_artifact::client_plan::ExpressionClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Boolean { value: true },
+            )
+            .encode()
+            .expect("expression plan encodes"),
+            orna_core::source_metadata::SourceBodyKind::Expression,
+        ),
+        (
+            orna_artifact::client_plan::PROCEDURAL_FORMAT_VERSION,
+            orna_artifact::client_plan::ProceduralClientPlan::new(
+                Vec::new(),
+                Vec::new(),
+                orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+            )
+            .encode()
+            .expect("procedural plan encodes"),
+            orna_core::source_metadata::SourceBodyKind::Procedural,
+        ),
+        (
+            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+            orna_artifact::client_plan::ControlFlowClientPlan::new(Vec::new(), Vec::new())
+                .encode()
+                .expect("control-flow plan encodes"),
+            orna_core::source_metadata::SourceBodyKind::ControlFlow,
+        ),
+        (
+            orna_artifact::client_plan::STATE_FORMAT_VERSION,
+            orna_artifact::client_plan::StateClientPlan::new(
+                orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+                vec![orna_artifact::client_plan::StateSlot::new(
+                    StateSlotId::from_bytes([0x21; 16]),
+                    orna_standard::INTEGER_TYPE_ID,
+                    orna_artifact::client_plan::StateScope::Local,
+                    orna_artifact::client_plan::StateDefault::Expression(
+                        orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+                    ),
+                )],
+            )
+            .encode()
+            .expect("state plan encodes"),
+            orna_core::source_metadata::SourceBodyKind::State,
+        ),
+        (
+            orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
+            orna_artifact::client_plan::OpaqueClientPlan::return_opaque(
+                orna_standard::OPAQUE_TOKEN_TYPE_ID,
+                [0x01, 0x02, 0x03],
+            )
+            .encode()
+            .expect("opaque plan encodes"),
+            orna_core::source_metadata::SourceBodyKind::Unknown,
+        ),
+    ];
+
+    for (version, payload, expected) in plans {
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            version,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(super::source_metadata_body_kind(&artifact), expected);
+    }
+}
+
+#[test]
+fn source_metadata_maps_capability_envelope_to_inner_body_kind() {
+    let plans = [
+        (
+            orna_artifact::client_plan::InnerClientPlan::Procedural(
+                orna_artifact::client_plan::ProceduralClientPlan::new(
+                    Vec::new(),
+                    Vec::new(),
+                    orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+                ),
+            ),
+            orna_core::source_metadata::SourceBodyKind::Procedural,
+        ),
+        (
+            orna_artifact::client_plan::InnerClientPlan::ControlFlow(
+                orna_artifact::client_plan::ControlFlowClientPlan::new(Vec::new(), Vec::new()),
+            ),
+            orna_core::source_metadata::SourceBodyKind::ControlFlow,
+        ),
+    ];
+    for (inner, expected) in plans {
+        let payload = orna_artifact::client_plan::CapabilityClientPlan::new(
+            inner,
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "app.read",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("scope".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("capability plan encodes");
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(super::source_metadata_body_kind(&artifact), expected);
+    }
+}
+
+#[test]
+fn source_metadata_maps_unknown_artifact_versions_to_unknown_body_kind() {
+    let payload = vec![0x71];
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        99,
+        payload.clone(),
+        artifact_payload_digest(&payload).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        super::source_metadata_body_kind(&artifact),
+        orna_core::source_metadata::SourceBodyKind::Unknown
+    );
+}
+
 #[path = "tests/actions.rs"]
 mod actions;
 #[path = "tests/capabilities.rs"]

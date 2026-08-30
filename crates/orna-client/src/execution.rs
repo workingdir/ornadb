@@ -1,9 +1,17 @@
 use super::*;
 
 mod action;
+mod control_flow;
+mod error;
 mod inspect;
 mod ui;
 mod validation;
+
+pub use error::{
+    ClientActiveRevisionError, ClientArtifactIntegrityError, ClientExecutionError,
+    ClientExecutionRule, ClientExpressionError, ClientOpaqueValueError,
+    ClientResourceExecutionError, ClientStateError,
+};
 
 use action::evaluate_action_operation;
 #[cfg(test)]
@@ -12,6 +20,7 @@ pub use action::{
     cancel_client_action_with_executor, complete_client_action, decode_action_payload,
     encode_action_payload, trigger_client_action,
 };
+use control_flow::{evaluate_control_flow_plan, validate_control_flow_plan_types};
 pub(super) use inspect::inspect_invocation_target;
 pub(crate) use inspect::stable_inspect_provider_error;
 #[cfg(test)]
@@ -38,510 +47,6 @@ pub(super) use validation::{
 use validation::{
     client_call_target_is_referenced, validate_active_catalogue, validate_artifact_identity,
 };
-
-/// An active-revision validation failure for local CLIENT execution.
-#[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientActiveRevisionError {
-    /// Canonical active catalogue semantics could not be calculated.
-    Canonical(CanonicalHashError),
-    /// The recorded active catalogue digest differs from canonical semantics.
-    CatalogueHashMismatch,
-}
-
-impl fmt::Display for ClientActiveRevisionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Canonical(source) => source.fmt(formatter),
-            Self::CatalogueHashMismatch => formatter
-                .write_str("active revision catalogue hash differs from its canonical semantics"),
-        }
-    }
-}
-
-impl Error for ClientActiveRevisionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Canonical(source) => Some(source),
-            Self::CatalogueHashMismatch => None,
-        }
-    }
-}
-
-/// A registered opaque-value failure during local CLIENT evaluation.
-#[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientOpaqueValueError {
-    /// The checked-in registry does not accept the active standard snapshot.
-    Registry(Box<RegisteredOpaqueCodecsError>),
-    /// The plan's nominal type differs from the function's declared return type.
-    TypeMismatch {
-        /// The function's declared opaque return type.
-        expected: TypeId,
-        /// The opaque type encoded in the saved plan.
-        actual: TypeId,
-    },
-    /// The registered codec rejected the plan value.
-    Value(OpaqueValueError),
-}
-
-impl fmt::Display for ClientOpaqueValueError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Registry(source) => source.fmt(formatter),
-            Self::TypeMismatch { .. } => {
-                formatter.write_str("opaque CLIENT plan type does not match its function return")
-            }
-            Self::Value(source) => source.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ClientOpaqueValueError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Registry(source) => Some(source),
-            Self::Value(source) => Some(source),
-            Self::TypeMismatch { .. } => None,
-        }
-    }
-}
-
-/// A closed CLIENT-function validation rule.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClientExecutionRule {
-    /// The function does not use the CLIENT execution domain.
-    FunctionDomain,
-    /// The function declares unsupported parameters.
-    Parameters,
-    /// The function does not return a supported CLIENT value.
-    ReturnType,
-    /// The function does not use INVOKER security.
-    Security,
-    /// The function is not immutable.
-    Volatility,
-    /// The function has unsupported definition references.
-    References,
-    /// The saved artefact format is unsupported.
-    ArtifactFormat,
-    /// The saved artefact version is unsupported.
-    ArtifactVersion,
-    /// The saved language label is unsupported.
-    LanguageVersion,
-}
-
-impl fmt::Display for ClientExecutionRule {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FunctionDomain => formatter.write_str("this function does not run on the client"),
-            Self::Parameters => {
-                formatter.write_str("this CLIENT function requires unsupported parameters")
-            }
-            Self::ReturnType => {
-                formatter.write_str("this CLIENT function has an unsupported return type")
-            }
-            Self::Security => {
-                formatter.write_str("this CLIENT function has an unsupported security mode")
-            }
-            Self::Volatility => {
-                formatter.write_str("this CLIENT function is not an immutable constant")
-            }
-            Self::References => {
-                formatter.write_str("this CLIENT function depends on unsupported definitions")
-            }
-            Self::ArtifactFormat => {
-                formatter.write_str("the saved CLIENT function uses an unsupported artefact format")
-            }
-            Self::ArtifactVersion => formatter
-                .write_str("the saved CLIENT function uses an unsupported artefact version"),
-            Self::LanguageVersion => formatter
-                .write_str("the saved CLIENT function uses an unsupported language version"),
-        }
-    }
-}
-
-impl Error for ClientExecutionRule {}
-
-/// A closed CLIENT expression could not produce a value.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClientExpressionError {
-    /// An expression read a parameter that was not bound at invocation time.
-    ParameterNotBound,
-    /// An expression value did not match the declared parameter or return type.
-    TypeMismatch,
-    /// A call did not bind exactly the target's declared parameters.
-    InvalidCall,
-    /// A field path did not resolve against its record value.
-    FieldPath,
-    /// The closed call-depth limit was reached.
-    RecursionLimit,
-    /// A checked INTEGER arithmetic operation failed.
-    Arithmetic,
-    /// The per-root CLIENT execution fuel was exhausted.
-    ExecutionLimit,
-    /// A control-flow function reached its end without returning a value.
-    MissingReturn,
-    /// The active client session cannot provide input.
-    InputUnavailable,
-    /// The active session rejected a dynamic command evaluation.
-    DynamicInvocation,
-}
-
-impl fmt::Display for ClientExpressionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ParameterNotBound => "a CLIENT expression parameter was not bound",
-            Self::TypeMismatch => "a CLIENT expression value has the wrong type",
-            Self::InvalidCall => "a CLIENT expression call has invalid arguments",
-            Self::FieldPath => "a CLIENT expression field path could not be resolved",
-            Self::RecursionLimit => "the CLIENT expression call-depth limit was exceeded",
-            Self::Arithmetic => "client.arithmetic_error",
-            Self::ExecutionLimit => "client.execution_limit",
-            Self::MissingReturn => "client.control_flow_missing_return",
-            Self::InputUnavailable => "client.input_unavailable",
-            Self::DynamicInvocation => "client.dynamic_invocation_failed",
-        })
-    }
-}
-
-impl Error for ClientExpressionError {}
-
-/// A CLIENT resource could not produce a value for an expression.
-#[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientResourceExecutionError {
-    /// No explicit resource executor was supplied by the caller.
-    ExecutorUnavailable,
-    /// The resource request is active and has not produced a terminal result.
-    Pending {
-        /// The resource identity waiting for completion.
-        key: ClientResourceKey,
-        /// The active request generation.
-        generation: ClientResourceGeneration,
-    },
-    /// The resource completed with a redacted structured failure code.
-    Failed(String),
-    /// The resource was cancelled before a value became available.
-    Cancelled,
-    /// The resource lifecycle or request invariants rejected the operation.
-    Invalid(ClientResourceError),
-}
-
-impl fmt::Display for ClientResourceExecutionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExecutorUnavailable => formatter
-                .write_str("CLIENT resource execution requires an explicit resource executor"),
-            Self::Failed(code) => write!(formatter, "CLIENT resource failed: {code}"),
-            Self::Pending { generation, .. } => {
-                write!(
-                    formatter,
-                    "CLIENT resource request is pending at generation {}",
-                    generation.value(),
-                )
-            }
-            Self::Cancelled => formatter.write_str("CLIENT resource was cancelled"),
-            Self::Invalid(source) => source.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ClientResourceExecutionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Invalid(source) => Some(source),
-            Self::ExecutorUnavailable
-            | Self::Pending { .. }
-            | Self::Failed(_)
-            | Self::Cancelled => None,
-        }
-    }
-}
-
-/// A version-four CLIENT state failure (work ADR 0069).
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClientStateError {
-    /// A `USER`-scoped slot has no runtime slice yet and must fail closed.
-    UserScopeUnsupported {
-        /// The declared user-scoped slot identity.
-        slot: StateSlotId,
-    },
-    /// The slot type is not a supported scalar or registered value type.
-    UnsupportedSlotType {
-        /// The slot whose type cannot be resolved.
-        slot: StateSlotId,
-    },
-    /// A caller-provided state value does not match the declared slot type.
-    StoredTypeMismatch {
-        /// The slot whose stored value has the wrong runtime type.
-        slot: StateSlotId,
-    },
-    /// A state default value does not match the declared slot type.
-    DefaultTypeMismatch {
-        /// The slot whose checked default has the wrong runtime type.
-        slot: StateSlotId,
-    },
-    /// A typed null default could not be constructed for the slot type.
-    NullDefault {
-        /// The slot whose null default cannot be represented.
-        slot: StateSlotId,
-    },
-}
-
-impl fmt::Display for ClientStateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UserScopeUnsupported { .. } => {
-                formatter.write_str("USER CLIENT state has no runtime slice yet and fails closed")
-            }
-            Self::UnsupportedSlotType { .. } => {
-                formatter.write_str("CLIENT state slot type is not supported locally")
-            }
-            Self::StoredTypeMismatch { .. } => {
-                formatter.write_str("CLIENT state value has the wrong runtime type")
-            }
-            Self::DefaultTypeMismatch { .. } => {
-                formatter.write_str("CLIENT state default has the wrong runtime type")
-            }
-            Self::NullDefault { .. } => {
-                formatter.write_str("CLIENT state null default cannot be represented")
-            }
-        }
-    }
-}
-
-impl Error for ClientStateError {}
-
-/// A failure while checking the execution domain and payload digest of a CLIENT artifact.
-///
-/// This local check provides payload integrity only. It does not authenticate
-/// an artifact's provenance, signature, sandbox policy, or host capabilities.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClientArtifactIntegrityError {
-    /// The artifact is not marked for client execution.
-    WrongExecutionDomain,
-    /// The canonical payload digest could not be computed or did not match.
-    PayloadDigest,
-}
-
-impl fmt::Display for ClientArtifactIntegrityError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::WrongExecutionDomain => "client artifact has the wrong execution domain",
-            Self::PayloadDigest => "client artifact payload digest is invalid",
-        })
-    }
-}
-
-impl Error for ClientArtifactIntegrityError {}
-
-/// An error returned by the closed local CLIENT evaluator.
-#[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientExecutionError {
-    /// The allow evidence targets another active revision.
-    AuthorisationMismatch {
-        /// The function and revision authorised by the security decision.
-        authorised: InvocationTarget,
-        /// The active revision supplied for local evaluation.
-        active: RevisionPair,
-    },
-    /// The active revision cannot form trusted canonical semantics.
-    InvalidActiveRevision {
-        /// The active revision pair.
-        pair: RevisionPair,
-        /// The requested function identity.
-        function: FunctionId,
-        /// The active-revision validation failure.
-        source: ClientActiveRevisionError,
-    },
-    /// The active catalogue does not contain the requested function.
-    FunctionNotFound {
-        /// The active revision pair.
-        pair: RevisionPair,
-        /// The requested function identity.
-        function: FunctionId,
-    },
-    /// The resolved function violates the closed CLIENT contract.
-    InvalidFunction {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The failed closed rule.
-        rule: ClientExecutionRule,
-    },
-    /// The saved CLIENT artefact cannot be decoded.
-    InvalidArtifact {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The artefact decoder error.
-        source: ClientPlanError,
-    },
-    /// A version-2 opaque plan cannot produce a registered runtime value.
-    InvalidOpaqueValue {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The registry or value validation failure.
-        source: ClientOpaqueValueError,
-    },
-    /// The local capability gate denied evaluation (ADR 0060).
-    ///
-    /// The recorded capability is the redacted qualified name only — no
-    /// path, host, or secret argument value is retained.
-    CapabilityDenied {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The redacted qualified capability name.
-        capability: String,
-    },
-    /// A version-3 expression could not produce a typed value.
-    ExpressionEvaluation {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The closed expression failure.
-        source: ClientExpressionError,
-    },
-    /// A version-3 external contract has no installed local runtime.
-    ExternalContract {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The exact contract identity retained by the artifact.
-        identity: String,
-    },
-    /// A version-four plan could not initialise or carry CLIENT state.
-    StateEvaluation {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The closed state failure.
-        source: ClientStateError,
-    },
-    /// A version-six resource expression could not produce a checked value.
-    ResourceEvaluation {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The closed resource failure.
-        source: ClientResourceExecutionError,
-    },
-    /// A version-nine Inspector expression could not produce a checked value.
-    Inspect {
-        /// The resolved execution context.
-        context: ClientExecutionContext,
-        /// The closed Inspector failure.
-        source: ClientInspectError,
-    },
-}
-
-impl From<Box<ClientExecutionError>> for ClientExecutionError {
-    fn from(error: Box<ClientExecutionError>) -> Self {
-        *error
-    }
-}
-impl ClientExecutionError {
-    /// Returns the active revision pair associated with this error.
-    pub const fn pair(&self) -> RevisionPair {
-        match self {
-            Self::AuthorisationMismatch { active, .. } => *active,
-            Self::InvalidActiveRevision { pair, .. } | Self::FunctionNotFound { pair, .. } => *pair,
-            Self::InvalidFunction { context, .. }
-            | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. }
-            | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. }
-            | Self::Inspect { context, .. } => context.pair(),
-        }
-    }
-
-    /// Returns the requested or resolved function identity associated with this error.
-    pub const fn function(&self) -> FunctionId {
-        match self {
-            Self::AuthorisationMismatch { authorised, .. } => authorised.function(),
-            Self::InvalidActiveRevision { function, .. }
-            | Self::FunctionNotFound { function, .. } => *function,
-            Self::InvalidFunction { context, .. }
-            | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. }
-            | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. }
-            | Self::Inspect { context, .. } => context.function(),
-        }
-    }
-
-    /// Returns the resolved context after function resolution.
-    pub const fn context(&self) -> Option<&ClientExecutionContext> {
-        match self {
-            Self::AuthorisationMismatch { .. }
-            | Self::InvalidActiveRevision { .. }
-            | Self::FunctionNotFound { .. } => None,
-            Self::InvalidFunction { context, .. }
-            | Self::InvalidArtifact { context, .. }
-            | Self::InvalidOpaqueValue { context, .. }
-            | Self::CapabilityDenied { context, .. }
-            | Self::ExpressionEvaluation { context, .. }
-            | Self::ExternalContract { context, .. }
-            | Self::StateEvaluation { context, .. }
-            | Self::ResourceEvaluation { context, .. }
-            | Self::Inspect { context, .. } => Some(context),
-        }
-    }
-}
-
-impl fmt::Display for ClientExecutionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AuthorisationMismatch { .. } => {
-                formatter.write_str("the CLIENT authorisation does not match the active revision")
-            }
-            Self::InvalidActiveRevision { .. } => {
-                formatter.write_str("the active revision cannot be trusted")
-            }
-            Self::FunctionNotFound { .. } => {
-                formatter.write_str("the active revision does not contain this function")
-            }
-            Self::InvalidFunction { rule, .. } => rule.fmt(formatter),
-            Self::InvalidArtifact { .. } | Self::InvalidOpaqueValue { .. } => {
-                formatter.write_str("the saved CLIENT function cannot be evaluated")
-            }
-            Self::CapabilityDenied { capability, .. } => write!(
-                formatter,
-                "the CLIENT function requires the capability {capability} which is not granted"
-            ),
-            Self::ExpressionEvaluation { source, .. } => source.fmt(formatter),
-            Self::ExternalContract { identity, .. } => write!(
-                formatter,
-                "the CLIENT runtime contract {identity} is not available"
-            ),
-            Self::StateEvaluation { source, .. } => source.fmt(formatter),
-            Self::ResourceEvaluation { source, .. } => source.fmt(formatter),
-            Self::Inspect { source, .. } => source.fmt(formatter),
-        }
-    }
-}
-impl Error for ClientExecutionError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidActiveRevision { source, .. } => Some(source),
-            Self::InvalidArtifact { source, .. } => Some(source),
-            Self::InvalidOpaqueValue { source, .. } => Some(source),
-            Self::StateEvaluation { source, .. } => Some(source),
-            Self::ResourceEvaluation { source, .. } => source.source(),
-            Self::Inspect { source, .. } => Some(source),
-            Self::AuthorisationMismatch { .. }
-            | Self::FunctionNotFound { .. }
-            | Self::InvalidFunction { .. }
-            | Self::CapabilityDenied { .. }
-            | Self::ExpressionEvaluation { .. }
-            | Self::ExternalContract { .. } => None,
-        }
-    }
-}
 
 /// Evaluates one closed CLIENT function from one active revision.
 ///
@@ -1260,6 +765,7 @@ fn evaluate_function_with_fuel(
             context,
             lineage,
             return_shape,
+            revision.artifact().version(),
             &arguments,
             &bound_declarations,
             grants,
@@ -1337,6 +843,7 @@ fn evaluate_plan(
     context: ClientExecutionContext,
     lineage: ObserverLineage,
     return_shape: ClientReturnShape,
+    artifact_version: u32,
     arguments: &[(ParameterId, RuntimeValue)],
     declarations: &[capability::LocalCapabilityDeclaration],
     grants: &capability::LocalCapabilityGrantSet,
@@ -1403,7 +910,7 @@ fn evaluate_plan(
                 .map_err(Box::new)
             }
         }
-        ClientReturnShape::Inspect(expected) | ClientReturnShape::Source(expected) => {
+        ClientReturnShape::Inspect(expected) => {
             let plan = ExpressionClientPlan::decode(payload).map_err(|source| {
                 Box::new(ClientExecutionError::InvalidArtifact { context, source })
             })?;
@@ -1426,6 +933,78 @@ fn evaluate_plan(
             )
             .map_err(Box::new)
         }
+        ClientReturnShape::Source(expected) => match artifact_version {
+            orna_artifact::client_plan::PROCEDURAL_FORMAT_VERSION => {
+                let plan = ProceduralClientPlan::decode(payload).map_err(|source| {
+                    Box::new(ClientExecutionError::InvalidArtifact { context, source })
+                })?;
+                preflight_client_procedural_calls(active, &plan, context)?;
+                evaluate_procedural_plan(
+                    active,
+                    &plan,
+                    context,
+                    lineage,
+                    expected,
+                    false,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                )
+                .map_err(Box::new)
+            }
+            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION => {
+                let plan = ControlFlowClientPlan::decode(payload).map_err(|source| {
+                    Box::new(ClientExecutionError::InvalidArtifact { context, source })
+                })?;
+                preflight_client_control_flow_calls(active, &plan, context)?;
+                evaluate_control_flow_plan(
+                    active,
+                    &plan,
+                    context,
+                    lineage,
+                    expected,
+                    false,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                    fuel,
+                )
+                .map_err(Box::new)
+            }
+            _ => {
+                let plan = ExpressionClientPlan::decode(payload).map_err(|source| {
+                    Box::new(ClientExecutionError::InvalidArtifact { context, source })
+                })?;
+                preflight_client_expression_calls(active, plan.expression(), context)?;
+                evaluate_expression_plan_with_fuel(
+                    active,
+                    plan.expression(),
+                    context,
+                    lineage,
+                    expected,
+                    arguments,
+                    declarations,
+                    grants,
+                    state,
+                    depth,
+                    principal,
+                    executor,
+                    local_environment,
+                    fuel,
+                )
+                .map_err(Box::new)
+            }
+        },
         ClientReturnShape::StreamState(expected) => {
             let plan = StateClientPlan::decode(payload)
                 .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
@@ -1994,8 +1573,6 @@ fn evaluate_resource_plan(
 /// plans: the caller's declaration list is not consulted, so a recursive
 /// CLIENT call validates its own stored requirements instead of inheriting
 /// the parent declaration list.
-#[cfg(test)]
-// Evaluator calls retain explicit context and state parameters for recursive semantics.
 #[allow(clippy::too_many_arguments)]
 // ClientExecutionError retains its accepted public context and source diagnostics.
 #[allow(clippy::result_large_err)]
@@ -2275,310 +1852,6 @@ fn validate_procedural_resource_binding(
         ));
     }
     Ok(())
-}
-
-#[derive(Clone, Debug)]
-struct ControlFlowReturnValue {
-    value: RuntimeValue,
-    stream: bool,
-}
-
-// Evaluator calls retain explicit context and state parameters for recursive semantics.
-#[allow(clippy::too_many_arguments)]
-// ClientExecutionError retains its accepted public context and source diagnostics.
-#[allow(clippy::result_large_err)]
-fn evaluate_control_flow_plan(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    context: ClientExecutionContext,
-    lineage: ObserverLineage,
-    expected: ResolvedType,
-    stream_result: bool,
-    arguments: &[(ParameterId, RuntimeValue)],
-    declarations: &[capability::LocalCapabilityDeclaration],
-    grants: &capability::LocalCapabilityGrantSet,
-    state: &mut ClientStateStore,
-    depth: usize,
-    principal: PrincipalId,
-    executor: &mut Option<&mut dyn ClientResourceExecutor>,
-    local_environment: &mut ClientLocalEnvironment,
-    fuel: &mut ClientExecutionFuel,
-) -> Result<RuntimeValue, ClientExecutionError> {
-    let returned = evaluate_control_flow_block(
-        active,
-        plan,
-        plan.statements(),
-        context,
-        lineage,
-        arguments,
-        declarations,
-        grants,
-        state,
-        depth,
-        principal,
-        executor,
-        local_environment,
-        fuel,
-    )?
-    .ok_or_else(|| expression_error(context, ClientExpressionError::MissingReturn))?;
-
-    let matches = if stream_result {
-        returned.stream && runtime_stream_value_matches(active, &returned.value, expected)
-    } else {
-        !returned.stream && runtime_value_matches(active, &returned.value, expected)
-    };
-    if matches {
-        Ok(returned.value)
-    } else {
-        Err(expression_error(
-            context,
-            ClientExpressionError::TypeMismatch,
-        ))
-    }
-}
-
-// Evaluator calls retain explicit context and state parameters for recursive semantics.
-#[allow(clippy::too_many_arguments)]
-// ClientExecutionError retains its accepted public context and source diagnostics.
-#[allow(clippy::result_large_err)]
-fn evaluate_control_flow_block(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    statements: &[ControlFlowStatement],
-    context: ClientExecutionContext,
-    lineage: ObserverLineage,
-    arguments: &[(ParameterId, RuntimeValue)],
-    declarations: &[capability::LocalCapabilityDeclaration],
-    grants: &capability::LocalCapabilityGrantSet,
-    state: &mut ClientStateStore,
-    depth: usize,
-    principal: PrincipalId,
-    executor: &mut Option<&mut dyn ClientResourceExecutor>,
-    local_environment: &mut ClientLocalEnvironment,
-    fuel: &mut ClientExecutionFuel,
-) -> Result<Option<ControlFlowReturnValue>, ClientExecutionError> {
-    for statement in statements {
-        fuel.consume(context)?;
-        if let Some(returned) = evaluate_control_flow_statement(
-            active,
-            plan,
-            statement,
-            context,
-            lineage,
-            arguments,
-            declarations,
-            grants,
-            state,
-            depth,
-            principal,
-            executor,
-            local_environment,
-            fuel,
-        )? {
-            return Ok(Some(returned));
-        }
-    }
-    Ok(None)
-}
-
-// Evaluator calls retain explicit context and state parameters for recursive semantics.
-#[allow(clippy::too_many_arguments)]
-// ClientExecutionError retains its accepted public context and source diagnostics.
-#[allow(clippy::result_large_err)]
-fn evaluate_control_flow_statement(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    statement: &ControlFlowStatement,
-    context: ClientExecutionContext,
-    lineage: ObserverLineage,
-    arguments: &[(ParameterId, RuntimeValue)],
-    declarations: &[capability::LocalCapabilityDeclaration],
-    grants: &capability::LocalCapabilityGrantSet,
-    state: &mut ClientStateStore,
-    depth: usize,
-    principal: PrincipalId,
-    executor: &mut Option<&mut dyn ClientResourceExecutor>,
-    local_environment: &mut ClientLocalEnvironment,
-    fuel: &mut ClientExecutionFuel,
-) -> Result<Option<ControlFlowReturnValue>, ClientExecutionError> {
-    match statement {
-        ControlFlowStatement::Let { local, expression }
-        | ControlFlowStatement::Assignment { local, expression } => {
-            let Some(declaration) = plan
-                .locals()
-                .iter()
-                .find(|candidate| candidate.local_id() == *local)
-            else {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::ParameterNotBound,
-                ));
-            };
-            if matches!(statement, ControlFlowStatement::Assignment { .. })
-                && !local_environment.contains_key(local)
-            {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::ParameterNotBound,
-                ));
-            }
-            let binding = evaluate_procedural_local_with_fuel(
-                active,
-                declaration,
-                expression,
-                context,
-                lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )?;
-            // A validated plan has one declaration per local identity. A LET
-            // inside a repeated block reinitialises that declaration each time.
-            local_environment.insert(*local, binding);
-            Ok(None)
-        }
-        ControlFlowStatement::Return(return_statement) => {
-            let Some(expression) = return_statement.expression() else {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::TypeMismatch,
-                ));
-            };
-            let stream = expression_returns_stream(active, expression, local_environment);
-            let value = evaluate_expression_with_fuel(
-                active,
-                expression,
-                context,
-                &lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )?;
-            Ok(Some(ControlFlowReturnValue { value, stream }))
-        }
-        ControlFlowStatement::If(if_statement) => {
-            for branch in if_statement.branches() {
-                fuel.consume(context)?;
-                let condition = evaluate_expression_with_fuel(
-                    active,
-                    branch.condition(),
-                    context,
-                    &lineage,
-                    arguments,
-                    declarations,
-                    grants,
-                    state,
-                    depth,
-                    principal,
-                    executor,
-                    local_environment,
-                    fuel,
-                )?;
-                let RuntimeValue::Boolean(condition) = condition else {
-                    return Err(expression_error(
-                        context,
-                        ClientExpressionError::TypeMismatch,
-                    ));
-                };
-                if condition {
-                    return evaluate_control_flow_block(
-                        active,
-                        plan,
-                        branch.statements(),
-                        context,
-                        lineage,
-                        arguments,
-                        declarations,
-                        grants,
-                        state,
-                        depth,
-                        principal,
-                        executor,
-                        local_environment,
-                        fuel,
-                    );
-                }
-            }
-            if let Some(statements) = if_statement.else_statements() {
-                evaluate_control_flow_block(
-                    active,
-                    plan,
-                    statements,
-                    context,
-                    lineage,
-                    arguments,
-                    declarations,
-                    grants,
-                    state,
-                    depth,
-                    principal,
-                    executor,
-                    local_environment,
-                    fuel,
-                )
-            } else {
-                Ok(None)
-            }
-        }
-        ControlFlowStatement::While(while_statement) => loop {
-            fuel.consume(context)?;
-            fuel.consume(context)?;
-            let condition = evaluate_expression_with_fuel(
-                active,
-                while_statement.condition(),
-                context,
-                &lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )?;
-            let RuntimeValue::Boolean(condition) = condition else {
-                return Err(expression_error(
-                    context,
-                    ClientExpressionError::TypeMismatch,
-                ));
-            };
-            if !condition {
-                return Ok(None);
-            }
-            if let Some(returned) = evaluate_control_flow_block(
-                active,
-                plan,
-                while_statement.statements(),
-                context,
-                lineage,
-                arguments,
-                declarations,
-                grants,
-                state,
-                depth,
-                principal,
-                executor,
-                local_environment,
-                fuel,
-            )? {
-                return Ok(Some(returned));
-            }
-        },
-    }
 }
 
 // Evaluator calls retain explicit context and state parameters for recursive semantics.
@@ -3335,322 +2608,6 @@ fn evaluate_expression(
         local_environment,
         &mut fuel,
     )?)
-}
-
-// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
-
-#[allow(clippy::result_large_err)]
-fn validate_control_flow_plan_types(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    context: ClientExecutionContext,
-) -> Result<(), ClientExecutionError> {
-    validate_control_flow_statements_types(active, plan, plan.statements(), context)
-}
-
-// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
-
-#[allow(clippy::result_large_err)]
-fn validate_control_flow_statements_types(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    statements: &[orna_artifact::client_plan::ControlFlowStatement],
-    context: ClientExecutionContext,
-) -> Result<(), ClientExecutionError> {
-    for statement in statements {
-        match statement {
-            orna_artifact::client_plan::ControlFlowStatement::Let { expression, .. }
-            | orna_artifact::client_plan::ControlFlowStatement::Assignment { expression, .. } => {
-                validate_control_flow_expression_type(active, plan, expression, context)?;
-            }
-            orna_artifact::client_plan::ControlFlowStatement::Return(return_statement) => {
-                if let Some(expression) = return_statement.expression() {
-                    validate_control_flow_expression_type(active, plan, expression, context)?;
-                }
-            }
-            orna_artifact::client_plan::ControlFlowStatement::If(if_statement) => {
-                for branch in if_statement.branches() {
-                    if validate_control_flow_expression_type(
-                        active,
-                        plan,
-                        branch.condition(),
-                        context,
-                    )? != Some(StandardScalar::Boolean)
-                    {
-                        return Err(expression_error(
-                            context,
-                            ClientExpressionError::TypeMismatch,
-                        ));
-                    }
-                    validate_control_flow_statements_types(
-                        active,
-                        plan,
-                        branch.statements(),
-                        context,
-                    )?;
-                }
-                if let Some(statements) = if_statement.else_statements() {
-                    validate_control_flow_statements_types(active, plan, statements, context)?;
-                }
-            }
-            orna_artifact::client_plan::ControlFlowStatement::While(while_statement) => {
-                if validate_control_flow_expression_type(
-                    active,
-                    plan,
-                    while_statement.condition(),
-                    context,
-                )? != Some(StandardScalar::Boolean)
-                {
-                    return Err(expression_error(
-                        context,
-                        ClientExpressionError::TypeMismatch,
-                    ));
-                }
-                validate_control_flow_statements_types(
-                    active,
-                    plan,
-                    while_statement.statements(),
-                    context,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-// ClientExecutionError or action errors retain their accepted diagnostic context and variants.
-
-#[allow(clippy::result_large_err)]
-fn validate_control_flow_expression_type(
-    active: &ActiveDatabaseRevision,
-    plan: &ControlFlowClientPlan,
-    expression: &ClientExpressionNode,
-    context: ClientExecutionContext,
-) -> Result<Option<StandardScalar>, ClientExecutionError> {
-    let mismatch = || expression_error(context, ClientExpressionError::TypeMismatch);
-    match expression {
-        ClientExpressionNode::String { .. } => Ok(Some(StandardScalar::CharacterLargeObject)),
-        ClientExpressionNode::Integer { value } => {
-            i32::try_from(*value).map_err(|_| mismatch())?;
-            Ok(Some(StandardScalar::Integer))
-        }
-        ClientExpressionNode::Boolean { .. } => Ok(Some(StandardScalar::Boolean)),
-        ClientExpressionNode::ParameterRead { parameter } => {
-            Ok(resolve_client_function(active, context.function())
-                .and_then(|resolved| resolved.definition.parameter_by_id(*parameter))
-                .and_then(|parameter| {
-                    static_control_flow_scalar_for_type(active, parameter.resolved_type())
-                }))
-        }
-        ClientExpressionNode::LocalRead { local } => {
-            let Some(declaration) = plan
-                .locals()
-                .iter()
-                .find(|candidate| candidate.local() == *local)
-            else {
-                return Err(mismatch());
-            };
-            if declaration.kind() == ClientLocalKind::Value {
-                let Some(resolved) = resolve_client_local_type(active, declaration.type_id())
-                else {
-                    return Err(mismatch());
-                };
-                Ok(static_control_flow_scalar_for_type(active, resolved))
-            } else {
-                Ok(None)
-            }
-        }
-        ClientExpressionNode::FieldPath { root, fields } => {
-            let Some(mut resolved) = resolve_client_function(active, context.function())
-                .and_then(|function| function.definition.parameter_by_id(*root))
-                .map(|parameter| parameter.resolved_type())
-            else {
-                return Ok(None);
-            };
-            for field in fields {
-                let Some(target) = resolved.reference_target() else {
-                    return Ok(None);
-                };
-                let Some(definition) = active.catalogue().object_type_by_id(target).or_else(|| {
-                    active
-                        .catalogue_hash_context()
-                        .standard()
-                        .and_then(|standard| standard.catalogue().object_type_by_id(target))
-                }) else {
-                    return Ok(None);
-                };
-                let Some(field) = definition.field_by_id(*field) else {
-                    return Ok(None);
-                };
-                resolved = field.resolved_type();
-            }
-            Ok(static_control_flow_scalar_for_type(active, resolved))
-        }
-        ClientExpressionNode::Concat { left, right } => {
-            let left = validate_control_flow_expression_type(active, plan, left, context)?;
-            let right = validate_control_flow_expression_type(active, plan, right, context)?;
-            if left != Some(StandardScalar::CharacterLargeObject)
-                || right != Some(StandardScalar::CharacterLargeObject)
-            {
-                return Err(mismatch());
-            }
-            Ok(Some(StandardScalar::CharacterLargeObject))
-        }
-        ClientExpressionNode::Unary {
-            operator,
-            expression,
-        } => {
-            let operand = validate_control_flow_expression_type(active, plan, expression, context)?;
-            let expected = match operator {
-                ControlFlowUnaryOperator::Plus | ControlFlowUnaryOperator::Minus => {
-                    StandardScalar::Integer
-                }
-                ControlFlowUnaryOperator::Not => StandardScalar::Boolean,
-            };
-            if operand != Some(expected) {
-                return Err(mismatch());
-            }
-            Ok(Some(expected))
-        }
-        ClientExpressionNode::Binary {
-            operator,
-            left,
-            right,
-        } => {
-            let left = validate_control_flow_expression_type(active, plan, left, context)?;
-            let right = validate_control_flow_expression_type(active, plan, right, context)?;
-            match operator {
-                ControlFlowBinaryOperator::And | ControlFlowBinaryOperator::Or => {
-                    if left != Some(StandardScalar::Boolean)
-                        || right != Some(StandardScalar::Boolean)
-                    {
-                        return Err(mismatch());
-                    }
-                    Ok(Some(StandardScalar::Boolean))
-                }
-                ControlFlowBinaryOperator::Add
-                | ControlFlowBinaryOperator::Subtract
-                | ControlFlowBinaryOperator::Multiply
-                | ControlFlowBinaryOperator::Divide
-                | ControlFlowBinaryOperator::Modulo => {
-                    if left != Some(StandardScalar::Integer)
-                        || right != Some(StandardScalar::Integer)
-                    {
-                        return Err(mismatch());
-                    }
-                    Ok(Some(StandardScalar::Integer))
-                }
-                ControlFlowBinaryOperator::Equal
-                | ControlFlowBinaryOperator::NotEqual
-                | ControlFlowBinaryOperator::LessThan
-                | ControlFlowBinaryOperator::GreaterThan
-                | ControlFlowBinaryOperator::LessThanOrEqual
-                | ControlFlowBinaryOperator::GreaterThanOrEqual => {
-                    let supported = |scalar| {
-                        matches!(
-                            scalar,
-                            Some(
-                                StandardScalar::Integer
-                                    | StandardScalar::Boolean
-                                    | StandardScalar::CharacterLargeObject
-                            )
-                        )
-                    };
-                    if !supported(left) || left != right {
-                        return Err(mismatch());
-                    }
-                    Ok(Some(StandardScalar::Boolean))
-                }
-            }
-        }
-        ClientExpressionNode::Call {
-            function,
-            arguments,
-        } => {
-            for (_, argument) in arguments {
-                validate_control_flow_expression_type(active, plan, argument, context)?;
-            }
-            Ok(
-                resolve_client_function(active, *function).and_then(|resolved| {
-                    let FunctionReturn::Single(return_type) = resolved.definition.return_type()
-                    else {
-                        return None;
-                    };
-                    static_control_flow_scalar_for_type(active, *return_type)
-                }),
-            )
-        }
-        ClientExpressionNode::Await { expression } => {
-            validate_control_flow_expression_type(active, plan, expression, context)?;
-            let type_id = match expression.as_ref() {
-                ClientExpressionNode::Resource { operation } => operation.declared_result_type(),
-                ClientExpressionNode::LocalRead { local } => {
-                    let Some(declaration) = plan
-                        .locals()
-                        .iter()
-                        .find(|candidate| candidate.local() == *local)
-                    else {
-                        return Err(mismatch());
-                    };
-                    if !matches!(declaration.kind(), ClientLocalKind::Resource(_)) {
-                        return Err(mismatch());
-                    }
-                    declaration.type_id()
-                }
-                _ => return Err(mismatch()),
-            };
-            Ok(static_control_flow_scalar_for_type_id(active, type_id))
-        }
-        ClientExpressionNode::Resource { operation } => {
-            for (_, argument) in operation.arguments() {
-                validate_control_flow_expression_type(active, plan, argument, context)?;
-            }
-            Ok(None)
-        }
-        ClientExpressionNode::Action { operation } => {
-            for (_, argument) in operation.arguments() {
-                validate_control_flow_expression_type(active, plan, argument, context)?;
-            }
-            Ok(static_control_flow_scalar_for_type_id(
-                active,
-                operation.declared_result_type(),
-            ))
-        }
-        ClientExpressionNode::Inspect { operation } => {
-            if let Some(target) = operation.target() {
-                validate_control_flow_expression_type(active, plan, target, context)?;
-            }
-            if let Some(options) = operation.options() {
-                validate_control_flow_expression_type(active, plan, options, context)?;
-            }
-            if let Some(snapshot) = operation.snapshot_expression() {
-                validate_control_flow_expression_type(active, plan, snapshot, context)?;
-            }
-            Ok(None)
-        }
-        ClientExpressionNode::SourceIntrospection
-        | ClientExpressionNode::Input
-        | ClientExpressionNode::Evaluate { .. } => Ok(None),
-        ClientExpressionNode::ExternalContract { .. } => Ok(None),
-    }
-}
-
-fn static_control_flow_scalar_for_type_id(
-    active: &ActiveDatabaseRevision,
-    type_id: TypeId,
-) -> Option<StandardScalar> {
-    resolve_client_local_type(active, type_id)
-        .and_then(|resolved| static_control_flow_scalar_for_type(active, resolved))
-}
-
-fn static_control_flow_scalar_for_type(
-    active: &ActiveDatabaseRevision,
-    resolved: ResolvedType,
-) -> Option<StandardScalar> {
-    match ClientResourceValueKind::from_active(active, resolved) {
-        ClientResourceValueKind::Scalar(scalar) => Some(scalar),
-        _ => None,
-    }
 }
 
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]

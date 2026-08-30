@@ -1454,6 +1454,13 @@ fn encode_record_value_types(
                     encoder.u8(4);
                     encoder.type_id(type_id);
                 }
+                RecordValueFieldDescriptorClass::SealedSourceMetadata => {
+                    return Err(CanonicalHashError::UnsupportedRecordValueFieldType {
+                        record_value_type: record_value_type.id(),
+                        field: field.id(),
+                        descriptor: field.descriptor().clone(),
+                    });
+                }
             }
         }
     }

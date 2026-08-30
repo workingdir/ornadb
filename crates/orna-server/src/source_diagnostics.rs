@@ -228,8 +228,8 @@ mod tests {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])
             .expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(
-            &orna_standard::retained_standard_library_v10_snapshot()
-                .and_then(orna_standard::verify_standard_library_v10_snapshot)
+            &orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
                 .expect("standard snapshot"),
         )
         .expect("standard source");
@@ -277,12 +277,13 @@ mod tests {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "bad\u{0007}x")])
             .expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(
-            &orna_standard::retained_standard_library_v10_snapshot()
-                .and_then(orna_standard::verify_standard_library_v10_snapshot)
+            &orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
                 .expect("standard snapshot"),
         )
         .expect("standard source");
-        let report = orna_compiler::check_new_application(&source, &standard).expect("source check");
+        let report =
+            orna_compiler::check_new_application(&source, &standard).expect("source check");
         let diagnostic = report
             .diagnostics()
             .first()
