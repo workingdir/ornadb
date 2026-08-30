@@ -4,8 +4,10 @@
 //! backend. Each artifact decoder validates its complete input before it
 //! returns an executable representation.
 
+mod artifact_codec;
 pub mod client_plan;
 pub mod constant_expression;
+mod parameter_artifact;
 pub mod server_csv_encode;
 pub mod server_json_encode;
 pub mod server_mutation_plan;
