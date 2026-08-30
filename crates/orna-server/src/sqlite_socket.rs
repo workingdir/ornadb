@@ -9,16 +9,23 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt, fs, io,
-    os::unix::{
-        fs::{FileTypeExt, PermissionsExt},
-        net::UnixStream as StandardUnixStream,
+    mem::{MaybeUninit, size_of},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{FileTypeExt, PermissionsExt},
+            net::UnixStream as StandardUnixStream,
+        },
     },
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use orna_core::{
-    InvocationId, ParameterId, catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision,
+    InvocationId, ParameterId,
+    catalogue::CatalogueSnapshot,
+    revision::{ActiveDatabaseRevision, RevisionPair},
+    security::AuthenticatedSession,
     value::OpaqueCodecRegistry,
 };
 use orna_protocol::{
@@ -166,6 +173,85 @@ fn socket_path(database_path: &Path) -> PathBuf {
     path.push(".orna.sock");
     PathBuf::from(path)
 }
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut credentials = MaybeUninit::<nix::libc::ucred>::uninit();
+    let mut length = size_of::<nix::libc::ucred>() as nix::libc::socklen_t;
+    // SAFETY: `credentials` points to writable storage for exactly `length`
+    // bytes, and both pointers remain valid for the duration of getsockopt.
+    let status = unsafe {
+        nix::libc::getsockopt(
+            stream.as_raw_fd(),
+            nix::libc::SOL_SOCKET,
+            nix::libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize != size_of::<nix::libc::ucred>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SO_PEERCRED returned an unexpected credential size",
+        ));
+    }
+    // SAFETY: getsockopt succeeded and reported that it initialised the
+    // complete `ucred` value.
+    Ok(unsafe { credentials.assume_init() }.uid)
+}
+
+#[derive(Clone)]
+struct ConnectionBinding {
+    uid: u32,
+    session: AuthenticatedSession,
+    active_pair: RevisionPair,
+    active: Arc<ActiveDatabaseRevision>,
+}
+
+impl ConnectionBinding {
+    fn matches_active(&self, active: &ActiveDatabaseRevision) -> bool {
+        self.active_pair == active.pair()
+    }
+
+    fn matches_session(&self, session: &AuthenticatedSession) -> bool {
+        self.session == *session
+    }
+}
+
+async fn authenticate_connection(
+    store: &SqliteRevisionStore,
+    active: Arc<ActiveDatabaseRevision>,
+    uid: u32,
+) -> Result<ConnectionBinding, SqliteSocketError> {
+    let session = store
+        .authenticate_local_peer(active.as_ref(), uid)
+        .await
+        .map_err(|source| sqlite_error("could not authenticate local peer", source))?;
+    Ok(ConnectionBinding {
+        uid,
+        session,
+        active_pair: active.pair(),
+        active,
+    })
+}
+
+async fn active_for_connection(
+    store: &SqliteRevisionStore,
+) -> Result<Arc<ActiveDatabaseRevision>, SqliteSocketError> {
+    ApplicationRevisionStore::recover(store)
+        .await
+        .map(Arc::new)
+        .map_err(|source| storage_error("could not recover SQLite database", source))
+}
+
+fn connection_has_current_session(
+    binding: &ConnectionBinding,
+    active: &ActiveDatabaseRevision,
+    session: &AuthenticatedSession,
+) -> bool {
+    binding.matches_active(active) && binding.matches_session(session)
+}
 
 struct SocketCleanup {
     path: PathBuf,
@@ -267,8 +353,7 @@ struct ProtocolVersions {
 }
 
 impl ProtocolVersions {
-    fn new(active: ActiveDatabaseRevision) -> Self {
-        let active = Arc::new(active);
+    fn new(active: Arc<ActiveDatabaseRevision>) -> Self {
         let catalogue = Arc::new(active.catalogue().clone());
         let registry = active
             .catalogue_hash_context()
@@ -479,6 +564,8 @@ async fn serve_connection(
     store: Arc<SqliteRevisionStore>,
     mut stream: UnixStream,
 ) -> Result<(), SqliteSocketError> {
+    let uid = peer_uid(&stream)
+        .map_err(|source| SqliteSocketError::io("could not authenticate local peer", source))?;
     let mut hello = [0_u8; 12];
     let hello_eof = match timeout(
         HANDSHAKE_TIMEOUT,
@@ -495,10 +582,28 @@ async fn serve_connection(
     let Some(requested) = RequestedVersion::from_hello(&hello) else {
         return Ok(());
     };
-    let active = ApplicationRevisionStore::recover(store.as_ref())
+
+    let initial_active = active_for_connection(store.as_ref()).await?;
+    let initial_binding =
+        authenticate_connection(store.as_ref(), Arc::clone(&initial_active), uid).await?;
+    let active = active_for_connection(store.as_ref()).await?;
+    if !initial_binding.matches_active(active.as_ref()) {
+        return Ok(());
+    }
+    let session = store
+        .authenticate_local_peer(active.as_ref(), uid)
         .await
-        .map_err(|source| storage_error("could not recover SQLite database", source))?;
-    let versions = ProtocolVersions::new(active);
+        .map_err(|source| sqlite_error("could not authenticate local peer", source))?;
+    if !initial_binding.matches_session(&session) {
+        return Ok(());
+    }
+    let binding = ConnectionBinding {
+        uid,
+        session,
+        active_pair: active.pair(),
+        active: Arc::clone(&active),
+    };
+    let versions = ProtocolVersions::new(Arc::clone(&active));
     stream
         .write_all(requested.acknowledgement())
         .await
@@ -508,7 +613,7 @@ async fn serve_connection(
 
     match versions.select(requested) {
         ProtocolVersion::Fallback(marker) => serve_fallback(stream, marker).await,
-        version => serve_typed(store, version, stream).await,
+        version => serve_typed(store, version, stream, binding).await,
     }
 }
 
@@ -516,6 +621,7 @@ async fn serve_typed(
     store: Arc<SqliteRevisionStore>,
     version: ProtocolVersion,
     mut stream: UnixStream,
+    binding: ConnectionBinding,
 ) -> Result<(), SqliteSocketError> {
     let mut connection = ProtocolConnection::new();
     loop {
@@ -556,6 +662,7 @@ async fn serve_typed(
                         &mut stream,
                         call_stream,
                         call,
+                        &binding,
                     )
                     .await?;
                 }
@@ -601,8 +708,9 @@ async fn dispatch_call(
     stream: &mut UnixStream,
     call_stream: u64,
     call: RawCall,
+    binding: &ConnectionBinding,
 ) -> Result<(), SqliteSocketError> {
-    let active = match ApplicationRevisionStore::recover(store).await {
+    let active = match active_for_connection(store).await {
         Ok(active) => active,
         Err(error) => {
             send_typed_failure(
@@ -617,15 +725,14 @@ async fn dispatch_call(
             return Ok(());
         }
     };
-    if active.catalogue().function_by_id(call.function).is_none() {
-        send_typed_failure(
-            version,
-            connection,
-            stream,
-            call_stream,
-            CallFailure::TargetUnavailable,
-        )
-        .await?;
+    let session = match store
+        .authenticate_local_peer(active.as_ref(), binding.uid)
+        .await
+    {
+        Ok(session) => session,
+        Err(_) => return Ok(()),
+    };
+    if !connection_has_current_session(binding, active.as_ref(), &session) {
         return Ok(());
     }
     let arguments: Vec<(ParameterId, orna_core::value::RuntimeValue)> = call
@@ -636,8 +743,8 @@ async fn dispatch_call(
     let invocation = InvocationId::new();
     let execution = match store
         .execute_local_peer_server_function_at(
-            &active,
-            nix::unistd::geteuid().as_raw(),
+            binding.active.as_ref(),
+            binding.uid,
             invocation,
             call.function,
             &arguments,
@@ -646,6 +753,20 @@ async fn dispatch_call(
     {
         Ok(execution) => execution,
         Err(error) => {
+            let current_active = match active_for_connection(store).await {
+                Ok(active) => active,
+                Err(_) => return Ok(()),
+            };
+            let current_session = match store
+                .authenticate_local_peer(current_active.as_ref(), binding.uid)
+                .await
+            {
+                Ok(session) => session,
+                Err(_) => return Ok(()),
+            };
+            if !connection_has_current_session(binding, current_active.as_ref(), &current_session) {
+                return Ok(());
+            }
             send_typed_failure(
                 version,
                 connection,
@@ -658,6 +779,16 @@ async fn dispatch_call(
             return Ok(());
         }
     };
+    let execution_session_matches = match &execution {
+        orna_sqlite::SqliteExecutionResult::Allowed { session, .. }
+        | orna_sqlite::SqliteExecutionResult::Denied { session, .. }
+        | orna_sqlite::SqliteExecutionResult::Failed { session, .. } => {
+            binding.matches_session(session)
+        }
+    };
+    if !execution_session_matches {
+        return Ok(());
+    }
     let values = match execution {
         orna_sqlite::SqliteExecutionResult::Denied { .. } => {
             send_typed_failure(
@@ -981,4 +1112,73 @@ fn raw_frame(marker: &[u8; 4], tag: u8, stream: u64, payload: &[u8]) -> Vec<u8> 
     encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     encoded.extend_from_slice(payload);
     encoded
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    fn test_database_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "orna-sqlite-socket-auth-{}.db",
+            InvocationId::new().canonical()
+        ))
+    }
+
+    #[tokio::test]
+    async fn unauthorized_peer_is_closed_before_handshake_acknowledgement() {
+        let database_path = test_database_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&database_path))
+            .await
+            .expect("SQLite store opens");
+        ApplicationRevisionStore::bootstrap(&store)
+            .await
+            .expect("SQLite store bootstraps");
+        let (mut client, server) = UnixStream::pair().expect("Unix stream pair");
+        let task = tokio::spawn(serve_connection(Arc::new(store), server));
+
+        client
+            .write_all(&CLIENT_HELLO_V1)
+            .await
+            .expect("client hello writes");
+        let mut acknowledgement = [0_u8; 12];
+        let read = timeout(HANDSHAKE_TIMEOUT, client.read(&mut acknowledgement))
+            .await
+            .expect("unauthorized peer closes promptly")
+            .expect("client observes close");
+        assert_eq!(read, 0, "unauthorized peer must not receive an ACK");
+        assert!(task.await.expect("connection task joins").is_err());
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[tokio::test]
+    async fn authenticated_peer_receives_handshake_acknowledgement() {
+        let database_path = test_database_path();
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&database_path))
+            .await
+            .expect("SQLite store opens");
+        ApplicationRevisionStore::bootstrap(&store)
+            .await
+            .expect("SQLite store bootstraps");
+        store
+            .provision_local_peer(nix::unistd::getuid().as_raw())
+            .await
+            .expect("local peer provisions");
+        let (mut client, server) = UnixStream::pair().expect("Unix stream pair");
+        let task = tokio::spawn(serve_connection(Arc::new(store), server));
+
+        client
+            .write_all(&CLIENT_HELLO_V1)
+            .await
+            .expect("client hello writes");
+        let mut acknowledgement = [0_u8; 12];
+        timeout(HANDSHAKE_TIMEOUT, client.read_exact(&mut acknowledgement))
+            .await
+            .expect("authenticated peer receives promptly")
+            .expect("acknowledgement reads");
+        assert_eq!(acknowledgement, SERVER_ACK_V1);
+        drop(client);
+        assert!(task.await.expect("connection task joins").is_ok());
+        let _ = fs::remove_file(database_path);
+    }
 }

@@ -27,7 +27,7 @@ use orna_server::{
 };
 use orna_sqlite::{SqliteConfig, SqliteRevisionStore};
 use orna_standard::INTEGER_TYPE_ID;
-use orna_storage::MigrationLedgerEntry;
+use orna_storage::{ApplicationRevisionStore, MigrationLedgerEntry};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -453,22 +453,21 @@ fn local_source_diff_is_read_only_and_rejects_fresh_database() {
         directory.path(),
         &source_arguments(&database, "diff", &reduced),
     )
-    .expect("bounded semantic source diff");
+    .expect("bounded SQLite source diff");
     assert_eq!(
         reduced_diff.status.code(),
-        Some(0),
-        "semantic source diff: {reduced_diff:?}"
+        Some(1),
+        "unsupported physical source diff must fail closed: {reduced_diff:?}"
     );
     assert!(
-        reduced_diff.stderr.is_empty(),
-        "semantic source diff must not write stderr: {:?}",
+        String::from_utf8_lossy(&reduced_diff.stderr)
+            .contains("durable object drops are not supported"),
+        "unsupported physical source diff must report the capability boundary: {:?}",
         reduced_diff.stderr
     );
-    let reduced_text =
-        String::from_utf8(reduced_diff.stdout).expect("semantic source diff output is UTF-8");
     assert!(
-        reduced_text.starts_with("semantic diff ") && reduced_text.contains("\n- "),
-        "semantic source diff must render dropped definitions: {reduced_text:?}"
+        reduced_diff.stdout.is_empty(),
+        "failed source diff must not render a partial semantic report"
     );
     assert_eq!(
         sqlite_revision_state(&database),
@@ -636,10 +635,21 @@ fn local_sqlite_user_state_writes_conflicts_and_reopens() {
         let store = SqliteRevisionStore::open(&SqliteConfig::new(&database))
             .await
             .expect("open SQLite USER state store");
+        ApplicationRevisionStore::bootstrap(&store)
+            .await
+            .expect("bootstrap SQLite USER state store");
         let principal = store
             .provision_local_peer(nix::unistd::geteuid().as_raw())
             .await
             .expect("provision USER state principal");
+        let active = store.recover().await.expect("recover USER state revision");
+        let security = store
+            .security_snapshot(&active)
+            .await
+            .expect("recover USER state security");
+        let session = security
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .expect("authenticate USER state principal");
         let change = UserStateChange::new(
             root,
             "profile".to_owned(),
@@ -652,19 +662,30 @@ fn local_sqlite_user_state_writes_conflicts_and_reopens() {
         )
         .expect("construct USER state change");
         let first = store
-            .write_user_state(principal, &change)
+            .write_user_state(&active, &security, &session, &change)
             .await
             .expect("first USER state write");
         let conflict = store
-            .write_user_state(principal, &change)
+            .write_user_state(&active, &security, &session, &change)
             .await
             .expect("conflicting USER state write is a result");
         drop(store);
         let reopened = SqliteRevisionStore::open(&SqliteConfig::new(&database))
             .await
             .expect("reopen SQLite USER state store");
+        let active = reopened
+            .recover()
+            .await
+            .expect("recover reopened USER state revision");
+        let security = reopened
+            .security_snapshot(&active)
+            .await
+            .expect("recover reopened USER state security");
+        let session = security
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .expect("authenticate reopened USER state principal");
         let cells = reopened
-            .load_user_state(principal, root, "profile")
+            .load_user_state(&active, &security, &session, root, "profile")
             .await
             .expect("load USER state after reopen");
         let audit = reopened
@@ -1101,7 +1122,7 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
             .expect("decode unknown-target response"),
         ServerFrame::CallFailed {
             stream: 2,
-            failure: orna_protocol::CallFailure::TargetUnavailable,
+            failure: orna_protocol::CallFailure::ExecuteDenied,
         }
     );
     drop(stream);
@@ -1118,6 +1139,17 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
         let store = SqliteRevisionStore::open(&SqliteConfig::new(&database))
             .await
             .expect("open socket evidence store");
+        let active = store
+            .recover()
+            .await
+            .expect("recover socket evidence revision");
+        let security = store
+            .security_snapshot(&active)
+            .await
+            .expect("recover socket evidence security");
+        let session = security
+            .authenticate_local_peer(nix::unistd::geteuid().as_raw())
+            .expect("authenticate socket evidence principal");
         (
             store
                 .load_invocation_audit(invocation)
@@ -1125,12 +1157,12 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
                 .expect("load socket invocation audit")
                 .expect("socket invocation audit"),
             store
-                .load_inspect_snapshot(invocation, None)
+                .load_inspect_snapshot(&active, &security, &session, invocation, None)
                 .await
                 .expect("load socket inspect snapshot")
                 .expect("socket inspect snapshot"),
             store
-                .load_inspect_trace_events(invocation, 0)
+                .load_inspect_trace_events(&active, &security, &session, invocation, 0)
                 .await
                 .expect("load socket inspect trace"),
         )
