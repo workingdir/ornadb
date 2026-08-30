@@ -1,5 +1,11 @@
 //! Authenticated and sealed SERVER resource production.
 
+use super::resource_producer::{
+    ResourceProducerCancelled, ResourceProducerCommand, ResourceProducerCompleted,
+    ResourceProducerExit, ResourceProducerFailed, ResourceProducerFailureStage,
+    ResourceProducerLifecycle, ResourceProducerPull, ResourceProducerReady,
+    ResourceProducerSealedFailed,
+};
 use super::*;
 async fn wait_for_resource_producer_pull_or_cancel(
     commands: &mut tokio::sync::mpsc::Receiver<ResourceProducerCommand>,
