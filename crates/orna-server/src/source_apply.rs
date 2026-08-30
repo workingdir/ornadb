@@ -14,6 +14,7 @@ use orna_compiler::{
 };
 use orna_core::{
     FunctionId,
+    physical::PhysicalMigrationArtifact,
     revision::{ActiveDatabaseRevision, RevisionPair, VerifiedStandardLibrarySnapshot},
     security::CATALOGUE_HEALTH_FUNCTION_ID,
     source::{SourceBundle, SourceBundleError, SourceUnit},
@@ -34,6 +35,7 @@ use orna_standard::{
     verify_standard_library_v6_snapshot, verify_standard_library_v7_snapshot,
     verify_standard_library_v8_snapshot, verify_standard_library_v9_snapshot,
 };
+use orna_storage::{ApplicationRevisionStore, StorageError};
 use serde::Serialize;
 
 use crate::{EmbeddedHostError, inspect_current_embedded_host, source_diagnostics};
@@ -163,6 +165,11 @@ pub enum InstalledSourceApplyError {
         /// The application-context failure.
         source: StandardApplicationContextError,
     },
+    /// The prepared candidate could not be represented as a physical artifact.
+    Artifact {
+        /// The physical-artifact construction failure.
+        source: orna_core::physical::PhysicalMigrationArtifactError,
+    },
     /// The checked source could not be prepared as one complete candidate.
     Preparation {
         /// The compiler preparation failure.
@@ -234,7 +241,7 @@ impl fmt::Display for InstalledSourceApplyError {
             | Self::ApplicationContext { .. } => {
                 formatter.write_str("orna: embedded standard library could not be verified")
             }
-            Self::Preparation { .. } => {
+            Self::Artifact { .. } | Self::Preparation { .. } => {
                 formatter.write_str("orna: source apply could not prepare the source")
             }
             Self::ExpectedBaseMismatch { expected, active } => write!(
@@ -281,6 +288,7 @@ impl Error for InstalledSourceApplyError {
             Self::StandardLibrary { source } => Some(source),
             Self::StandardSource { source } => Some(source),
             Self::ApplicationContext { source } => Some(source),
+            Self::Artifact { source } => Some(source),
             Self::Preparation { source } => Some(source),
             Self::ResultDocument { source } => Some(source),
             Self::Output { source } | Self::Runtime { source } => Some(source),
@@ -317,7 +325,9 @@ async fn apply_source_bundle(
     kernel: PostgresKernel,
     bundle: SourceBundle,
 ) -> Result<InstalledSourceApplyOutcome, InstalledSourceApplyError> {
-    let active = kernel.recover().await.map_err(map_recovery_error)?;
+    let active = ApplicationRevisionStore::recover(&kernel)
+        .await
+        .map_err(map_storage_recovery_error)?;
     let installed = active
         .catalogue_hash_context()
         .standard()
@@ -357,12 +367,13 @@ async fn apply_source_bundle(
 
     let candidate = prepare_standard_application(&report, active.pair(), &active)
         .map_err(|source| InstalledSourceApplyError::Preparation { source })?;
+    let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate)
+        .map_err(|source| InstalledSourceApplyError::Artifact { source })?;
     let expected_pair = candidate.candidate_pair();
     let document = build_success_document(expected_pair, candidate.candidate())?;
-    let committed = kernel
-        .apply_source_apply(&candidate)
+    let committed = ApplicationRevisionStore::apply_source_apply(&kernel, &candidate, &artifact)
         .await
-        .map_err(map_apply_error)?;
+        .map_err(map_storage_apply_error)?;
     if committed.pair() != expected_pair
         || committed.source().bundle_hash() != candidate.source().bundle_hash()
         || committed.source().revision_hash() != candidate.source().revision_hash()
@@ -456,6 +467,32 @@ fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceApplyError 
     }
 }
 
+fn map_storage_recovery_error(
+    error: StorageError<PostgresKernelError>,
+) -> InstalledSourceApplyError {
+    match error {
+        StorageError::Backend(source) => map_recovery_error(source),
+        StorageError::InvalidRequest(source) => InstalledSourceApplyError::Recovery {
+            source: PostgresKernelError::InvalidLedgerRequest(source),
+        },
+    }
+}
+
+fn map_storage_apply_error(error: StorageError<PostgresKernelError>) -> InstalledSourceApplyError {
+    match error {
+        StorageError::Backend(source) => map_apply_error(source),
+        StorageError::InvalidRequest(
+            orna_storage::MigrationLedgerEntryError::ActiveBaseMismatch { expected, actual },
+        ) => InstalledSourceApplyError::ExpectedBaseMismatch {
+            expected,
+            active: actual,
+        },
+        StorageError::InvalidRequest(source) => InstalledSourceApplyError::Apply {
+            source: PostgresKernelError::InvalidLedgerRequest(source),
+        },
+    }
+}
+
 fn map_apply_error(source: PostgresKernelError) -> InstalledSourceApplyError {
     match source {
         PostgresKernelError::ExpectedBaseMismatch { expected, active } => {
@@ -499,8 +536,6 @@ pub(super) fn select_accepted_standard(
                 .and_then(verify_standard_library_v7_snapshot),
             STANDARD_LIBRARY_V8_REVISION_ID => retained_standard_library_v8_snapshot()
                 .and_then(verify_standard_library_v8_snapshot),
-            STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
-                .and_then(verify_standard_library_v9_snapshot),
             STANDARD_LIBRARY_V9_REVISION_ID => retained_standard_library_v9_snapshot()
                 .and_then(verify_standard_library_v9_snapshot),
             _ => return Err(StandardSelectionError::UnknownRevision),

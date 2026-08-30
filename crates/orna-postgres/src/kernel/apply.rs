@@ -141,8 +141,8 @@ impl PostgresKernel {
 
     /// Applies a compiler-supplied artifact after locking and re-reading the
     /// active revision. This is the backend-neutral
-    /// [`orna_storage::RevisionStore`] entry point; unlike [`Self::apply`], it
-    /// never regenerates or ignores the caller's artifact.
+    /// [`orna_storage::ApplicationRevisionStore`] entry point; unlike
+    /// [`Self::apply`], it never regenerates or ignores the caller's artifact.
     pub(crate) async fn apply_with_artifact(
         &self,
         candidate: &DeployableRevision,
@@ -169,6 +169,26 @@ impl PostgresKernel {
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let apply_result = apply_client(&mut session.client, candidate, None, true).await;
+        let shutdown_result = session.shutdown_for_source_apply().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Applies a compiler-supplied source-apply artifact and records its
+    /// committed candidate pair in protected audit using the reserved
+    /// catalogue-health principal.
+    ///
+    /// The principal is fixed by the installed host contract; callers cannot
+    /// provide request-derived audit identity.
+    pub(crate) async fn apply_source_apply_with_artifact(
+        &self,
+        candidate: &DeployableRevision,
+        artifact: &PhysicalMigrationArtifact,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result = apply_client(&mut session.client, candidate, Some(artifact), true).await;
         let shutdown_result = session.shutdown_for_source_apply().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),

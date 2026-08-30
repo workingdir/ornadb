@@ -100,3 +100,13 @@ CREATE TABLE IF NOT EXISTS orna_application_migrations (
     CHECK (length(canonical_bytes) > 0),
     CHECK (length(digest) = 32)
 );
+
+CREATE TABLE IF NOT EXISTS orna_revision_snapshots (
+    source_revision_id BLOB NOT NULL,
+    catalogue_revision_id BLOB NOT NULL,
+    payload BLOB NOT NULL,
+    PRIMARY KEY (source_revision_id, catalogue_revision_id),
+    CHECK (length(source_revision_id) = 16),
+    CHECK (length(catalogue_revision_id) = 16),
+    CHECK (length(payload) > 0)
+);

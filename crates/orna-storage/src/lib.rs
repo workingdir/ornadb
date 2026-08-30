@@ -16,7 +16,7 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair, Sha256Digest},
 };
 
-/// The seeded active revision pair returned by [`RevisionStore::bootstrap`].
+/// The seeded active revision pair returned by [`ApplicationRevisionStore::bootstrap`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapRevision {
     source: SourceRevisionId,
@@ -349,7 +349,7 @@ impl<E: Error + 'static> Error for StorageError<E> {
 /// check succeeds. A failed apply leaves both the visible ledger and active
 /// pointer unchanged. `read_ledger` returns entries oldest-first in
 /// deterministic apply order, never backend-default row order.
-pub trait RevisionStore {
+pub trait ApplicationRevisionStore {
     /// Backend-specific error type.
     type Error: Error + Send + Sync + 'static;
 
@@ -372,6 +372,21 @@ pub trait RevisionStore {
         candidate: &DeployableRevision,
         artifact: &PhysicalMigrationArtifact,
     ) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send;
+
+    /// Atomically applies a source-apply candidate and preserves the backend's
+    /// protected source-apply audit contract.
+    ///
+    /// Backends without a distinct source-apply audit store inherit the same
+    /// atomic persistence semantics as [`Self::apply`]. PostgreSQL overrides
+    /// this operation to record its fixed-principal protected audit event.
+    fn apply_source_apply(
+        &self,
+        candidate: &DeployableRevision,
+        artifact: &PhysicalMigrationArtifact,
+    ) -> impl Future<Output = Result<ActiveDatabaseRevision, StorageError<Self::Error>>> + Send
+    {
+        self.apply(candidate, artifact)
+    }
 
     /// Reads the migration ledger oldest-first in deterministic apply order.
     fn read_ledger(
@@ -652,7 +667,7 @@ mod tests {
         }
     }
 
-    impl RevisionStore for FakeStore {
+    impl ApplicationRevisionStore for FakeStore {
         type Error = FakeError;
 
         fn bootstrap(

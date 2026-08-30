@@ -1407,6 +1407,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "proptest",
+ "serde",
  "serde_json",
  "sha2",
  "uuid",
@@ -1473,7 +1474,9 @@ dependencies = [
  "orna-postgres",
  "orna-protocol",
  "orna-runtime-tty",
+ "orna-sqlite",
  "orna-standard",
+ "orna-storage",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -1487,8 +1490,12 @@ dependencies = [
 name = "orna-sqlite"
 version = "0.1.0"
 dependencies = [
+ "orna-artifact",
  "orna-core",
+ "orna-standard",
  "orna-storage",
+ "serde",
+ "serde_json",
  "tokio",
  "turso",
 ]
@@ -2131,6 +2138,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2407,6 +2424,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

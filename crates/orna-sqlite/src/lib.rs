@@ -1,8 +1,10 @@
 //! Local Turso SQLite adapter for the backend-neutral Orna revision lifecycle.
 //!
-//! This slice persists source units and schemas from compiler-produced
-//! candidates. Other catalogue categories and semantic artifacts remain
-//! explicitly fail-closed until their durable codecs are implemented.
+//! This adapter persists compiler-produced source/catalogue lineage, semantic
+//! revision snapshots, the application migration ledger, and generated object
+//! tables for the supported physical artifact subset. Its execution surface
+//! handles checked server-plan and parameter-echo artifacts; unsupported value,
+//! enum, record, binding, and artifact shapes remain explicitly fail-closed.
 
 use std::{
     error::Error,
@@ -12,30 +14,54 @@ use std::{
     sync::Arc,
 };
 
+use orna_artifact::server_parameter_echo::ServerParameterEcho;
+use orna_artifact::server_plan::{
+    DistinctServerPlan, Expression, ExpressionKind, IdentitySelectedServerPlan, Scan,
+    SelectBindValue, ServerPlan, UniqueTextSelectedServerPlan,
+};
 use orna_core::{
-    CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    CatalogueRevisionId, FieldId, ObjectId, ParameterId, SchemaId, SourceBundleId,
+    SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
-    catalogue::{CatalogueSnapshot, QualifiedSemanticName, SchemaDefinition},
-    physical::PhysicalMigrationArtifact,
+    catalogue::{
+        CatalogueSnapshot, EnumTypeDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        ObjectTypeDefinition, QualifiedSemanticName, RecordValueTypeDefinition, SchemaDefinition,
+        TypeBinding, ValueTypeDefinition,
+    },
+    physical::{
+        AddField, CreateField, CreateObject, PhysicalFieldType, PhysicalMigrationArtifact,
+        PhysicalOperation,
+    },
     revision::{
         ActiveDatabaseRevision, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
-        DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
+        DefinitionReference, DeployableRevision, ExecutableArtifactKind, ExpressionArtifact,
+        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision,
         StoredSourceUnit,
     },
+    types::{ResolvedType, StandardScalar},
+    value::{RuntimeFloat, RuntimeType, RuntimeValue},
+};
+use orna_standard::{
+    BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
+    DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID, FLOAT_TYPE_ID, INTEGER_TYPE_ID, TIME_TYPE_ID,
+    TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID,
 };
 use orna_storage::{
-    BootstrapRevision, MigrationLedgerEntry, MigrationLedgerEntryError, RevisionStore, StorageError,
+    ApplicationRevisionStore, BootstrapRevision, MigrationLedgerEntry, MigrationLedgerEntryError,
+    StorageError,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Value};
 
 const SCHEMA: &str = include_str!("../migrations/0001_revision_store.sql");
 
-/// A candidate capability that the SQLite revision store does not persist.
+/// A candidate capability that the SQLite revision store does not yet accept.
 ///
-/// The checks use a fixed precedence: catalogue categories first (with
-/// semantic records before their owning categories), then non-schema origins,
-/// and finally the catalogue hash context.
+/// The first SQLite persistence slice accepts schemas, objects, functions,
+/// expressions, references, and schema origins. These checks reject the
+/// remaining catalogue categories in fixed precedence, then the catalogue
+/// hash context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SqliteCapability {
     /// A non-schema object type definition.
@@ -115,6 +141,112 @@ pub struct SqliteConfig {
     path: PathBuf,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct PersistedCatalogueSnapshot {
+    revision: CatalogueRevisionId,
+    schemas: Vec<SchemaDefinition>,
+    object_types: Vec<ObjectTypeDefinition>,
+    value_types: Vec<ValueTypeDefinition>,
+    enum_types: Vec<EnumTypeDefinition>,
+    record_value_types: Vec<RecordValueTypeDefinition>,
+    type_bindings: Vec<TypeBinding>,
+    functions: Vec<FunctionDefinition>,
+}
+
+impl PersistedCatalogueSnapshot {
+    fn from_catalogue(catalogue: &CatalogueSnapshot) -> Self {
+        Self {
+            revision: catalogue.revision(),
+            schemas: catalogue.schemas().to_vec(),
+            object_types: catalogue.object_types().to_vec(),
+            value_types: catalogue.value_types().to_vec(),
+            enum_types: catalogue.enum_types().to_vec(),
+            record_value_types: catalogue.record_value_types().to_vec(),
+            type_bindings: catalogue.type_bindings().to_vec(),
+            functions: catalogue.functions().to_vec(),
+        }
+    }
+
+    fn into_catalogue(self) -> Result<CatalogueSnapshot, SqliteError> {
+        CatalogueSnapshot::new_with_functions_and_record_value_types(
+            self.revision,
+            self.schemas,
+            self.object_types,
+            self.value_types,
+            self.enum_types,
+            self.record_value_types,
+            self.type_bindings,
+            self.functions,
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PersistedActiveRevision {
+    source: StoredSourceRevision,
+    catalogue: PersistedCatalogueSnapshot,
+    catalogue_hash: Sha256Digest,
+    expressions: Vec<ExpressionArtifact>,
+    function_revisions: Vec<FunctionRevisionRecord>,
+    historical_function_revisions: Vec<FunctionRevisionRecord>,
+    origins: Vec<DefinitionOrigin>,
+    references: Vec<DefinitionReference>,
+}
+
+impl PersistedActiveRevision {
+    fn from_active(active: &ActiveDatabaseRevision) -> Self {
+        Self {
+            source: active.source().clone(),
+            catalogue: PersistedCatalogueSnapshot::from_catalogue(active.catalogue()),
+            catalogue_hash: active.catalogue_hash(),
+            expressions: active.expressions().to_vec(),
+            function_revisions: active.function_revisions().to_vec(),
+            historical_function_revisions: active.historical_function_revisions().to_vec(),
+            origins: active.origins().to_vec(),
+            references: active.references().to_vec(),
+        }
+    }
+
+    fn into_active(self) -> Result<ActiveDatabaseRevision, SqliteError> {
+        let source = StoredSourceRevision::new(
+            self.source.bundle(),
+            self.source.id(),
+            self.source.parent(),
+            self.source.units().to_vec(),
+            self.source.bundle_hash(),
+            self.source.revision_hash(),
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        let catalogue = self.catalogue.into_catalogue()?;
+        let expected_hash = catalogue_digest(
+            &catalogue,
+            &self.function_revisions,
+            &self.expressions,
+            &self.origins,
+            &self.references,
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))?;
+        if expected_hash != self.catalogue_hash {
+            return Err(SqliteError::InvalidPersistedData(
+                "catalogue snapshot hash mismatch",
+            ));
+        }
+        ActiveDatabaseRevision::new_with_history(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            self.catalogue_hash,
+            self.expressions,
+            self.function_revisions,
+            self.historical_function_revisions,
+            self.origins,
+            self.references,
+        )
+        .map_err(|error| SqliteError::Domain(error.to_string()))
+    }
+}
+
 impl SqliteConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -149,7 +281,7 @@ impl SqliteRevisionStore {
     async fn seed_pair(&self) -> Result<BootstrapRevision, SqliteError> {
         let mut connection = self.connection.lock().await;
         let transaction = turso::transaction::Transaction::new(
-            &mut *connection,
+            &mut connection,
             turso::transaction::TransactionBehavior::Immediate,
         )
         .await?;
@@ -170,7 +302,7 @@ impl SqliteRevisionStore {
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, StorageError<SqliteError>> {
         let mut connection = self.connection.lock().await;
         let transaction = turso::transaction::Transaction::new(
-            &mut *connection,
+            &mut connection,
             turso::transaction::TransactionBehavior::Deferred,
         )
         .await
@@ -178,14 +310,14 @@ impl SqliteRevisionStore {
         .map_err(StorageError::Backend)?;
 
         let result = async {
-            let active = load_active_from(&*transaction)
+            let active = load_active_from(&transaction)
                 .await
                 .map_err(StorageError::Backend)?;
-            let ledger = load_ledger_from(&*transaction)
+            let ledger = load_ledger_from(&transaction)
                 .await
                 .map_err(StorageError::Backend)?;
             validate_ledger_active_pair(&ledger, &active).map_err(StorageError::Backend)?;
-            validate_active_catalogue_lineage(&*transaction, &active, &ledger)
+            validate_active_catalogue_lineage(&transaction, &active, &ledger)
                 .await
                 .map_err(StorageError::Backend)?;
             Ok(active)
@@ -226,6 +358,175 @@ impl SqliteRevisionStore {
         Ok(ledger)
     }
 
+    /// Executes the supported pure server-function subset against this local
+    /// database and returns the canonical result values.
+    ///
+    /// The initial SQLite runtime slice accepts checked parameter-echo and
+    /// server-plan artifacts. Other server artifacts remain explicit backend
+    /// errors rather than being interpreted as source text.
+    pub async fn execute_server_function(
+        &self,
+        function_id: orna_core::FunctionId,
+        arguments: &[(ParameterId, RuntimeValue)],
+    ) -> Result<Vec<RuntimeValue>, SqliteError> {
+        let active = self.recover().await.map_err(storage_error_to_sqlite)?;
+        let function = active
+            .catalogue()
+            .function_by_id(function_id)
+            .ok_or_else(|| {
+                SqliteError::Domain(format!("function {function_id} is not installed"))
+            })?;
+        if function.domain() != FunctionDomain::Server {
+            return Err(SqliteError::Domain(format!(
+                "function {function_id} is not a server function"
+            )));
+        }
+        let revision = active
+            .function_revisions()
+            .iter()
+            .find(|revision| {
+                revision.function() == function_id && revision.id() == function.current_revision()
+            })
+            .ok_or(SqliteError::InvalidPersistedData(
+                "active function has no executable revision",
+            ))?;
+        if revision.artifact().kind() != ExecutableArtifactKind::Server {
+            return Err(SqliteError::Domain(format!(
+                "function {function_id} does not have a server executable"
+            )));
+        }
+        validate_function_arguments(function, arguments)?;
+        if revision.artifact().format() == orna_artifact::server_parameter_echo::FORMAT_IDENTITY {
+            if revision.artifact().version() != orna_artifact::server_parameter_echo::FORMAT_VERSION
+            {
+                return Err(SqliteError::Domain(format!(
+                    "SQLite execution does not support {} artifact version {}",
+                    revision.artifact().format(),
+                    revision.artifact().version()
+                )));
+            }
+            let [parameter] = function.parameters() else {
+                return Err(SqliteError::Domain(
+                    "server parameter-echo function must have one parameter".to_owned(),
+                ));
+            };
+            let expected_type = standard_type_id(parameter.resolved_type()).ok_or_else(|| {
+                SqliteError::Domain("server parameter-echo value type is not supported".to_owned())
+            })?;
+            ServerParameterEcho::decode(
+                revision.artifact().payload(),
+                parameter.id(),
+                expected_type,
+            )
+            .map_err(|error| SqliteError::Domain(error.to_string()))?;
+            let value = arguments
+                .iter()
+                .find(|(parameter_id, _)| *parameter_id == parameter.id())
+                .map(|(_, value)| value)
+                .ok_or_else(|| {
+                    SqliteError::Domain(format!(
+                        "function {function_id} requires exactly parameter {}",
+                        parameter.id()
+                    ))
+                })?;
+            return Ok(vec![value.clone()]);
+        }
+        if revision.artifact().format() == orna_artifact::server_plan::FORMAT_IDENTITY {
+            return self
+                .execute_server_plan(&active, function, revision, arguments)
+                .await;
+        }
+        Err(SqliteError::Domain(format!(
+            "SQLite execution does not support the {} server artifact",
+            revision.artifact().format()
+        )))
+    }
+
+    async fn execute_server_plan(
+        &self,
+        active: &ActiveDatabaseRevision,
+        function: &FunctionDefinition,
+        revision: &FunctionRevisionRecord,
+        arguments: &[(ParameterId, RuntimeValue)],
+    ) -> Result<Vec<RuntimeValue>, SqliteError> {
+        let decoded =
+            decode_query_plan(revision.artifact().version(), revision.artifact().payload())?;
+        let return_count = match function.return_type() {
+            FunctionReturn::Single(_) | FunctionReturn::Stream(_) => 1,
+            FunctionReturn::Rows(columns) => columns.len(),
+        };
+        if decoded.projections.len() != return_count {
+            return Err(SqliteError::Domain(
+                "server plan projection count does not match function result shape".to_owned(),
+            ));
+        }
+        if !decoded.ordering.is_empty() {
+            return Err(SqliteError::Domain(
+                "SQLite server plan ordering is not supported".to_owned(),
+            ));
+        }
+        let object = active
+            .catalogue()
+            .object_type_by_id(decoded.scan.object_type)
+            .ok_or_else(|| {
+                SqliteError::Domain("server plan scans an unknown object type".to_owned())
+            })?;
+        let mut columns = Vec::with_capacity(object.fields().len() + 1);
+        columns.push(object_id_column().to_owned());
+        columns.extend(object.fields().iter().map(|field| field_name(field.id())));
+        let query = format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            columns.join(", "),
+            object_table_name(object.id()),
+            object_id_column()
+        );
+        let connection = self.connection.lock().await;
+        let mut rows = connection.query(&query, ()).await?;
+        let mut output_rows: Vec<Vec<RuntimeValue>> = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let object_id = ObjectId::from_bytes(id16(row.get::<Vec<u8>>(0)?, "object id")?);
+            let mut fields = Vec::with_capacity(object.fields().len());
+            for (index, field) in object.fields().iter().enumerate() {
+                fields.push((
+                    field.id(),
+                    runtime_value_from_sql(
+                        row.get_value(index + 1)?,
+                        field.resolved_type(),
+                        field.nullable(),
+                    )?,
+                ));
+            }
+            let record = SqliteObjectRow {
+                object_type: decoded.scan.object_type,
+                object_id,
+                fields,
+            };
+            if !selector_matches(&decoded.selector, &record, arguments)? {
+                continue;
+            }
+            if let Some(selection) = decoded.selection.as_ref() {
+                let RuntimeValue::Boolean(accepted) = evaluate_expression(selection, &record)?
+                else {
+                    return Err(SqliteError::Domain(
+                        "server plan selection does not evaluate to BOOLEAN".to_owned(),
+                    ));
+                };
+                if !accepted {
+                    continue;
+                }
+            }
+            let mut projected = Vec::with_capacity(decoded.projections.len());
+            for expression in &decoded.projections {
+                projected.push(evaluate_expression(expression, &record)?);
+            }
+            if decoded.distinct && output_rows.contains(&projected) {
+                continue;
+            }
+            output_rows.push(projected);
+        }
+        Ok(output_rows.into_iter().flatten().collect())
+    }
+
     /// Compatibility entry point that plans the exact artifact before applying.
     pub async fn apply(
         &self,
@@ -246,7 +547,7 @@ impl SqliteRevisionStore {
     ) -> Result<ActiveDatabaseRevision, StorageError<SqliteError>> {
         let mut connection = self.connection.lock().await;
         let transaction = turso::transaction::Transaction::new(
-            &mut *connection,
+            &mut connection,
             turso::transaction::TransactionBehavior::Immediate,
         )
         .await
@@ -256,7 +557,7 @@ impl SqliteRevisionStore {
         let result = apply_in_transaction(&transaction, candidate, artifact).await;
         match result {
             Ok(()) => {
-                let active = match load_active_from(&*transaction).await {
+                let active = match load_active_from(&transaction).await {
                     Ok(active) => active,
                     Err(error) => match transaction.rollback().await {
                         Ok(()) => return Err(StorageError::Backend(error)),
@@ -280,7 +581,302 @@ impl SqliteRevisionStore {
     }
 }
 
+fn storage_error_to_sqlite(error: StorageError<SqliteError>) -> SqliteError {
+    match error {
+        StorageError::Backend(error) => error,
+        StorageError::InvalidRequest(error) => SqliteError::Domain(error.to_string()),
+    }
+}
+
+fn validate_function_arguments(
+    function: &FunctionDefinition,
+    arguments: &[(ParameterId, RuntimeValue)],
+) -> Result<(), SqliteError> {
+    if arguments.len() != function.parameters().len() {
+        return Err(SqliteError::Domain(format!(
+            "function {} requires exactly {} arguments",
+            function.id(),
+            function.parameters().len()
+        )));
+    }
+    for parameter in function.parameters() {
+        let Some((_, value)) = arguments
+            .iter()
+            .find(|(parameter_id, _)| *parameter_id == parameter.id())
+        else {
+            return Err(SqliteError::Domain(format!(
+                "function {} is missing parameter {}",
+                function.id(),
+                parameter.id()
+            )));
+        };
+        if value.runtime_type() != RuntimeType::Flat(parameter.resolved_type()) {
+            return Err(SqliteError::Domain(format!(
+                "function {} received a value with the wrong type for parameter {}",
+                function.id(),
+                parameter.id()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn standard_type_id(resolved_type: ResolvedType) -> Option<TypeId> {
+    match resolved_type {
+        ResolvedType::Scalar(scalar) => Some(match scalar {
+            StandardScalar::Boolean => BOOLEAN_TYPE_ID,
+            StandardScalar::Integer => INTEGER_TYPE_ID,
+            StandardScalar::BigInt => BIGINT_TYPE_ID,
+            StandardScalar::Float => FLOAT_TYPE_ID,
+            StandardScalar::Decimal => DECIMAL_TYPE_ID,
+            StandardScalar::CharacterLargeObject => CHARACTER_LARGE_OBJECT_TYPE_ID,
+            StandardScalar::BinaryLargeObject => BINARY_LARGE_OBJECT_TYPE_ID,
+            StandardScalar::Uuid => UUID_TYPE_ID,
+            StandardScalar::Date => DATE_TYPE_ID,
+            StandardScalar::Time => TIME_TYPE_ID,
+            StandardScalar::Timestamp => TIMESTAMP_TYPE_ID,
+            StandardScalar::Duration => DURATION_TYPE_ID,
+            StandardScalar::Void => VOID_TYPE_ID,
+        }),
+        ResolvedType::Named(type_id)
+        | ResolvedType::Reference { target: type_id }
+        | ResolvedType::Value(type_id) => Some(type_id),
+    }
+}
+
+struct DecodedQueryPlan {
+    scan: Scan,
+    projections: Vec<Expression>,
+    selection: Option<Expression>,
+    selector: Option<QuerySelector>,
+    ordering: Vec<orna_artifact::server_plan::Ordering>,
+    distinct: bool,
+}
+
+enum QuerySelector {
+    Identity {
+        target: TypeId,
+        parameter: ParameterId,
+    },
+    UniqueText {
+        field: FieldId,
+        parameter: ParameterId,
+    },
+}
+
+fn decode_query_plan(version: u32, payload: &[u8]) -> Result<DecodedQueryPlan, SqliteError> {
+    match version {
+        orna_artifact::server_plan::FORMAT_VERSION => {
+            let plan = ServerPlan::decode(payload)
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+            Ok(DecodedQueryPlan {
+                scan: plan.scan,
+                projections: plan.projections,
+                selection: plan.selection,
+                selector: None,
+                ordering: plan.ordering,
+                distinct: false,
+            })
+        }
+        orna_artifact::server_plan::IDENTITY_SELECTED_FORMAT_VERSION => {
+            let plan = IdentitySelectedServerPlan::decode(payload)
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+            let selector = plan.selector();
+            Ok(DecodedQueryPlan {
+                scan: plan.scan(),
+                projections: plan.projections().to_vec(),
+                selection: None,
+                selector: Some(QuerySelector::Identity {
+                    target: plan.scan().object_type,
+                    parameter: selector.parameter(),
+                }),
+                ordering: Vec::new(),
+                distinct: false,
+            })
+        }
+        orna_artifact::server_plan::DISTINCT_FORMAT_VERSION => {
+            let plan = DistinctServerPlan::decode(payload)
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+            Ok(DecodedQueryPlan {
+                scan: plan.scan(),
+                projections: plan.projections().to_vec(),
+                selection: plan.selection().cloned(),
+                selector: None,
+                ordering: Vec::new(),
+                distinct: true,
+            })
+        }
+        orna_artifact::server_plan::UNIQUE_TEXT_SELECTED_FORMAT_VERSION => {
+            let plan = UniqueTextSelectedServerPlan::decode(payload)
+                .map_err(|error| SqliteError::Domain(error.to_string()))?;
+            let SelectBindValue::Text {
+                field, parameter, ..
+            } = *plan.selector();
+            Ok(DecodedQueryPlan {
+                scan: plan.scan(),
+                projections: plan.projections().to_vec(),
+                selection: None,
+                selector: Some(QuerySelector::UniqueText { field, parameter }),
+                ordering: Vec::new(),
+                distinct: false,
+            })
+        }
+        version => Err(SqliteError::Domain(format!(
+            "unsupported orna.server-plan artifact version {version}"
+        ))),
+    }
+}
+struct SqliteObjectRow {
+    object_type: TypeId,
+    object_id: ObjectId,
+    fields: Vec<(FieldId, RuntimeValue)>,
+}
+
+fn selector_matches(
+    selector: &Option<QuerySelector>,
+    row: &SqliteObjectRow,
+    arguments: &[(ParameterId, RuntimeValue)],
+) -> Result<bool, SqliteError> {
+    match selector {
+        None => Ok(true),
+        Some(QuerySelector::Identity { target, parameter }) => {
+            let value = arguments
+                .iter()
+                .find(|(candidate, _)| candidate == parameter)
+                .map(|(_, value)| value)
+                .ok_or_else(|| {
+                    SqliteError::Domain("server selector parameter is missing".to_owned())
+                })?;
+            Ok(matches!(
+                value,
+                RuntimeValue::Reference {
+                    target: actual_target,
+                    object
+                } if *actual_target == *target && *object == row.object_id
+            ))
+        }
+        Some(QuerySelector::UniqueText { field, parameter }) => {
+            let value = arguments
+                .iter()
+                .find(|(candidate, _)| candidate == parameter)
+                .map(|(_, value)| value)
+                .ok_or_else(|| {
+                    SqliteError::Domain("server selector parameter is missing".to_owned())
+                })?;
+            let RuntimeValue::Text(value) = value else {
+                return Ok(false);
+            };
+            let field_value = row
+                .fields
+                .iter()
+                .find(|(candidate, _)| candidate == field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| {
+                    SqliteError::Domain("server selector field is missing".to_owned())
+                })?;
+            Ok(matches!(field_value, RuntimeValue::Text(candidate) if candidate == value))
+        }
+    }
+}
+
+fn evaluate_expression(
+    expression: &Expression,
+    row: &SqliteObjectRow,
+) -> Result<RuntimeValue, SqliteError> {
+    match &expression.kind {
+        ExpressionKind::ObjectReference { .. } => Ok(RuntimeValue::Reference {
+            target: row.object_type,
+            object: row.object_id,
+        }),
+        ExpressionKind::FieldPath { steps, .. } => {
+            if steps.len() != 1 {
+                return Err(SqliteError::Domain(
+                    "SQLite server plans support one-step field paths".to_owned(),
+                ));
+            }
+            let field = row
+                .fields
+                .iter()
+                .find(|(candidate, _)| *candidate == steps[0].field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| SqliteError::Domain("server plan field is missing".to_owned()))?;
+            Ok(field.clone())
+        }
+        ExpressionKind::BooleanLiteral { value } => Ok(RuntimeValue::Boolean(*value)),
+        ExpressionKind::Equality { left, right } => {
+            let left = evaluate_expression(left, row)?;
+            let right = evaluate_expression(right, row)?;
+            Ok(RuntimeValue::Boolean(
+                !left.is_null() && !right.is_null() && left == right,
+            ))
+        }
+    }
+}
+
+fn runtime_value_from_sql(
+    value: Value,
+    resolved_type: ResolvedType,
+    nullable: bool,
+) -> Result<RuntimeValue, SqliteError> {
+    if matches!(value, Value::Null) {
+        if !nullable {
+            return Err(SqliteError::InvalidPersistedData(
+                "non-null SQLite object field contains NULL",
+            ));
+        }
+        return RuntimeValue::null(resolved_type)
+            .map_err(|error| SqliteError::Domain(error.to_string()));
+    }
+    if let Some(scalar) = resolved_type.legacy_scalar() {
+        return match (scalar, value) {
+            (StandardScalar::Boolean, Value::Integer(value)) => match value {
+                0 => Ok(RuntimeValue::Boolean(false)),
+                1 => Ok(RuntimeValue::Boolean(true)),
+                _ => Err(SqliteError::InvalidPersistedData(
+                    "SQLite BOOLEAN field is not 0 or 1",
+                )),
+            },
+            (StandardScalar::Integer, Value::Integer(value)) => i32::try_from(value)
+                .map(RuntimeValue::Integer)
+                .map_err(|_| SqliteError::InvalidPersistedData("SQLite INTEGER is out of range")),
+            (StandardScalar::BigInt, Value::Integer(value)) => Ok(RuntimeValue::BigInt(value)),
+            (StandardScalar::Float | StandardScalar::Decimal, Value::Real(value)) => {
+                RuntimeFloat::new(value)
+                    .map(RuntimeValue::Float)
+                    .map_err(|error| SqliteError::Domain(error.to_string()))
+            }
+            (
+                StandardScalar::CharacterLargeObject
+                | StandardScalar::Uuid
+                | StandardScalar::Date
+                | StandardScalar::Time
+                | StandardScalar::Timestamp
+                | StandardScalar::Duration,
+                Value::Text(value),
+            ) => Ok(RuntimeValue::Text(value)),
+            (StandardScalar::BinaryLargeObject, Value::Blob(value)) => {
+                Ok(RuntimeValue::Bytes(value))
+            }
+            (scalar, value) => Err(SqliteError::Domain(format!(
+                "SQLite value {value:?} does not match {scalar:?}"
+            ))),
+        };
+    }
+    if let Some(target) = resolved_type.reference_target() {
+        let Value::Blob(value) = value else {
+            return Err(SqliteError::Domain(
+                "SQLite reference field is not stored as BLOB".to_owned(),
+            ));
+        };
+        let object = ObjectId::from_bytes(id16(value, "reference object id")?);
+        return Ok(RuntimeValue::Reference { target, object });
+    }
+    Err(SqliteError::Domain(
+        "SQLite server plan value type is not in the supported runtime subset".to_owned(),
+    ))
+}
 async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
+    connection.execute("PRAGMA foreign_keys = ON", ()).await?;
     connection.execute_batch(SCHEMA).await?;
 
     let transaction = turso::transaction::Transaction::new(
@@ -312,7 +908,7 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
                 )
                 .await?;
         }
-        ensure_catalogue_revision_lineage_schema(&*transaction).await?;
+        ensure_catalogue_revision_lineage_schema(&transaction).await?;
         // Source-unit identities are immutable globally, not just within one
         // revision. Creating this index also hardens legacy databases; a
         // duplicate legacy identity fails the transaction and therefore keeps
@@ -335,8 +931,8 @@ async fn ensure_schema(connection: &mut Connection) -> Result<(), SqliteError> {
             )
             .await?;
 
-        backfill_active_identity_registries(&*transaction, legacy_active_schema).await?;
-        backfill_catalogue_revision_lineage(&*transaction).await
+        backfill_active_identity_registries(&transaction, legacy_active_schema).await?;
+        backfill_catalogue_revision_lineage(&transaction).await
     }
     .await;
     match result {
@@ -823,15 +1419,14 @@ async fn validate_active_identity_registries(
             "active source revision registry does not match active metadata",
         ));
     }
-    if let Some(parent) = active.source.parent {
-        if load_source_revision_registry(connection, parent)
+    if let Some(parent) = active.source.parent
+        && load_source_revision_registry(connection, parent)
             .await?
             .is_none()
-        {
-            return Err(SqliteError::InvalidPersistedData(
-                "active source parent revision has no registry record",
-            ));
-        }
+    {
+        return Err(SqliteError::InvalidPersistedData(
+            "active source parent revision has no registry record",
+        ));
     }
 
     let catalogue = load_catalogue_revision_registry(connection, active.catalogue_id)
@@ -881,10 +1476,10 @@ async fn seed_pair_in_transaction(
     transaction: &turso::transaction::Transaction<'_>,
 ) -> Result<BootstrapRevision, SqliteError> {
     if load_active_identity_metadata(transaction).await?.is_some() {
-        let active = load_active_from(&*transaction).await?;
-        let ledger = load_ledger_from(&*transaction).await?;
+        let active = load_active_from(transaction).await?;
+        let ledger = load_ledger_from(transaction).await?;
         validate_ledger_active_pair(&ledger, &active)?;
-        validate_active_catalogue_lineage(&*transaction, &active, &ledger).await?;
+        validate_active_catalogue_lineage(transaction, &active, &ledger).await?;
         return Ok(BootstrapRevision::new(
             active.pair().source(),
             active.pair().catalogue(),
@@ -1056,10 +1651,50 @@ async fn load_source_revision_from(
     .map_err(|error| SqliteError::Domain(error.to_string()))
 }
 
+async fn load_persisted_active(
+    connection: &Connection,
+    metadata: ActiveIdentityMetadata,
+) -> Result<Option<ActiveDatabaseRevision>, SqliteError> {
+    let mut rows = connection
+        .query(
+            "SELECT payload FROM orna_revision_snapshots
+             WHERE source_revision_id = ?1 AND catalogue_revision_id = ?2",
+            [
+                Value::Blob(metadata.source_id.to_bytes().to_vec()),
+                Value::Blob(metadata.catalogue_id.to_bytes().to_vec()),
+            ],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let payload = row.get::<Vec<u8>>(0)?;
+    let persisted = serde_json::from_slice::<PersistedActiveRevision>(&payload)
+        .map_err(|error| SqliteError::Domain(format!("invalid revision snapshot: {error}")))?;
+    let active = persisted.into_active()?;
+    if active.pair() != RevisionPair::new(metadata.source_id, metadata.catalogue_id)
+        || active.source().bundle() != metadata.source.bundle
+        || active.source().parent() != metadata.source.parent
+        || active.source().bundle_hash() != metadata.source.bundle_hash
+        || active.source().revision_hash() != metadata.source.revision_hash
+        || active.catalogue_hash() != metadata.catalogue.hash
+    {
+        return Err(SqliteError::InvalidPersistedData(
+            "revision snapshot does not match active identity metadata",
+        ));
+    }
+    Ok(Some(active))
+}
+
 async fn load_active_from(connection: &Connection) -> Result<ActiveDatabaseRevision, SqliteError> {
     let active = load_active_identity_metadata(connection).await?.ok_or(
         SqliteError::InvalidPersistedData("database has not been bootstrapped"),
     )?;
+
+    if let Some(revision) = load_persisted_active(connection, active).await? {
+        validate_active_identity_registries(connection, active).await?;
+        return Ok(revision);
+    }
 
     let source_id = active.source_id;
     let catalogue_id = active.catalogue_id;
@@ -1251,6 +1886,35 @@ async fn validate_catalogue_revision(
             "catalogue revision parent does not match migration history",
         ));
     }
+    let mut snapshot_rows = connection
+        .query(
+            "SELECT payload FROM orna_revision_snapshots
+             WHERE source_revision_id = ?1 AND catalogue_revision_id = ?2",
+            [
+                Value::Blob(source.id().to_bytes().to_vec()),
+                Value::Blob(revision.to_bytes().to_vec()),
+            ],
+        )
+        .await?;
+    let snapshot_catalogue = if let Some(snapshot_row) = snapshot_rows.next().await? {
+        let payload = snapshot_row.get::<Vec<u8>>(0)?;
+        let persisted = serde_json::from_slice::<PersistedActiveRevision>(&payload)
+            .map_err(|error| SqliteError::Domain(format!("invalid revision snapshot: {error}")))?;
+        let snapshot_active = persisted.into_active()?;
+        if snapshot_active.source().id() != source.id()
+            || snapshot_active.pair().catalogue() != revision
+            || snapshot_active.catalogue_hash() != registry.hash
+        {
+            return Err(SqliteError::InvalidPersistedData(
+                "historical catalogue hash mismatch",
+            ));
+        }
+        Some(snapshot_active.catalogue().clone())
+    } else {
+        None
+    };
+    drop(snapshot_rows);
+
     let mut rows = connection
         .query(
             "SELECT schema_id, name_parts, source_unit_id, source_start, source_end
@@ -1288,9 +1952,16 @@ async fn validate_catalogue_revision(
             source_origin,
         ));
     }
-    drop(rows);
     let catalogue = CatalogueSnapshot::new(revision, schemas, Vec::new())
         .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    if let Some(snapshot_catalogue) = snapshot_catalogue {
+        if snapshot_catalogue.schemas() != catalogue.schemas() {
+            return Err(SqliteError::InvalidPersistedData(
+                "historical catalogue hash mismatch",
+            ));
+        }
+        return Ok(());
+    }
     let computed_hash = catalogue_digest(&catalogue, &[], &[], &origins, &[])
         .map_err(|error| SqliteError::Domain(error.to_string()))?;
     if computed_hash != registry.hash {
@@ -1448,29 +2119,154 @@ async fn apply_in_transaction(
     let ordinal = next_ledger_ordinal(transaction)
         .await
         .map_err(StorageError::Backend)?;
-    persist_candidate(transaction, candidate, &entry, ordinal)
+    install_physical_artifact(transaction, artifact)
+        .await
+        .map_err(StorageError::Backend)?;
+    persist_candidate(&active, transaction, candidate, &entry, ordinal)
         .await
         .map_err(StorageError::Backend)
+}
+async fn install_physical_artifact(
+    transaction: &turso::transaction::Transaction<'_>,
+    artifact: &PhysicalMigrationArtifact,
+) -> Result<(), SqliteError> {
+    for operation in artifact.operations() {
+        let statement = match operation {
+            PhysicalOperation::CreateObject(object) => create_object_statement(object)?,
+            PhysicalOperation::AddField(add_field) => add_field_statement(add_field)?,
+        };
+        transaction.execute(&statement, ()).await?;
+        if let PhysicalOperation::AddField(add_field) = operation
+            && add_field.field().unique()
+        {
+            let index_name = format!(
+                "orna_unique_{}_{}",
+                hex_bytes(add_field.object_type().to_bytes()),
+                hex_bytes(add_field.field().field_id().to_bytes()),
+            );
+            let statement = format!(
+                "CREATE UNIQUE INDEX {} ON {} ({})",
+                index_name,
+                object_table_name(add_field.object_type()),
+                field_name(add_field.field().field_id()),
+            );
+            transaction.execute(&statement, ()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn create_object_statement(object: &CreateObject) -> Result<String, SqliteError> {
+    let mut definitions = vec![format!("{} BLOB NOT NULL PRIMARY KEY", object_id_column())];
+    for field in object.fields() {
+        definitions.push(field_definition(field)?);
+        if field.unique() {
+            definitions.push(format!("UNIQUE ({})", field_name(field.field_id())));
+        }
+        if let PhysicalFieldType::Reference { target, on_delete } = field.field_type() {
+            definitions.push(format!(
+                "FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {}",
+                field_name(field.field_id()),
+                object_table_name(target),
+                object_id_column(),
+                sqlite_on_delete(on_delete),
+            ));
+        }
+    }
+    Ok(format!(
+        "CREATE TABLE {} ({})",
+        object_table_name(object.type_id()),
+        definitions.join(", "),
+    ))
+}
+
+fn add_field_statement(add_field: &AddField) -> Result<String, SqliteError> {
+    let mut statement = format!(
+        "ALTER TABLE {} ADD COLUMN {}",
+        object_table_name(add_field.object_type()),
+        field_definition(add_field.field())?,
+    );
+    if let PhysicalFieldType::Reference { target, on_delete } = add_field.field().field_type() {
+        statement.push_str(&format!(
+            " REFERENCES {} ({}) ON DELETE {}",
+            object_table_name(target),
+            object_id_column(),
+            sqlite_on_delete(on_delete),
+        ));
+    }
+    Ok(statement)
+}
+
+fn field_definition(field: &CreateField) -> Result<String, SqliteError> {
+    let storage_type = match field.field_type() {
+        PhysicalFieldType::Scalar(scalar) => sqlite_scalar_type(scalar)?,
+        PhysicalFieldType::Enum(_) => "TEXT",
+        PhysicalFieldType::Record(_) | PhysicalFieldType::Reference { .. } => "BLOB",
+    };
+    let nullability = if field.nullable() { "" } else { " NOT NULL" };
+    Ok(format!(
+        "{} {}{}",
+        field_name(field.field_id()),
+        storage_type,
+        nullability,
+    ))
+}
+
+fn sqlite_scalar_type(
+    scalar: orna_core::types::StandardScalar,
+) -> Result<&'static str, SqliteError> {
+    match scalar {
+        orna_core::types::StandardScalar::Boolean
+        | orna_core::types::StandardScalar::Integer
+        | orna_core::types::StandardScalar::BigInt => Ok("INTEGER"),
+        orna_core::types::StandardScalar::Float | orna_core::types::StandardScalar::Decimal => {
+            Ok("REAL")
+        }
+        orna_core::types::StandardScalar::CharacterLargeObject
+        | orna_core::types::StandardScalar::Uuid
+        | orna_core::types::StandardScalar::Date
+        | orna_core::types::StandardScalar::Time
+        | orna_core::types::StandardScalar::Timestamp
+        | orna_core::types::StandardScalar::Duration => Ok("TEXT"),
+        orna_core::types::StandardScalar::BinaryLargeObject => Ok("BLOB"),
+        orna_core::types::StandardScalar::Void => Err(SqliteError::Domain(
+            "SQLite object fields cannot use VOID".to_owned(),
+        )),
+    }
+}
+
+fn object_id_column() -> &'static str {
+    "_orna_object_id"
+}
+
+fn object_table_name(type_id: orna_core::TypeId) -> String {
+    format!("orna_object_{}", hex_bytes(type_id.to_bytes()))
+}
+
+fn field_name(field_id: orna_core::FieldId) -> String {
+    format!("f_{}", hex_bytes(field_id.to_bytes()))
+}
+
+fn hex_bytes<const N: usize>(bytes: [u8; N]) -> String {
+    let mut encoded = String::with_capacity(N * 2);
+    for byte in bytes {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn sqlite_on_delete(action: Option<orna_core::catalogue::OnDeleteAction>) -> &'static str {
+    match action {
+        None => "NO ACTION",
+        Some(orna_core::catalogue::OnDeleteAction::Restrict) => "RESTRICT",
+        Some(orna_core::catalogue::OnDeleteAction::SetNull) => "SET NULL",
+        Some(orna_core::catalogue::OnDeleteAction::Cascade) => "CASCADE",
+    }
 }
 
 fn ensure_supported_candidate(candidate: &DeployableRevision) -> Result<(), SqliteError> {
     let catalogue = candidate.candidate();
 
-    if !catalogue.object_types().is_empty() {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::ObjectType,
-        ));
-    }
-    if !catalogue.record_value_types().is_empty() {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::RecordValueType,
-        ));
-    }
-    if !catalogue.type_bindings().is_empty() {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::TypeBinding,
-        ));
-    }
     if !catalogue.value_types().is_empty() {
         return Err(SqliteError::UnsupportedCapability(
             SqliteCapability::ValueType,
@@ -1481,33 +2277,14 @@ fn ensure_supported_candidate(candidate: &DeployableRevision) -> Result<(), Sqli
             SqliteCapability::EnumType,
         ));
     }
-    if !candidate.expressions().is_empty() {
+    if !catalogue.record_value_types().is_empty() {
         return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::Expression,
+            SqliteCapability::RecordValueType,
         ));
     }
-    if !candidate.references().is_empty() {
+    if !catalogue.type_bindings().is_empty() {
         return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::Reference,
-        ));
-    }
-    if !candidate.new_function_revisions().is_empty() {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::FunctionRevision,
-        ));
-    }
-    if !catalogue.functions().is_empty() {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::Function,
-        ));
-    }
-    if candidate
-        .origins()
-        .iter()
-        .any(|origin| !matches!(origin.identity(), DefinitionIdentity::Schema(_)))
-    {
-        return Err(SqliteError::UnsupportedCapability(
-            SqliteCapability::NonSchemaOrigin,
+            SqliteCapability::TypeBinding,
         ));
     }
     if candidate.catalogue_hash_context().version() != CatalogueHashVersion::Version1 {
@@ -1539,9 +2316,17 @@ fn validate_candidate_records(
             actual: source.revision_hash(),
         });
     }
-    let expected_catalogue_hash =
-        catalogue_digest(candidate.candidate(), &[], &[], candidate.origins(), &[])
-            .map_err(MigrationLedgerEntryError::CanonicalHash)?;
+    let function_revisions = candidate
+        .current_function_revisions()
+        .map_or_else(|| candidate.new_function_revisions(), |revisions| revisions);
+    let expected_catalogue_hash = catalogue_digest(
+        candidate.candidate(),
+        function_revisions,
+        candidate.expressions(),
+        candidate.origins(),
+        candidate.references(),
+    )
+    .map_err(MigrationLedgerEntryError::CanonicalHash)?;
     if expected_catalogue_hash != candidate.catalogue_hash() {
         return Err(MigrationLedgerEntryError::DigestMismatch {
             expected: expected_catalogue_hash,
@@ -1572,7 +2357,42 @@ async fn validate_candidate_parent_registries(
     Ok(())
 }
 
+fn build_persisted_active(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+) -> Result<PersistedActiveRevision, SqliteError> {
+    let function_revisions = candidate.current_function_revisions().map_or_else(
+        || candidate.new_function_revisions().to_vec(),
+        |revisions| revisions.to_vec(),
+    );
+    let current_ids = function_revisions
+        .iter()
+        .map(FunctionRevisionRecord::id)
+        .collect::<Vec<_>>();
+    let historical_function_revisions = active
+        .function_revisions()
+        .iter()
+        .chain(active.historical_function_revisions())
+        .filter(|revision| !current_ids.contains(&revision.id()))
+        .cloned()
+        .collect();
+    let next = ActiveDatabaseRevision::new_with_history(
+        candidate.candidate_pair(),
+        candidate.source().clone(),
+        candidate.candidate().clone(),
+        candidate.catalogue_hash(),
+        candidate.expressions().to_vec(),
+        function_revisions,
+        historical_function_revisions,
+        candidate.origins().to_vec(),
+        candidate.references().to_vec(),
+    )
+    .map_err(|error| SqliteError::Domain(error.to_string()))?;
+    Ok(PersistedActiveRevision::from_active(&next))
+}
+
 async fn persist_candidate(
+    active: &ActiveDatabaseRevision,
     transaction: &turso::transaction::Transaction<'_>,
     candidate: &DeployableRevision,
     entry: &MigrationLedgerEntry,
@@ -1580,6 +2400,10 @@ async fn persist_candidate(
 ) -> Result<(), SqliteError> {
     let source = candidate.source();
     let catalogue_pair = candidate.candidate_pair();
+    let snapshot_payload = serde_json::to_vec(&build_persisted_active(active, candidate)?)
+        .map_err(|error| {
+            SqliteError::Domain(format!("revision snapshot encoding failed: {error}"))
+        })?;
     insert_source_revision_registry(
         transaction,
         source.id(),
@@ -1627,9 +2451,7 @@ async fn persist_candidate(
 
     for origin in candidate.origins() {
         let DefinitionIdentity::Schema(schema_id) = origin.identity() else {
-            return Err(SqliteError::UnsupportedCapability(
-                SqliteCapability::NonSchemaOrigin,
-            ));
+            continue;
         };
         let schema = candidate.candidate().schema_by_id(schema_id).ok_or(
             SqliteError::InvalidPersistedData("schema origin has no candidate schema"),
@@ -1654,6 +2476,24 @@ async fn persist_candidate(
                 "schema insert affected an unexpected number of rows",
             ));
         }
+    }
+
+    let inserted = transaction
+        .execute(
+            "INSERT INTO orna_revision_snapshots
+             (source_revision_id, catalogue_revision_id, payload)
+             VALUES (?1, ?2, ?3)",
+            [
+                Value::Blob(source.id().to_bytes().to_vec()),
+                Value::Blob(catalogue_pair.catalogue().to_bytes().to_vec()),
+                Value::Blob(snapshot_payload),
+            ],
+        )
+        .await?;
+    if inserted != 1 {
+        return Err(SqliteError::InvalidPersistedData(
+            "revision snapshot insert affected an unexpected number of rows",
+        ));
     }
 
     let next_ordinal = ordinal;
@@ -1809,9 +2649,10 @@ fn decode_qualified_semantic_name(encoded: &str) -> Result<QualifiedSemanticName
     })
 }
 
-impl RevisionStore for SqliteRevisionStore {
+impl ApplicationRevisionStore for SqliteRevisionStore {
     type Error = SqliteError;
 
+    #[allow(clippy::manual_async_fn)]
     fn bootstrap(
         &self,
     ) -> impl Future<Output = Result<BootstrapRevision, StorageError<Self::Error>>> + Send {
@@ -1847,24 +2688,18 @@ mod tests {
     use super::*;
     use orna_core::canonical_hash::source_unit_content_digest;
     use orna_core::{
-        ExpressionId, FieldId, FunctionId, FunctionRevisionId, StandardLibraryRevisionId, TypeId,
-        canonical_hash::{
-            artifact_payload_digest, calculate_standard_library_digest,
-            verify_standard_library_v2_snapshot,
-        },
+        FieldId, StandardLibraryRevisionId, TypeId,
+        canonical_hash::{calculate_standard_library_digest, verify_standard_library_v2_snapshot},
         catalogue::{
-            EnumTypeDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-            RecordValueFieldDefinition, RecordValueTypeDefinition, TypeBinding,
+            EnumTypeDefinition, RecordValueFieldDefinition, RecordValueTypeDefinition, TypeBinding,
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
-            CatalogueHashContext, DefinitionReference, DefinitionReferenceKind,
-            DefinitionReferenceTarget, DeployableRevisionContent, DeployableRevisionInput,
-            ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
-            StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            CatalogueHashContext, DefinitionReference, DeployableRevisionContent,
+            DeployableRevisionInput, FunctionRevisionRecord, StandardLibraryDigestVersion,
+            StandardLibrarySnapshot,
         },
-        types::{ResolvedType, StandardScalar, TypeDescriptor},
+        types::TypeDescriptor,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1958,6 +2793,7 @@ mod tests {
         .unwrap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn unsupported_candidate(
         active: &ActiveDatabaseRevision,
         source_byte: u8,
@@ -2087,6 +2923,7 @@ mod tests {
         catalogue_revisions: i64,
         source_units: i64,
         schemas: i64,
+        snapshots: i64,
         ledger: i64,
     }
 
@@ -2103,6 +2940,7 @@ mod tests {
             .await,
             source_units: row_count(&connection, "SELECT COUNT(*) FROM orna_source_units").await,
             schemas: row_count(&connection, "SELECT COUNT(*) FROM orna_catalogue_schemas").await,
+            snapshots: row_count(&connection, "SELECT COUNT(*) FROM orna_revision_snapshots").await,
             ledger: row_count(
                 &connection,
                 "SELECT COUNT(*) FROM orna_application_migrations",
@@ -2118,7 +2956,7 @@ mod tests {
         expected: SqliteCapability,
     ) {
         let before = persisted_row_counts(store).await;
-        let error = RevisionStore::apply(store, candidate, artifact)
+        let error = ApplicationRevisionStore::apply(store, candidate, artifact)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -2192,32 +3030,6 @@ mod tests {
             .unwrap();
         store.bootstrap().await.unwrap();
         let active = store.recover().await.unwrap();
-
-        let (schema_id, schema) = unsupported_schema(0x01);
-        let object_id = TypeId::from_bytes([0x02; 16]);
-        let object_catalogue = CatalogueSnapshot::new(
-            CatalogueRevisionId::from_bytes([0x03; 16]),
-            vec![schema],
-            vec![ObjectTypeDefinition::new(
-                object_id,
-                QualifiedSemanticName::new(["schema", "object"]).unwrap(),
-                Vec::new(),
-            )],
-        )
-        .unwrap();
-        let object_candidate = unsupported_candidate(
-            &active,
-            0x04,
-            object_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::ObjectType(object_id),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            CatalogueHashContext::version_one(),
-        );
 
         let (schema_id, schema) = unsupported_schema(0x11);
         let value_id = TypeId::from_bytes([0x12; 16]);
@@ -2392,216 +3204,6 @@ mod tests {
             Vec::new(),
             empty_version_two_context(),
         );
-
-        let (schema_id, schema) = unsupported_schema(0x61);
-        let function_id = FunctionId::from_bytes([0x62; 16]);
-        let function_revision_id = FunctionRevisionId::from_bytes([0x63; 16]);
-        let function_catalogue = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::from_bytes([0x64; 16]),
-            vec![schema],
-            Vec::new(),
-            vec![FunctionDefinition::new(
-                function_id,
-                QualifiedSemanticName::new(["schema", "calculate"]).unwrap(),
-                FunctionDomain::Server,
-                Vec::new(),
-                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-                function_revision_id,
-                FunctionSecurity::Invoker,
-                Some(FunctionTransaction::ReadOnly),
-                FunctionVolatility::Immutable,
-            )],
-        )
-        .unwrap();
-        let function_candidate = unsupported_candidate(
-            &active,
-            0x65,
-            function_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::Function(function_id),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            CatalogueHashContext::version_one(),
-        );
-
-        let (schema_id, schema) = unsupported_schema(0x71);
-        let revision_function_id = FunctionId::from_bytes([0x72; 16]);
-        let revision_id = FunctionRevisionId::from_bytes([0x73; 16]);
-        let revision_origin = unsupported_source_origin(0x7a);
-        let executable_payload = vec![0x76];
-        let executable = ExecutableArtifact::new(
-            ExecutableArtifactKind::Server,
-            "test.function",
-            1,
-            executable_payload.clone(),
-            artifact_payload_digest(&executable_payload).unwrap(),
-        )
-        .unwrap();
-        let function_revision = FunctionRevisionRecord::new(
-            revision_function_id,
-            revision_id,
-            1,
-            revision_origin,
-            Sha256Digest::from_bytes([0x77; 32]),
-            Sha256Digest::from_bytes([0x78; 32]),
-            "orna.language/1",
-            executable,
-        )
-        .unwrap();
-        let revision_catalogue = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::from_bytes([0x79; 16]),
-            vec![schema],
-            Vec::new(),
-            vec![FunctionDefinition::new(
-                revision_function_id,
-                QualifiedSemanticName::new(["schema", "versioned"]).unwrap(),
-                FunctionDomain::Server,
-                Vec::new(),
-                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-                revision_id,
-                FunctionSecurity::Invoker,
-                Some(FunctionTransaction::ReadOnly),
-                FunctionVolatility::Immutable,
-            )],
-        )
-        .unwrap();
-        let revision_candidate = unsupported_candidate(
-            &active,
-            0x7a,
-            revision_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::Function(revision_function_id),
-            ],
-            Vec::new(),
-            vec![function_revision],
-            Vec::new(),
-            CatalogueHashContext::version_one(),
-        );
-
-        let (schema_id, schema) = unsupported_schema(0x81);
-        let reference_function_id = FunctionId::from_bytes([0x82; 16]);
-        let reference_revision_id = FunctionRevisionId::from_bytes([0x83; 16]);
-        let reference_origin = unsupported_source_origin(0x8a);
-        let reference_payload = vec![0x86];
-        let reference_executable = ExecutableArtifact::new(
-            ExecutableArtifactKind::Server,
-            "test.reference",
-            1,
-            reference_payload.clone(),
-            artifact_payload_digest(&reference_payload).unwrap(),
-        )
-        .unwrap();
-        let reference_revision = FunctionRevisionRecord::new(
-            reference_function_id,
-            reference_revision_id,
-            1,
-            reference_origin,
-            Sha256Digest::from_bytes([0x87; 32]),
-            Sha256Digest::from_bytes([0x88; 32]),
-            "orna.language/1",
-            reference_executable,
-        )
-        .unwrap();
-        let reference_catalogue = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::from_bytes([0x89; 16]),
-            vec![schema],
-            Vec::new(),
-            vec![FunctionDefinition::new(
-                reference_function_id,
-                QualifiedSemanticName::new(["schema", "referencing"]).unwrap(),
-                FunctionDomain::Server,
-                Vec::new(),
-                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-                reference_revision_id,
-                FunctionSecurity::Invoker,
-                Some(FunctionTransaction::ReadOnly),
-                FunctionVolatility::Immutable,
-            )],
-        )
-        .unwrap();
-        let reference = DefinitionReference::new(
-            reference_function_id,
-            reference_revision_id,
-            0,
-            DefinitionReferenceTarget::Function(reference_function_id),
-            DefinitionReferenceKind::FunctionCall,
-            reference_origin,
-        );
-        let reference_candidate = unsupported_candidate(
-            &active,
-            0x8a,
-            reference_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::Function(reference_function_id),
-            ],
-            Vec::new(),
-            vec![reference_revision],
-            vec![reference],
-            CatalogueHashContext::version_one(),
-        );
-
-        let (schema_id, schema) = unsupported_schema(0x91);
-        let expression_id = ExpressionId::from_bytes([0x92; 16]);
-        let expression_payload = vec![0x93];
-        let expression = orna_core::revision::ExpressionArtifact::new(
-            expression_id,
-            "test.expression",
-            1,
-            expression_payload.clone(),
-            artifact_payload_digest(&expression_payload).unwrap(),
-        )
-        .unwrap();
-        let expression_catalogue = CatalogueSnapshot::new(
-            CatalogueRevisionId::from_bytes([0x94; 16]),
-            vec![schema],
-            Vec::new(),
-        )
-        .unwrap();
-        let expression_candidate = unsupported_candidate(
-            &active,
-            0x95,
-            expression_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::Expression(expression_id),
-            ],
-            vec![expression],
-            Vec::new(),
-            Vec::new(),
-            CatalogueHashContext::version_one(),
-        );
-
-        let (schema_id, schema) = unsupported_schema(0xa1);
-        let origin_object_id = TypeId::from_bytes([0xa2; 16]);
-        let origin_catalogue = CatalogueSnapshot::new(
-            CatalogueRevisionId::from_bytes([0xa3; 16]),
-            vec![schema],
-            vec![ObjectTypeDefinition::new(
-                origin_object_id,
-                QualifiedSemanticName::new(["schema", "origin_object"]).unwrap(),
-                Vec::new(),
-            )],
-        )
-        .unwrap();
-        let origin_candidate = unsupported_candidate(
-            &active,
-            0xa4,
-            origin_catalogue,
-            [
-                DefinitionIdentity::Schema(schema_id),
-                DefinitionIdentity::ObjectType(origin_object_id),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            CatalogueHashContext::version_one(),
-        );
-
         let (schema_id, schema) = unsupported_schema(0xb1);
         let hash_catalogue = CatalogueSnapshot::new(
             CatalogueRevisionId::from_bytes([0xb2; 16]),
@@ -2621,17 +3223,11 @@ mod tests {
         );
 
         let cases = [
-            (SqliteCapability::ObjectType, object_candidate),
             (SqliteCapability::ValueType, binary_value_candidate),
             (SqliteCapability::ValueType, array_like_value_candidate),
-            (SqliteCapability::TypeBinding, binding_candidate),
+            (SqliteCapability::ValueType, binding_candidate),
             (SqliteCapability::EnumType, enum_candidate),
-            (SqliteCapability::RecordValueType, record_candidate),
-            (SqliteCapability::Function, function_candidate),
-            (SqliteCapability::FunctionRevision, revision_candidate),
-            (SqliteCapability::Reference, reference_candidate),
-            (SqliteCapability::Expression, expression_candidate),
-            (SqliteCapability::ObjectType, origin_candidate),
+            (SqliteCapability::EnumType, record_candidate),
             (SqliteCapability::CatalogueHashVersion, hash_candidate),
         ];
         for (expected, candidate) in cases {
@@ -2733,18 +3329,18 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x11, 0x12, 0x13);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let first = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
 
         let second_candidate = schema_candidate(&first, 0x21, 0x22, 0x23);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
-        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+        ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
             .await
             .unwrap();
 
-        let ledger = RevisionStore::read_ledger(&store).await.unwrap();
+        let ledger = ApplicationRevisionStore::read_ledger(&store).await.unwrap();
         assert_eq!(ledger.len(), 2);
         assert_eq!(
             ledger[0],
@@ -2790,7 +3386,7 @@ mod tests {
 
         let candidate = schema_candidate(&initial, 0x31, 0x32, 0x33);
         let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
-        RevisionStore::apply(&store, &candidate, &artifact)
+        ApplicationRevisionStore::apply(&store, &candidate, &artifact)
             .await
             .unwrap();
 
@@ -2864,7 +3460,7 @@ mod tests {
         drop(connection);
 
         assert!(matches!(
-            RevisionStore::apply(&store, &candidate, &artifact)
+            ApplicationRevisionStore::apply(&store, &candidate, &artifact)
                 .await
                 .unwrap_err(),
             StorageError::Backend(SqliteError::InvalidPersistedData(
@@ -2886,13 +3482,13 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x41, 0x42, 0x43);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let first = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
         let second_candidate = schema_candidate(&first, 0x51, 0x52, 0x53);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
-        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+        ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
             .await
             .unwrap();
 
@@ -2944,13 +3540,13 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x61, 0x62, 0x63);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let first = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
         let second_candidate = schema_candidate(&first, 0x71, 0x72, 0x73);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
-        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+        ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
             .await
             .unwrap();
 
@@ -2999,7 +3595,7 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x71, 0x72, 0x73);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let active = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let active = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
 
@@ -3023,7 +3619,7 @@ mod tests {
             0x83,
         );
         let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
-        let error = RevisionStore::apply(&store, &candidate, &artifact)
+        let error = ApplicationRevisionStore::apply(&store, &candidate, &artifact)
             .await
             .unwrap_err();
         assert!(matches!(error, StorageError::Backend(_)));
@@ -3068,7 +3664,7 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x91, 0x92, 0x93);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let active = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let active = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
 
@@ -3092,7 +3688,7 @@ mod tests {
             0xa3,
         );
         let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate).unwrap();
-        let error = RevisionStore::apply(&store, &candidate, &artifact)
+        let error = ApplicationRevisionStore::apply(&store, &candidate, &artifact)
             .await
             .unwrap_err();
         assert!(matches!(error, StorageError::Backend(_)));
@@ -3138,14 +3734,14 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x51, 0x52, 0x53);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first = RevisionStore::apply(&store, &first_candidate, &first_artifact)
+        let first = ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
             .await
             .unwrap();
 
         let second_candidate = schema_candidate(&first, 0x61, 0x62, 0x63);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first, &second_candidate).unwrap();
-        RevisionStore::apply(&store, &second_candidate, &second_artifact)
+        ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
             .await
             .unwrap();
 
@@ -3184,7 +3780,7 @@ mod tests {
         let wrong_candidate = schema_candidate(&initial, 0x41, 0x42, 0x43);
 
         let before = store.read_ledger().await.unwrap();
-        let error = RevisionStore::apply(&store, &wrong_candidate, &artifact)
+        let error = ApplicationRevisionStore::apply(&store, &wrong_candidate, &artifact)
             .await
             .unwrap_err();
         assert!(matches!(error, StorageError::InvalidRequest(_)));
@@ -3208,43 +3804,35 @@ mod tests {
         let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
 
         let (result_a, result_b) = tokio::join!(
-            RevisionStore::apply(&store_a, &candidate, &artifact),
-            RevisionStore::apply(&store_b, &candidate, &artifact),
+            ApplicationRevisionStore::apply(&store_a, &candidate, &artifact),
+            ApplicationRevisionStore::apply(&store_b, &candidate, &artifact),
         );
 
         let mut successes = 0;
-        let mut failures = 0;
         for result in [result_a, result_b] {
             match result {
                 Ok(active) => {
                     successes += 1;
                     assert_eq!(active.pair(), candidate.candidate_pair());
                 }
-                Err(error) => {
-                    failures += 1;
-                    match error {
-                        StorageError::InvalidRequest(
-                            MigrationLedgerEntryError::ActiveBaseMismatch { expected, actual },
-                        ) => {
-                            assert_eq!(expected, initial.pair());
-                            assert_eq!(actual, candidate.candidate_pair());
-                        }
-                        StorageError::Backend(SqliteError::Backend(turso::Error::Busy(_)))
-                        | StorageError::Backend(SqliteError::Backend(
-                            turso::Error::BusySnapshot(_),
-                        )) => {}
-                        StorageError::Backend(SqliteError::Backend(turso::Error::Error(
-                            message,
-                        ))) if message.to_ascii_lowercase().contains("busy")
-                            || message.to_ascii_lowercase().contains("locked") => {}
-                        other => panic!("unexpected concurrent apply result: {other:?}"),
+                Err(error) => match error {
+                    StorageError::InvalidRequest(
+                        MigrationLedgerEntryError::ActiveBaseMismatch { expected, actual },
+                    ) => {
+                        assert_eq!(expected, initial.pair());
+                        assert_eq!(actual, candidate.candidate_pair());
                     }
-                }
+                    StorageError::Backend(SqliteError::Backend(turso::Error::Busy(_)))
+                    | StorageError::Backend(SqliteError::Backend(turso::Error::BusySnapshot(_))) => {
+                    }
+                    StorageError::Backend(SqliteError::Backend(turso::Error::Error(message)))
+                        if message.to_ascii_lowercase().contains("busy")
+                            || message.to_ascii_lowercase().contains("locked") => {}
+                    other => panic!("unexpected concurrent apply result: {other:?}"),
+                },
             }
         }
         assert_eq!(successes, 1);
-        assert_eq!(failures, 1);
-
         assert_eq!(
             persisted_row_counts(&store_a).await,
             PersistedRowCounts {
@@ -3253,6 +3841,7 @@ mod tests {
                 catalogue_revisions: 2,
                 source_units: 1,
                 schemas: 1,
+                snapshots: 1,
                 ledger: 1,
             }
         );
@@ -3282,9 +3871,10 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0xc1, 0xc2, 0xc3);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let active_before = RevisionStore::apply(&store, &first_candidate, &first_artifact)
-            .await
-            .unwrap();
+        let active_before =
+            ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
+                .await
+                .unwrap();
         let counts_before = persisted_row_counts(&store).await;
 
         let connection = store.connection.lock().await;
@@ -3303,7 +3893,7 @@ mod tests {
         let second_candidate = schema_candidate(&active_before, 0xd1, 0xd2, 0xd3);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&active_before, &second_candidate).unwrap();
-        let error = RevisionStore::apply(&store, &second_candidate, &second_artifact)
+        let error = ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -3356,16 +3946,18 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0xe1, 0xe2, 0xe3);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first_active = RevisionStore::apply(&store, &first_candidate, &first_artifact)
-            .await
-            .unwrap();
+        let first_active =
+            ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
+                .await
+                .unwrap();
 
         let second_candidate = schema_candidate(&first_active, 0xe4, 0xe5, 0xe6);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first_active, &second_candidate).unwrap();
-        let second_active = RevisionStore::apply(&store, &second_candidate, &second_artifact)
-            .await
-            .unwrap();
+        let second_active =
+            ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
+                .await
+                .unwrap();
 
         let third_candidate = schema_candidate(&second_active, 0xe7, 0xe8, 0xe9);
         let third_artifact =
@@ -3410,7 +4002,7 @@ mod tests {
             ))
         ));
 
-        let error = RevisionStore::apply(&store, &third_candidate, &third_artifact)
+        let error = ApplicationRevisionStore::apply(&store, &third_candidate, &third_artifact)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -3436,7 +4028,7 @@ mod tests {
 
         let candidate = schema_candidate(&initial, 0xea, 0xeb, 0xec);
         let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
-        let active = RevisionStore::apply(&store, &candidate, &artifact)
+        let active = ApplicationRevisionStore::apply(&store, &candidate, &artifact)
             .await
             .unwrap();
         let next_candidate = schema_candidate(&active, 0xed, 0xee, 0xef);
@@ -3468,7 +4060,7 @@ mod tests {
             ))
         ));
 
-        let error = RevisionStore::apply(&store, &next_candidate, &next_artifact)
+        let error = ApplicationRevisionStore::apply(&store, &next_candidate, &next_artifact)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -3493,7 +4085,7 @@ mod tests {
         let initial = store.recover().await.unwrap();
         let candidate = schema_candidate(&initial, 0xe1, 0xe2, 0xe3);
         let artifact = PhysicalMigrationArtifact::from_revisions(&initial, &candidate).unwrap();
-        let active = RevisionStore::apply(&store, &candidate, &artifact)
+        let active = ApplicationRevisionStore::apply(&store, &candidate, &artifact)
             .await
             .unwrap();
         let counts_before_delete = persisted_row_counts(&store).await;
@@ -3562,16 +4154,18 @@ mod tests {
         let first_candidate = schema_candidate(&initial, 0x31, 0x32, 0x33);
         let first_artifact =
             PhysicalMigrationArtifact::from_revisions(&initial, &first_candidate).unwrap();
-        let first_active = RevisionStore::apply(&store, &first_candidate, &first_artifact)
-            .await
-            .unwrap();
+        let first_active =
+            ApplicationRevisionStore::apply(&store, &first_candidate, &first_artifact)
+                .await
+                .unwrap();
 
         let second_candidate = schema_candidate(&first_active, 0x41, 0x42, 0x43);
         let second_artifact =
             PhysicalMigrationArtifact::from_revisions(&first_active, &second_candidate).unwrap();
-        let second_active = RevisionStore::apply(&store, &second_candidate, &second_artifact)
-            .await
-            .unwrap();
+        let second_active =
+            ApplicationRevisionStore::apply(&store, &second_candidate, &second_artifact)
+                .await
+                .unwrap();
         assert_ne!(
             first_candidate.source().id(),
             second_active.pair().source(),
@@ -3625,7 +4219,7 @@ mod tests {
             ))
         ));
 
-        let error = RevisionStore::apply(&store, &third_candidate, &third_artifact)
+        let error = ApplicationRevisionStore::apply(&store, &third_candidate, &third_artifact)
             .await
             .unwrap_err();
         assert!(matches!(
