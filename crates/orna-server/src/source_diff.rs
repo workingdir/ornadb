@@ -75,12 +75,18 @@ impl InstalledSourceDiffDiagnostics {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSourceDiffReport {
     bytes: Vec<u8>,
+    warnings: Option<InstalledSourceDiffDiagnostics>,
 }
 
 impl InstalledSourceDiffReport {
     /// Returns the rendered diff document and its one final line feed.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns non-blocking compiler warnings emitted while preparing the diff.
+    pub fn warnings(&self) -> Option<&InstalledSourceDiffDiagnostics> {
+        self.warnings.as_ref()
     }
 
     /// Writes the complete diff document. A write failure cannot change the
@@ -285,17 +291,22 @@ async fn diff_source_bundle(
         .map_err(map_storage_recovery_error)?;
     let report = source_support::check_application_source(&active, &bundle)
         .map_err(map_application_check_error)?;
-
-    if !report.diagnostics().is_empty() {
+    let rendered_diagnostics = if report.diagnostics().is_empty() {
+        None
+    } else {
         let (bytes, human_bytes, coloured_bytes) =
             source_support::render_source_diagnostics(report.parse_report(), report.diagnostics())
                 .into_parts();
+        Some(InstalledSourceDiffDiagnostics {
+            bytes,
+            human_bytes,
+            coloured_bytes,
+        })
+    };
+
+    if report.has_errors() {
         return Ok(InstalledSourceDiffOutcome::Diagnostics(
-            InstalledSourceDiffDiagnostics {
-                bytes,
-                human_bytes,
-                coloured_bytes,
-            },
+            rendered_diagnostics.expect("an error-level report contains diagnostics"),
         ));
     }
 
@@ -305,7 +316,10 @@ async fn diff_source_bundle(
     let revision_changes = function_revision_changes(&active, &candidate);
     let bytes = render_diff_document(&active, &candidate, &diff, &revision_changes)?;
     Ok(InstalledSourceDiffOutcome::Diff(
-        InstalledSourceDiffReport { bytes },
+        InstalledSourceDiffReport {
+            bytes,
+            warnings: rendered_diagnostics,
+        },
     ))
 }
 

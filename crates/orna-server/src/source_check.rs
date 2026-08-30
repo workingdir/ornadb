@@ -178,6 +178,11 @@ pub(super) fn run_with_output(
     if report.diagnostics().is_empty() {
         return SourceCheckResult::Success;
     }
+    let outcome = if report.has_errors() {
+        SourceCheckResult::Failure
+    } else {
+        SourceCheckResult::Success
+    };
     let result = if human_output {
         output.write_all(&orna_server::render_human_source_diagnostics(
             report.parse_report(),
@@ -190,9 +195,10 @@ pub(super) fn run_with_output(
         ))
     };
     if result.is_err() {
-        return SourceCheckResult::Failure;
+        SourceCheckResult::Failure
+    } else {
+        outcome
     }
-    SourceCheckResult::Failure
 }
 fn read_regular_file(path: &str) -> Result<Vec<u8>, ()> {
     let mut file = fs::OpenOptions::new()

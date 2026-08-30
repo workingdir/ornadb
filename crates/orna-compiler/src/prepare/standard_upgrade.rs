@@ -243,7 +243,7 @@ pub(crate) fn prepare_checked_standard_upgrade_with_allocator(
     )
     .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
     let report = check_standard_application(&source, &context);
-    if !report.diagnostics().is_empty() {
+    if report.has_errors() {
         return Err(PrepareStandardUpgradeError::ActiveSourceDiagnostics {
             diagnostics: report.diagnostics().to_vec(),
         });

@@ -9,12 +9,12 @@ use orna_protocol::CallFailure;
 mod cli;
 mod source_check;
 
-use cli::{Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help};
+use cli::{
+    ColorChoice, Command, ParsedInvocation, RawCallParameters, USAGE, parse_invocation, write_help,
+};
 
 #[cfg(test)]
-use cli::{
-    ColorChoice, HELP_TOP_LEVEL, HelpTopic, InvokeArguments, help_text, parse_command, render_help,
-};
+use cli::{HELP_TOP_LEVEL, HelpTopic, InvokeArguments, help_text, parse_command, render_help};
 #[cfg(test)]
 use orna_core::{
     FunctionId, InspectEpochId, InvocationId, PrincipalId, StateSlotId, TypeId,
@@ -128,20 +128,26 @@ fn main() -> ExitCode {
             },
             _ => match orna_server::run_installed_source_apply(&path) {
                 Ok(orna_server::InstalledSourceApplyOutcome::Diagnostics(diagnostics)) => {
-                    let stderr = io::stderr();
-                    let terminal = stderr.is_terminal();
-                    let mut stderr = stderr.lock();
-                    let bytes = if color.enabled(terminal) {
-                        diagnostics.coloured_bytes()
-                    } else if terminal {
-                        diagnostics.human_bytes()
-                    } else {
-                        diagnostics.as_bytes()
-                    };
-                    let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+                    let _ = write_terminal_diagnostics(
+                        diagnostics.as_bytes(),
+                        diagnostics.human_bytes(),
+                        diagnostics.coloured_bytes(),
+                        &color,
+                    );
                     ExitCode::from(1)
                 }
                 Ok(orna_server::InstalledSourceApplyOutcome::Applied(document)) => {
+                    if let Some(warnings) = document.warnings()
+                        && write_terminal_diagnostics(
+                            warnings.as_bytes(),
+                            warnings.human_bytes(),
+                            warnings.coloured_bytes(),
+                            &color,
+                        )
+                        .is_err()
+                    {
+                        return ExitCode::from(1);
+                    }
                     let stdout = io::stdout();
                     let mut stdout = stdout.lock();
                     match document.write_to(&mut stdout) {
@@ -174,20 +180,26 @@ fn main() -> ExitCode {
             },
             _ => match orna_server::run_installed_source_diff(&path) {
                 Ok(orna_server::InstalledSourceDiffOutcome::Diagnostics(diagnostics)) => {
-                    let stderr = io::stderr();
-                    let terminal = stderr.is_terminal();
-                    let mut stderr = stderr.lock();
-                    let bytes = if color.enabled(terminal) {
-                        diagnostics.coloured_bytes()
-                    } else if terminal {
-                        diagnostics.human_bytes()
-                    } else {
-                        diagnostics.as_bytes()
-                    };
-                    let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+                    let _ = write_terminal_diagnostics(
+                        diagnostics.as_bytes(),
+                        diagnostics.human_bytes(),
+                        diagnostics.coloured_bytes(),
+                        &color,
+                    );
                     ExitCode::from(1)
                 }
                 Ok(orna_server::InstalledSourceDiffOutcome::Diff(report)) => {
+                    if let Some(warnings) = report.warnings()
+                        && write_terminal_diagnostics(
+                            warnings.as_bytes(),
+                            warnings.human_bytes(),
+                            warnings.coloured_bytes(),
+                            &color,
+                        )
+                        .is_err()
+                    {
+                        return ExitCode::from(1);
+                    }
                     let stdout = io::stdout();
                     let mut stdout = stdout.lock();
                     match report.write_to(&mut stdout) {
@@ -503,6 +515,25 @@ fn write_sqlite_source_diff_outcome(
             ExitCode::from(1)
         }
     }
+}
+
+fn write_terminal_diagnostics(
+    machine: &[u8],
+    human: &[u8],
+    coloured: &[u8],
+    color: &ColorChoice,
+) -> io::Result<()> {
+    let stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    let bytes = if color.enabled(terminal) {
+        coloured
+    } else if terminal {
+        human
+    } else {
+        machine
+    };
+    let mut stderr = stderr.lock();
+    stderr.write_all(bytes).and_then(|()| stderr.flush())
 }
 
 #[derive(serde::Serialize)]

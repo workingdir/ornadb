@@ -5,6 +5,7 @@
 
 mod client;
 mod identity;
+mod lints;
 mod model;
 mod server_functions;
 mod standard_library;
@@ -26,6 +27,7 @@ pub use identity::{
     CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId,
 };
 
+use lints::collect_warnings;
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientBodyKind,
     CheckedClientCapability, CheckedClientCapabilityArgument, CheckedClientFunction,
@@ -644,19 +646,23 @@ fn check_application_parsed(
     let mut uses = Vec::new();
     let mut checked_schemas = Vec::new();
     let mut known_schemas = HashSet::new();
-    let mut submitted_schemas = HashSet::new();
+    let mut submitted_schemas = HashMap::<QualifiedSemanticName, SourceLocation>::new();
     for unit in parse_report.units() {
         for declaration in unit.parsed().schemas() {
             let name = semantic_name(&declaration.name);
-            if !submitted_schemas.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = submitted_schemas.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate schema definition {name}"),
                     unit.logical_path(),
                     &declaration.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            submitted_schemas.insert(
+                name.clone(),
+                location(unit.logical_path(), &declaration.name.span),
+            );
             known_schemas.insert(name.clone());
             checked_schemas.push(CheckedSchema {
                 id: assignments.schema_id(base.schema_by_name(&name).map(|schema| schema.id())),
@@ -667,7 +673,7 @@ fn check_application_parsed(
     }
 
     let mut headers = Vec::new();
-    let mut declarations_by_name = HashSet::<QualifiedSemanticName>::new();
+    let mut declarations_by_name = HashMap::<QualifiedSemanticName, SourceLocation>::new();
     for unit in parse_report.units() {
         for declaration in unit.parsed().object_types() {
             let name = semantic_name(&declaration.name);
@@ -689,15 +695,19 @@ fn check_application_parsed(
                 ));
                 continue;
             }
-            if !declarations_by_name.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = declarations_by_name.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate object type definition {name}"),
                     unit.logical_path(),
                     &declaration.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            declarations_by_name.insert(
+                name.clone(),
+                location(unit.logical_path(), &declaration.name.span),
+            );
             let id = assignments.type_id(
                 base.object_type_by_name(&name)
                     .map(|object_type| object_type.id()),
@@ -732,30 +742,40 @@ fn check_application_parsed(
                 ));
                 continue;
             }
-            if !declarations_by_name.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = declarations_by_name.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate enum type definition {name}"),
                     unit.logical_path(),
                     &declaration.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            declarations_by_name.insert(
+                name.clone(),
+                location(unit.logical_path(), &declaration.name.span),
+            );
 
             let mut labels = Vec::with_capacity(declaration.labels.len());
-            let mut distinct_labels = HashSet::with_capacity(declaration.labels.len());
+            let mut distinct_labels =
+                HashMap::<String, SourceLocation>::with_capacity(declaration.labels.len());
             let mut valid = true;
             for label in &declaration.labels {
                 let decoded = decode_string_literal(&label.literal)
                     .expect("parser accepted one complete enum string literal");
-                if !distinct_labels.insert(decoded.clone()) {
-                    diagnostics.push(diagnostic(
-                        DiagnosticCode::DuplicateDefinition,
+                if let Some(previous) = distinct_labels.get(&decoded) {
+                    diagnostics.push(duplicate_diagnostic(
                         format!("duplicate enum label {decoded:?} in {name}"),
                         unit.logical_path(),
                         &label.literal.span,
+                        previous.clone(),
                     ));
                     valid = false;
+                } else {
+                    distinct_labels.insert(
+                        decoded.clone(),
+                        location(unit.logical_path(), &label.literal.span),
+                    );
                 }
                 labels.push(decoded);
             }
@@ -797,15 +817,19 @@ fn check_application_parsed(
                 ));
                 continue;
             }
-            if !declarations_by_name.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = declarations_by_name.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate record value type definition {name}"),
                     unit.logical_path(),
                     &declaration.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            declarations_by_name.insert(
+                name.clone(),
+                location(unit.logical_path(), &declaration.name.span),
+            );
             if standard.is_none() {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
@@ -847,19 +871,23 @@ fn check_application_parsed(
     for header in &record_value_headers {
         let type_name = semantic_name(&header.declaration.name);
         let base_type = base.record_value_type_by_name(&type_name);
-        let mut field_names = HashSet::new();
+        let mut field_names = HashMap::<String, SourceLocation>::new();
         let mut fields = Vec::with_capacity(header.declaration.fields.len());
         for field in &header.declaration.fields {
             let name = semantic_part(&field.name);
-            if !field_names.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = field_names.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate record field definition {name} in {type_name}"),
                     header.logical_path,
                     &field.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            field_names.insert(
+                name.clone(),
+                location(header.logical_path, &field.name.span),
+            );
             let Some(resolved_type) = resolve_record_value_field_type(
                 &field.type_specification,
                 &submitted_ids,
@@ -922,23 +950,27 @@ fn check_application_parsed(
     for header in headers {
         let type_name = semantic_name(&header.declaration.name);
         let base_type = base.object_type_by_name(&type_name);
-        let mut field_names = HashSet::new();
+        let mut field_names = HashMap::<String, SourceLocation>::new();
         let mut checked_fields = Vec::with_capacity(header.declaration.fields.len());
 
         for field in &header.declaration.fields {
             let name = semantic_part(&field.name);
-            if !field_names.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = field_names.get(&name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!(
                         "duplicate field definition {name} in {}",
                         semantic_name(&header.declaration.name)
                     ),
                     header.logical_path,
                     &field.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            field_names.insert(
+                name.clone(),
+                location(header.logical_path, &field.name.span),
+            );
 
             let resolved_type = resolve_application_type(
                 &field.type_specification,
@@ -1134,6 +1166,9 @@ fn check_application_parsed(
     if !diagnostics.is_empty() {
         return application_failed(parse_report, diagnostics);
     }
+
+    diagnostics.extend(collect_warnings(&parse_report));
+    sort_application_diagnostics(&mut diagnostics, &parse_report);
 
     ApplicationCheckResult {
         parse_report,
@@ -1579,12 +1614,13 @@ fn resolve_function_namespace(
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> HashMap<QualifiedSemanticName, CheckedFunctionId> {
     let mut function_ids = HashMap::new();
-    let mut declarations_by_name = HashMap::<QualifiedSemanticName, FunctionDomain>::new();
+    let mut declarations_by_name =
+        HashMap::<QualifiedSemanticName, (FunctionDomain, SourceLocation)>::new();
 
     for declaration in function_declarations_in_source_order(parse_report) {
         let name = declaration.name();
-        if let Some(previous_domain) = declarations_by_name.get(&name).copied() {
-            let message = match (previous_domain, declaration.domain()) {
+        if let Some((previous_domain, previous)) = declarations_by_name.get(&name) {
+            let message = match (*previous_domain, declaration.domain()) {
                 (FunctionDomain::Server, FunctionDomain::Server) => {
                     format!("duplicate server function definition {name}")
                 }
@@ -1593,15 +1629,21 @@ fn resolve_function_namespace(
                 }
                 _ => format!("duplicate function definition {name}"),
             };
-            diagnostics.push(diagnostic(
-                DiagnosticCode::DuplicateDefinition,
+            diagnostics.push(duplicate_diagnostic(
                 message,
                 declaration.logical_path(),
                 declaration.span(),
+                previous.clone(),
             ));
             continue;
         }
-        declarations_by_name.insert(name.clone(), declaration.domain());
+        declarations_by_name.insert(
+            name.clone(),
+            (
+                declaration.domain(),
+                location(declaration.logical_path(), declaration.span()),
+            ),
+        );
 
         let Some(namespace) = namespace_of(&name) else {
             let kind = match declaration.domain() {
@@ -1685,20 +1727,24 @@ fn resolve_server_function_inputs<'a>(
         let diagnostics_before = diagnostics.len();
         let name = semantic_name(&header.declaration.name);
         let base_function = base.function_by_name(&name);
-        let mut parameter_names = HashSet::new();
+        let mut parameter_names = HashMap::<String, SourceLocation>::new();
         let mut parameters = Vec::with_capacity(header.declaration.parameters.len());
 
         for parameter in &header.declaration.parameters {
             let parameter_name = semantic_part(&parameter.name);
-            if !parameter_names.insert(parameter_name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
+            if let Some(previous) = parameter_names.get(&parameter_name) {
+                diagnostics.push(duplicate_diagnostic(
                     format!("duplicate parameter definition {parameter_name} in {name}"),
                     header.logical_path,
                     &parameter.name.span,
+                    previous.clone(),
                 ));
                 continue;
             }
+            parameter_names.insert(
+                parameter_name.clone(),
+                location(header.logical_path, &parameter.name.span),
+            );
 
             let Some(resolved_type) = resolve_application_type_with_named_standard(
                 &parameter.type_specification,
@@ -1869,19 +1915,20 @@ fn resolve_server_function_return(
             }
 
             let diagnostics_before = diagnostics.len();
-            let mut names = HashSet::new();
+            let mut names = HashMap::<String, SourceLocation>::new();
             let mut resolved_columns = Vec::with_capacity(columns.len());
             for column in columns {
                 let name = semantic_part(&column.name);
-                if !names.insert(name.clone()) {
-                    diagnostics.push(diagnostic(
-                        DiagnosticCode::DuplicateDefinition,
+                if let Some(previous) = names.get(&name) {
+                    diagnostics.push(duplicate_diagnostic(
                         format!("duplicate ROWS return column definition {name}"),
                         logical_path,
                         &column.name.span,
+                        previous.clone(),
                     ));
                     continue;
                 }
+                names.insert(name.clone(), location(logical_path, &column.name.span));
                 let Some(resolved_type) = resolve_application_type(
                     &column.type_specification,
                     submitted_ids,
@@ -3266,6 +3313,23 @@ fn diagnostic(
     span: &SourceSpan,
 ) -> CompilerDiagnostic {
     DiagnosticCode::semantic(code, message, location(logical_path, span))
+}
+
+fn duplicate_diagnostic(
+    message: impl Into<String>,
+    logical_path: &str,
+    span: &SourceSpan,
+    previous: SourceLocation,
+) -> CompilerDiagnostic {
+    diagnostic(
+        DiagnosticCode::DuplicateDefinition,
+        message,
+        logical_path,
+        span,
+    )
+    .with_primary_label("redefined here")
+    .with_help("rename one of the definitions or remove the duplicate")
+    .with_related(previous, "first defined here")
 }
 
 #[cfg(test)]

@@ -3783,6 +3783,21 @@ impl CheckReport {
     pub fn diagnostics(&self) -> &[CompilerDiagnostic] {
         &self.diagnostics
     }
+    /// Returns whether checking produced any error-level diagnostics.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(CompilerDiagnostic::is_error)
+    }
+    /// Returns the number of error-level diagnostics.
+    pub fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .count()
+    }
+    /// Returns the number of warning-level diagnostics.
+    pub fn warning_count(&self) -> usize {
+        self.diagnostics.len() - self.error_count()
+    }
     /// Returns checked Orna-owned definitions when checking succeeds.
     pub fn checked_bundle(&self) -> Option<&CheckedBundle> {
         self.checked_bundle.as_ref()

@@ -85,12 +85,18 @@ impl InstalledSourceApplyDiagnostics {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledSourceApplySuccess {
     bytes: Vec<u8>,
+    warnings: Option<InstalledSourceApplyDiagnostics>,
 }
 
 impl InstalledSourceApplySuccess {
     /// Returns the compact success JSON and its one final line feed.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns non-blocking compiler warnings emitted before the source was applied.
+    pub fn warnings(&self) -> Option<&InstalledSourceApplyDiagnostics> {
+        self.warnings.as_ref()
     }
 
     /// Writes the complete success document after the apply has committed.
@@ -352,22 +358,24 @@ async fn apply_source_bundle(
     let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
         .map_err(|source| InstalledSourceApplyError::ApplicationContext { source })?;
     let report = check_standard_application(&bundle, &context);
+    let rendered_diagnostics =
+        (!report.diagnostics().is_empty()).then(|| InstalledSourceApplyDiagnostics {
+            bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
+            human_bytes: source_diagnostics::render_human_diagnostics(
+                report.parse_report(),
+                report.diagnostics(),
+                false,
+            ),
+            coloured_bytes: source_diagnostics::render_human_diagnostics(
+                report.parse_report(),
+                report.diagnostics(),
+                true,
+            ),
+        });
 
-    if !report.diagnostics().is_empty() {
+    if report.has_errors() {
         return Ok(InstalledSourceApplyOutcome::Diagnostics(
-            InstalledSourceApplyDiagnostics {
-                bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
-                human_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    false,
-                ),
-                coloured_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    true,
-                ),
-            },
+            rendered_diagnostics.expect("an error-level report contains diagnostics"),
         ));
     }
 
@@ -376,7 +384,8 @@ async fn apply_source_bundle(
     let artifact = PhysicalMigrationArtifact::from_revisions(&active, &candidate)
         .map_err(|source| InstalledSourceApplyError::Artifact { source })?;
     let expected_pair = candidate.candidate_pair();
-    let document = build_success_document(expected_pair, candidate.candidate())?;
+    let mut document = build_success_document(expected_pair, candidate.candidate())?;
+    document.warnings = rendered_diagnostics;
     let committed = ApplicationRevisionStore::apply_source_apply(&kernel, &candidate, &artifact)
         .await
         .map_err(map_storage_apply_error)?;
@@ -638,7 +647,10 @@ fn build_success_document(
     let mut bytes = serde_json::to_vec(&document)
         .map_err(|source| InstalledSourceApplyError::ResultDocument { source })?;
     bytes.push(b'\n');
-    Ok(InstalledSourceApplySuccess { bytes })
+    Ok(InstalledSourceApplySuccess {
+        bytes,
+        warnings: None,
+    })
 }
 
 #[cfg(test)]
