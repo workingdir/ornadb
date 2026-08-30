@@ -46,6 +46,11 @@ fn main() -> ExitCode {
                 | Command::SourceCheck(_)
                 | Command::SourceApply(_)
                 | Command::SourceDiff(_)
+                | Command::Invoke(_)
+                | Command::SecurityGrantExecute(_)
+                | Command::SecurityAdmin(_)
+                | Command::Inspect(_)
+                | Command::RawCall(_, _)
         ),
         orna_client::endpoint::DatabaseEndpoint::UnixSocket { .. }
         | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => true,
@@ -219,7 +224,15 @@ fn main() -> ExitCode {
             },
         },
         Command::SecurityGrantExecute(function) => {
-            match orna_server::security_admin::run_installed_security_grant(function) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_security_grant_execute(path, function)
+                        .map_err(|error| error.to_string())
+                }
+                _ => orna_server::security_admin::run_installed_security_grant(function)
+                    .map_err(|error| error.to_string()),
+            };
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -229,7 +242,13 @@ fn main() -> ExitCode {
         }
         Command::SecurityAdmin(request) => {
             let mut stdout = std::io::stdout().lock();
-            match orna_server::run_installed_security_admin(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_security_admin(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_security_admin(request, &mut stdout),
+            };
+            match result {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -247,33 +266,56 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::RawCall(function, parameters) => match match parameters {
-            RawCallParameters::None => orna_server::run_local_raw_call(function),
-            RawCallParameters::One(parameter) => {
-                orna_server::run_local_raw_call_with_argument(function, parameter)
+        Command::RawCall(function, parameters) => {
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    let parameter_ids = match parameters {
+                        RawCallParameters::None => Vec::new(),
+                        RawCallParameters::One(parameter) => vec![parameter],
+                        RawCallParameters::Pair(first, second) => vec![first, second],
+                    };
+                    orna_server::run_sqlite_raw_call(
+                        path,
+                        function,
+                        &parameter_ids,
+                        &mut stdin,
+                        &mut stdout,
+                    )
+                }
+                _ => match parameters {
+                    RawCallParameters::None => orna_server::run_local_raw_call(function),
+                    RawCallParameters::One(parameter) => {
+                        orna_server::run_local_raw_call_with_argument(function, parameter)
+                    }
+                    RawCallParameters::Pair(first, second) => {
+                        orna_server::run_local_raw_call_with_argument_pair(function, first, second)
+                    }
+                },
+            };
+            match result {
+                Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
+                Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
+                    write_stderr_line(&format!("raw call failed: {}", failure_name(failure)));
+                    ExitCode::from(1)
+                }
+                Ok(orna_server::LocalRawCallOutcome::Cancelled) => ExitCode::from(6),
+                Err(
+                    error @ (orna_server::LocalRawCallError::Connection
+                    | orna_server::LocalRawCallError::Negotiation),
+                ) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(3)
+                }
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(7)
+                }
             }
-            RawCallParameters::Pair(first, second) => {
-                orna_server::run_local_raw_call_with_argument_pair(function, first, second)
-            }
-        } {
-            Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
-            Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
-                write_stderr_line(&format!("raw call failed: {}", failure_name(failure)));
-                ExitCode::from(1)
-            }
-            Ok(orna_server::LocalRawCallOutcome::Cancelled) => ExitCode::from(6),
-            Err(
-                error @ (orna_server::LocalRawCallError::Connection
-                | orna_server::LocalRawCallError::Negotiation),
-            ) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(3)
-            }
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(7)
-            }
-        },
+        }
         Command::Invoke(arguments) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
@@ -288,7 +330,13 @@ fn main() -> ExitCode {
                 arguments.explain,
                 arguments.runtime,
             );
-            match orna_server::run_installed_invoke(request, &mut stdout, &mut stderr) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
+                }
+                _ => orna_server::run_installed_invoke(request, &mut stdout, &mut stderr),
+            };
+            match result {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
                 Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
                 Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
@@ -304,7 +352,13 @@ fn main() -> ExitCode {
         Command::State(request) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
-            match orna_server::run_installed_user_state(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_user_state(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_user_state(request, &mut stdout),
+            };
+            match result {
                 Ok(orna_server::InstalledUserStateOutcome::Completed) => ExitCode::SUCCESS,
                 // A future closed outcome falls back to internal.
                 Ok(_) => ExitCode::from(7),
@@ -335,7 +389,13 @@ fn main() -> ExitCode {
         Command::Inspect(request) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
-            match orna_server::run_installed_inspect(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_inspect(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_inspect(request, &mut stdout),
+            };
+            match result {
                 Ok(orna_server::InstalledInspectOutcome::Completed) => ExitCode::SUCCESS,
                 // A future closed outcome falls back to internal.
                 Ok(_) => ExitCode::from(7),

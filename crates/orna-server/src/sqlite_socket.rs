@@ -133,6 +133,10 @@ async fn run_sqlite_server_async(database_path: PathBuf) -> Result<(), SqliteSoc
     ApplicationRevisionStore::bootstrap(&store)
         .await
         .map_err(|source| storage_error("could not bootstrap SQLite database", source))?;
+    store
+        .provision_local_peer(nix::unistd::geteuid().as_raw())
+        .await
+        .map_err(|source| sqlite_error("could not provision local peer", source))?;
     ApplicationRevisionStore::recover(&store)
         .await
         .map_err(|source| storage_error("could not recover SQLite database", source))?;
@@ -598,17 +602,75 @@ async fn dispatch_call(
     call_stream: u64,
     call: RawCall,
 ) -> Result<(), SqliteSocketError> {
+    let active = match ApplicationRevisionStore::recover(store).await {
+        Ok(active) => active,
+        Err(error) => {
+            send_typed_failure(
+                version,
+                connection,
+                stream,
+                call_stream,
+                CallFailure::InternalFailure,
+            )
+            .await?;
+            let _ = error;
+            return Ok(());
+        }
+    };
+    if active.catalogue().function_by_id(call.function).is_none() {
+        send_typed_failure(
+            version,
+            connection,
+            stream,
+            call_stream,
+            CallFailure::TargetUnavailable,
+        )
+        .await?;
+        return Ok(());
+    }
     let arguments: Vec<(ParameterId, orna_core::value::RuntimeValue)> = call
         .arguments
         .into_iter()
         .map(|argument| (argument.parameter, argument.value))
         .collect();
-    let values = match store
-        .execute_server_function(call.function, &arguments)
+    let invocation = InvocationId::new();
+    let execution = match store
+        .execute_local_peer_server_function_at(
+            &active,
+            nix::unistd::geteuid().as_raw(),
+            invocation,
+            call.function,
+            &arguments,
+        )
         .await
     {
-        Ok(values) => values,
+        Ok(execution) => execution,
         Err(error) => {
+            send_typed_failure(
+                version,
+                connection,
+                stream,
+                call_stream,
+                CallFailure::InternalFailure,
+            )
+            .await?;
+            let _ = error;
+            return Ok(());
+        }
+    };
+    let values = match execution {
+        orna_sqlite::SqliteExecutionResult::Denied { .. } => {
+            send_typed_failure(
+                version,
+                connection,
+                stream,
+                call_stream,
+                CallFailure::ExecuteDenied,
+            )
+            .await?;
+            return Ok(());
+        }
+        orna_sqlite::SqliteExecutionResult::Failed { error, .. } => {
             send_typed_failure(
                 version,
                 connection,
@@ -619,6 +681,7 @@ async fn dispatch_call(
             .await?;
             return Ok(());
         }
+        orna_sqlite::SqliteExecutionResult::Allowed { values, .. } => values,
     };
 
     let accepted = version
@@ -626,7 +689,7 @@ async fn dispatch_call(
             connection,
             ServerAction::Accepted {
                 stream: call_stream,
-                invocation: InvocationId::new(),
+                invocation,
             },
         )
         .map_err(|_| SqliteSocketError::protocol("could not accept call"))?;

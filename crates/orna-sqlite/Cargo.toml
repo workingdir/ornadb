@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 orna-core = { path = "../orna-core" }
 orna-artifact = { path = "../orna-artifact" }
+orna-protocol = { path = "../orna-protocol" }
 orna-storage = { path = "../orna-storage" }
 orna-standard = { path = "../orna-standard" }
 serde = { version = "1.0.229", features = ["derive"] }

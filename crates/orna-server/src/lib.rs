@@ -13,7 +13,10 @@ mod source_apply;
 mod source_diagnostics;
 mod source_diff;
 mod sqlite_backend;
+mod sqlite_inspect;
+mod sqlite_security;
 mod sqlite_socket;
+mod sqlite_state;
 mod user_state;
 
 /// Renders source diagnostics in the stable machine-readable format.
@@ -74,10 +77,13 @@ pub use source_diff::{
     run_source_diff_with_kernel,
 };
 pub use sqlite_backend::{
-    SqliteBackendError, SqliteSourceApplyOutcome, SqliteSourceDiffOutcome, run_sqlite_source_apply,
-    run_sqlite_source_diff,
+    SqliteBackendError, SqliteSourceApplyOutcome, SqliteSourceDiffOutcome, run_sqlite_invoke,
+    run_sqlite_raw_call, run_sqlite_source_apply, run_sqlite_source_diff,
 };
+pub use sqlite_inspect::run_sqlite_inspect;
+pub use sqlite_security::{run_sqlite_security_admin, run_sqlite_security_grant_execute};
 pub use sqlite_socket::{SqliteSocketError, run_sqlite_server};
+pub use sqlite_state::run_sqlite_user_state;
 pub use user_state::{
     AuthenticatedClientStateAdapter, AuthenticatedClientStateError, InstalledUserStateChange,
     InstalledUserStateError, InstalledUserStateErrorKind, InstalledUserStateExpectedType,

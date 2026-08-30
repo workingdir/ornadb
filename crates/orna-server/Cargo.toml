@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user"] }
+orna-artifact = { path = "../orna-artifact" }
 orna-client = { path = "../orna-client" }
 orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
@@ -31,5 +32,4 @@ tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-
 tokio-postgres = "0.7.18"
 
 [dev-dependencies]
-orna-artifact = { path = "../orna-artifact" }
 orna-postgres = { path = "../orna-postgres", features = ["test-hooks"] }

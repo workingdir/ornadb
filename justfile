@@ -10,6 +10,7 @@ sqlite-check:
 
 # Run the deterministic SQLite adapter and process-boundary smoke tests offline.
 sqlite-smoke:
+    cargo test --offline -p orna-sqlite --lib
     cargo run --offline -p orna-sqlite --example revision_store_smoke
     cargo test --offline -p orna-server --test sqlite_backend -- --nocapture
 

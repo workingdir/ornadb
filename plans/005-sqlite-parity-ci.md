@@ -2,12 +2,11 @@
 
 ## Purpose
 
-Keep the bounded SQLite contract continuously buildable and executable without a
-PostgreSQL service. The gate is intentionally focused: it proves local persistence,
-source lifecycle, socket behavior, and fail-closed boundaries without pretending to
-cover PostgreSQL resource/security transport behavior.
-
-## Required commands
+Keep the local SQLite runtime buildable and executable without a PostgreSQL
+service. The gate proves local persistence, source lifecycle, direct SERVER
+invocation/raw-call, USER state, security administration, socket behavior, and
+redacted inspection evidence without pretending to cover PostgreSQL CLIENT/Qt
+execution or resource transport parity.
 
 ```text
 just sqlite-check
@@ -31,20 +30,28 @@ The focused process target must retain coverage for:
 - source diagnostics that leave the active pair and migration ledger unchanged;
 - semantic diff that does not perform physical planning or mutation;
 - read-only diff rejection for a fresh database path;
+- direct SERVER invoke output formats, raw-call routing, USER-state write/load/
+  conflict behavior, and security-admin persistence;
+- persisted redacted invocation audit, inspection-summary, trace records, and
+  reopen behavior;
 - private socket mode, stale-socket handling, live-server conflict, graceful signal
   cleanup, unsupported-version rejection, and concurrent clients;
 - V1 raw-call handshake/dispatch, unknown-target failure, and V2 catalogue calls.
 
 The SQLite adapter tests additionally cover exact artifact persistence, recovery,
 source/snapshot integrity, migration ordinal/format/version/canonical-byte/digest
-corruption, unsupported capabilities, and concurrent apply serialization.
+corruption, unsupported capabilities, bounded evidence payloads, and concurrent
+apply serialization.
 
 ## CI policy
 
-The workflow has a dedicated `SQLite parity gate` job. It runs both recipes on
-`ubuntu-latest` with Rust 1.95 and uploads the command logs as retained evidence.
-The existing Compose PostgreSQL gate remains separate and continues to own
-PostgreSQL-only resource audit, inspect, state, security, and protected-audit proofs.
+The workflow has a dedicated `SQLite parity gate` job. It checks out the
+PostgreSQL submodule recursively because the `orna-server` binary links the
+embedded engine even when the exercised commands are SQLite LocalPath commands.
+It runs both recipes on `ubuntu-latest` with Rust 1.95 and uploads command logs as
+retained evidence. The existing Compose PostgreSQL gate remains separate and
+continues to own PostgreSQL-only resource transport and protected-audit proofs.
 
-A green SQLite gate is evidence of the bounded contract above. It is not evidence that
-SQLite supports PostgreSQL-only command routes or resource durability.
+A green SQLite gate is evidence of the local contract above. It is not evidence
+of PostgreSQL CLIENT/Qt execution, resource durability, or value-bearing
+inspection parity.

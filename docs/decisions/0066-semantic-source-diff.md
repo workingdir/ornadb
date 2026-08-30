@@ -29,12 +29,15 @@ interleave with it.
 
 ## Semantics
 
-The active catalogue is recovered from the fixed private instance. The bundle
-is checked through the same standard-backed application path as `orna source
-apply` (`check_standard_application` against the pinned verified standard,
-then `prepare_standard_application` against the active revision pair). The
-candidate's `CatalogueSnapshot` is then compared against the active
-`CatalogueSnapshot`:
+The active catalogue is recovered from the selected backend. On the managed
+local endpoint, the bundle is checked through the same standard-backed
+application path as `orna source apply` (`check_standard_application` against
+the pinned verified standard, then `prepare_standard_application` against the
+active revision pair). On an explicit `LocalPath`, the SQLite adapter runs its
+supported backend-neutral `check`/`prepare` path against the recovered active
+revision and rejects unsupported catalogue or artifact capabilities before
+mutation. In both cases the candidate's `CatalogueSnapshot` is then compared
+against the active `CatalogueSnapshot`:
 
 - **added** — a schema, object type, enum type, or function whose stable
   identity is absent from the active catalogue;

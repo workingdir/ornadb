@@ -19,24 +19,35 @@ shared invariants and explicit failure boundaries—not identical command covera
   `<database>.orna.sock`. The socket accepts the bounded raw-call protocol, refreshes
   the durable active revision for each new connection, enforces connection and frame
   limits, and removes its socket on graceful shutdown.
-- The SQLite physical surface is closed: unsupported value, enum, record, binding,
-  scalar, and artifact shapes fail before durable mutation. The server-plan and
-  parameter-echo result shapes are the only execution shapes in this slice.
 - Recovery recomputes source-unit, source-bundle, source-revision, catalogue, and
   physical-ledger integrity, and rejects corrupted or mismatched snapshots and
   lineage before exposing state.
+- `--db <path> invoke` resolves and executes the supported SERVER-function subset
+  directly, performs canonical CLI binding, authenticates the local peer, and
+  renders canonical, JSON, table, or CSV output. `--explain` is a redacted plan
+  record and does not execute.
+- `--db <path> raw-call` directly executes a supported SERVER function using
+  bounded canonical ORV5 values from standard input. The private SQLite socket
+  remains available for protocol clients and applies the same execute gate.
+- `--db <path> state get|set` persists principal-scoped USER-state cells with
+  canonical ORV5 values, optimistic revisions, type checks, and conflict results.
+- `--db <path> security ...` persists principals, roles, memberships, execute
+  grants, privilege grants, and local peer credentials. Mutations require the
+  durable `SecurityAdmin` privilege and reads use the same snapshot model.
+- Successful local invocations persist only redacted audit, inspection-summary,
+  and trace evidence. Arguments, result values, source text, and resource
+  payloads are never stored by this evidence path.
 
 ## Explicit non-goals
 
-SQLite LocalPath does not route PostgreSQL-only `invoke`, `state`, `inspect`, or
-`security` commands. It also does not implement the authenticated resource transport,
-resource invocation, durable resource audit rows, or PostgreSQL protected audit
-semantics. These are rejected or absent by design; no local fallback is implied.
+SQLite LocalPath does not implement CLIENT or Qt execution, the authenticated
+resource transport, resource invocation, durable resource-audit payloads, or the
+PostgreSQL standard-library protected transports. Inspection is intentionally
+redacted and bounded: it exposes structural invocation summaries and trace
+events captured by the local route, not value-bearing projections or source text.
+The local raw-call and invoke routes accept SERVER functions only.
 
-The socket acknowledges protocol versions one through five. Versions one through
-three have typed SQLite handling in this bounded slice; versions four and five use
-the protocol fallback when the required opaque codec registry is unavailable. A
-successful handshake is not a claim of full feature parity.
+These are rejected or absent by design; no local fallback is implied.
 
 ## Verification surface
 
