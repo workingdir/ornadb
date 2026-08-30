@@ -54,7 +54,14 @@ async fn recovery_rejects_a_tampered_application_migration_ledger() -> TestResul
             .await
             .expect_err("recovery must reject a missing application migration");
         require(
-            matches!(error, PostgresKernelError::CatalogueInvariant(_)),
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.application_migrations",
+                    rule: "an empty migration ledger requires an active root source revision",
+                    ..
+                }
+            ),
             "ledger tamper produced the wrong recovery error",
         )?;
         let bootstrap_error = kernel
@@ -62,7 +69,14 @@ async fn recovery_rejects_a_tampered_application_migration_ledger() -> TestResul
             .await
             .expect_err("bootstrap must reject a missing application migration");
         require(
-            matches!(bootstrap_error, PostgresKernelError::CatalogueInvariant(_)),
+            matches!(
+                bootstrap_error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.application_migrations",
+                    rule: "an empty migration ledger requires an active root source revision",
+                    ..
+                }
+            ),
             "ledger tamper produced the wrong bootstrap error",
         )?;
         Ok(())

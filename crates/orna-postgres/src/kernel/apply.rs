@@ -435,6 +435,47 @@ pub(crate) async fn load_and_validate_migration_ledger(
     validate_ledger_registries(transaction, &entries, true).await?;
     Ok(entries)
 }
+/// Loads the application migration ledger and validates its durable history
+/// while allowing recovery of any revision represented by that history.
+pub(crate) async fn load_and_validate_migration_ledger_for_recovery(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+) -> Result<Vec<MigrationLedgerEntry>, PostgresKernelError> {
+    let entries = load_migration_ledger(transaction).await?;
+    validate_ledger_chain(&entries, None)?;
+    validate_recovery_active_pair(&entries, active)?;
+    validate_ledger_registries(transaction, &entries, true).await?;
+    Ok(entries)
+}
+
+fn validate_recovery_active_pair(
+    entries: &[MigrationLedgerEntry],
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PostgresKernelError> {
+    let active_pair = active.pair();
+    if entries.is_empty() {
+        if active.source().parent().is_some() {
+            return Err(DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "empty")
+                .invariant("an empty migration ledger requires an active root source revision"));
+        }
+        return Ok(());
+    }
+
+    if entries
+        .first()
+        .is_some_and(|entry| entry.expected_base() == active_pair)
+        || entries
+            .iter()
+            .any(|entry| entry.candidate_pair() == active_pair)
+    {
+        return Ok(());
+    }
+
+    Err(
+        DurableRecord::new(APPLICATION_MIGRATIONS_RELATION, "active")
+            .invariant("active revision must be represented by migration ledger history"),
+    )
+}
 
 pub(crate) async fn load_and_validate_migration_ledger_suffix(
     transaction: &Transaction<'_>,
@@ -784,12 +825,12 @@ async fn apply_standard_upgrade_transaction(
             "standard upgrade candidate must select the supplied standard snapshot",
         ));
     }
-    let artifact = resolve_artifact(&active, candidate, None)?;
-    validate_migration_artifact(&active, candidate, &artifact)?;
     let existing_ledger = load_and_validate_migration_ledger(transaction, Some(&active)).await?;
     validate_durable_grant_targets(transaction, candidate).await?;
     scan_reserved_standard_identities(transaction, &active, standard).await?;
     persist_retained_v1_standard_parent(transaction, standard).await?;
+    let artifact = resolve_artifact(&active, candidate, None)?;
+    validate_migration_artifact(&active, candidate, &artifact)?;
 
     let materialized = materialize(candidate, &active)?;
     let encoder = CandidateEncoder::new(candidate.catalogue_hash_context(), candidate.candidate());

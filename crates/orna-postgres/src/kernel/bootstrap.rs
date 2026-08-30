@@ -83,6 +83,8 @@ async fn bootstrap_client(client: &mut Client) -> Result<ActiveRevision, Postgre
 
     apply_migrations(&transaction).await?;
     let active = load_or_seed_active_revision(&transaction).await?;
+    let recovered = recover_active_revision(&transaction).await?;
+    crate::apply::load_and_validate_migration_ledger(&transaction, Some(&recovered)).await?;
     transaction
         .commit()
         .await
