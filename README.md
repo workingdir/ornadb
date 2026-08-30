@@ -47,9 +47,9 @@ target/debug/orna --help
 target/debug/orna --version
 ```
 
-The default `orna` command opens the local function-backed session. Use
-`orna repl` for the explicit form. Use `orna invoke <function>` for one stored
-function call:
+The no-argument form targets the local function-backed session, and `orna repl`
+is its explicit spelling. The parser accepts `orna invoke <function>` for one
+stored function call:
 
 ```sh
 orna
@@ -60,9 +60,11 @@ orna --db orna://db.example.test/work invoke tasks.overdue
 orna --daemon
 ```
 
+The examples above cover parser-supported command shapes. They do not prove
+that a database host is available or that the session completes successfully.
 The `--db` option selects a managed local database, an explicit Orna Unix
-socket, or a remote Orna URI. Remote invocation is parsed by the CLI but is not
-available until the authenticated TLS session contract is accepted.
+socket, or a remote Orna URI. Remote invocation is parsed by the CLI but is
+not available until the authenticated TLS session contract is accepted.
 
 Use `orna inspect`, `orna source check`, and `orna source apply` for normal
 inspection and source workflows. Server administration, security management,
