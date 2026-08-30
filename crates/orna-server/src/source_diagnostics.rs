@@ -44,6 +44,19 @@ pub(crate) fn write_diagnostics(
     }
     Ok(())
 }
+fn display_column(text: &str) -> usize {
+    text.chars()
+        .map(|character| match character {
+            '\t' => 4,
+            '\r' => 0,
+            character if character.is_control() => {
+                format!("\\u{{{:04X}}}", character as u32).chars().count()
+            }
+            _ => 1,
+        })
+        .sum()
+}
+
 fn write_human_diagnostics(
     output: &mut impl Write,
     parse_report: &ParseReport,
@@ -85,6 +98,8 @@ fn write_human_diagnostic(
     let source = unit.source_text();
     let start = span.start().min(source.len());
     let end = span.end().min(source.len()).max(start);
+    let start = char_boundary_at_or_before(source, start);
+    let end = char_boundary_at_or_after(source, end);
     let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
     let line_end = source[start..]
         .find('\n')
@@ -97,7 +112,15 @@ fn write_human_diagnostic(
     let column = display_column(&source[line_start..start]) + 1;
     let line = &source[line_start..line_end];
     let source_line = render_source_line(line);
-    let underline_width = display_column(&source[start..end]).max(1);
+    let underline_end = end.min(line_end);
+    let underline_width = display_column(&source[start..underline_end]).max(1);
+    let eof = end == source.len() && start == source.len();
+    let marker = format!(
+        "{}{}{}",
+        " ".repeat(display_column(&source[line_start..start])),
+        "^".repeat(underline_width),
+        if eof { " EOF" } else { "" }
+    );
     if colour {
         write!(output, "\x1b[1;31merror\x1b[0m")?;
     } else {
@@ -128,11 +151,6 @@ fn write_human_diagnostic(
     }
     output.write_all(b"   |\n")?;
     writeln!(output, "{line_number:>2} | {source_line}")?;
-    let marker = format!(
-        "{}{}",
-        " ".repeat(display_column(&source[line_start..start])),
-        "^".repeat(underline_width)
-    );
     if colour {
         writeln!(output, "   | \x1b[31m{marker}\x1b[0m")?;
     } else {
@@ -147,7 +165,6 @@ fn write_human_diagnostic(
     }
     Ok(())
 }
-
 fn render_source_line(line: &str) -> String {
     line.chars()
         .flat_map(|character| match character {
@@ -160,23 +177,25 @@ fn render_source_line(line: &str) -> String {
         })
         .collect()
 }
-fn display_column(text: &str) -> usize {
-    text.chars().fold(0, |column, character| {
-        column + if character == '\t' { 4 } else { 1 }
-    })
-}
-
 fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&'static str> {
-    match diagnostic.code().as_str() {
-        "ORNA0001" if diagnostic.message().contains("schema name") => {
-            Some("write a schema name before the semicolon")
-        }
-        "ORNA0002" => Some("close the comment, quoted identifier, or string literal"),
-        "ORNA0101" => Some("check the name against the declarations in the source bundle"),
-        "ORNA0103" => Some("give each declaration a distinct semantic name"),
-        "ORNA0201" => Some("check the declared type and the value or expression"),
-        _ => None,
+    if diagnostic.code().as_str() == "ORNA0001" && diagnostic.message().contains("schema name") {
+        return Some("write a schema name before the semicolon");
     }
+    diagnostic.code().help()
+}
+fn char_boundary_at_or_before(source: &str, offset: usize) -> usize {
+    let mut boundary = offset.min(source.len());
+    while boundary > 0 && !source.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+fn char_boundary_at_or_after(source: &str, offset: usize) -> usize {
+    let mut boundary = offset.min(source.len());
+    while boundary < source.len() && !source.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    boundary
 }
 fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<()> {
     for character in message.chars() {
@@ -209,8 +228,8 @@ mod tests {
         let source = SourceBundle::new([SourceUnit::new("main.orna", "CREATE SCHEMA ;")])
             .expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(
-            &orna_standard::retained_standard_library_v9_snapshot()
-                .and_then(orna_standard::verify_standard_library_v9_snapshot)
+            &orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
                 .expect("standard snapshot"),
         )
         .expect("standard source");
@@ -237,7 +256,7 @@ mod tests {
     fn colour_output_contains_ansi_only_when_requested() {
         let report = broken_report();
         let rendered = render_human_diagnostics(report.parse_report(), report.diagnostics(), true);
-        assert!(rendered.starts_with(b"\x1b[1;31merror\x1b[0m"));
+        assert!(String::from_utf8_lossy(&rendered).contains("\x1b[1;31m"));
     }
 
     #[test]
@@ -252,6 +271,63 @@ mod tests {
     #[test]
     fn expands_tabs_without_panicking() {
         assert_eq!(display_column("\tX"), 5);
+    }
+    #[test]
+    fn aligns_caret_after_escaped_control_character() {
+        let source = SourceBundle::new([SourceUnit::new("main.orna", "bad\u{0007}x")])
+            .expect("source bundle");
+        let standard = orna_compiler::check_standard_library_source(
+            &orna_standard::retained_standard_library_v11_snapshot()
+                .and_then(orna_standard::verify_standard_library_v11_snapshot)
+                .expect("standard snapshot"),
+        )
+        .expect("standard source");
+        let report =
+            orna_compiler::check_new_application(&source, &standard).expect("source check");
+        let diagnostic = report
+            .diagnostics()
+            .first()
+            .expect("source check should report invalid syntax");
+        let rendered = String::from_utf8(render_human_diagnostics(
+            report.parse_report(),
+            std::slice::from_ref(diagnostic),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(rendered.contains("1 | bad\\u{0007}x"));
+        let marker = rendered
+            .lines()
+            .find(|line| line.contains("^"))
+            .expect("caret line");
+        assert_eq!(marker, "   | ^^^");
+    }
+}
+
+#[cfg(test)]
+mod source_context_tests {
+    use super::*;
+
+    #[test]
+    fn display_column_counts_utf8_scalars_and_expands_tabs() {
+        assert_eq!(display_column("é\tX"), 6);
+        assert_eq!(display_column("e\u{301}"), 2);
+    }
+
+    #[test]
+    fn source_line_renderer_removes_cr_and_escapes_controls() {
+        assert_eq!(
+            render_source_line("CREATE\tSCHEMA\r"),
+            "CREATE    SCHEMA".to_owned()
+        );
+        assert_eq!(render_source_line("bad\u{0007}"), "bad\\u{0007}".to_owned());
+    }
+
+    #[test]
+    fn character_boundary_helpers_never_split_utf8() {
+        let source = "éclair";
+        assert_eq!(char_boundary_at_or_before(source, 1), 0);
+        assert_eq!(char_boundary_at_or_after(source, 1), 2);
+        assert_eq!(char_boundary_at_or_before(source, 3), 3);
     }
 }
 

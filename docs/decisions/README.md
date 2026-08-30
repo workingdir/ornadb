@@ -1,12 +1,11 @@
 # Architecture decision records
 
-OrnaDB has two accepted ADR series. The number is unique only within its
-series:
+OrnaDB has two accepted ADR series:
 
-* **spec ADR NNNN** is a canonical specification decision in
-  `spec/adrs/NNNN-*.md`.
-* **work ADR NNNN** is an implementation decision in
-  `docs/decisions/NNNN-*.md`.
+* **spec ADR NNNN** is a canonical specification decision in the sibling
+  `../spec/` checkout.
+* **work ADR NNNN** is an implementation decision in this repository's
+  `docs/decisions/` directory.
 
 Use the qualified form when referring to a decision: `spec ADR 0001` or
 `work ADR 0001`. Within a work decision file, an unqualified `ADR NNNN` means
@@ -20,12 +19,9 @@ source-of-truth or authority rules.
 
 ## Status convention
 
-The recent accepted implementation slices below are implemented unless a
-deferred portion is called out explicitly. ADRs marked `Accepted design
-direction` record direction and evidence requirements; they do not claim that
-the described implementation already exists. Historical ADRs retain their
-original rationale and closed boundaries; later ADRs supersede only the named
-deferred portion.
+The recent accepted slices below are implemented unless a deferred portion is
+called out explicitly. Historical ADRs retain their original rationale and
+closed boundaries; later ADRs supersede only the named deferred portion.
 
 | Work ADRs | Implemented slice | Still deferred or superseded by |
 |---|---|---|
@@ -45,9 +41,8 @@ deferred portion.
 | 0088 | Structural UI constructors for source-authored CLIENT work | Seven V9 pure UI constructors are accepted after Rows V8; actions, models, Studio operations, metadata, and runtime expansion remain deferred. |
 | 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
 | 0090 | Local principal and authenticated-session authority boundary for local invocation, resource, raw, and USER-state paths. | Credential/provider/secret enrollment, durable sessions, role selection, definer/effective-principal transitions, delegation, EXTERNAL principals, remote gateway auth, and production CLIENT VM trust features remain deferred. |
-| 0092 | Function-backed CLI sessions are an accepted design direction; no endpoint transport, persistent action loop, `std.cli.repl@1`, remote TLS/auth, or production artifact-trust implementation is claimed. | The endpoint transport, persistent action loop, `std.cli.repl@1`, remote TLS/auth, and production artifact trust remain implementation-gated. |
-| 0093 | Source-authored standard math is an accepted design direction only; no V10 source bundle, exports, or math test suite is retained in this checkout. | SERVER procedural execution, collection/range `FOR`, exception tails, and unbounded host execution remain separate contracts; the proposed V10 slice also remains unimplemented. |
-
+| 0092 | Function-backed CLI sessions use one thin client/session path for local, daemon, and remote endpoints; the no-command form targets `std.cli.repl`, and `-d` is foreground daemon mode. | The endpoint transport, persistent action loop, native session frame wiring, remote TLS/auth, and production artifact trust remain implementation-gated. |
+| 0093 | Source-authored `std.math` CLIENT functions in the append-only V10 standard snapshot; the normal check, prepare, authorise, and evaluate path now runs `.orna` arithmetic. | SERVER procedural execution, collection/range `FOR`, exception tails, and unbounded host execution remain separate contracts. |
 
 ## Current work ADRs
 
@@ -218,5 +213,3 @@ deferred portion.
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092 (proposed):**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
-* **work ADR 0093:**
-  [Source-Authored Standard Math](0093-source-authored-standard-math.md)

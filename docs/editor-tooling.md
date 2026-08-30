@@ -16,9 +16,10 @@ OrnaDB ships three layers of editor support for `.orna` files:
 
 The language server provides:
 
-- Compiler diagnostics identical to `orna source check`, with stable
-  `ORNAxxxx` codes. Both push (`textDocument/publishDiagnostics`) and
-  pull (`textDocument/diagnostic`) modes are supported.
+- Compiler diagnostics from the same checker as `orna source check`, with
+  stable `ORNAxxxx` codes, raw messages, and byte spans. Both push
+  (`textDocument/publishDiagnostics`) and pull (`textDocument/diagnostic`) modes
+  are supported.
 - Semantic highlighting through the standard LSP semantic-token API:
   keywords, types, functions, namespaces, properties, strings, numbers,
   comments, and operators.

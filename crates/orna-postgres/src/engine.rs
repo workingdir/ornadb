@@ -251,7 +251,7 @@ mod embedded {
 
         #[test]
         fn validates_absolute_paths() {
-            assert!(AbsolutePath::new(Path::new("/var/lib/orna")).is_ok());
+            assert!(AbsolutePath::new(Path::new("/tmp/orna")).is_ok());
             assert_eq!(
                 AbsolutePath::new(Path::new("relative")).unwrap_err(),
                 EngineError::InvalidAbsolutePath
