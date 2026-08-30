@@ -47,6 +47,8 @@ mod sealed_dispatch;
 mod sealed_events;
 #[path = "security/sealed_invocation.rs"]
 mod sealed_invocation;
+#[path = "security/sealed_server_execution.rs"]
+mod sealed_server_execution;
 #[path = "security/target_resolution.rs"]
 mod target_resolution;
 
@@ -83,16 +85,6 @@ pub(crate) use resource_producer::{
     ResourceProducerCancelled, ResourceProducerCommand, ResourceProducerCompleted,
     ResourceProducerExit, ResourceProducerFailed, ResourceProducerPull,
 };
-#[cfg(test)]
-use resource_stream::{
-    bind_authenticated_resource_arguments, classify_sealed_server_error,
-    resource_target_shape_is_supported, resource_values_from_server_result,
-    sealed_server_result_kind, sealed_server_stream_completed_event,
-};
-use resource_stream::{
-    execute_sealed_server_after_audit, resource_target_security_is_supported,
-    sealed_server_target_is_mutation, start_sealed_server_stream_producer,
-};
 use revision_guard::lock_active_revision_for_resource;
 pub(crate) use revision_guard::{lock_active_revision, require_complete_function_set};
 use sealed_audit::{
@@ -111,6 +103,16 @@ use sealed_invocation::{
 pub use sealed_invocation::{
     SealedInvocationContinuation, SealedInvocationExecution, SealedInvocationOperation,
     SealedInvocationPreflight, SealedInvocationResult,
+};
+#[cfg(test)]
+use sealed_server_execution::{
+    bind_authenticated_resource_arguments, classify_sealed_server_error,
+    resource_target_shape_is_supported, resource_values_from_server_result,
+    sealed_server_result_kind, sealed_server_stream_completed_event,
+};
+use sealed_server_execution::{
+    execute_sealed_server_after_audit, resource_target_security_is_supported,
+    sealed_server_target_is_mutation, start_sealed_server_stream_producer,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
