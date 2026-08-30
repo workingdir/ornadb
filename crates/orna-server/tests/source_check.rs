@@ -413,6 +413,32 @@ diagnostics.orna:30..31: ORNA0001: expected a schema name after CREATE SCHEMA\n"
 }
 
 #[test]
+fn emits_warnings_without_failing_source_check() {
+    let directory = TestDirectory::new("warning").expect("test directory");
+    let path = directory.0.join("warning.orna");
+    let source = "CREATE SCHEMA app;\n\
+                  CREATE CLIENT FUNCTION app.unreachable()\n\
+                  RETURNS BOOLEAN\n\
+                  IS\n\
+                  BEGIN\n\
+                      RETURN TRUE;\n\
+                      LET ignored := FALSE;\n\
+                  END;";
+    fs::write(&path, source).expect("warning source");
+
+    let output = run_source_check(&directory.0, "warning.orna").expect("warning source check");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    let start = source.find("LET ignored").expect("unreachable statement");
+    let end = start + "LET ignored := FALSE;".len();
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("UTF-8 warning"),
+        format!("warning.orna:{start}..{end}: ORNA0401: unreachable statement\n")
+    );
+}
+
+#[test]
 fn rejects_each_invalid_utf8_shape_without_compiler_output() {
     let directory = TestDirectory::new("utf8").expect("test directory");
     let path = directory.0.join("invalid.orna");
