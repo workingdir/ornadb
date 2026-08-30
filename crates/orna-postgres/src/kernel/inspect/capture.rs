@@ -2,6 +2,7 @@
 
 use super::payload::encode_epoch_payload;
 use super::projection::{build_inspect_epoch, durable_trace_kind};
+use super::storage::{decode_security_decision_row, decode_state_cell_row};
 use super::*;
 
 /// Captures one inspection epoch and its trace rows in the caller's
