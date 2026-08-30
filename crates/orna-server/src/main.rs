@@ -39,13 +39,14 @@ fn main() -> ExitCode {
         endpoint_explicit,
         command,
     } = parsed;
+    let endpoint_is_unsupported = endpoint_command_is_unsupported(&endpoint, &command);
     if endpoint_explicit
-        && !matches!(
-            &command,
-            Command::Help(_) | Command::Version | Command::Invoke(_)
-        )
+        && !matches!(&command, Command::Help(_) | Command::Version)
+        && endpoint_is_unsupported
     {
-        write_stderr_line("orna: endpoint selection is supported for invoke only");
+        write_stderr_line(
+            "orna: the selected endpoint needs a client transport that is not available yet",
+        );
         return ExitCode::from(3);
     }
     match command {
@@ -72,12 +73,23 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Run => match orna_server::run_embedded_server() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
+        Command::Run => match endpoint {
+            orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                match orna_server::run_sqlite_server(path) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        write_stderr_line(&error.to_string());
+                        ExitCode::from(1)
+                    }
+                }
             }
+            _ => match orna_server::run_embedded_server() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            },
         },
         Command::BackendShell => match orna_server::run_backend_shell() {
             Ok(()) => ExitCode::SUCCESS,
@@ -104,78 +116,108 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::SourceApply(path) => match orna_server::run_installed_source_apply(&path) {
-            Ok(orna_server::InstalledSourceApplyOutcome::Diagnostics(diagnostics)) => {
-                let stderr = io::stderr();
-                let terminal = stderr.is_terminal();
-                let mut stderr = stderr.lock();
-                let bytes = if color.enabled(terminal) {
-                    diagnostics.coloured_bytes()
-                } else if terminal {
-                    diagnostics.human_bytes()
-                } else {
-                    diagnostics.as_bytes()
-                };
-                let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
-                ExitCode::from(1)
-            }
-            Ok(orna_server::InstalledSourceApplyOutcome::Applied(document)) => {
-                let stdout = io::stdout();
-                let mut stdout = stdout.lock();
-                match document.write_to(&mut stdout) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        write_stderr_line(&error.to_string());
-                        ExitCode::from(1)
+        Command::SourceApply(path) => match &endpoint {
+            orna_client::endpoint::DatabaseEndpoint::LocalPath {
+                path: database_path,
+            } => match orna_server::run_sqlite_source_apply(database_path, &path) {
+                Ok(outcome) => write_sqlite_source_apply_outcome(outcome, color),
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            },
+            _ => match orna_server::run_installed_source_apply(&path) {
+                Ok(orna_server::InstalledSourceApplyOutcome::Diagnostics(diagnostics)) => {
+                    let stderr = io::stderr();
+                    let terminal = stderr.is_terminal();
+                    let mut stderr = stderr.lock();
+                    let bytes = if color.enabled(terminal) {
+                        diagnostics.coloured_bytes()
+                    } else if terminal {
+                        diagnostics.human_bytes()
+                    } else {
+                        diagnostics.as_bytes()
+                    };
+                    let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+                    ExitCode::from(1)
+                }
+                Ok(orna_server::InstalledSourceApplyOutcome::Applied(document)) => {
+                    let stdout = io::stdout();
+                    let mut stdout = stdout.lock();
+                    match document.write_to(&mut stdout) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            write_stderr_line(&error.to_string());
+                            ExitCode::from(1)
+                        }
                     }
                 }
-            }
-            Ok(_) => {
-                write_stderr_line("orna: source apply returned an unsupported result");
-                ExitCode::from(1)
-            }
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
+                Ok(_) => {
+                    write_stderr_line("orna: source apply returned an unsupported result");
+                    ExitCode::from(1)
+                }
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            },
         },
-        Command::SourceDiff(path) => match orna_server::run_installed_source_diff(&path) {
-            Ok(orna_server::InstalledSourceDiffOutcome::Diagnostics(diagnostics)) => {
-                let stderr = io::stderr();
-                let terminal = stderr.is_terminal();
-                let mut stderr = stderr.lock();
-                let bytes = if color.enabled(terminal) {
-                    diagnostics.coloured_bytes()
-                } else if terminal {
-                    diagnostics.human_bytes()
-                } else {
-                    diagnostics.as_bytes()
-                };
-                let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
-                ExitCode::from(1)
-            }
-            Ok(orna_server::InstalledSourceDiffOutcome::Diff(report)) => {
-                let stdout = io::stdout();
-                let mut stdout = stdout.lock();
-                match report.write_to(&mut stdout) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) => {
-                        write_stderr_line(&error.to_string());
-                        ExitCode::from(1)
+        Command::SourceDiff(path) => match &endpoint {
+            orna_client::endpoint::DatabaseEndpoint::LocalPath {
+                path: database_path,
+            } => match orna_server::run_sqlite_source_diff(database_path, &path) {
+                Ok(outcome) => write_sqlite_source_diff_outcome(outcome, color),
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            },
+            _ => match orna_server::run_installed_source_diff(&path) {
+                Ok(orna_server::InstalledSourceDiffOutcome::Diagnostics(diagnostics)) => {
+                    let stderr = io::stderr();
+                    let terminal = stderr.is_terminal();
+                    let mut stderr = stderr.lock();
+                    let bytes = if color.enabled(terminal) {
+                        diagnostics.coloured_bytes()
+                    } else if terminal {
+                        diagnostics.human_bytes()
+                    } else {
+                        diagnostics.as_bytes()
+                    };
+                    let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+                    ExitCode::from(1)
+                }
+                Ok(orna_server::InstalledSourceDiffOutcome::Diff(report)) => {
+                    let stdout = io::stdout();
+                    let mut stdout = stdout.lock();
+                    match report.write_to(&mut stdout) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            write_stderr_line(&error.to_string());
+                            ExitCode::from(1)
+                        }
                     }
                 }
-            }
-            Ok(_) => {
-                write_stderr_line("orna: source diff returned an unsupported result");
-                ExitCode::from(1)
-            }
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(1)
-            }
+                Ok(_) => {
+                    write_stderr_line("orna: source diff returned an unsupported result");
+                    ExitCode::from(1)
+                }
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            },
         },
         Command::SecurityGrantExecute(function) => {
-            match orna_server::security_admin::run_installed_security_grant(function) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_security_grant_execute(path, function)
+                        .map_err(|error| error.to_string())
+                }
+                _ => orna_server::security_admin::run_installed_security_grant(function)
+                    .map_err(|error| error.to_string()),
+            };
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -185,7 +227,13 @@ fn main() -> ExitCode {
         }
         Command::SecurityAdmin(request) => {
             let mut stdout = std::io::stdout().lock();
-            match orna_server::run_installed_security_admin(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_security_admin(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_security_admin(request, &mut stdout),
+            };
+            match result {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(error) => {
                     write_stderr_line(&error.to_string());
@@ -203,33 +251,56 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::RawCall(function, parameters) => match match parameters {
-            RawCallParameters::None => orna_server::run_local_raw_call(function),
-            RawCallParameters::One(parameter) => {
-                orna_server::run_local_raw_call_with_argument(function, parameter)
+        Command::RawCall(function, parameters) => {
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    let parameter_ids = match parameters {
+                        RawCallParameters::None => Vec::new(),
+                        RawCallParameters::One(parameter) => vec![parameter],
+                        RawCallParameters::Pair(first, second) => vec![first, second],
+                    };
+                    orna_server::run_sqlite_raw_call(
+                        path,
+                        function,
+                        &parameter_ids,
+                        &mut stdin,
+                        &mut stdout,
+                    )
+                }
+                _ => match parameters {
+                    RawCallParameters::None => orna_server::run_local_raw_call(function),
+                    RawCallParameters::One(parameter) => {
+                        orna_server::run_local_raw_call_with_argument(function, parameter)
+                    }
+                    RawCallParameters::Pair(first, second) => {
+                        orna_server::run_local_raw_call_with_argument_pair(function, first, second)
+                    }
+                },
+            };
+            match result {
+                Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
+                Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
+                    write_stderr_line(&format!("raw call failed: {}", failure_name(failure)));
+                    ExitCode::from(1)
+                }
+                Ok(orna_server::LocalRawCallOutcome::Cancelled) => ExitCode::from(6),
+                Err(
+                    error @ (orna_server::LocalRawCallError::Connection
+                    | orna_server::LocalRawCallError::Negotiation),
+                ) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(3)
+                }
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(7)
+                }
             }
-            RawCallParameters::Pair(first, second) => {
-                orna_server::run_local_raw_call_with_argument_pair(function, first, second)
-            }
-        } {
-            Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
-            Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
-                write_stderr_line(&format!("raw call failed: {}", failure_name(failure)));
-                ExitCode::from(1)
-            }
-            Ok(orna_server::LocalRawCallOutcome::Cancelled) => ExitCode::from(6),
-            Err(
-                error @ (orna_server::LocalRawCallError::Connection
-                | orna_server::LocalRawCallError::Negotiation),
-            ) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(3)
-            }
-            Err(error) => {
-                write_stderr_line(&error.to_string());
-                ExitCode::from(7)
-            }
-        },
+        }
         Command::Invoke(arguments) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
@@ -244,10 +315,17 @@ fn main() -> ExitCode {
                 arguments.explain,
                 arguments.runtime,
             );
-            let result = if endpoint_explicit {
-                orna_server::run_installed_invoke_at(&endpoint, request, &mut stdout, &mut stderr)
-            } else {
-                orna_server::run_installed_invoke(request, &mut stdout, &mut stderr)
+            let result = match &endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
+                }
+                _ if endpoint_explicit => orna_server::run_installed_invoke_at(
+                    &endpoint,
+                    request,
+                    &mut stdout,
+                    &mut stderr,
+                ),
+                _ => orna_server::run_installed_invoke(request, &mut stdout, &mut stderr),
             };
             match result {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
@@ -265,7 +343,13 @@ fn main() -> ExitCode {
         Command::State(request) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
-            match orna_server::run_installed_user_state(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_user_state(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_user_state(request, &mut stdout),
+            };
+            match result {
                 Ok(orna_server::InstalledUserStateOutcome::Completed) => ExitCode::SUCCESS,
                 // A future closed outcome falls back to internal.
                 Ok(_) => ExitCode::from(7),
@@ -296,7 +380,13 @@ fn main() -> ExitCode {
         Command::Inspect(request) => {
             let stdout = io::stdout();
             let mut stdout = stdout.lock();
-            match orna_server::run_installed_inspect(request, &mut stdout) {
+            let result = match endpoint {
+                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+                    orna_server::run_sqlite_inspect(path, request, &mut stdout)
+                }
+                _ => orna_server::run_installed_inspect(request, &mut stdout),
+            };
+            match result {
                 Ok(orna_server::InstalledInspectOutcome::Completed) => ExitCode::SUCCESS,
                 // A future closed outcome falls back to internal.
                 Ok(_) => ExitCode::from(7),
@@ -305,6 +395,112 @@ fn main() -> ExitCode {
                     ExitCode::from(inspect_error_exit_code(&error))
                 }
             }
+        }
+    }
+}
+
+fn endpoint_command_is_unsupported(
+    endpoint: &orna_client::endpoint::DatabaseEndpoint,
+    command: &Command,
+) -> bool {
+    match endpoint {
+        orna_client::endpoint::DatabaseEndpoint::ManagedLocal { .. } => false,
+        orna_client::endpoint::DatabaseEndpoint::LocalPath { .. } => !matches!(
+            command,
+            Command::Run
+                | Command::SourceCheck(_)
+                | Command::SourceApply(_)
+                | Command::SourceDiff(_)
+                | Command::Invoke(_)
+                | Command::State(_)
+                | Command::SecurityGrantExecute(_)
+                | Command::SecurityAdmin(_)
+                | Command::Inspect(_)
+                | Command::RawCall(_, _)
+        ),
+        orna_client::endpoint::DatabaseEndpoint::UnixSocket { .. }
+        | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => true,
+    }
+}
+
+fn write_sqlite_source_apply_outcome(
+    outcome: orna_server::SqliteSourceApplyOutcome,
+    color: cli::ColorChoice,
+) -> ExitCode {
+    match outcome {
+        orna_server::SqliteSourceApplyOutcome::Diagnostics {
+            bytes,
+            human_bytes,
+            coloured_bytes,
+        } => {
+            let stderr = io::stderr();
+            let terminal = stderr.is_terminal();
+            let mut stderr = stderr.lock();
+            let bytes = if color.enabled(terminal) {
+                &coloured_bytes
+            } else if terminal {
+                &human_bytes
+            } else {
+                &bytes
+            };
+            let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+            ExitCode::from(1)
+        }
+        orna_server::SqliteSourceApplyOutcome::Applied(bytes) => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match stdout.write_all(&bytes).and_then(|()| stdout.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            write_stderr_line("orna: local SQLite source apply returned an unsupported result");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn write_sqlite_source_diff_outcome(
+    outcome: orna_server::SqliteSourceDiffOutcome,
+    color: cli::ColorChoice,
+) -> ExitCode {
+    match outcome {
+        orna_server::SqliteSourceDiffOutcome::Diagnostics {
+            bytes,
+            human_bytes,
+            coloured_bytes,
+        } => {
+            let stderr = io::stderr();
+            let terminal = stderr.is_terminal();
+            let mut stderr = stderr.lock();
+            let bytes = if color.enabled(terminal) {
+                &coloured_bytes
+            } else if terminal {
+                &human_bytes
+            } else {
+                &bytes
+            };
+            let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+            ExitCode::from(1)
+        }
+        orna_server::SqliteSourceDiffOutcome::Diff(bytes) => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match stdout.write_all(&bytes).and_then(|()| stdout.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            write_stderr_line("orna: local SQLite source diff returned an unsupported result");
+            ExitCode::from(1)
         }
     }
 }
@@ -1687,6 +1883,33 @@ mod tests {
     }
 
     #[test]
+    fn admits_explicit_local_path_state_to_the_sqlite_route() {
+        let root = FunctionId::from_bytes([0x11; 16]);
+        let parsed = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "state",
+            "get",
+            &root.canonical(),
+        ]))
+        .expect("explicit local path state command should parse");
+
+        assert_eq!(
+            parsed.endpoint,
+            orna_client::endpoint::DatabaseEndpoint::LocalPath {
+                path: PathBuf::from("./state.sqlite"),
+            }
+        );
+        assert!(parsed.endpoint_explicit);
+        assert!(matches!(&parsed.command, Command::State(_)));
+        assert!(
+            !endpoint_command_is_unsupported(&parsed.endpoint, &parsed.command),
+            "the LocalPath capability gate must admit state for the SQLite adapter",
+        );
+    }
+
+    #[test]
     fn accepts_state_get_filters_and_expected_types() {
         let root = FunctionId::from_bytes([0x11; 16]);
         let function = FunctionId::from_bytes([0x21; 16]);
@@ -2089,6 +2312,72 @@ mod tests {
     }
 
     #[test]
+    fn local_path_help_matches_sqlite_value_and_trace_contracts() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let parameter = ParameterId::from_bytes([0x22; 16]);
+        let raw_call = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "raw-call",
+            &function.canonical(),
+            &parameter.canonical(),
+        ]))
+        .expect("LocalPath raw-call parameter form should parse");
+        assert!(matches!(
+            raw_call.command,
+            Command::RawCall(_, RawCallParameters::One(parsed)) if parsed == parameter
+        ));
+
+        let raw_help = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "raw-call",
+            "--help",
+        ]))
+        .expect("LocalPath raw-call help should parse");
+        assert_eq!(raw_help.command, Command::Help(HelpTopic::RawCallLocalPath),);
+        let raw_help_text = help_text(HelpTopic::RawCallLocalPath);
+        assert!(raw_help_text.contains("ORV5"));
+        assert!(!raw_help_text.contains("ORV1"));
+        assert!(help_text(HelpTopic::RawCall).contains("ORV1"));
+
+        let invoke_help = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "invoke",
+            "--help",
+        ]))
+        .expect("LocalPath invoke help should parse");
+        assert_eq!(
+            invoke_help.command,
+            Command::Help(HelpTopic::InvokeLocalPath),
+        );
+        let invoke_help_text = help_text(HelpTopic::InvokeLocalPath);
+        assert!(invoke_help_text.contains("SQLite LocalPath"));
+        assert!(invoke_help_text.contains("--trace"));
+        assert!(invoke_help_text.contains("does not support"));
+        assert!(!help_text(HelpTopic::Invoke).contains("SQLite LocalPath"));
+
+        let parsed_invoke = parse_invocation(arguments(&[
+            "orna",
+            "--db",
+            "./state.sqlite",
+            "invoke",
+            "std.invoke.echo",
+            "--trace",
+            "normal",
+        ]))
+        .expect("LocalPath invoke trace option should remain parseable");
+        let Command::Invoke(arguments) = parsed_invoke.command else {
+            panic!("expected invoke command");
+        };
+        assert_eq!(arguments.trace, Some(InvocationTracePolicy::Normal));
+    }
+
+    #[test]
     fn usage_diagnostic_keeps_the_direct_command_list() {
         assert!(USAGE.starts_with(
             "Usage:\n  orna\n  orna repl\n  orna --db <target> [command] [options]\n"
@@ -2153,7 +2442,7 @@ mod tests {
     fn parses_a_positional_database_endpoint_before_the_command() {
         let parsed = parse_invocation(arguments(&[
             "orna",
-            "orna+unix:///tmp/orna/default/orna.sock",
+            "orna+unix:///run/orna/default/orna.sock",
             "invoke",
             "demo.main",
         ]))
@@ -2161,7 +2450,7 @@ mod tests {
         assert_eq!(
             parsed.endpoint,
             orna_client::endpoint::DatabaseEndpoint::UnixSocket {
-                path: PathBuf::from("/tmp/orna/default/orna.sock"),
+                path: PathBuf::from("/run/orna/default/orna.sock"),
             },
         );
         assert!(parsed.endpoint_explicit);
