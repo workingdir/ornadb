@@ -1222,10 +1222,6 @@ fn verify_normal_configuration(instance: &PreparedInstance) -> Result<(), Embedd
     )
 }
 
-fn verify_normal_data_directory(data_directory: &Path) -> Result<(), EmbeddedHostError> {
-    verify_normal_data_directory_with_auth(data_directory, NORMAL_HBA_BYTES, IDENT_BYTES)
-}
-
 fn verify_normal_data_directory_with_auth(
     data_directory: &Path,
     normal_hba: &[u8],
@@ -1999,7 +1995,11 @@ impl Drop for EmbeddedPostmaster {
                 Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) => {
+                    self.finish_log_capture();
+                    return;
+                }
+                Err(_) => {
                     self.finish_log_capture();
                     return;
                 }
@@ -2008,11 +2008,15 @@ impl Drop for EmbeddedPostmaster {
         let _ = kill(child, Signal::SIGKILL);
         loop {
             match waitpid(child, None) {
-                Ok(_) | Err(_) => {
+                Ok(_) => {
                     self.finish_log_capture();
                     return;
                 }
                 Err(Errno::EINTR) => continue,
+                Err(_) => {
+                    self.finish_log_capture();
+                    return;
+                }
             }
         }
     }
