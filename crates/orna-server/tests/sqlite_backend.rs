@@ -123,17 +123,13 @@ fn wait_bounded(mut child: Child) -> io::Result<Output> {
         thread::sleep(Duration::from_millis(10));
     };
     let mut stdout = Vec::new();
-    child
-        .stdout
-        .take()
-        .expect("captured stdout")
-        .read_to_end(&mut stdout)?;
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout)?;
+    }
     let mut stderr = Vec::new();
-    child
-        .stderr
-        .take()
-        .expect("captured stderr")
-        .read_to_end(&mut stderr)?;
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr)?;
+    }
     Ok(Output {
         status,
         stdout,
@@ -201,8 +197,13 @@ fn wait_for_socket(child: &mut Child, path: &Path) -> io::Result<()> {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait()? {
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)?;
+            }
             return Err(io::Error::other(format!(
-                "orna SQLite server exited before socket readiness: {status}"
+                "orna SQLite server exited before socket readiness: {status}: {}",
+                String::from_utf8_lossy(&stderr)
             )));
         }
         match fs::symlink_metadata(path) {
