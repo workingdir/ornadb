@@ -2324,7 +2324,7 @@ impl ClientResource {
         Ok(())
     }
 
-    /// Takes the next stream batch as canonical OPTION<LIST<T>>.
+    /// Takes the next stream batch as canonical `OPTION<LIST<T>>`.
     ///
     /// `None` means the stream is still loading and has no batch available.
     /// A terminal empty stream returns `Some(OPTION(None))`; batches are never

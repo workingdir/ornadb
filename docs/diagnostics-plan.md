@@ -13,50 +13,50 @@ Give Orna compiler failures the same practical quality as Rust, SQLite, Turso, P
 
 ## Current implementation
 
-`CompilerDiagnostic` contains a stable code, raw message, logical path, and
-exclusive UTF-8 byte span. `ParseReport` retains the exact source text in each
-`ParsedSourceUnit`.
+`CompilerDiagnostic` contains a stable code, raw message, severity, primary
+label, optional help, notes, related source labels, logical path, and exclusive
+UTF-8 byte span. `ParseReport` retains the exact source text in each
+`ParsedSourceUnit`. Error and warning counts are available on every compiler
+report.
 
 The server exposes two diagnostic renderings:
 
 - the established machine format, which preserves byte spans and escaped
   messages; and
-- a Rust-style human format with line/column locations, source context,
-  underlines, optional colour, and bounded help text.
+- a Rust-style human format with severity-aware colour, line/column locations,
+  bounded single- and multiline source context, labelled underlines, related
+  locations, help, notes, and an error/warning summary.
 
 Source commands keep the machine format for non-terminal output. Human output
 is selected for terminal diagnostics without changing the machine contract.
-The LSP maps the same raw message and byte span to an LSP diagnostic. The
-raw-call protocol is not a compiler-diagnostic transport and is unchanged.
+Warnings are printed but do not block checking, preparation, apply, or diff.
+The LSP publishes the same severity, code, range, help, notes, related
+locations, primary label, and warning tags. The raw-call protocol is not a
+compiler-diagnostic transport and is unchanged.
 
 ## Implementation phases
 
-### Phase 1: source-aware presentation layer (partially implemented)
+### Phase 1: source-aware presentation layer (implemented)
 
-The initial renderer derives, without rereading files:
+The renderer derives, without rereading files:
 
 - one-based line and column for display
-- the complete source line containing the start of the span
-- a caret range for the source line
-- a fallback location when the diagnostic path is absent from the report
+- bounded source context across single- and multiline spans
+- labelled primary and related markers
+- explicit EOF handling
+- a fallback byte location when the diagnostic path is absent from the report
 
 The implementation keeps the original byte offsets and raw message unchanged.
 It uses `ParsedSourceUnit::source_text()` and avoids `syntax_text()`, which
 allocates a new string.
 
-Focused regression coverage currently covers:
+Focused regression coverage includes ASCII, Unicode, CRLF, tabs, control
+characters, long lines, multiline context, EOF, related definitions, colour,
+summaries, warnings, and the unchanged machine-format contract.
 
-- an ASCII source diagnostic with line, column, source context, and help
-- tabs
-- the machine-format contract
-- opt-in ANSI output
+### Phase 2: structured diagnostic metadata (implemented)
 
-Bounded long-line rendering, explicit EOF handling, and readable multiline
-spans remain open work.
-
-### Phase 2: structured diagnostic metadata
-
-Add optional metadata without forcing every existing diagnostic to change at once:
+Compiler diagnostics carry:
 
 - severity
 - primary label
@@ -64,60 +64,75 @@ Add optional metadata without forcing every existing diagnostic to change at onc
 - notes
 - related source labels
 
-Store this separately from the stable raw message until the wording catalogue is complete. Do not put rendered snippets or ANSI sequences in compiler messages.
+Rendered snippets and ANSI sequences remain presentation-layer data and never
+enter compiler messages.
 
-Create a central wording catalogue for parser and semantic diagnostics. Each entry should define:
+`DiagnosticCode` is the central wording catalogue for parser and semantic
+diagnostics. Each entry defines its code, severity, short title, stable
+explanation, and optional default help. Individual diagnostics add precise
+expected/found wording and source labels when the compiler has that evidence.
+Wording remains direct and does not mention parser state, implementation gaps,
+or internal phase names.
 
-- code
-- short title
-- stable explanation
-- optional help text
-- examples of expected and found values where the compiler knows them
+### Phase 3: human terminal formatter (implemented)
 
-Use direct wording. Do not mention parser state, implementation gaps, or internal phase names.
-
-### Phase 3: human terminal formatter (initial implementation)
-
-The source commands expose an initial human format that follows the useful
-parts of rustc and database CLIs:
+Source commands expose a human format that follows the useful parts of rustc
+and database CLIs:
 
 ```
-error[ORNA0001]: expected a schema name after CREATE SCHEMA
-  --> broken.orna:1:15
+error[ORNA0103]: duplicate schema definition app
+  --> broken.orna:2:15
    |
- 1 | CREATE SCHEMA ;
-   |               ^ schema name is missing
+ 2 | CREATE SCHEMA app;
+   |               ^^^ redefined here
+  ::: broken.orna:1:15
    |
-   = help: write a schema name before the semicolon
+ 1 | CREATE SCHEMA app;
+   |               --- first defined here
+   |
+   = help: rename one of the definitions or remove the duplicate
+
+error: aborting due to 1 previous error
 ```
 
-The current implementation:
+The implementation:
 
 - selects human output for terminal diagnostics and preserves machine output
   for the non-terminal default
-- follows `--color auto|always|never` where coloured human output is exposed
+- follows `--color auto|always|never`
 - emits no colour in machine output
 - keeps diagnostics on stderr and successful result data on stdout
 - retains compiler order for multiple diagnostics
+- prints warning diagnostics while returning success when no error exists
+- emits plural-aware error and warning summaries
 
 The compatibility rule is terminal-sensitive rather than a new `--format`
 flag: existing machine output remains available for scripts, while terminal
-users receive the human presentation. Bounded long-line and multiline
-rendering, and safe control-character presentation, remain open work.
+users receive the human presentation.
 
-### Phase 4: semantic precision and intelligent suggestions
+### Phase 4: semantic precision and intelligent suggestions (in progress)
 
-Improve diagnostics at their source, not in the formatter:
+Completed:
 
-- replace whole-function spans with the offending keyword, expression, or return type
-- add secondary labels for related declarations and conflicting definitions
-- use catalogue data for unknown names and suggest the closest valid name only when the match is unambiguous
-- distinguish domain restrictions from type mismatches
+- duplicate-definition diagnostics label both the redefinition and the first
+  definition
+- unreachable procedural statements emit non-blocking `ORNA0401` warnings
+- compiler severity and related locations are preserved by the LSP
+
+Remaining improvements must be made at their source, not in the formatter:
+
+- replace remaining whole-function spans with the offending keyword,
+  expression, or return type
+- use catalogue data for unknown names and suggest the closest valid name only
+  when the match is unambiguous
+- distinguish remaining domain restrictions from type mismatches
 - suppress cascaded delimiter errors after an unterminated token
 - merge lexer and parser diagnostics by source span before exposing source order
-- replace the panic on unknown syntax diagnostic codes with a controlled internal error path
+- make an unknown syntax-code mapping a controlled internal diagnostic instead
+  of silently collapsing it to `ORNA0001`
 
-Each improvement needs a focused regression test and must preserve LSP raw message/range parity unless the public contract changes intentionally.
+Each improvement needs a focused regression test and must preserve LSP raw
+message/range parity unless the public contract changes intentionally.
 
 ## Non-goals for the first implementation slice
 
@@ -132,12 +147,14 @@ Each improvement needs a focused regression test and must preserve LSP raw messa
 
 For each phase:
 
-- run the focused syntax/compiler/server tests for the changed contract
-- run the source-check integration tests
-- run the LSP parity tests when raw diagnostic fields change
+- run the focused compiler, server, and LSP tests for the changed contract
+- run source-check integration coverage for error status `1` and warning-only
+  status `0`
+- prove warning-only preparation, apply, and diff remain successful
 - run `cargo fmt --all -- --check`
-- run the relevant package check
-- inspect plain, colour-disabled, and colour-enabled output manually
+- run workspace checks and Clippy with warnings denied
+- inspect terminal output with colour disabled and enabled while preserving the
+  redirected machine format
 
 ADR 0018 and editor-tooling document the current compatibility rules. Update
 them, and any source/apply/diff documentation added later, whenever a remaining

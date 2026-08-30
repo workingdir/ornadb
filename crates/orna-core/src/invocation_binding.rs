@@ -4,7 +4,7 @@
 //! the sealed `sys.invoke` boundary. It reflects one resolved
 //! [`FunctionDefinition`] signature, converts CLI strings to canonical typed
 //! [`RuntimeValue`]s, and returns ordered [`InvocationArgument`]s in source
-//! order. It never builds an [`InvokeRequest`] and never dispatches.
+//! order. It never builds an `InvokeRequest` and never dispatches.
 //!
 //! The friendly `--<name>` form derives from each parameter's resolved source
 //! name: a leading `p_` prefix is stripped, so `p_value` maps to `--value`.
@@ -79,7 +79,7 @@ pub enum CliArgumentInput {
 
 /// One closed failure from binding CLI arguments against a function
 /// signature. Each variant is the named usage-error class of ADR 0056; the
-/// carried details are typed for diagnostics while the [`Display`] form stays
+/// carried details are typed for diagnostics while the [`fmt::Display`] form stays
 /// redacted for CLI usage.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
