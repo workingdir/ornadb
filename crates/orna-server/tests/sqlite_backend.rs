@@ -12,14 +12,21 @@ use nix::{
     unistd::Pid,
 };
 use orna_core::{
-    FunctionId,
+    FunctionId, PrincipalId,
     revision::{ActiveDatabaseRevision, RevisionPair},
+    state::{UserStateChange, UserStateWriteOutcome},
+    value::RuntimeValue,
 };
 use orna_protocol::{
     ClientFrame, ServerFrame, decode_catalogue_server_frame, decode_server_frame,
-    encode_catalogue_client_frame, encode_client_frame,
+    encode_catalogue_client_frame, encode_client_frame, encode_value,
+};
+use orna_server::{
+    InstalledUserStateChange, InstalledUserStateErrorKind, InstalledUserStateOperation,
+    InstalledUserStateRequest, run_sqlite_user_state,
 };
 use orna_sqlite::{SqliteConfig, SqliteRevisionStore};
+use orna_standard::INTEGER_TYPE_ID;
 use orna_storage::MigrationLedgerEntry;
 use serde_json::Value;
 use std::{
@@ -292,6 +299,38 @@ fn sqlite_active(database: &Path) -> ActiveDatabaseRevision {
     })
 }
 
+fn local_principal_and_latest_invocation(
+    database: &Path,
+) -> (
+    orna_core::PrincipalId,
+    orna_sqlite::SqliteInvocationAuditEvent,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite audit runtime");
+    runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(database.to_owned()))
+            .await
+            .expect("open SQLite audit store");
+        let active = store.recover().await.expect("recover SQLite audit store");
+        let principal = store
+            .provision_local_peer(nix::unistd::geteuid().as_raw())
+            .await
+            .expect("provision local audit principal");
+        let _session = store
+            .authenticate_local_peer(&active, nix::unistd::geteuid().as_raw())
+            .await
+            .expect("authenticate local audit principal");
+        let audit = store
+            .load_latest_invocation_audit(principal)
+            .await
+            .expect("load latest invocation audit")
+            .expect("completed invocation audit");
+        (principal, audit)
+    })
+}
+
 #[test]
 fn local_source_apply_emits_json_and_same_source_diff_is_empty() {
     let directory = TestDirectory::new("source").expect("scratch directory");
@@ -482,6 +521,459 @@ fn local_source_apply_diagnostics_leave_active_state_and_ledger_unchanged() {
 }
 
 #[test]
+fn local_sqlite_invoke_formats_results_and_persists_inspectable_evidence() {
+    let directory = TestDirectory::new("invoke-inspect").expect("scratch directory");
+    let database = directory.path().join("invoke-inspect.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for local invoke");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let applied_document: Value =
+        serde_json::from_slice(&applied.stdout).expect("source apply JSON");
+    let function = applied_document["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions.iter().find(|entry| {
+                entry["qualified_name"]
+                    == Value::Array(vec![
+                        Value::String("dogfood".to_owned()),
+                        Value::String("read".to_owned()),
+                    ])
+            })
+        })
+        .and_then(|entry| entry["function_id"].as_str())
+        .and_then(|canonical| FunctionId::from_canonical(canonical).ok())
+        .expect("dogfood.read function identity");
+
+    for (presenter, expected) in [
+        ("json", b"[]\n".as_slice()),
+        ("table", b"value\n".as_slice()),
+        ("csv", b"value\n".as_slice()),
+    ] {
+        let result = run_orna(
+            directory.path(),
+            &[
+                OsString::from("--db"),
+                database.as_os_str().to_os_string(),
+                OsString::from("invoke"),
+                OsString::from("dogfood.read"),
+                OsString::from("--output"),
+                OsString::from(presenter),
+                OsString::from("--no-progress"),
+            ],
+        )
+        .expect("local SQLite invoke");
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "invoke {presenter}: {result:?}"
+        );
+        assert_eq!(result.stdout, expected, "invoke {presenter} output");
+        assert!(result.stderr.is_empty(), "no-progress invoke stderr");
+    }
+
+    let (_, audit) = local_principal_and_latest_invocation(&database);
+    assert_eq!(audit.outcome, "completed");
+    assert_eq!(audit.function, Some(function));
+    let inspect = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("inspect"),
+            OsString::from(audit.invocation.canonical()),
+        ],
+    )
+    .expect("local SQLite inspect summary");
+    assert_eq!(
+        inspect.status.code(),
+        Some(0),
+        "inspect summary: {inspect:?}"
+    );
+    let summary: Value = serde_json::from_slice(&inspect.stdout).expect("inspect summary JSON");
+    assert_eq!(summary["record"], "inspect_summary");
+    assert_eq!(summary["function_id"], function.canonical());
+    assert!(
+        summary.get("results").is_none(),
+        "inspect must not persist results"
+    );
+
+    let trace = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("inspect"),
+            OsString::from(audit.invocation.canonical()),
+            OsString::from("--trace"),
+        ],
+    )
+    .expect("local SQLite inspect trace");
+    assert_eq!(trace.status.code(), Some(0), "inspect trace: {trace:?}");
+    let trace_record: Value = serde_json::from_slice(&trace.stdout).expect("inspect trace JSON");
+    assert_eq!(trace_record["record"], "inspect_trace");
+    assert_eq!(trace_record["function_id"], function.canonical());
+}
+
+#[test]
+fn local_sqlite_user_state_writes_conflicts_and_reopens() {
+    let directory = TestDirectory::new("user-state").expect("scratch directory");
+    let database = directory.path().join("user-state.sqlite");
+    let root = FunctionId::from_bytes([0x11; 16]);
+    let function = FunctionId::from_bytes([0x22; 16]);
+    let state_slot = orna_core::StateSlotId::from_bytes([0x33; 16]);
+    let value = RuntimeValue::Integer(42);
+    let value_bytes = encode_value(&value).expect("encode ORV5 integer");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite USER state runtime");
+    let (first, conflict, cells, audit) = runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&database))
+            .await
+            .expect("open SQLite USER state store");
+        let principal = store
+            .provision_local_peer(nix::unistd::geteuid().as_raw())
+            .await
+            .expect("provision USER state principal");
+        let change = UserStateChange::new(
+            root,
+            "profile".to_owned(),
+            function,
+            String::new(),
+            state_slot,
+            None,
+            value.clone(),
+            INTEGER_TYPE_ID,
+        )
+        .expect("construct USER state change");
+        let first = store
+            .write_user_state(principal, &change)
+            .await
+            .expect("first USER state write");
+        let conflict = store
+            .write_user_state(principal, &change)
+            .await
+            .expect("conflicting USER state write is a result");
+        drop(store);
+        let reopened = SqliteRevisionStore::open(&SqliteConfig::new(&database))
+            .await
+            .expect("reopen SQLite USER state store");
+        let cells = reopened
+            .load_user_state(principal, root, "profile")
+            .await
+            .expect("load USER state after reopen");
+        let audit = reopened
+            .load_user_state_audit(principal, root, "profile")
+            .await
+            .expect("load USER state audit");
+        (first, conflict, cells, audit)
+    });
+    assert!(matches!(
+        first.outcome(),
+        UserStateWriteOutcome::Written { revision: 1 }
+    ));
+    assert!(matches!(
+        conflict.outcome(),
+        UserStateWriteOutcome::Conflict {
+            current_revision: 1
+        }
+    ));
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].value(), &value);
+    assert_eq!(cells[0].value_type(), INTEGER_TYPE_ID);
+    assert_eq!(cells[0].revision(), 1);
+    assert_eq!(audit.len(), 3, "write, conflict, and load audits");
+    assert_eq!(audit[0].operation, "write");
+    assert_eq!(audit[0].outcome, "completed");
+    assert_eq!(audit[1].operation, "write");
+    assert_eq!(audit[1].outcome, "conflict");
+    assert_eq!(audit[2].operation, "load");
+    assert_eq!(audit[2].outcome, "completed");
+    assert_eq!(
+        encode_value(cells[0].value()).expect("re-encode ORV5"),
+        value_bytes
+    );
+}
+
+#[test]
+fn local_sqlite_user_state_rejects_uninstalled_schema() {
+    let directory = TestDirectory::new("user-state-schema").expect("scratch directory");
+    let database = directory.path().join("user-state.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy server function fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for USER state schema rejection");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let request = InstalledUserStateRequest::new(InstalledUserStateOperation::Write {
+        root_function: FunctionId::from_bytes([0x11; 16]),
+        state_profile: "profile".to_owned(),
+        change: InstalledUserStateChange {
+            function: FunctionId::from_bytes([0x22; 16]),
+            instance_key: String::new(),
+            state_slot: orna_core::StateSlotId::from_bytes([0x33; 16]),
+            expected_revision: None,
+            value_type: INTEGER_TYPE_ID,
+            value_bytes: encode_value(&RuntimeValue::Integer(42)).expect("encode ORV5 integer"),
+        },
+    });
+    let error = run_sqlite_user_state(database, request, &mut Vec::new())
+        .expect_err("uninstalled USER state schema must be rejected");
+    assert_eq!(error.kind(), InstalledUserStateErrorKind::State);
+    assert!(error.message().contains("not installed"));
+}
+
+#[test]
+fn local_sqlite_security_admin_mutations_persist() {
+    let directory = TestDirectory::new("security-admin").expect("scratch directory");
+    let database = directory.path().join("security-admin.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy server function fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for security admin");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let document: Value = serde_json::from_slice(&applied.stdout).expect("security apply JSON");
+    let health_target = document["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions.iter().find(|entry| {
+                entry["qualified_name"]
+                    == Value::Array(vec![
+                        Value::String("dogfood".to_owned()),
+                        Value::String("read".to_owned()),
+                    ])
+            })
+        })
+        .and_then(|entry| entry["function_id"].as_str())
+        .expect("dogfood.read function identity")
+        .to_owned();
+    for _ in 0..2 {
+        let granted = run_orna(
+            directory.path(),
+            &[
+                OsString::from("--db"),
+                database.as_os_str().to_os_string(),
+                OsString::from("security"),
+                OsString::from("grant-execute"),
+                OsString::from(&health_target),
+            ],
+        )
+        .expect("grant fixed catalogue-health execute");
+        assert_eq!(granted.status.code(), Some(0), "grant-execute: {granted:?}");
+    }
+    let active = sqlite_active(&database);
+    let health_function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["dogfood", "read"])
+        .expect("dogfood.read active function")
+        .id();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("security snapshot runtime");
+    let fixed_grant_count = runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&database))
+            .await
+            .expect("open security snapshot store");
+        let snapshot = store
+            .security_snapshot(&active)
+            .await
+            .expect("load security snapshot");
+        snapshot
+            .execute_grants()
+            .filter(|grant| {
+                grant.grantee() == orna_core::security::CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
+                    && grant.function() == health_function
+            })
+            .count()
+    });
+    assert_eq!(fixed_grant_count, 1, "fixed execute grant is idempotent");
+    let whoami = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("whoami"),
+        ],
+    )
+    .expect("local SQLite security whoami");
+    assert_eq!(whoami.status.code(), Some(0), "whoami: {whoami:?}");
+    let principal =
+        serde_json::from_slice::<Value>(&whoami.stdout).expect("whoami JSON")["principal"]
+            .as_str()
+            .expect("whoami principal")
+            .to_owned();
+    let created = PrincipalId::from_bytes([0x44; 16]).canonical();
+    let create = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("user"),
+            OsString::from("create"),
+            OsString::from(&created),
+        ],
+    )
+    .expect("create local SQLite principal");
+    assert_eq!(
+        create.status.code(),
+        Some(0),
+        "create principal: {create:?}"
+    );
+    let grants = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("grants"),
+            OsString::from("grant"),
+            OsString::from(&created),
+            OsString::from("execute"),
+        ],
+    )
+    .expect("grant local SQLite privilege");
+    assert_eq!(grants.status.code(), Some(0), "grant privilege: {grants:?}");
+    let object_grantee = PrincipalId::from_bytes([0x45; 16]).canonical();
+    let object_create = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("user"),
+            OsString::from("create"),
+            OsString::from(&object_grantee),
+        ],
+    )
+    .expect("create object-scoped SQLite principal");
+    assert_eq!(
+        object_create.status.code(),
+        Some(0),
+        "create object-scoped principal: {object_create:?}"
+    );
+    let object_grant = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("grants"),
+            OsString::from("grant"),
+            OsString::from(&object_grantee),
+            OsString::from("execute"),
+            OsString::from(&health_target),
+        ],
+    )
+    .expect("grant object-scoped SQLite privilege");
+    assert_eq!(
+        object_grant.status.code(),
+        Some(0),
+        "grant object-scoped privilege: {object_grant:?}"
+    );
+    let object_check = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("check"),
+            OsString::from("has-privilege"),
+            OsString::from(&object_grantee),
+            OsString::from("execute"),
+            OsString::from(&health_target),
+        ],
+    )
+    .expect("check object-scoped SQLite privilege");
+    assert_eq!(
+        object_check.status.code(),
+        Some(0),
+        "object-scoped privilege check: {object_check:?}"
+    );
+    let object_check: Value =
+        serde_json::from_slice(&object_check.stdout).expect("object privilege JSON");
+    assert_eq!(object_check["result"], true);
+    let listed = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("security"),
+            OsString::from("grants"),
+            OsString::from("list"),
+            OsString::from(&created),
+        ],
+    )
+    .expect("list local SQLite grants");
+    assert_eq!(listed.status.code(), Some(0), "list grants: {listed:?}");
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("listed grants JSON");
+    assert_eq!(listed["principal"], created);
+    assert_eq!(listed["privileges"][0]["class"], "execute");
+    assert!(!principal.is_empty(), "whoami principal remains present");
+}
+
+#[test]
+fn local_sqlite_raw_call_route_executes_server_function() {
+    let directory = TestDirectory::new("raw-call").expect("scratch directory");
+    let database = directory.path().join("raw-call.sqlite");
+    let source = directory.path().join("server_function_dogfood.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("copy source fixture");
+    let applied = run_orna(
+        directory.path(),
+        &source_arguments(&database, "apply", &source),
+    )
+    .expect("source apply for raw call");
+    assert_eq!(applied.status.code(), Some(0), "source apply: {applied:?}");
+    let document: Value = serde_json::from_slice(&applied.stdout).expect("source apply JSON");
+    let function = document["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions.iter().find(|entry| {
+                entry["qualified_name"]
+                    == Value::Array(vec![
+                        Value::String("dogfood".to_owned()),
+                        Value::String("read".to_owned()),
+                    ])
+            })
+        })
+        .and_then(|entry| entry["function_id"].as_str())
+        .expect("dogfood.read function identity")
+        .to_owned();
+    let result = run_orna(
+        directory.path(),
+        &[
+            OsString::from("--db"),
+            database.as_os_str().to_os_string(),
+            OsString::from("raw-call"),
+            OsString::from(function),
+        ],
+    )
+    .expect("local SQLite raw call");
+    assert_eq!(result.status.code(), Some(0), "raw call: {result:?}");
+    assert!(
+        result.stdout.is_empty(),
+        "empty dogfood table has no values"
+    );
+    assert!(
+        result.stderr.is_empty(),
+        "raw call keeps stdout/stderr clean"
+    );
+}
+#[test]
 fn local_sqlite_server_has_private_v1_socket_and_ping_pong() {
     let directory = TestDirectory::new("socket").expect("scratch directory");
     let database = directory.path().join("socket.sqlite");
@@ -564,7 +1056,7 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
             .expect("write raw-call frame");
     }
     stream.flush().expect("flush raw-call frames");
-    let mut accepted = false;
+    let mut accepted_invocation = None;
     let mut completed = false;
     for _ in 0..3 {
         match decode_server_frame(&read_frame(&mut stream).expect("read raw-call response"))
@@ -572,10 +1064,10 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
         {
             ServerFrame::CallAccepted {
                 stream: response_stream,
-                ..
+                invocation,
             } => {
                 assert_eq!(response_stream, 1);
-                accepted = true;
+                accepted_invocation = Some(invocation);
             }
             ServerFrame::EventBatch {
                 stream: response_stream,
@@ -591,8 +1083,6 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
             response => panic!("unexpected raw-call response: {response:?}"),
         }
     }
-    assert!(accepted, "raw call must be accepted");
-    assert!(completed, "raw call must complete");
 
     for frame in [
         ClientFrame::CallRawStart {
@@ -614,6 +1104,42 @@ fn local_sqlite_socket_dispatches_raw_calls_and_rejects_unknown_targets() {
             failure: orna_protocol::CallFailure::TargetUnavailable,
         }
     );
+    drop(stream);
+    let _ = server
+        .stop_with_signal(Signal::SIGTERM)
+        .expect("stop SQLite socket server");
+    let invocation = accepted_invocation.expect("raw call accepted invocation id");
+    assert!(completed, "raw call must complete");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("socket evidence runtime");
+    let (audit, snapshot, trace) = runtime.block_on(async {
+        let store = SqliteRevisionStore::open(&SqliteConfig::new(&database))
+            .await
+            .expect("open socket evidence store");
+        (
+            store
+                .load_invocation_audit(invocation)
+                .await
+                .expect("load socket invocation audit")
+                .expect("socket invocation audit"),
+            store
+                .load_inspect_snapshot(invocation, None)
+                .await
+                .expect("load socket inspect snapshot")
+                .expect("socket inspect snapshot"),
+            store
+                .load_inspect_trace_events(invocation, 0)
+                .await
+                .expect("load socket inspect trace"),
+        )
+    });
+    assert_eq!(audit.invocation, invocation);
+    assert_eq!(audit.outcome, "completed");
+    assert_eq!(snapshot.invocation, invocation);
+    assert_eq!(trace.len(), 1);
+    assert_eq!(trace[0].invocation, invocation);
 }
 #[test]
 fn local_sqlite_socket_supports_v2_catalogue_calls() {
