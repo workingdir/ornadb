@@ -13,6 +13,8 @@
 
 use std::{fmt, str};
 
+use crate::artifact_codec::{DecodeError, Reader, Writer};
+
 /// The stable public identity of this artifact format.
 pub const FORMAT_IDENTITY: &str = "orna.constant-expression";
 /// The only supported constant-expression artifact version.
@@ -40,31 +42,32 @@ impl ConstantExpression {
     pub fn encode(&self) -> Result<Vec<u8>, ConstantExpressionError> {
         let encoded_size = self.encoded_size()?;
         validate_artifact_size(encoded_size)?;
-        let mut bytes = Vec::with_capacity(encoded_size);
-        bytes.extend_from_slice(&MAGIC);
-        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        let mut writer = Writer::with_capacity(encoded_size);
+        writer.bytes(&MAGIC);
+        writer.u32(FORMAT_VERSION);
         match self {
-            Self::Null => bytes.push(1),
+            Self::Null => writer.u8(1),
             Self::Boolean(value) => {
-                bytes.push(2);
-                bytes.push(u8::from(*value));
+                writer.u8(2);
+                writer.boolean(*value);
             }
             Self::Integer(value) => {
-                bytes.push(3);
-                bytes.extend_from_slice(&value.to_be_bytes());
+                writer.u8(3);
+                writer.i64(*value);
             }
             Self::Text(value) => {
-                bytes.push(4);
+                writer.u8(4);
                 let length = u32::try_from(value.len()).map_err(|_| {
                     ConstantExpressionError::TextSizeLimit {
                         size: value.len(),
                         maximum: u32::MAX as usize,
                     }
                 })?;
-                bytes.extend_from_slice(&length.to_be_bytes());
-                bytes.extend_from_slice(value.as_bytes());
+                writer.u32(length);
+                writer.bytes(value.as_bytes());
             }
         }
+        let bytes = writer.finish();
         debug_assert_eq!(bytes.len(), encoded_size);
         Ok(bytes)
     }
@@ -98,11 +101,11 @@ impl ConstantExpression {
         }
         let value = match reader.u8()? {
             1 => Self::Null,
-            2 => Self::Boolean(reader.boolean()?),
+            2 => Self::Boolean(decode_boolean(&mut reader)?),
             3 => Self::Integer(reader.i64()?),
             4 => {
                 let length = reader.u32()? as usize;
-                let value = reader.bytes(length)?;
+                let value = reader.take(length)?;
                 Self::Text(
                     str::from_utf8(value)
                         .map_err(|_| ConstantExpressionError::InvalidUtf8)?
@@ -147,6 +150,15 @@ pub enum ConstantExpressionError {
     Truncated,
     /// The artifact contains bytes after a complete value.
     TrailingBytes,
+}
+
+impl From<DecodeError> for ConstantExpressionError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Truncated => Self::Truncated,
+            DecodeError::TrailingBytes => Self::TrailingBytes,
+        }
+    }
 }
 
 impl fmt::Display for ConstantExpressionError {
@@ -198,61 +210,11 @@ fn validate_artifact_size(size: usize) -> Result<(), ConstantExpressionError> {
     }
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> Reader<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
-    }
-
-    fn bytes(&mut self, length: usize) -> Result<&'a [u8], ConstantExpressionError> {
-        let end = self
-            .cursor
-            .checked_add(length)
-            .ok_or(ConstantExpressionError::Truncated)?;
-        let value = self
-            .bytes
-            .get(self.cursor..end)
-            .ok_or(ConstantExpressionError::Truncated)?;
-        self.cursor = end;
-        Ok(value)
-    }
-
-    fn array<const LENGTH: usize>(&mut self) -> Result<[u8; LENGTH], ConstantExpressionError> {
-        self.bytes(LENGTH)?
-            .try_into()
-            .map_err(|_| ConstantExpressionError::Truncated)
-    }
-
-    fn u8(&mut self) -> Result<u8, ConstantExpressionError> {
-        Ok(self.array::<1>()?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32, ConstantExpressionError> {
-        Ok(u32::from_be_bytes(self.array()?))
-    }
-
-    fn i64(&mut self) -> Result<i64, ConstantExpressionError> {
-        Ok(i64::from_be_bytes(self.array()?))
-    }
-
-    fn boolean(&mut self) -> Result<bool, ConstantExpressionError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            value => Err(ConstantExpressionError::InvalidBoolean(value)),
-        }
-    }
-
-    fn require_finished(&self) -> Result<(), ConstantExpressionError> {
-        if self.cursor == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(ConstantExpressionError::TrailingBytes)
-        }
+fn decode_boolean(reader: &mut Reader<'_>) -> Result<bool, ConstantExpressionError> {
+    match reader.u8()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(ConstantExpressionError::InvalidBoolean(value)),
     }
 }
 

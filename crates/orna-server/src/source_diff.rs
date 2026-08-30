@@ -1,3 +1,7 @@
+#![allow(clippy::redundant_pattern)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
+// Source diff preserves the accepted host error boundary.
+#![allow(clippy::result_large_err)]
 //! Local read-only semantic source diff (work ADR 0066).
 //!
 //! [`run_installed_source_diff`] checks one application source file against
@@ -9,28 +13,26 @@
 
 use std::{
     error::Error,
-    fmt, fs,
-    io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    fmt,
+    io::{self, Write},
 };
 
 use orna_compiler::{
-    PrepareStandardApplicationError, StandardApplicationCheckContext,
-    StandardApplicationContextError, StandardLibraryCheckError, check_standard_application,
-    check_standard_library_source, prepare_standard_application,
+    PrepareStandardApplicationError, StandardApplicationContextError, StandardLibraryCheckError,
+    prepare_standard_application,
 };
 use orna_core::{
     catalogue_diff::{CatalogueSemanticDiff, SemanticChange},
-    revision::VerifiedStandardLibrarySnapshot,
-    source::{SourceBundle, SourceBundleError, SourceUnit},
+    source::{SourceBundle, SourceBundleError},
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::StandardLibraryError;
 
 use crate::{
     EmbeddedHostError, inspect_current_embedded_host,
-    source_apply::{StandardSelectionError, select_accepted_standard},
-    source_diagnostics,
+    source_support::{
+        self, ApplicationCheckError, HostFailureClass, KernelFailureClass, SourceFileError,
+    },
 };
 
 /// The closed result of one installed read-only source diff.
@@ -278,37 +280,18 @@ async fn diff_source_bundle(
     bundle: SourceBundle,
 ) -> Result<InstalledSourceDiffOutcome, InstalledSourceDiffError> {
     let active = kernel.recover().await.map_err(map_recovery_error)?;
-    let installed = active
-        .catalogue_hash_context()
-        .standard()
-        .ok_or(InstalledSourceDiffError::ActiveStandardMismatch)?;
-    let accepted = select_accepted_standard(installed).map_err(|error| match error {
-        StandardSelectionError::UnknownRevision => InstalledSourceDiffError::ActiveStandardMismatch,
-        StandardSelectionError::Verification(source) => {
-            InstalledSourceDiffError::StandardLibrary { source }
-        }
-    })?;
-    require_accepted_active_standard(&active, &accepted)?;
-    let standard = check_standard_library_source(&accepted)
-        .map_err(|source| InstalledSourceDiffError::StandardSource { source })?;
-    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard)
-        .map_err(|source| InstalledSourceDiffError::ApplicationContext { source })?;
-    let report = check_standard_application(&bundle, &context);
+    let report = source_support::check_application_source(&active, &bundle)
+        .map_err(map_application_check_error)?;
 
     if !report.diagnostics().is_empty() {
+        let (bytes, human_bytes, coloured_bytes) =
+            source_support::render_source_diagnostics(report.parse_report(), report.diagnostics())
+                .into_parts();
         return Ok(InstalledSourceDiffOutcome::Diagnostics(
             InstalledSourceDiffDiagnostics {
-                bytes: source_diagnostics::render_diagnostics(report.diagnostics()),
-                human_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    false,
-                ),
-                coloured_bytes: source_diagnostics::render_human_diagnostics(
-                    report.parse_report(),
-                    report.diagnostics(),
-                    true,
-                ),
+                bytes,
+                human_bytes,
+                coloured_bytes,
             },
         ));
     }
@@ -999,88 +982,17 @@ fn qualified(name: &orna_core::catalogue::QualifiedSemanticName) -> String {
         .join(".")
 }
 
-fn require_accepted_active_standard(
-    active: &orna_core::revision::ActiveDatabaseRevision,
-    accepted: &VerifiedStandardLibrarySnapshot,
-) -> Result<(), InstalledSourceDiffError> {
-    let Some(installed) = active.catalogue_hash_context().standard() else {
-        return Err(InstalledSourceDiffError::ActiveStandardMismatch);
-    };
-    let installed_source = installed.source();
-    let accepted_source = accepted.source();
-    if installed.revision() != accepted.revision()
-        || installed.catalogue().revision() != accepted.catalogue().revision()
-        || installed_source.bundle() != accepted_source.bundle()
-        || installed_source.id() != accepted_source.id()
-        || installed_source.bundle_hash() != accepted_source.bundle_hash()
-        || installed_source.revision_hash() != accepted_source.revision_hash()
-        || installed.digest() != accepted.digest()
-    {
-        return Err(InstalledSourceDiffError::ActiveStandardMismatch);
-    }
-    Ok(())
-}
-
 fn read_source_bundle(path: &str) -> Result<SourceBundle, InstalledSourceDiffError> {
-    validate_source_path(path)?;
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|source| InstalledSourceDiffError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?;
-    if !file
-        .metadata()
-        .map_err(|source| InstalledSourceDiffError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?
-        .is_file()
-    {
-        return Err(InstalledSourceDiffError::SourceRead {
-            path: path.to_owned(),
-            source: None,
-        });
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|source| InstalledSourceDiffError::SourceRead {
-            path: path.to_owned(),
-            source: Some(source),
-        })?;
-    let source = String::from_utf8(bytes).map_err(|_| InstalledSourceDiffError::SourceUtf8 {
-        path: path.to_owned(),
-    })?;
-    SourceBundle::new([SourceUnit::new(path, source)])
-        .map_err(|source| InstalledSourceDiffError::SourceBundle { source })
-}
-
-fn validate_source_path(path: &str) -> Result<(), InstalledSourceDiffError> {
-    if path.is_empty()
-        || path.starts_with('-')
-        || path
-            .chars()
-            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
-    {
-        return Err(InstalledSourceDiffError::SourceBundle {
-            source: SourceBundleError::EmptyLogicalPath { index: 0 },
-        });
-    }
-
-    Ok(())
+    source_support::read_source_bundle(path).map_err(map_source_file_error)
 }
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceDiffError {
-    let failure = match &source {
-        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
-            InstalledSourceDiffHostFailure::EngineInvalid
-        }
-        EmbeddedHostError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+    let failure = match source_support::classify_host_error(&source) {
+        HostFailureClass::InstanceNotInstalled => {
             InstalledSourceDiffHostFailure::InstanceNotInstalled
         }
-        _ => InstalledSourceDiffHostFailure::InstanceInvalid,
+        HostFailureClass::InstanceInvalid => InstalledSourceDiffHostFailure::InstanceInvalid,
+        HostFailureClass::EngineInvalid => InstalledSourceDiffHostFailure::EngineInvalid,
     };
     InstalledSourceDiffError::Host {
         failure,
@@ -1089,14 +1001,40 @@ fn map_host_error(source: EmbeddedHostError) -> InstalledSourceDiffError {
 }
 
 fn map_recovery_error(source: PostgresKernelError) -> InstalledSourceDiffError {
+    match source_support::classify_kernel_error(&source) {
+        KernelFailureClass::Configuration
+        | KernelFailureClass::Database
+        | KernelFailureClass::DriverTask => InstalledSourceDiffError::Attach { source },
+        KernelFailureClass::SessionClose
+        | KernelFailureClass::RecoveryDatabase
+        | KernelFailureClass::Other => InstalledSourceDiffError::Recovery { source },
+    }
+}
+
+fn map_source_file_error(source: SourceFileError) -> InstalledSourceDiffError {
     match source {
-        source @ (PostgresKernelError::Configuration(_)
-        | PostgresKernelError::Database(_)
-        | PostgresKernelError::DriverTask(_)) => InstalledSourceDiffError::Attach { source },
-        source @ PostgresKernelError::RecoveryDatabase(_) => {
-            InstalledSourceDiffError::Recovery { source }
+        SourceFileError::Read { path, source } => {
+            InstalledSourceDiffError::SourceRead { path, source }
         }
-        source => InstalledSourceDiffError::Recovery { source },
+        SourceFileError::Utf8 { path } => InstalledSourceDiffError::SourceUtf8 { path },
+        SourceFileError::Bundle { source } => InstalledSourceDiffError::SourceBundle { source },
+    }
+}
+
+fn map_application_check_error(source: ApplicationCheckError) -> InstalledSourceDiffError {
+    match source {
+        ApplicationCheckError::ActiveStandardMismatch => {
+            InstalledSourceDiffError::ActiveStandardMismatch
+        }
+        ApplicationCheckError::StandardLibrary(source) => {
+            InstalledSourceDiffError::StandardLibrary { source }
+        }
+        ApplicationCheckError::StandardSource(source) => {
+            InstalledSourceDiffError::StandardSource { source }
+        }
+        ApplicationCheckError::ApplicationContext(source) => {
+            InstalledSourceDiffError::ApplicationContext { source }
+        }
     }
 }
 
