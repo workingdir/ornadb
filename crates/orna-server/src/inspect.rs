@@ -1,3 +1,7 @@
+// Inspector execution preserves its accepted multi-input seam.
+#![allow(clippy::too_many_arguments)]
+// Inspector operations return the stable embedded-host error boundary.
+#![allow(clippy::result_large_err)]
 //! Installed `orna inspect` access to the durable Inspector core.
 //!
 //! This module runs one closed `orna inspect` command against the fixed
