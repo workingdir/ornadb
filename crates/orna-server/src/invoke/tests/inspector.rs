@@ -1,6 +1,12 @@
 //! Installed Inspector invocation and carrier tests.
 
 use super::*;
+fn epoch_id(low: u8) -> InspectEpochId {
+    let mut bytes = [0; 16];
+    bytes[15] = low;
+    InspectEpochId::from_bytes(bytes)
+}
+
 fn inspect_test_context() -> (
     ActiveDatabaseRevision,
     orna_core::value::OpaqueCodecRegistry,
@@ -135,21 +141,21 @@ fn inspector_snapshot_row_rejects_zero_value_batch_count() {
     no_values.truncate(68);
     assert_eq!(no_values.len(), 68);
     assert_eq!(
-        decode_snapshot_row_payload(&no_values, 7),
+        decode_snapshot_row_payload(&no_values, epoch_id(7)),
         Ok((epoch, target, root_target))
     );
     assert_eq!(
-        decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, epoch_id(7)),
         Err("inspect.malformed_carrier".to_owned())
     );
     row[67..75].copy_from_slice(&1_u64.to_be_bytes());
     assert_eq!(
-        decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, epoch_id(7)),
         Ok((epoch, target, root_target))
     );
     row.push(0x19);
     assert_eq!(
-        decode_snapshot_row_payload(&row, 7),
+        decode_snapshot_row_payload(&row, epoch_id(7)),
         Err("inspect.malformed_carrier".to_owned())
     );
 }
@@ -169,7 +175,8 @@ fn inspector_snapshot_row_rejects_forged_root_provenance() {
     row.push(0);
     row.push(0);
 
-    let (_, _, decoded_root) = decode_snapshot_row_payload(&row, 7).expect("valid snapshot row");
+    let (_, _, decoded_root) =
+        decode_snapshot_row_payload(&row, epoch_id(7)).expect("valid snapshot row");
     assert_eq!(
         require_inspect_root_provenance(expected_root, decoded_root),
         Ok(())
@@ -177,7 +184,7 @@ fn inspector_snapshot_row_rejects_forged_root_provenance() {
 
     row[41..57].copy_from_slice(&forged_root.to_bytes());
     let (_, _, decoded_root) =
-        decode_snapshot_row_payload(&row, 7).expect("forged root remains well-formed");
+        decode_snapshot_row_payload(&row, epoch_id(7)).expect("forged root remains well-formed");
     assert_eq!(
         require_inspect_root_provenance(expected_root, decoded_root),
         Err("inspect.epoch_mismatch".to_owned())
@@ -208,7 +215,7 @@ fn inspector_enriched_row_rejects_forged_root_provenance() {
         &registry,
         &encoded,
         InspectCarrierKind::SecurityDecisions,
-        7,
+        epoch_id(7),
     )
     .expect("valid enriched Inspector row");
     assert_eq!(
@@ -225,7 +232,7 @@ fn inspector_enriched_row_rejects_forged_root_provenance() {
         &registry,
         &forged_encoded,
         InspectCarrierKind::SecurityDecisions,
-        7,
+        epoch_id(7),
     )
     .expect("forged root remains structurally valid");
     assert_eq!(
@@ -256,7 +263,7 @@ fn inspector_enriched_row_rejects_zero_target() {
             &registry,
             &encoded,
             InspectCarrierKind::SecurityDecisions,
-            7,
+            epoch_id(7),
         ),
         Err("inspect.invalid_target".to_owned())
     );
@@ -392,6 +399,7 @@ fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
     let target = InvocationId::from_bytes([0x11; 16]);
     let other_target = InvocationId::from_bytes([0x22; 16]);
     let mut epoch_bytes = [0; 16];
+    epoch_bytes[..8].fill(0x32);
     epoch_bytes[15] = 0x33;
     let epoch = InspectEpochId::from_bytes(epoch_bytes);
     let pair = RevisionPair::new(
@@ -401,7 +409,7 @@ fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
     let envelope = InspectCarrierEnvelope::new_with_target(
         InspectCarrierKind::Snapshot,
         target,
-        InspectCarrierProvenance::trusted_for_target(0x33, target, pair.source(), pair.catalogue()),
+        InspectCarrierProvenance::trusted_for_target(epoch, target, pair.source(), pair.catalogue()),
         Vec::new(),
     )
     .expect("snapshot envelope");
@@ -413,8 +421,8 @@ fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
         validate_inspect_projection_binding(Some(other_target), &envelope, epoch, target, pair,),
         Err("inspect.epoch_mismatch".to_owned()),
     );
-    let mut wrong_epoch_bytes = [0; 16];
-    wrong_epoch_bytes[15] = 0x34;
+    let mut wrong_epoch_bytes = epoch.to_bytes();
+    wrong_epoch_bytes[0] ^= 1;
     let wrong_epoch = InspectEpochId::from_bytes(wrong_epoch_bytes);
     assert_eq!(
         validate_inspect_projection_binding(Some(target), &envelope, wrong_epoch, target, pair,),
