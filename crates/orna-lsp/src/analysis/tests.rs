@@ -2,7 +2,10 @@ use super::{
     StandardLibrary, completion_at, declaration_at, hover, references, type_owner_name_from_source,
 };
 use crate::documents::{Document, PositionMapper};
-use lsp_types::{Hover, HoverContents, Position, Range};
+use lsp_types::{
+    CompletionContext, CompletionItemKind, CompletionTriggerKind, Hover, HoverContents, Position,
+    Range,
+};
 
 fn hover_at(text: &str, byte: usize) -> Option<Hover> {
     let document = Document::new("file:///hover.orna".parse().unwrap(), text.to_owned(), 1);
@@ -80,6 +83,79 @@ fn standard_functions_appear_in_completion() {
     let parse = orna_syntax::parse("");
     let items = completion_at(&parse, Some(&standard), None, None);
     assert!(items.iter().any(|item| item.label == "increment"));
+}
+
+#[test]
+fn completion_resolves_nested_client_fields_through_utf16_cursor() {
+    let text = concat!(
+        "CREATE SCHEMA expr;\n",
+        "CREATE TYPE expr.inner AS OBJECT (label TEXT);\n",
+        "CREATE TYPE expr.item AS OBJECT (nested REF expr.inner, title TEXT);\n",
+        "CREATE CLIENT FUNCTION expr.read(p_item REF expr.item)\n",
+        "RETURNS TEXT\n",
+        "AS '😀' || p_item.nested.label;\n",
+    );
+    let parse = orna_syntax::parse(text);
+    assert!(
+        parse.diagnostics().is_empty(),
+        "accepted CLIENT field-path fixture must parse: {:?}",
+        parse.diagnostics()
+    );
+    let mapper = PositionMapper::new(text);
+    let outer_cursor = text.find("p_item.nested.").expect("outer field cursor")
+        + "p_item.nested.".len();
+    let outer_position = mapper.position(outer_cursor);
+    assert_eq!(outer_position.line, 5);
+    let body_line = text.lines().nth(5).expect("CLIENT body line");
+    let body_start = text.find(body_line).expect("CLIENT body line start");
+    assert_eq!(
+        outer_position.character as usize,
+        body_line[..outer_cursor - body_start]
+            .encode_utf16()
+            .count()
+    );
+    assert_eq!(mapper.byte_offset(outer_position), outer_cursor);
+
+    let context = CompletionContext {
+        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+        trigger_character: Some(".".to_owned()),
+    };
+    let outer_items = completion_at(
+        &parse,
+        None,
+        Some(mapper.byte_offset(outer_position)),
+        Some(&context),
+    );
+    assert!(
+        outer_items
+            .iter()
+            .any(|item| item.label == "label" && item.kind == Some(CompletionItemKind::FIELD)),
+        "nested field completion at the UTF-16 cursor: {outer_items:?}"
+    );
+    assert!(
+        outer_items.iter().any(|item| item.label == "CREATE"),
+        "global completion at the UTF-16 cursor: {outer_items:?}"
+    );
+
+    let root_cursor = text.find("p_item.").expect("root field cursor") + "p_item.".len();
+    let root_items = completion_at(
+        &parse,
+        None,
+        Some(mapper.byte_offset(mapper.position(root_cursor))),
+        Some(&context),
+    );
+    assert!(
+        root_items
+            .iter()
+            .any(|item| item.label == "nested" && item.kind == Some(CompletionItemKind::FIELD)),
+        "root field completion at the cursor: {root_items:?}"
+    );
+    assert!(
+        root_items
+            .iter()
+            .any(|item| item.label == "title" && item.kind == Some(CompletionItemKind::FIELD)),
+        "all root fields remain available at the cursor: {root_items:?}"
+    );
 }
 
 #[test]
