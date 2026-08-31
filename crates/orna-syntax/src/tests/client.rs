@@ -1170,6 +1170,66 @@ fn reports_malformed_client_await_operands_without_widening_expression_syntax() 
         );
     }
 }
+#[test]
+fn rejects_await_in_non_suspending_contexts_with_lossless_later_recovery() {
+    let cases = [
+        (
+            "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT AS \
+             std.outer(AWAIT std.data.resource());\n",
+            "nested call argument",
+        ),
+        (
+            "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT IS\n\
+                 STATE value TEXT DEFAULT AWAIT std.data.resource();\n\
+             BEGIN\n\
+                 RETURN value;\n\
+             END;\n",
+            "state declaration default",
+        ),
+        (
+            "CREATE CLIENT FUNCTION examples.awaited() RETURNS TEXT IS\n\
+                 STATE value TEXT;\n\
+             BEGIN\n\
+                 RETURN AWAIT std.data.resource();\n\
+             END;\n",
+            "state block return",
+        ),
+    ];
+
+    for (invalid, context) in cases {
+        let source = format!(
+            "{invalid}CREATE CLIENT FUNCTION examples.recovered() RETURNS TEXT AS 'ok';"
+        );
+        let parsed = parse(&source);
+
+        assert_eq!(parsed.syntax().text(), source, "{context}");
+        assert_eq!(parsed.client_functions().len(), 1, "{context}");
+        assert_eq!(
+            parsed.client_functions()[0].name.parts[1].text,
+            "recovered",
+            "{context}"
+        );
+        assert!(
+            parsed
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ORNA0001"),
+            "{context}: expected an ORNA0001 diagnostic, got {:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(
+            parsed
+                .syntax()
+                .root()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::ClientAwaitExpression)
+                .count(),
+            0,
+            "{context}: forbidden AWAIT must not produce an Await AST node"
+        );
+    }
+}
+
 
 #[test]
 fn rejects_client_expression_trailing_dots() {
