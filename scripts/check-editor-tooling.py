@@ -37,7 +37,7 @@ CORPUS_CASE_DELIMITER = "=" * 20
 ORDER_BY_HIGHLIGHT_FIXTURE_NAME = "accepted_resources_streams.orna"
 ORDER_BY_DIRECTION_TEXTS = ("ASC", "DESC")
 # Keep the Zed grammar source reproducible: this is the accepted, reviewed tree-sitter revision.
-ACCEPTED_ZED_GRAMMAR_REVISION = "f5c9007ee2ba8dcd00784e806a9d9b32be6efe08"
+ACCEPTED_ZED_GRAMMAR_REVISION = "00399d1fcc2c94c94c237daf516bbc92c619effb"
 TARGET_HIGHLIGHT_EXPECTATIONS = (
     ("accepted_resources_streams.orna", {"function": ("overdue", "execute_sql"), "property": ("payload",)}),
     ("accepted_actions_inspector.orna", {"function": ("echo",), "property": ("invoke",)}),
@@ -583,6 +583,8 @@ def check_source_check_parity(
                         cargo,
                         "run",
                         "--quiet",
+                        "--locked",
+                        "--offline",
                         "--package",
                         "orna-server",
                         "--",
@@ -2051,7 +2053,7 @@ def check_zed_extension(
 
     log("checking editors/zed with cargo check")
     result = run_command(
-        [cargo, "check", "--locked", "--manifest-path", str(manifest)],
+        [cargo, "check", "--locked", "--offline", "--manifest-path", str(manifest)],
         cwd=repository,
         label="zed cargo check",
     )
@@ -2067,7 +2069,7 @@ def check_accepted_parser_manifest(cargo: str, repository: Path) -> bool:
     """Run the Rust parser test that consumes the accepted corpus manifest."""
     log("checking orna-syntax accepted corpus manifest test")
     result = run_command(
-        [cargo, "test", "--package", "orna-syntax", "--test", "accepted_manifest"],
+        [cargo, "test", "--locked", "--offline", "--package", "orna-syntax", "--test", "accepted_manifest"],
         cwd=repository,
         label="orna-syntax accepted manifest test",
     )
@@ -2083,7 +2085,7 @@ def check_lsp_protocol(cargo: str, repository: Path) -> bool:
     """Run the framed LSP protocol test against the checked-in binary."""
     log("checking orna-lsp framed protocol tests")
     result = run_command(
-        [cargo, "test", "--package", "orna-lsp", "--test", "lsp_e2e"],
+        [cargo, "test", "--locked", "--offline", "--package", "orna-lsp", "--test", "lsp_e2e"],
         cwd=repository,
         label="orna-lsp protocol test",
     )
@@ -2103,6 +2105,8 @@ def check_lsp_accepted_corpus_manifest(cargo: str, repository: Path) -> bool:
         [
             cargo,
             "test",
+            "--locked",
+            "--offline",
             "--package",
             "orna-lsp",
             "--test",
