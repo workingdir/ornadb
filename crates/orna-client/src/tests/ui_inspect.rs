@@ -2,8 +2,7 @@ use super::*;
 
 fn inspect_epoch(high: u8, low: u8) -> super::super::InspectEpochId {
     let mut bytes = [0; 16];
-    bytes[..8].fill(high);
-    bytes[8..].fill(low);
+    bytes[15] = low;
     super::super::InspectEpochId::from_bytes(bytes)
 }
 
