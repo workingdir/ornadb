@@ -160,6 +160,17 @@ impl PostgresKernel {
                 None => decode_retained_invoke_request(&active, &registry, request)
                     .map_err(PostgresKernelError::SealedInvocation)?,
             };
+            if prepared_outcome.is_some_and(|outcome| {
+                outcome
+                    .unsupported_security_definer_target()
+                    .is_some()
+            }) {
+                return Err(sealed_target_invariant(
+                    &active,
+                    "prepared sealed dispatch must reject unsupported SECURITY DEFINER",
+                ));
+            }
+
             let system_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
             let decision = match prepared_outcome {
                 Some(SealedInvocationPreparedOutcome::Allowed { .. }) => {

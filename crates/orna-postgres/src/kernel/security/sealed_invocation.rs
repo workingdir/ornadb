@@ -260,6 +260,33 @@ pub(super) enum SealedInvocationPreparedOutcome {
         authorisation: AuthorisedInvocation,
     },
 }
+impl SealedInvocationPreparedOutcome {
+    pub(super) fn unsupported_security_definer_target(&self) -> Option<InvocationTarget> {
+        match self {
+            Self::Allowed {
+                target,
+                security_target,
+                ..
+            }
+            | Self::BindFailure {
+                target,
+                security_target,
+                ..
+            } => (!target.security_is_supported()).then_some(*security_target),
+            Self::TargetDenied { .. } => None,
+        }
+    }
+
+    pub(super) fn reject_unsupported_security_definer(&mut self) {
+        let Some(security_target) = self.unsupported_security_definer_target() else {
+            return;
+        };
+        *self = Self::TargetDenied {
+            security_target: Some(security_target),
+            denial: Some(ExecuteDenial::UnsupportedSecurityDefiner),
+        };
+    }
+}
 
 #[derive(Clone)]
 pub(super) enum PreparedSealedTarget {
@@ -282,6 +309,23 @@ impl PreparedSealedTarget {
                 definition.id()
             }
             Self::System { definition } => definition.id(),
+        }
+    }
+    pub(super) fn security_is_supported(&self) -> bool {
+        match self {
+            Self::Application { definition } => {
+                sealed_target_security_is_supported(SealedResolvedTarget::Application(definition))
+            }
+            Self::System { definition } => {
+                sealed_target_security_is_supported(SealedResolvedTarget::System(*definition))
+            }
+            Self::VerifiedStandard {
+                definition,
+                executable,
+            } => sealed_target_security_is_supported(SealedResolvedTarget::VerifiedStandard {
+                definition,
+                executable,
+            }),
         }
     }
 
@@ -639,6 +683,8 @@ impl SealedInvocationOperation {
                 rule: "execute_after_started may only be called once",
             });
         }
+        self.outcome.reject_unsupported_security_definer();
+
         self.consumed = true;
         self.append_prepared_audit().await?;
         if cancellation.is_requested() {
