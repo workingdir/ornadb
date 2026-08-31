@@ -13,9 +13,7 @@ use std::{
 
 use orna_compiler::{check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{
-    retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot,
-};
+use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
@@ -1862,10 +1860,14 @@ fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbol
         "global completion preserved: {labels:?}"
     );
 
-    let incomplete_source = "CREATE CLIENT FUNCTION app.probe(p_item REF expr.item) RETURNS TEXT AS p_item.;\n";
+    let incomplete_source =
+        "CREATE CLIENT FUNCTION app.probe(p_item REF expr.item) RETURNS TEXT AS p_item.;\n";
     let incomplete_parse = orna_syntax::parse(incomplete_source);
     assert!(
-        incomplete_parse.diagnostics().iter().any(|diagnostic| diagnostic.message.contains("CLIENT expression dot")),
+        incomplete_parse
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("CLIENT expression dot")),
         "incomplete CLIENT member path must remain an explicit parser diagnostic"
     );
 
