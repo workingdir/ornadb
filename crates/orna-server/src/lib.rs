@@ -3,6 +3,7 @@
 #![allow(clippy::type_complexity)]
 //! Embedded PostgreSQL host and administrative interfaces for OrnaDB.
 
+mod distribution;
 mod backend_shell;
 mod embedded;
 mod inspect;
