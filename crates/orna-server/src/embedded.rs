@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::{Config, NoTls};
 
 use crate::{
-    LocalRawSocketServer, LocalRawSocketServerError, OpenStandardDatabaseError,
+    LocalRawSocketServer, LocalRawSocketServerError, OpenStandardDatabaseError, distribution,
     open_standard_database, start_local_raw_socket,
 };
 
@@ -248,6 +248,8 @@ impl fmt::Debug for ReadyEmbeddedHost {
 }
 
 fn prepare_development_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    distribution::verify_if_installed()
+        .map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
     validate_embedded_engine_manifest()?;
     let paths = EmbeddedHostPaths::development();
     let service = ServiceIdentity::current();
@@ -399,6 +401,8 @@ fn parse_instance_manifest(
 
 /// Verifies and retains the user-owned local host for a private client.
 pub fn inspect_current_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    distribution::verify_if_installed()
+        .map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
     let service = ServiceIdentity::current();
     let paths = EmbeddedHostPaths::development();
     let host_lock = open_verified_file(
@@ -1191,6 +1195,8 @@ pub enum EmbeddedHostError {
     InvalidSupportManifest,
     /// The embedded engine manifest is malformed or does not bind its embedded data.
     InvalidEngineManifest,
+    /// The installed distribution manifest does not bind this executable and engine.
+    InvalidDistributionManifest,
     /// A support member path is not a safe relative path.
     InvalidSupportPath,
     /// A linked PostgreSQL entry was requested after another thread existed.
@@ -1246,6 +1252,9 @@ impl fmt::Display for EmbeddedHostError {
             }
             Self::InvalidEngineManifest => {
                 formatter.write_str("embedded PostgreSQL engine manifest is invalid")
+            }
+            Self::InvalidDistributionManifest => {
+                formatter.write_str("Orna distribution manifest is invalid")
             }
             Self::InvalidSupportPath => {
                 formatter.write_str("embedded PostgreSQL support path is invalid")
