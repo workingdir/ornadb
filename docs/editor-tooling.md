@@ -31,9 +31,9 @@ tests use `--locked --offline`; the source-check parity phase also invokes
 `orna-server`, whose embedded-engine build requires a Linux x86_64 host plus
 either `ORNA_POSTGRES_ENGINE_OUTPUT` naming a complete prebuilt engine output
 directory with an **absolute** path (for example,
-`$PWD/third_party/postgresql/output`) or the environment-dependent
-Docker-backed build. Cargo offline mode does not disable that build script's
-host/network work.
+`$PWD/target/postgresql-embedded-native-one/output` after the native lifecycle
+recipe has produced it) or the environment-dependent Docker-backed build.
+Cargo offline mode does not disable that build script's host/network work.
 The script generates Tree-sitter output in a temporary directory and does not
 rewrite the checkout.
 
