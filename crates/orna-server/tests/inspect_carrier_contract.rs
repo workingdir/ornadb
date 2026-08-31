@@ -248,13 +248,12 @@ fn malformed_carrier_bytes_and_rows_fail_closed() {
 fn target_provenance_and_stale_epoch_bindings_fail_closed() {
     let target = invocation(0xc1);
     let other_target = invocation(0xc2);
-    let provenance =
-        InspectCarrierProvenance::trusted_for_target(
-            epoch(0, 11),
-            target,
-            source(0xd1),
-            catalogue(0xe1),
-        );
+    let provenance = InspectCarrierProvenance::trusted_for_target(
+        epoch(0, 11),
+        target,
+        source(0xd1),
+        catalogue(0xe1),
+    );
 
     assert_eq!(
         provenance.bind_target(other_target),
