@@ -3958,11 +3958,7 @@ impl ClientStateStore {
         loaded: &HashMap<ClientStateKey, ClientUserState>,
         is_selected: impl Fn(&ClientStateKey) -> bool,
     ) -> Result<u64, ClientUserStateError> {
-        let current_count = self
-            .user
-            .keys()
-            .filter(|key| is_selected(key))
-            .count();
+        let current_count = self.user.keys().filter(|key| is_selected(key)).count();
         let changed = current_count != loaded.len()
             || loaded
                 .iter()
