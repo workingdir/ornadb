@@ -51,7 +51,7 @@ The client builds one `InvocationRuntimeOffer` for the installed tty runtime:
 | Field | Value | Source |
 | --- | --- | --- |
 | name | `tty` | spec family name |
-| version | `0.1.0` | workspace crate version of `orna-runtime-tty` |
+| version | `1.0.0` | workspace crate version of `orna-runtime-tty` |
 | consumed descriptors | `std.terminal.Document`, `std.io.ByteStream` | the two sink types it renders |
 | contracts | empty | no UI contract surface exists yet |
 | preference rank | `0` | matches the sink offers default |
