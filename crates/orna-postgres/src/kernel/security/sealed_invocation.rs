@@ -738,7 +738,8 @@ impl SealedInvocationOperation {
                 rule: "execute_after_started may only be called once",
             });
         }
-        self.outcome.reject_unsupported_security_definer(&self.active)?;
+        self.outcome
+            .reject_unsupported_security_definer(&self.active)?;
 
         self.consumed = true;
         self.append_prepared_audit().await?;
