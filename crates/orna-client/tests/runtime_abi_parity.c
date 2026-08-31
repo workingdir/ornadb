@@ -1,9 +1,10 @@
 /*
  * Linux x86_64 cross-language checks for the test-only Rust ABI mirror.
- *
  * The expected values are the constants asserted by runtime_abi in
- * crates/orna-client/src/lib.rs. Keep this translation unit against the
- * canonical sibling header; it must not become a production ABI loader.
+ * crates/orna-client/src/lib.rs. The release gate requires the canonical
+ * sibling header; the Rust unit test may opt into the checked-in declaration
+ * fixture explicitly when that external source is absent. This translation
+ * unit must not become a production ABI loader.
  */
 
 #if !defined(__linux__) || !defined(__x86_64__)
@@ -13,7 +14,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(ORNA_RUNTIME_ABI_USE_LOCAL_FIXTURE)
+#include "runtime_abi_v1_fixture.h"
+#else
 #include <spec/orna_runtime_abi_v1.h>
+#endif
 
 #define ORNA_ASSERT_SIZE(type, expected) \
     _Static_assert(sizeof(type) == (expected), #type " size")
@@ -41,6 +46,7 @@ ORNA_ASSERT_SIZE(OrnaNodeHandle, 8);
 ORNA_ASSERT_SIZE(OrnaActionHandle, 8);
 ORNA_ASSERT_SIZE(OrnaModelHandle, 8);
 ORNA_ASSERT_SIZE(OrnaRequestHandle, 8);
+ORNA_ASSERT_ALIGN(OrnaHandle, 8);
 
 ORNA_ASSERT_SIZE(OrnaStringView, 16);
 ORNA_ASSERT_ALIGN(OrnaStringView, 8);
