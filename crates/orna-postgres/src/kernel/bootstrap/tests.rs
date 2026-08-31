@@ -4,6 +4,10 @@ use super::{
     MIGRATIONS, PostgresKernel, legacy_migration_checksum, migration_checksum,
     migration_checksum_matches, validated_migration_registry,
 };
+use super::migrations::{
+    migration_sql_contains_anonymous_do_block,
+    migration_sql_contains_anonymous_do_block_with_standard_conforming_strings,
+};
 
 #[test]
 fn migration_registry_is_a_strict_contiguous_sequence() {
@@ -159,7 +163,110 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
 }
 
 #[test]
-fn legacy_migration_checksums_are_scoped_to_versions_23_29_and_30() {
+fn production_migration_registry_has_no_anonymous_do_blocks() {
+    for migration in validated_migration_registry()
+        .expect("production migration registry is valid")
+    {
+        assert!(
+            !migration_sql_contains_anonymous_do_block(migration.sql),
+            "migration {} ({}) contains an anonymous DO block",
+            migration.version,
+            migration.name
+        );
+        assert!(
+            !migration.sql.to_ascii_lowercase().contains("plpgsql"),
+            "migration {} ({}) depends on PL/pgSQL",
+            migration.version,
+            migration.name
+        );
+    }
+}
+
+#[test]
+fn anonymous_do_scanner_covers_postgres_forms_and_ignores_quoted_text() {
+    for sql in [
+        "DO $$ BEGIN NULL; END $$;",
+        "Do $body$ BEGIN NULL; END $body$;",
+        "DO 'BEGIN NULL; END';",
+        "DO E'BEGIN NULL; END';",
+        "DO LANGUAGE sql 'SELECT 1';",
+        "DO /* before */ LANGUAGE /* between */ sql $body$SELECT 1$body$;",
+        "DO LANGUAGE \"sql\" E'SELECT 1';",
+        "DO LANGUAGE 'sql' $$SELECT 1$$;",
+        "DO $body$ SELECT 1 $body$ LANGUAGE sql;",
+        "DO $body$ SELECT 'DO LANGUAGE sql $$not-a-block$$'; $body$;",
+    ] {
+        assert!(
+            migration_sql_contains_anonymous_do_block(sql),
+            "scanner missed anonymous DO form: {sql:?}"
+        );
+    }
+
+    for sql in [
+        "-- DO $$ BEGIN NULL; END $$;\nSELECT 1;",
+        "/* DO LANGUAGE sql 'not a block'; */ SELECT 1;",
+        "/* outer /* DO $$ nested comment $$ */ comment */ SELECT 1;",
+        "SELECT 'DO LANGUAGE sql $$not-a-block$$';",
+        "SELECT $$DO 'not-a-block'$$;",
+        "SELECT E'DO LANGUAGE sql $$not-a-block$$';",
+        "SELECT \"DO\";",
+        r#"SELECT U&"DO $$ BEGIN NULL; END $$;" UESCAPE '!';"#,
+        "SELECT do FROM _orna_kernel.example;",
+    ] {
+        assert!(
+            !migration_sql_contains_anonymous_do_block(sql),
+            "scanner treated quoted/commented text as anonymous DO: {sql:?}"
+        );
+    }
+}
+
+#[test]
+fn anonymous_do_scanner_ends_line_comments_at_cr_and_crlf() {
+    for sql in [
+        "-- ignored DO text\rDO $$ BEGIN NULL; END $$;",
+        "-- ignored DO text\r\nDO $$ BEGIN NULL; END $$;",
+    ] {
+        assert!(
+            migration_sql_contains_anonymous_do_block(sql),
+            "scanner missed DO after line comment terminator: {sql:?}"
+        );
+    }
+}
+
+#[test]
+fn anonymous_do_scanner_does_not_swallow_do_after_unicode_identifier() {
+    let sql = r#"SELECT U&"backslash\" UESCAPE '!'; DO $$ BEGIN NULL; END $$;"#;
+
+    assert!(
+        migration_sql_contains_anonymous_do_block(sql),
+        "scanner swallowed DO after a U& identifier with alternate UESCAPE: {sql:?}"
+    );
+}
+
+#[test]
+fn anonymous_do_scanner_honors_standard_conforming_strings_mode() {
+    let sql = r#"'escaped \'; DO $$ BEGIN NULL; END $$';"#;
+
+    assert!(
+        !migration_sql_contains_anonymous_do_block_with_standard_conforming_strings(sql, false),
+        "scanner treated DO text inside a standard-conforming-off string as executable: {sql:?}"
+    );
+    assert!(
+        migration_sql_contains_anonymous_do_block_with_standard_conforming_strings(sql, true),
+        "scanner ignored a one-byte backslash before a quote with standard-conforming-strings on: {sql:?}"
+    );
+
+    let sql =
+        r#"SET standard_conforming_strings = off; SELECT 'escaped \'; DO $$ BEGIN NULL; END $$;"#;
+
+    assert!(
+        migration_sql_contains_anonymous_do_block(sql),
+        "an in-batch SET changed the scanner mode despite batch_execute parsing mode being fixed: {sql:?}"
+    );
+}
+
+#[test]
+fn legacy_migration_checksums_are_scoped_to_versions_23_29_30_and_43() {
     let expected_legacy_checksums = [
         (
             23_i64,
@@ -185,6 +292,14 @@ fn legacy_migration_checksums_are_scoped_to_versions_23_29_and_30() {
                 0x3e, 0xfe, 0x81, 0x01,
             ],
         ),
+        (
+            43_i64,
+            [
+                0x02, 0x26, 0x8f, 0x8d, 0x50, 0xe4, 0x46, 0xba, 0x5e, 0x21, 0xce, 0x24, 0x18, 0x6c,
+                0xc8, 0xcc, 0x0c, 0xa7, 0x6c, 0x9b, 0x45, 0xa7, 0x48, 0xb1, 0x7b, 0x25, 0x35, 0xaf,
+                0xa4, 0xce, 0x04, 0x20,
+            ],
+        ),
     ];
 
     for (version, expected_checksum) in expected_legacy_checksums {
@@ -208,18 +323,28 @@ fn legacy_migration_checksums_are_scoped_to_versions_23_29_and_30() {
     assert!(legacy_migration_checksum(24).is_none());
     assert!(legacy_migration_checksum(28).is_none());
     assert!(legacy_migration_checksum(31).is_none());
+    assert!(legacy_migration_checksum(44).is_none());
 }
 
 #[test]
 fn unrelated_migration_checksum_drift_is_rejected() {
     for migration in MIGRATIONS {
-        if matches!(migration.version, 23 | 29 | 30) {
+        if matches!(migration.version, 23 | 29 | 30 | 43) {
             continue;
         }
 
         let mut drifted_checksum = migration_checksum(migration);
         drifted_checksum[0] ^= 0xff;
         assert!(!migration_checksum_matches(migration, &drifted_checksum));
+    }
+    for version in [23_i64, 29, 30, 43] {
+        let migration = &MIGRATIONS[usize::try_from(version - 1).expect("valid version")];
+        let mut drifted_current_checksum = migration_checksum(migration);
+        drifted_current_checksum[0] ^= 0xff;
+        assert!(!migration_checksum_matches(
+            migration,
+            &drifted_current_checksum
+        ));
     }
 
     let legacy_23_checksum = legacy_migration_checksum(23).expect("version 23 compatibility");
