@@ -1371,14 +1371,14 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "orna-artifact"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-core",
 ]
 
 [[package]]
 name = "orna-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libloading 0.9.0",
  "orna-artifact",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "orna-compiler"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-artifact",
  "orna-core",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "orna-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "proptest",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "orna-lsp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "orna-postgres"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "orna-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-core",
  "orna-standard",
@@ -1457,14 +1457,14 @@ dependencies = [
 
 [[package]]
 name = "orna-runtime-tty"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-core",
 ]
 
 [[package]]
 name = "orna-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "nix",
  "orna-artifact",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "orna-sqlite"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-artifact",
  "orna-core",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "orna-standard"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-artifact",
  "orna-compiler",
@@ -1513,14 +1513,14 @@ dependencies = [
 
 [[package]]
 name = "orna-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "orna-core",
 ]
 
 [[package]]
 name = "orna-syntax"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proptest",
  "rowan",
