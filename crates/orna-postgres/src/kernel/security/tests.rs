@@ -851,9 +851,9 @@ fn prepared_security_definer_mismatched_target_tuple_fails_closed() {
             .expect("function name"),
         FunctionDomain::Server,
         Vec::new(),
-        FunctionReturn::Single(
-            orna_core::types::ResolvedType::scalar(orna_core::types::StandardScalar::Integer),
-        ),
+        FunctionReturn::Single(orna_core::types::ResolvedType::scalar(
+            orna_core::types::StandardScalar::Integer,
+        )),
         FunctionRevisionId::from_bytes([0xc4; 16]),
         FunctionSecurity::Definer,
         Some(orna_core::catalogue::FunctionTransaction::ReadOnly),
@@ -882,7 +882,8 @@ fn prepared_security_definer_mismatched_target_tuple_fails_closed() {
         panic!("the fixture grant must create allowed evidence");
     };
     let active = sealed_test_active_revision(revision);
-    let prepared = PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definition));
+    let prepared =
+        PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definition));
     let mismatches = [
         InvocationTarget::new(FunctionId::from_bytes([0xc6; 16]), revision),
         InvocationTarget::new(
