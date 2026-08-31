@@ -1,9 +1,9 @@
 # OrnaDB maintainer and operator runbook
 
 OrnaDB (Object-Relational Native Applications) is the product. `orna` is the
-CLI and server executable. This runbook covers the current checkout; it is not
-a replacement for the canonical design bundle in the sibling `../spec/`
-checkout.
+CLI and server executable. This runbook covers the current
+checkout; it is not a replacement for the canonical design bundle in a
+separate `spec` checkout.
 
 ## Before you start
 
@@ -18,13 +18,93 @@ Clippy, and tests. PostgreSQL starts only when a PostgreSQL recipe is selected.
 
 The normal toolchain is Rust 1.95 with `rustfmt` and `clippy`, `just`, Node 22,
 `tree-sitter-cli@0.26.5`, Python 3.11 or newer, and Docker with the Compose
-plugin. Runtime and ABI recipes additionally need CMake, CTest, and GCC with
-C11 support.
+plugin. Commands that compile the embedded PostgreSQL engine require a Linux
+x86_64 host; use the Docker-backed engine gate when the host is not Linux
+x86_64. Runtime and ABI recipes additionally need CMake 3.21 or newer, CTest,
+Qt 6 Core and Widgets, and a C++17 compiler. `gcc` with C11 support is needed
+for the ABI-header/parity checks. Git, GNU `make`, `patch`, and the standard
+Unix file/archive tools are needed by the checked-in source and evidence
+recipes.
 
-The sibling canonical spec checkout is required by
-`just runtime-abi-header-check` and the Qt runtime build. The header check reads
-`../spec/spec/orna_runtime_abi_v1.h`; do not replace it with a generated or
-local substitute.
+When using a prebuilt engine instead of the build script's Docker or source
+build, `ORNA_POSTGRES_ENGINE_OUTPUT` must be an **absolute** path to a complete
+engine output directory, such as `$PWD/third_party/postgresql/output`.
+
+This checkout currently has neither `./spec/` nor the sibling `../spec/`
+checkout. The latter owns `../spec/spec/orna_runtime_abi_v1.h`; it is required
+by `just runtime-abi-header-check`, `just runtime-abi-parity`, and the Qt
+runtime CMake project. Do not substitute a generated or local header, and do
+not report those gates as passed while the canonical input is absent.
+
+## Fresh-checkout bootstrap
+
+Use a real Git checkout rather than a source archive: the embedded PostgreSQL
+engine is a pinned submodule and its input checks reject an absent, modified,
+or detached-at-the-wrong-commit source tree. From the parent directory, replace
+`<repository-url>` with the repository URL supplied by your hosting service:
+
+```sh
+git clone --recurse-submodules <repository-url> ornadb
+cd ornadb
+git submodule sync --recursive
+git submodule update --init --recursive --checkout
+git status --short
+git submodule status -- third_party/postgresql
+git -C third_party/postgresql rev-parse HEAD
+git -C third_party/postgresql status --porcelain=v1 --untracked-files=all
+```
+
+The superproject status must be empty, the PostgreSQL submodule status must be
+clean, and its commit must be the checked-in gitlink
+`f5cc81719e6da4cbdb1f797c48b693e91018153a` (the status line has a leading
+space for a matching checkout). The initial clone and submodule update may
+fetch the pinned source; after bootstrap, the gate commands below must not
+silently fetch it.
+
+Install or select the required host tools before running a gate. With rustup,
+the accepted toolchain setup is:
+
+```sh
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+rustup override set 1.95.0
+rustc --version
+cargo --version
+just --version
+python3 --version
+node --version
+tree-sitter --version
+docker --version
+docker compose version
+cmake --version
+gcc --version
+```
+
+Warm the locked Cargo cache while network access is available, then use Cargo
+offline mode where the cache must be complete:
+
+```sh
+cargo fetch --locked
+cargo fetch --locked --manifest-path editors/zed/Cargo.toml
+CARGO_NET_OFFLINE=true just check
+CARGO_NET_OFFLINE=true just editor-tooling-check
+CARGO_NET_OFFLINE=true just demo-check
+CARGO_NET_OFFLINE=true just sqlite-check
+CARGO_NET_OFFLINE=true just sqlite-smoke
+```
+Commands that compile `orna-server` or `orna-postgres` invoke the embedded
+engine build unless `ORNA_POSTGRES_ENGINE_OUTPUT` names a complete prebuilt
+engine output directory using an **absolute** path. Record that prerequisite
+separately; Cargo offline mode alone does not make the engine build network-free.
+`CARGO_NET_OFFLINE=true` makes Cargo registry/git resolution fail closed when
+the cache is incomplete, but it does not disable arbitrary build scripts.
+
+Each gate is **pass** only after its command exits zero and its output is
+retained. A prerequisite that is intentionally not installed is **skipped** or
+**unavailable** only when the evidence record names the gate and missing
+prerequisite; it is never a pass. A command that was invoked and exited
+non-zero is a **failure**, not a skip. The current missing `./spec`/`../spec`
+inputs therefore make the ABI and Qt gates unavailable, rather than evidence
+of success.
 
 ## Repository map
 
@@ -51,27 +131,54 @@ maintained documentation rather than restoring removed snapshots.
 
 ## Local check flow
 
-Run a narrower recipe when needed:
+Warm dependencies once from the network with `cargo fetch --locked` and
+`cargo fetch --locked --manifest-path editors/zed/Cargo.toml`; do not mistake
+those provisioning commands for evidence. After the caches are warm, use
+Cargo's offline forms where applicable:
 
 ```text
 just fmt
-just build
-just lint
-just test
-just editor-tooling-check
-just demo-check
+CARGO_NET_OFFLINE=true just build
+CARGO_NET_OFFLINE=true just lint
+CARGO_NET_OFFLINE=true just test
+CARGO_NET_OFFLINE=true just editor-tooling-check
+CARGO_NET_OFFLINE=true just demo-check
 ```
+
+`CARGO_NET_OFFLINE=true` makes Cargo registry and Git resolution fail closed,
+but it does not disable arbitrary build scripts. `build`, `test`,
+`editor-tooling-check`, and `demo-check` include paths that can compile
+`orna-server`/`orna-postgres`; those paths need a Linux x86_64 host plus either
+a complete `ORNA_POSTGRES_ENGINE_OUTPUT` directory at an **absolute** path or
+the environment-dependent embedded-engine build. Keep that prerequisite in the
+evidence instead of calling the whole command network-free.
 
 `just fmt` checks formatting without changing files. `just build` checks all
 workspace targets. `just lint` runs workspace Clippy with warnings denied.
 `just test` runs workspace tests except tests marked `#[ignore]`.
 `just editor-tooling-check` is a static gate and does not launch editor
-runtimes. `just demo-check` runs accepted source-check and offline demos in
-manifest order and skips Compose-only entries.
+runtimes, but its source-check parity child can compile `orna-server` and
+therefore needs the embedded-engine prerequisite described above.
+`just demo-check` runs accepted source-check and offline demos in manifest order
+and explicitly skips Compose-only entries; source-check entries have the same
+embedded-engine prerequisite.
 
-`just demo-suite` combines the offline checks, TTY renderer demo, client
-artifact-integrity demo, and local capability-matching demo. It does not run
-the local PostgreSQL CLI demo or Qt/Studio smoke commands.
+The editor gate requires Python 3.11+, `tree-sitter` CLI 0.26.5, Node, Cargo,
+and the checked-in editor trees. It validates JSON, grammar generation,
+accepted corpus manifests, LSP tests, the Zed extension, and the VS Code
+syntax with `node --check`; it does not launch Neovim, Vim, Zed, VS Code,
+Helix, or Sublime. Emacs is optional: when `emacs` and Eglot are available,
+the script batch-loads `editors/emacs/orna-eglot.el`; otherwise it records the
+Emacs runtime check as unavailable while still requiring the checked-in
+integration file. `../spec/examples` is optional proposal/deferred input; the
+script logs it as absent and skips it when, as in this checkout, the directory
+is missing.
+
+`just demo-suite` combines `demo-check` with the standalone TTY renderer,
+client artifact-integrity, and local capability-matching demos. `demo-check`
+source-check entries can compile `orna-server`; provide the embedded-engine
+output or record that environment-dependent prerequisite. The suite does not
+run the local PostgreSQL CLI demo or Qt/Studio smoke commands.
 
 ## Application revisions and SQLite boundary
 
@@ -100,11 +207,14 @@ full physical or runtime parity between PostgreSQL and SQLite; do not record
 that claim without fresh, dedicated evidence. CLIENT/Qt execution, protected
 standard transports, and resource transport remain PostgreSQL/runtime-only.
 
-`just sqlite-check` is the dedicated offline compile gate for the storage,
-SQLite, and local CLI binary targets. `just sqlite-smoke` runs the deterministic
-revision-store example and the focused SQLite process/socket integration target.
-These recipes provide a dedicated SQLite adoption proof; the standalone adapter
-example remains a library smoke and does not exercise the socket by itself.
+`just sqlite-check` is the dedicated Cargo compile gate for the storage, SQLite,
+and local CLI binary targets. Its local CLI target can compile `orna-server`
+and therefore needs the embedded-engine output or environment-dependent build;
+Cargo offline mode alone is not sufficient. `just sqlite-smoke` runs the
+deterministic revision-store example and the focused SQLite process/socket
+integration target. These recipes provide a dedicated SQLite adoption proof;
+the standalone adapter example remains a library smoke and does not exercise
+the socket by itself.
 
 The accepted standard-library revision chain is V1 through V9 only; there is no
 V10 revision.
@@ -115,6 +225,15 @@ V10 revision.
 `postgres:18.4-bookworm`. It binds PostgreSQL to `127.0.0.1:55432` and stores
 data in the named `orna_postgres_data` volume. Its credentials are development
 fixtures only.
+
+The basic Compose lifecycle recipes (`postgres-up`, `postgres-status`,
+`postgres-health`, and `postgres-stop`) require Docker and the development
+image but do not build the embedded PostgreSQL source. The kernel recipes below
+also compile `orna-server`/`orna-postgres`; on a clean target they require a
+Linux x86_64 host and either `ORNA_POSTGRES_ENGINE_OUTPUT` naming a complete
+prebuilt engine output directory at an **absolute** path or the Docker-backed
+engine build. The pinned submodule is required when the Docker/source engine
+build path is selected; the prebuilt-output branch does not read it.
 
 Use the checked-in recipes:
 
@@ -128,35 +247,100 @@ just postgres-stop
 `postgres-up` starts the service in detached mode. `postgres-status` reports
 container status. `postgres-health` runs `pg_isready` inside the container for
 `ornadb_dev`. `postgres-stop` stops PostgreSQL without deleting the volume.
+If Docker, the plugin, the image, or the port is unavailable, record this
+Compose gate as unavailable before invoking it; a command that was invoked and
+failed is a failure.
 
-For the integration kernel, use `just kernel-test`. It starts PostgreSQL with
-`--wait`, runs the ignored server and PostgreSQL integration suites, uses the
-isolated `ornadb_kernel_gate` database, and cleans up the database and service.
-`just kernel-resource-audit-proof` is the narrower resource durability proof.
-Treat both recipes as local test infrastructure, not a production lifecycle.
-
-CI captures Compose logs with:
+For the integration kernel, use these commands from the repository root:
 
 ```text
-docker compose logs --no-color postgres
+just kernel-resource-audit-proof
+just kernel-test
+```
+
+Both recipes start PostgreSQL with `--wait`, set the checked-in development
+connection fixtures, run ignored tests serially, and stop the service on exit.
+`kernel-test` uses a unique per-invocation database named with the
+`ornadb_kernel_gate_<BASHPID>_<UTC nanoseconds>` prefix and drops it during
+cleanup. Their Cargo invocations enforce `--locked`, but compiling the server
+or kernel can still run `orna-postgres/build.rs`. With the Docker/source engine
+build, ensure the clean pinned submodule is present; with a prebuilt engine,
+provide `ORNA_POSTGRES_ENGINE_OUTPUT` as a complete output directory at an
+**absolute** path. These environment-gated Compose proofs also require a Linux
+x86_64 host.
+
+CI captures the service and gate logs:
+
+```sh
+set -euo pipefail
+mkdir -p ci-evidence
+just kernel-test 2>&1 | tee ci-evidence/kernel-test.log
+docker compose logs --no-color postgres | tee ci-evidence/postgres.log
 ```
 
 Do not remove the named volume during a routine stop. Reset it only after
-confirming that data recovery or reset is intentional.
+confirming that data recovery or reset is intentional. A passing test command
+without retained gate/log output is not sufficient release evidence.
+
+## Embedded PostgreSQL source gate
+
+The native embedded-engine summary is a separate Docker-isolated gate from the
+Compose development service. It requires the clean
+`third_party/postgresql` submodule at the pinned gitlink, a running Docker
+daemon, and network access while the pinned builder image is prepared. Check
+the source boundary first, then run the two-lifecycle reproduction:
+
+```text
+make -C postgresql verify-inputs
+make -C postgresql verify-lifecycle \
+  TARGET_ROOT="$PWD/target/postgresql-embedded-native"
+```
+
+`verify-inputs` rejects an absent, modified, dirty, or wrong-commit submodule
+and rejects changed or untracked overlays, patches, and build scripts.
+`verify-lifecycle` builds the pinned Debian builder image and fetches only the
+checksummed sources named by `postgresql/Containerfile`; the image-preparation
+step needs network access. Its `prepare-source` prerequisite runs on the host,
+using the pinned Git archive, overlays, and patches. Compilation and both
+lifecycle probes then run in `docker run --network=none` with the PostgreSQL
+source mounted read-only. Do not enable network access for those proof
+containers.
+
+The reproducibility evidence is written under
+`target/postgresql-embedded-native-one/output/` (and the comparison run under
+`target/postgresql-embedded-native-two/`). The output includes the embedded
+archives, support data, lifecycle report/stdout, symbol inventories, licence,
+and `embedded-engine-manifest.json`; retain the complete `target` subtree when
+reviewing a result. CI uploads the first run's `output/*`, not an unrecorded
+local summary. A missing submodule, unavailable Docker daemon/image source,
+non-zero build, lifecycle verifier failure, or mismatch between the two runs
+is a failed or unavailable gate as appropriate; it is never evidence of a
+passed embedded build. This checkout has the PostgreSQL source at the checked-in
+gitlink `f5cc81719e6da4cbdb1f797c48b693e91018153a`; no native result is claimed
+without a newly executed command and retained evidence.
 
 ## Runtime and ABI boundaries
 
 The product is `OrnaDB`, the CLI is `orna`, and runtime families use the
-`orna-runtime-*` prefix. The checkout contains a TTY runtime path and a
+`orna-runtime-*` prefix. The checkout contains an offline TTY path and a
 separate Qt runtime project. A runtime named in the canonical spec is not
 necessarily implemented or proved here.
-
-Use the runtime and ABI recipes as follows:
+The TTY and client demos are Cargo-only and their recipes enforce
+`--locked --offline`; they do not need PostgreSQL, Qt, or a display:
 
 ```text
 just runtime-tty-demo
 just client-artifact-demo
 just client-capability-demo
+```
+
+The CMake/CTest Qt build and ABI gates require CMake 3.21 or newer, CTest, a
+C++17 compiler, Qt 6.2+ Core and Widgets development files, and the canonical
+`../spec/spec/orna_runtime_abi_v1.h`. The Rust loader and Studio smoke
+commands only require an explicit compatible shared-library path. Build and
+test headlessly with:
+
+```text
 just runtime-qt-build
 just runtime-qt-test
 just runtime-qt-rust-smoke <runtime-shared-library>
@@ -166,11 +350,31 @@ just runtime-abi-header-check
 just runtime-abi-parity
 ```
 
-The Qt build and test are independent of the server. The Rust and Studio smoke
-forms require an explicit shared-library path. The ABI header check is C11
-syntax-only validation; ABI parity compiles the Linux x86_64 assertions against
-the canonical header and Rust mirror values. None of these commands proves a
-remote deployment, editor host session, or production sandbox.
+`runtime-qt-test` sets `QT_QPA_PLATFORM=offscreen`; the Rust loader and
+`studio-qt-smoke` also use offscreen mode and require an explicit compatible
+shared-library path (normally produced by `runtime-qt-build`). The build tree
+and Qt visual output remain under `target/runtime-qt/` (including the CTest
+visual PNG), while the TTY demo writes `target/runtime-tty-demo-output.bin`.
+The ABI-header check is GCC C11 syntax-only validation; ABI parity compiles the
+Linux x86_64 C assertions against the canonical header. Because this checkout
+has neither `./spec/` nor `../spec/`, the CMake/CTest and ABI commands above
+that consume the canonical header are currently unavailable; no Qt/ABI pass is
+claimed. The two Rust smoke commands remain path-dependent.
+
+Display-backed gates are separate and require a live `DISPLAY` or
+`WAYLAND_DISPLAY`:
+
+```text
+just runtime-qt-demo
+just studio-qt-display-smoke
+just studio-qt-action-smoke
+just runtime-display-suite
+```
+
+The checked-in recipes fail with a prerequisite message and status 2 when the
+display variables are absent; record that condition as unavailable rather than
+as a passing headless result. None of these commands proves a remote
+deployment, editor host session, or production sandbox.
 
 ## CLI entry points
 
@@ -326,10 +530,27 @@ ci-evidence/sqlite-check.log
 ci-evidence/sqlite-smoke.log
 ```
 
+For a local evidence bundle, create the directory and preserve exit status
+while capturing each gate:
+
+```bash
+mkdir -p ci-evidence
+set -euo pipefail
+CARGO_NET_OFFLINE=true just check 2>&1 | tee ci-evidence/check.log
+CARGO_NET_OFFLINE=true just editor-tooling-check 2>&1 | tee ci-evidence/editor-tooling.log
+CARGO_NET_OFFLINE=true just demo-check 2>&1 | tee ci-evidence/demo-check.log
+CARGO_NET_OFFLINE=true just sqlite-check 2>&1 | tee ci-evidence/sqlite-check.log
+CARGO_NET_OFFLINE=true just sqlite-smoke 2>&1 | tee ci-evidence/sqlite-smoke.log
+```
+
 The embedded PostgreSQL workflow stores its lifecycle output under
-`target/postgresql-embedded-native-one/output/`. Report a result only when a
-recorded artifact or a newly run command supports it; this runbook does not
-claim a fresh command result.
+`target/postgresql-embedded-native-one/output/`; the comparison run is under
+the sibling `-two` directory. Report a result only when a recorded artifact
+or a newly run command supports it. A missing prerequisite may be recorded as
+skipped/unavailable with the gate and reason (for example, absent `../spec`,
+Docker, a display server, Emacs, or the PostgreSQL submodule); a command that
+ran and failed remains a failure. This runbook does not claim a fresh
+native, Compose, Qt, editor-host, remote, or release result.
 
 ## Explicit non-claims
 
