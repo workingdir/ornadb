@@ -5,7 +5,7 @@
 
 use std::{collections::HashSet, error::Error, fmt};
 
-use crate::{CatalogueRevisionId, InvocationId, SourceRevisionId, TypeId};
+use crate::{CatalogueRevisionId, InspectEpochId, InvocationId, SourceRevisionId, TypeId};
 
 pub const INSPECT_CARRIER_MAGIC: &[u8; 15] = b"ORNA-INSPECT/1 ";
 pub const INSPECT_CARRIER_VERSION: u16 = 1;
@@ -164,16 +164,17 @@ impl InspectCarrierKind {
 
 /// Provenance copied from trusted kernel/server facts.
 ///
-/// `server_epoch_id` is the epoch encoded by ORNA-INSPECT/1. The distinct
-/// client execution epoch is intentionally not part of this core envelope;
-/// the client binds it externally while validating the decoded carrier.
+/// `server_epoch_id` is the complete epoch identity encoded by
+/// ORNA-INSPECT/1. The distinct client execution epoch is intentionally not
+/// part of this core envelope; the client binds it externally while
+/// validating the decoded carrier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InspectCarrierProvenance {
     /// The server-side snapshot epoch represented by the carrier.
-    server_epoch_id: u64,
+    server_epoch_id: InspectEpochId,
     /// The invocation captured by the server epoch, when the carrier was
-    /// constructed from target-bound facts. Legacy constructors leave this
-    /// absent because ORNA-INSPECT/1 does not encode it.
+    /// constructed from target-bound facts. Constructors without a target leave
+    /// this absent because ORNA-INSPECT/1 does not encode it.
     target_invocation_id: Option<InvocationId>,
     source_revision_id: SourceRevisionId,
     catalogue_revision_id: CatalogueRevisionId,
@@ -182,7 +183,7 @@ pub struct InspectCarrierProvenance {
 impl InspectCarrierProvenance {
     /// Explicitly marks the supplied facts as trusted kernel/server evidence.
     pub const fn trusted(
-        server_epoch_id: u64,
+        server_epoch_id: InspectEpochId,
         source_revision_id: SourceRevisionId,
         catalogue_revision_id: CatalogueRevisionId,
     ) -> Self {
@@ -196,7 +197,7 @@ impl InspectCarrierProvenance {
 
     /// Explicitly marks target-bound server facts as trusted evidence.
     pub const fn trusted_for_target(
-        server_epoch_id: u64,
+        server_epoch_id: InspectEpochId,
         target_invocation_id: InvocationId,
         source_revision_id: SourceRevisionId,
         catalogue_revision_id: CatalogueRevisionId,
@@ -211,17 +212,16 @@ impl InspectCarrierProvenance {
 
     /// Copies provenance from an immutable captured epoch.
     pub fn from_snapshot_epoch(epoch: &crate::inspect::InspectSnapshotEpoch) -> Self {
-        let bytes = epoch.id().to_bytes();
         Self::trusted_for_target(
-            u64::from_be_bytes(bytes[8..].try_into().expect("epoch identity width")),
+            epoch.id(),
             epoch.invocation_id(),
             epoch.source_revision_id(),
             epoch.catalogue_revision_id(),
         )
     }
 
-    /// Returns the server-side epoch identity.
-    pub const fn server_epoch_id(self) -> u64 {
+    /// Returns the complete server-side epoch identity.
+    pub const fn server_epoch_id(self) -> InspectEpochId {
         self.server_epoch_id
     }
 
@@ -230,8 +230,8 @@ impl InspectCarrierProvenance {
         self.target_invocation_id
     }
 
-    /// Binds trusted legacy provenance to a target, rejecting a conflicting
-    /// target already present in the provenance.
+    /// Binds trusted provenance to a target, rejecting a conflicting target
+    /// already present in the provenance.
     pub fn bind_target(
         self,
         target_invocation_id: InvocationId,
@@ -252,7 +252,7 @@ impl InspectCarrierProvenance {
     }
 
     /// Compatibility alias for the pre-target-bound carrier API.
-    pub const fn epoch_id(self) -> u64 {
+    pub const fn epoch_id(self) -> InspectEpochId {
         self.server_epoch_id()
     }
     pub const fn source_revision_id(self) -> SourceRevisionId {
@@ -276,7 +276,7 @@ impl InspectCarrierEnvelope {
     /// when the target invocation is available at the call site.
     pub fn new<K: Into<InspectCarrierKind>>(
         kind: K,
-        epoch_id: u64,
+        epoch_id: InspectEpochId,
         source_revision_id: SourceRevisionId,
         catalogue_revision_id: CatalogueRevisionId,
         rows: Vec<Vec<u8>>,
@@ -345,10 +345,10 @@ impl InspectCarrierEnvelope {
     pub const fn projection(&self) -> Option<InspectProjection> {
         self.kind.projection()
     }
-    pub const fn epoch_id(&self) -> u64 {
+    pub const fn epoch_id(&self) -> InspectEpochId {
         self.server_epoch_id()
     }
-    pub const fn server_epoch_id(&self) -> u64 {
+    pub const fn server_epoch_id(&self) -> InspectEpochId {
         self.provenance.server_epoch_id()
     }
     pub const fn target_invocation_id(&self) -> Option<InvocationId> {
@@ -380,7 +380,7 @@ impl InspectCarrierEnvelope {
         bytes.extend_from_slice(INSPECT_CARRIER_MAGIC);
         bytes.extend_from_slice(&INSPECT_CARRIER_VERSION.to_be_bytes());
         bytes.push(self.kind.tag());
-        bytes.extend_from_slice(&self.epoch_id().to_be_bytes());
+        bytes.extend_from_slice(&self.epoch_id().to_bytes());
         bytes.extend_from_slice(&self.source_revision_id().to_bytes());
         bytes.extend_from_slice(&self.catalogue_revision_id().to_bytes());
         bytes.extend_from_slice(&(self.rows.len() as u32).to_be_bytes());
@@ -409,7 +409,7 @@ impl InspectCarrierEnvelope {
         let tag = reader.u8()?;
         let kind = InspectCarrierKind::from_tag(tag)
             .ok_or(InspectCarrierError::UnknownProjectionTag(tag))?;
-        let epoch_id = reader.u64()?;
+        let epoch_id = InspectEpochId::from_bytes(reader.array::<16>()?);
         let source_revision_id = SourceRevisionId::from_bytes(reader.array::<16>()?);
         let catalogue_revision_id = CatalogueRevisionId::from_bytes(reader.array::<16>()?);
         let count = reader.u32()? as usize;
@@ -452,7 +452,7 @@ impl InspectCarrierEnvelope {
                     maximum: MAX_INSPECT_CARRIER_BYTES,
                 })
         })?;
-        62usize
+        70usize
             .checked_add(rows_len)
             .ok_or(InspectCarrierError::EnvelopeTooLarge {
                 actual: usize::MAX,
@@ -842,9 +842,6 @@ impl<'a> Reader<'a> {
     fn u32(&mut self) -> Result<u32, InspectCarrierError> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().expect("width")))
     }
-    fn u64(&mut self) -> Result<u64, InspectCarrierError> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().expect("width")))
-    }
     fn array<const N: usize>(&mut self) -> Result<[u8; N], InspectCarrierError> {
         Ok(self.take(N)?.try_into().expect("width"))
     }
@@ -1004,6 +1001,9 @@ mod tests {
     fn catalogue() -> CatalogueRevisionId {
         CatalogueRevisionId::from_bytes([0x22; 16])
     }
+    fn epoch(byte: u8) -> InspectEpochId {
+        InspectEpochId::from_bytes([byte; 16])
+    }
 
     fn row(tag: u8, type_id: [u8; 16], payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(ORV5_HEADER_BYTES + payload.len());
@@ -1101,7 +1101,7 @@ mod tests {
             InspectCarrierKind::SecurityDecisions,
         ];
         for kind in kinds {
-            let carrier = InspectCarrierEnvelope::new(kind, 7, source(), catalogue(), vec![])
+            let carrier = InspectCarrierEnvelope::new(kind, epoch(7), source(), catalogue(), vec![])
                 .expect("empty rows are valid");
             let encoded = carrier.encode().expect("carrier encodes");
             assert_eq!(InspectCarrierEnvelope::decode(&encoded), Ok(carrier));
@@ -1110,9 +1110,13 @@ mod tests {
 
     #[test]
     fn primitive_and_opaque_rows_round_trip_with_revision_evidence() {
+        let epoch_id = InspectEpochId::from_bytes([
+            0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08,
+        ]);
         let carrier = InspectCarrierEnvelope::new(
             InspectProjection::Calls,
-            0x0102_0304_0506_0708,
+            epoch_id,
             source(),
             catalogue(),
             vec![integer_row(1), row(0x0c, [0xaa; 16], b"opaque")],
@@ -1122,6 +1126,7 @@ mod tests {
         assert!(encoded.starts_with(INSPECT_CARRIER_MAGIC));
         assert_eq!(encoded[15..17], INSPECT_CARRIER_VERSION.to_be_bytes());
         assert_eq!(encoded[17], InspectProjection::Calls.tag());
+        assert_eq!(&encoded[18..34], &epoch_id.to_bytes());
         assert_eq!(InspectCarrierEnvelope::decode(&encoded), Ok(carrier));
     }
 
@@ -1151,7 +1156,7 @@ mod tests {
         );
         let carrier = InspectCarrierEnvelope::new(
             InspectCarrierKind::Snapshot,
-            1,
+            epoch(1),
             source(),
             catalogue(),
             vec![integer_row(1)],
@@ -1180,7 +1185,7 @@ mod tests {
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectCarrierKind::Calls,
-                1,
+                epoch(1),
                 source(),
                 catalogue(),
                 vec![duplicate],
@@ -1201,7 +1206,7 @@ mod tests {
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectCarrierKind::Calls,
-                1,
+                epoch(1),
                 source(),
                 catalogue(),
                 vec![declaration_order],
@@ -1225,7 +1230,7 @@ mod tests {
     fn decode_rejects_duplicate_record_field_identity() {
         let valid = InspectCarrierEnvelope::new(
             InspectCarrierKind::Calls,
-            1,
+            epoch(1),
             source(),
             catalogue(),
             vec![record_row(&[([1; 16], 1), ([2; 16], 2)])],
@@ -1260,7 +1265,7 @@ mod tests {
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectProjection::Calls,
-                1,
+                epoch(1),
                 source(),
                 catalogue(),
                 vec![integer_row(2), integer_row(1)]
@@ -1270,7 +1275,7 @@ mod tests {
         assert_eq!(
             InspectCarrierEnvelope::new(
                 InspectProjection::Calls,
-                1,
+                epoch(1),
                 source(),
                 catalogue(),
                 vec![integer_row(1), integer_row(1)]
@@ -1279,7 +1284,7 @@ mod tests {
         );
         let mut encoded = InspectCarrierEnvelope::new(
             InspectCarrierKind::Snapshot,
-            1,
+            epoch(1),
             source(),
             catalogue(),
             vec![],
@@ -1287,7 +1292,7 @@ mod tests {
         .expect("carrier")
         .encode()
         .expect("encode");
-        encoded[58..62].copy_from_slice(&((MAX_INSPECT_CARRIER_ROWS as u32) + 1).to_be_bytes());
+        encoded[66..70].copy_from_slice(&((MAX_INSPECT_CARRIER_ROWS as u32) + 1).to_be_bytes());
         assert_eq!(
             InspectCarrierEnvelope::decode(&encoded),
             Err(InspectCarrierError::RowCountExceeded {
@@ -1299,7 +1304,7 @@ mod tests {
 
     #[test]
     fn explicit_provenance_constructor_is_available() {
-        let provenance = InspectCarrierProvenance::trusted(9, source(), catalogue());
+        let provenance = InspectCarrierProvenance::trusted(epoch(9), source(), catalogue());
         let carrier = InspectCarrierEnvelope::new_with_provenance(
             InspectCarrierKind::Snapshot,
             provenance,
@@ -1307,7 +1312,7 @@ mod tests {
         )
         .expect("trusted provenance");
         assert_eq!(carrier.provenance(), provenance);
-        assert_eq!(carrier.server_epoch_id(), 9);
+        assert_eq!(carrier.server_epoch_id(), epoch(9));
         assert_eq!(carrier.target_invocation_id(), None);
     }
 
@@ -1316,7 +1321,7 @@ mod tests {
         let target = InvocationId::from_bytes([0x33; 16]);
         let other_target = InvocationId::from_bytes([0x44; 16]);
         let provenance =
-            InspectCarrierProvenance::trusted_for_target(9, target, source(), catalogue());
+            InspectCarrierProvenance::trusted_for_target(epoch(9), target, source(), catalogue());
         let carrier = InspectCarrierEnvelope::new_with_target(
             InspectCarrierKind::Snapshot,
             target,
@@ -1326,7 +1331,7 @@ mod tests {
         .expect("matching target provenance");
         assert_eq!(carrier.provenance(), provenance);
         assert_eq!(carrier.target_invocation_id(), Some(target));
-        assert_eq!(carrier.server_epoch_id(), 9);
+        assert_eq!(carrier.server_epoch_id(), epoch(9));
 
         assert_eq!(
             InspectCarrierEnvelope::new_with_target(
@@ -1358,7 +1363,7 @@ mod tests {
     #[test]
     fn zero_target_invocation_is_rejected_before_carrier_construction() {
         let zero = InvocationId::from_bytes([0; 16]);
-        let provenance = InspectCarrierProvenance::trusted(9, source(), catalogue());
+        let provenance = InspectCarrierProvenance::trusted(epoch(9), source(), catalogue());
         assert_eq!(
             provenance.bind_target(zero),
             Err(InspectCarrierError::InvalidTargetInvocation)
@@ -1374,7 +1379,7 @@ mod tests {
         );
 
         let bound_zero =
-            InspectCarrierProvenance::trusted_for_target(9, zero, source(), catalogue());
+            InspectCarrierProvenance::trusted_for_target(epoch(9), zero, source(), catalogue());
         assert_eq!(
             InspectCarrierEnvelope::new_with_provenance(
                 InspectCarrierKind::Snapshot,
