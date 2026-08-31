@@ -311,7 +311,12 @@ fn rejects_inline_row_resource_descriptor_in_control_flow_local_path() {
         let source_bundle =
             SourceBundle::new([SourceUnit::new("resource-control-flow.orna", source)]).unwrap();
         let report = check(&source_bundle, &base);
-        assert_eq!(report.diagnostics().len(), 1, "{descriptor}: {:?}", report.diagnostics());
+        assert_eq!(
+            report.diagnostics().len(),
+            1,
+            "{descriptor}: {:?}",
+            report.diagnostics()
+        );
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
         assert_eq!(
             report.diagnostics()[0].message(),
