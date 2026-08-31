@@ -5,14 +5,14 @@ check: fmt build lint test
 
 # Check the SQLite adapter, storage contract, and local CLI binary offline.
 sqlite-check:
-    cargo check --offline -p orna-storage -p orna-sqlite
-    cargo check --offline -p orna-server --bin orna
+    cargo check --locked --offline -p orna-storage -p orna-sqlite
+    cargo check --locked --offline -p orna-server --bin orna
 
 # Run the deterministic SQLite adapter and process-boundary smoke tests offline.
 sqlite-smoke:
-    cargo test --offline -p orna-sqlite --lib
-    cargo run --offline -p orna-sqlite --example revision_store_smoke
-    cargo test --offline -p orna-server --test sqlite_backend -- --nocapture
+    cargo test --locked --offline -p orna-sqlite --lib
+    cargo run --locked --offline -p orna-sqlite --example revision_store_smoke
+    cargo test --locked --offline -p orna-server --test sqlite_backend -- --nocapture
 
 # Verify formatting without changing source files.
 fmt:
@@ -21,7 +21,7 @@ fmt:
 
 # Run the accepted TTY renderer demo for terminal documents and byte streams.
 runtime-tty-demo:
-    cargo run --locked -p orna-runtime-tty --example runtime_demo
+    cargo run --locked --offline -p orna-runtime-tty --example runtime_demo
 
 
 # Build the binary, start a temporary local server, and invoke std.invoke.echo.
@@ -31,12 +31,12 @@ local-cli-demo:
 
 # Exercise CLIENT artifact kind and payload-digest validation.
 client-artifact-demo:
-    cargo run --locked -p orna-client --example client_artifact_demo
+    cargo run --locked --offline -p orna-client --example client_artifact_demo
 
 
 # Exercise component-boundary matching for a local filesystem grant.
 client-capability-demo:
-    cargo run --locked -p orna-client --example client_capability_demo
+    cargo run --locked --offline -p orna-client --example client_capability_demo
 
 # Run the accepted offline demo registry and standalone local demos.
 demo-suite: demo-check runtime-tty-demo client-artifact-demo client-capability-demo
@@ -49,7 +49,8 @@ runtime-qt-build:
 
 # Build and run the Qt runtime demo against a real display.
 runtime-qt-demo: runtime-qt-build
-    target/runtime-qt/orna-runtime-qt-demo
+    test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "runtime-qt-demo: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-demo
 
 # Build the Qt runtime and run the static Studio shell smoke.
 studio-qt-demo: runtime-qt-build
@@ -65,16 +66,16 @@ runtime-qt-test:
 
 # Run the Rust Qt runtime loader/session smoke test against an explicit shared library path.
 runtime-qt-rust-smoke runtime_path:
-    QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
+    QT_QPA_PLATFORM=offscreen cargo run --locked --offline -p orna-client --example runtime_qt_smoke -- {{runtime_path}}
 
 
 # Prove adapter shutdown drains a full callback queue before native shutdown.
 runtime-qt-shutdown-queue-smoke runtime_path:
-    QT_QPA_PLATFORM=offscreen cargo run --locked -p orna-client --example runtime_qt_shutdown_queue_smoke -- {{runtime_path}}
+    QT_QPA_PLATFORM=offscreen cargo run --locked --offline -p orna-client --example runtime_qt_shutdown_queue_smoke -- {{runtime_path}}
 
 # Run the Studio shell demo once against an explicit Qt runtime path.
 studio-qt-smoke runtime_path:
-    QT_QPA_PLATFORM=offscreen cargo run -p orna-client --example studio_demo -- {{runtime_path}} --smoke
+    QT_QPA_PLATFORM=offscreen cargo run --locked --offline -p orna-client --example studio_demo -- {{runtime_path}} --smoke
 
 # Run the Rust Studio shell interactively against a display server.
 studio-qt-display: runtime-qt-build
@@ -93,7 +94,7 @@ studio-qt-action-smoke: runtime-qt-build
 
 # Exercise the accepted TTY and Qt runtime smoke paths without a display server.
 runtime-suite: runtime-qt-test
-    cargo run --locked -p orna-runtime-tty --example runtime_demo > target/runtime-tty-demo-output.bin
+    cargo run --locked --offline -p orna-runtime-tty --example runtime_demo > target/runtime-tty-demo-output.bin
     QT_QPA_PLATFORM=offscreen target/runtime-qt/orna-runtime-qt-demo --smoke
 
 # Exercise the Qt visual and action paths against a display server.
@@ -115,15 +116,15 @@ runtime-abi-parity:
 
 # Compile every workspace target.
 build:
-    cargo check --workspace --all-targets
+    cargo check --locked --workspace --all-targets
 
 # Reject all Clippy warnings across workspace targets.
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # Run workspace tests excluding #[ignore] tests.
 test:
-    cargo test --workspace --all-targets
+    cargo test --locked --workspace --all-targets
 
 # Validate the tree-sitter grammar and editor metadata without installing editor runtimes.
 # This static gate requires its CLI prerequisites: Python 3.11+, tree-sitter CLI, node, and cargo.
@@ -161,7 +162,7 @@ kernel-resource-audit-proof:
     docker compose up --detach --wait postgres
     export ORNA_TEST_POSTGRES_ADMIN_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password'
     export ORNA_TEST_POSTGRES_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev'
-    cargo test --package orna-server --features test-hooks --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
+    cargo test --locked --package orna-server --features test-hooks --test standard_database installed_resource_socket_delivers_values_and_enforces_windows_and_grants -- --ignored --exact --test-threads=1
 
 # Run every ignored PostgreSQL integration test against an isolated database.
 kernel-test:
@@ -191,9 +192,9 @@ kernel-test:
         test_name=${test_path##*/}
         postgres_tests+=(--test "${test_name%.rs}")
     done
-    cargo test --package orna-server --features test-hooks "${server_tests[@]}" -- --ignored --test-threads=1
+    cargo test --locked --package orna-server --features test-hooks "${server_tests[@]}" -- --ignored --test-threads=1
     docker compose exec -T postgres dropdb --if-exists --force --username=ornadb_dev "$kernel_database"
     docker compose exec -T postgres createdb --template=template0 --username=ornadb_dev "$kernel_database"
     export ORNA_TEST_POSTGRES_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=$kernel_database"
-    cargo test --package orna-postgres --features test-hooks --lib -- --ignored --test-threads=1
-    cargo test --package orna-postgres --features test-hooks "${postgres_tests[@]}" -- --ignored --test-threads=1
+    cargo test --locked --package orna-postgres --features test-hooks --lib -- --ignored --test-threads=1
+    cargo test --locked --package orna-postgres --features test-hooks "${postgres_tests[@]}" -- --ignored --test-threads=1
