@@ -24,6 +24,10 @@ jobs:
         with:
           node-version: "22"
       - run: npm install --global tree-sitter-cli@0.26.5 --no-audit --no-fund
+      - name: Warm Cargo dependency caches
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path editors/zed/Cargo.toml
       - name: Prepare CI evidence
         run: |
           set -euo pipefail
