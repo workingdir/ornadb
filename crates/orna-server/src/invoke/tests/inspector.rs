@@ -409,7 +409,12 @@ fn inspector_projection_binding_rejects_target_epoch_and_revision_mismatches() {
     let envelope = InspectCarrierEnvelope::new_with_target(
         InspectCarrierKind::Snapshot,
         target,
-        InspectCarrierProvenance::trusted_for_target(epoch, target, pair.source(), pair.catalogue()),
+        InspectCarrierProvenance::trusted_for_target(
+            epoch,
+            target,
+            pair.source(),
+            pair.catalogue(),
+        ),
         Vec::new(),
     )
     .expect("snapshot envelope");
