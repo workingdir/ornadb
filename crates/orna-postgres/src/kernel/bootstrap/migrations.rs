@@ -349,6 +349,14 @@ const LEGACY_MIGRATION_CHECKSUMS: &[(i64, [u8; 32])] = &[
             0x3e, 0xfe, 0x81, 0x01,
         ],
     ),
+    (
+        43,
+        [
+            0x02, 0x26, 0x8f, 0x8d, 0x50, 0xe4, 0x46, 0xba, 0x5e, 0x21, 0xce, 0x24, 0x18, 0x6c,
+            0xc8, 0xcc, 0x0c, 0xa7, 0x6c, 0x9b, 0x45, 0xa7, 0x48, 0xb1, 0x7b, 0x25, 0x35, 0xaf,
+            0xa4, 0xce, 0x04, 0x20,
+        ],
+    ),
 ];
 
 pub(super) fn legacy_migration_checksum(version: i64) -> Option<&'static [u8; 32]> {
@@ -368,10 +376,25 @@ pub(super) fn migration_checksum_matches(migration: &Migration, applied_checksum
 pub(super) async fn apply_migrations(
     transaction: &Transaction<'_>,
 ) -> Result<(), PostgresKernelError> {
+    // Pin the lexical mode before registry validation as well as before each
+    // batch, so this transaction is deterministic even if its session starts
+    // with a non-default standard_conforming_strings value.
+    transaction
+        .batch_execute("SET LOCAL standard_conforming_strings = on;")
+        .await
+        .map_err(PostgresKernelError::Database)?;
     let migrations = validated_migration_registry()?;
     let applied_count = validated_applied_migration_count(transaction, migrations).await?;
 
     for migration in migrations.iter().skip(applied_count) {
+        // `batch_execute` parses the complete input before executing it, so a
+        // SET inside a migration cannot change how later strings are lexed.
+        // Pin the server's lexical mode in a separate command to match the
+        // scanner's fixed PostgreSQL default.
+        transaction
+            .batch_execute("SET LOCAL standard_conforming_strings = on;")
+            .await
+            .map_err(PostgresKernelError::Database)?;
         transaction
             .batch_execute(migration.sql)
             .await
@@ -453,8 +476,289 @@ pub(super) fn validated_migration_registry() -> Result<&'static [Migration], Pos
                 "migration registry versions are not contiguous",
             ));
         }
+        if migration_sql_contains_anonymous_do_block(migration.sql) {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "migration registry contains an anonymous DO block",
+            ));
+        }
     }
     Ok(MIGRATIONS)
+}
+
+/// Returns whether SQL contains a top-level anonymous PostgreSQL `DO` statement.
+///
+/// The scanner follows PostgreSQL's lexical boundaries so occurrences in
+/// comments, quoted literals, and quoted identifiers are not treated as
+/// executable statements.
+///
+/// `apply_migrations` pins `standard_conforming_strings` to PostgreSQL's
+/// default (`on`) in a separate command before each batch. The scanner uses
+/// that fixed mode rather than interpreting SET statements in a batch, since
+/// `batch_execute` parses the complete batch before executing any statement.
+pub(super) fn migration_sql_contains_anonymous_do_block(sql: &str) -> bool {
+    migration_sql_contains_anonymous_do_block_with_mode(sql, true)
+}
+
+#[cfg(test)]
+pub(super) fn migration_sql_contains_anonymous_do_block_with_standard_conforming_strings(
+    sql: &str,
+    standard_conforming_strings: bool,
+) -> bool {
+    migration_sql_contains_anonymous_do_block_with_mode(sql, standard_conforming_strings)
+}
+
+fn migration_sql_contains_anonymous_do_block_with_mode(
+    sql: &str,
+    standard_conforming_strings: bool,
+) -> bool {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    let mut statement_start = true;
+
+    while index < bytes.len() {
+        index = skip_sql_trivia(bytes, index);
+        if index >= bytes.len() {
+            break;
+        }
+
+        if bytes[index] == b';' {
+            statement_start = true;
+            index += 1;
+            continue;
+        }
+
+        if let Some(next) = skip_sql_literal(bytes, index, standard_conforming_strings) {
+            statement_start = false;
+            index = next;
+            continue;
+        }
+
+        let Some((word_start, word_end)) = sql_identifier(bytes, index) else {
+            statement_start = false;
+            index += 1;
+            continue;
+        };
+
+        if statement_start
+            && sql_identifier_is(bytes, word_start, word_end, b"do")
+            && do_statement_has_code(bytes, word_end, standard_conforming_strings)
+        {
+            return true;
+        }
+
+        statement_start = false;
+        index = word_end;
+    }
+
+    false
+}
+
+fn do_statement_has_code(
+    bytes: &[u8],
+    do_end: usize,
+    standard_conforming_strings: bool,
+) -> bool {
+    let mut index = skip_sql_trivia(bytes, do_end);
+    if let Some((word_start, word_end)) = sql_identifier(bytes, index) {
+        if sql_identifier_is(bytes, word_start, word_end, b"language") {
+            index = skip_sql_trivia(bytes, word_end);
+            index = skip_sql_literal(bytes, index, standard_conforming_strings)
+                .or_else(|| sql_identifier(bytes, index).map(|(_, word_end)| word_end))
+                .unwrap_or(index);
+            index = skip_sql_trivia(bytes, index);
+        }
+    }
+
+    is_sql_code_literal_start(bytes, index)
+}
+
+fn is_sql_code_literal_start(bytes: &[u8], index: usize) -> bool {
+    if index >= bytes.len() {
+        return false;
+    }
+    matches!(
+        bytes[index],
+        b'\'' | b'e' | b'E' | b'u' | b'U' | b'$'
+    ) && (bytes[index] == b'\''
+        || (matches!(bytes[index], b'e' | b'E') && bytes.get(index + 1) == Some(&b'\''))
+        || (matches!(bytes[index], b'u' | b'U')
+            && bytes.get(index + 1) == Some(&b'&')
+            && bytes.get(index + 2) == Some(&b'\''))
+        || (bytes[index] == b'$' && dollar_quote_end(bytes, index).is_some()))
+}
+
+fn sql_identifier(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    if !is_sql_identifier_start(bytes.get(index).copied()?) {
+        return None;
+    }
+
+    let mut end = index + 1;
+    while end < bytes.len() && is_sql_identifier_continue(bytes[end]) {
+        end += 1;
+    }
+    Some((index, end))
+}
+
+fn sql_identifier_is(bytes: &[u8], start: usize, end: usize, expected: &[u8]) -> bool {
+    end - start == expected.len()
+        && bytes[start..end]
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+}
+
+fn is_sql_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+fn is_sql_identifier_continue(byte: u8) -> bool {
+    is_sql_identifier_start(byte) || byte.is_ascii_digit() || byte == b'$'
+}
+
+fn skip_sql_trivia(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+
+        if bytes.get(index..index + 2) == Some(b"--") {
+            index += 2;
+            while index < bytes.len() && !matches!(bytes[index], b'\r' | b'\n') {
+                index += 1;
+            }
+            continue;
+        }
+
+        if bytes.get(index..index + 2) != Some(b"/*") {
+            return index;
+        }
+
+        let mut depth = 1;
+        index += 2;
+        while index < bytes.len() && depth > 0 {
+            if bytes.get(index..index + 2) == Some(b"/*") {
+                depth += 1;
+                index += 2;
+            } else if bytes.get(index..index + 2) == Some(b"*/") {
+                depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+fn skip_sql_literal(
+    bytes: &[u8],
+    index: usize,
+    standard_conforming_strings: bool,
+) -> Option<usize> {
+    if bytes.get(index) == Some(&b'\'') {
+        return Some(skip_quoted_sql_literal(
+            bytes,
+            index,
+            b'\'',
+            !standard_conforming_strings,
+        ));
+    }
+    if bytes.get(index) == Some(&b'"') {
+        return Some(skip_quoted_sql_literal(bytes, index, b'"', false));
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E'))
+        && bytes.get(index + 1) == Some(&b'\'')
+    {
+        return Some(skip_quoted_sql_literal(bytes, index + 1, b'\'', true));
+    }
+    if matches!(bytes.get(index), Some(b'u' | b'U'))
+        && bytes.get(index + 1) == Some(&b'&')
+        && matches!(bytes.get(index + 2), Some(b'\'' | b'"'))
+    {
+        // U& escapes encode code points; neither the default backslash nor
+        // an alternate UESCAPE character can escape a quote delimiter.
+        return Some(skip_unicode_quoted_sql_literal(bytes, index + 2));
+    }
+    if bytes.get(index) == Some(&b'$') {
+        return dollar_quote_end(bytes, index);
+    }
+    None
+}
+
+fn skip_quoted_sql_literal(
+    bytes: &[u8],
+    quote_start: usize,
+    quote: u8,
+    backslash_escapes: bool,
+) -> usize {
+    let mut index = quote_start + 1;
+    while index < bytes.len() {
+        if backslash_escapes && bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_unicode_quoted_sql_literal(bytes: &[u8], quote_start: usize) -> usize {
+    let quote = bytes[quote_start];
+    let mut index = quote_start + 1;
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn dollar_quote_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let delimiter_end = dollar_quote_delimiter_end(bytes, start)?;
+    let delimiter = &bytes[start..delimiter_end];
+    let mut index = delimiter_end;
+    while index <= bytes.len().saturating_sub(delimiter.len()) {
+        if bytes[index..index + delimiter.len()] == *delimiter {
+            return Some(index + delimiter.len());
+        }
+        index += 1;
+    }
+    Some(bytes.len())
+}
+
+fn dollar_quote_delimiter_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+
+    let mut index = start + 1;
+    if bytes.get(index) == Some(&b'$') {
+        return Some(index + 1);
+    }
+    if !is_sql_identifier_start(bytes.get(index).copied()?) {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len()
+        && (is_sql_identifier_continue(bytes[index]) && bytes[index] != b'$')
+    {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b'$')).then_some(index + 1)
 }
 
 pub(super) fn migration_checksum(migration: &Migration) -> Vec<u8> {
