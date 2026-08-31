@@ -2938,8 +2938,6 @@ pub fn hover(
             return Some(hover);
         }
     }
-    // A standard or external target has no same-document declaration. Do not
-    // fall through to a same-spelled function from another schema.
     if client_target_function_path_at(parse, &span).is_some() {
         return None;
     }
@@ -2950,8 +2948,28 @@ pub fn hover(
         return Some(hover);
     }
     let mut hover = match kind {
-        HighlightKind::Keyword => crate::reference::keyword_reference(&name)
-            .map(|reference| crate::hover::keyword_hover(reference, doc_link.as_deref())),
+        HighlightKind::Keyword => {
+            let reference = crate::reference::keyword_reference(&name)?;
+            let mut hover = crate::hover::keyword_hover(reference, doc_link.as_deref());
+            if name.eq_ignore_ascii_case("IS") {
+                let is_procedural = parse.client_functions().iter().any(|function| {
+                    function.body.as_state_block().is_some_and(|block| {
+                        block.span.start <= span.start
+                            && block.span.end >= span.end
+                            && document.text[span.end..].trim_start().starts_with("BEGIN")
+                    })
+                });
+                if !is_procedural
+                    && let lsp_types::HoverContents::Markup(markup) = &mut hover.contents
+                {
+                    markup.value = markup.value.replace(
+                        "IS declarations BEGIN statements END; after RETURNS. expression IS [NOT] NULL. Null and identity comparison.",
+                        "expression IS [NOT] NULL. Null and identity comparison.",
+                    );
+                }
+            }
+            Some(hover)
+        }
         _ => {
             if let Some(field) = field_at(parse, byte) {
                 // A field name shadows scalar and declaration names at the
@@ -3023,8 +3041,6 @@ pub fn hover(
                     | ClientExpressionPart::CallArgumentLabel => None,
                 }
             } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
-                // A column reference inside a SQL body resolves to the field
-                // of the body's target object type.
                 Some(crate::hover::field_hover(
                     &field,
                     &document.text,
@@ -3051,7 +3067,7 @@ pub fn hover(
             }
         }
     };
-    if let Some(hover) = hover.as_mut() {
+    if let Some(hover) = &mut hover {
         hover.range = Some(mapper.range(&span));
     }
     hover

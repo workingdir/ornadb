@@ -19,6 +19,26 @@ fn hover_markdown(hover: &Hover) -> &str {
 }
 
 #[test]
+fn hover_keyword_is_preserves_procedural_and_null_contexts() {
+    let procedural_text =
+        "CREATE CLIENT FUNCTION app.probe() RETURNS BOOLEAN IS\nBEGIN\n    RETURN TRUE;\nEND;";
+    let procedural_is = procedural_text.find(" IS\n").expect("procedural IS") + 1;
+    let procedural_hover = hover_at(procedural_text, procedural_is).expect("procedural IS hover");
+    let procedural_markdown = hover_markdown(&procedural_hover);
+    assert!(procedural_markdown.contains("declarative function body"));
+    assert!(procedural_markdown.contains("IS declarations BEGIN statements END;"));
+    assert!(procedural_markdown.contains("expression IS [NOT] NULL."));
+
+    let expression_text =
+        "CREATE CLIENT FUNCTION app.probe(value BOOLEAN) RETURNS BOOLEAN AS value IS NULL;";
+    let expression_is = expression_text.find(" IS NULL").expect("expression IS") + 1;
+    let expression_hover = hover_at(expression_text, expression_is).expect("expression IS hover");
+    let expression_markdown = hover_markdown(&expression_hover);
+    assert!(expression_markdown.contains("compares an expression with NULL"));
+    assert!(expression_markdown.contains("expression IS [NOT] NULL."));
+    assert!(!expression_markdown.contains("IS declarations BEGIN statements END;"));
+}
+#[test]
 fn standard_library_loads_verified_v11_snapshot() {
     let standard = StandardLibrary::load().expect("retained V11 standard must load");
     let snapshot = standard.checked.verified_snapshot();
