@@ -3405,7 +3405,7 @@ fn explain_renders_resolution_and_sealed_request_facts() {
     assert!(plan.contains("target: std.invoke.echo"));
     assert!(plan.contains("caller: CliPipe"));
     assert!(
-        plan.contains("offer: protocol 5, locale en-GB, timezone UTC, sinks 0, runtimes tty@0.1.0")
+        plan.contains("offer: protocol 5, locale en-GB, timezone UTC, sinks 0, runtimes tty@1.0.0")
     );
     assert!(plan.contains("trace: Off"));
     assert!(plan.contains("output: none"));
