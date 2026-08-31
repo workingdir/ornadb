@@ -124,6 +124,7 @@ create object type accepts keyword-initial qualified names
 ====================
 
 CREATE TYPE END AS OBJECT ();
+CREATE TYPE SELECT.FROM AS OBJECT ();
 
 ---
 
@@ -134,6 +135,19 @@ CREATE TYPE END AS OBJECT ();
       (kw_type)
       name: (qualified_name
         (kw_end))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (rparen)
+      (semicolon)))
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (kw_select)
+        (dot)
+        (kw_from))
       (kw_as)
       (kw_object)
       (lparen)
