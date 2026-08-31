@@ -2339,6 +2339,30 @@ async fn recovers_the_two_class_security_target_union_with_standard_targets() ->
         let fixture = install_v2_standard_fixture(&database).await?;
         let kernel = kernel(&database)?;
         let snapshot = kernel.recover_security_snapshot().await?;
+        let system_anchor_count: i64 = {
+            let session = database.open().await?;
+            let operation: TestResult<i64> = async {
+                Ok(session
+                    .client()
+                    .query_one(
+                        "SELECT count(*) FROM _orna_kernel.invocation_target_authorities
+                         WHERE catalogue_revision_id = $1 AND target_class = 'system'",
+                        &[&fixture.active.pair().catalogue().to_bytes().to_vec()],
+                    )
+                    .await?
+                    .get(0))
+            }
+            .await;
+            finish_session(
+                operation,
+                session.shutdown().await,
+                "system authority anchor count",
+            )?
+        };
+        require(
+            system_anchor_count == 3,
+            "the valid fixture must retain all three system authority anchors",
+        )?;
         let executable = &fixture.standard.executables()[0];
         let echo = executable.function();
         let echo_target = SecurityFunctionTarget::verified_standard(
@@ -2454,10 +2478,25 @@ async fn recovers_the_two_class_security_target_union_with_standard_targets() ->
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn recovery_rejects_a_missing_application_authority_target_without_changing_active_state()
 -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x35; 16]);
+
     with_test_database(|database| async move {
         let fixture = install_v2_standard_fixture(&database).await?;
         let kernel = kernel(&database)?;
         let active_before = active_revision_pair(&database).await?;
+        run_batch(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.security_principals (id, kind, status)
+                 VALUES (decode('{}', 'hex'), 'user', 'active');
+                 INSERT INTO _orna_kernel.security_execute_grants (grantee_id, function_id)
+                 VALUES (decode('{}', 'hex'), decode('{}', 'hex'));",
+                raw_id_hex(USER.to_bytes()),
+                raw_id_hex(USER.to_bytes()),
+                raw_id_hex(fixture.app_function.to_bytes()),
+            ),
+        )
+        .await?;
         require(
             kernel.recover_security_snapshot().await.is_ok(),
             "the intact two-class fixture must recover its security snapshot",
@@ -2486,6 +2525,83 @@ async fn recovery_rejects_a_missing_application_authority_target_without_changin
         require(
             active_revision_pair(&database).await? == active_before,
             "rejected application authority tamper changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_an_extra_foreign_application_authority_target_without_changing_active_state()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let fixture = install_v2_standard_fixture(&database).await?;
+        let kernel = kernel(&database)?;
+        let active_before = active_revision_pair(&database).await?;
+        let foreign_function = FunctionId::from_bytes([0x91; 16]);
+        let foreign_revision = FunctionRevisionId::from_bytes([0x92; 16]);
+        run_batch(
+            &database,
+            &format!(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES (decode('{}', 'hex'), decode('{}', 'hex'), 'application',
+                         decode('{}', 'hex'), NULL);",
+                raw_id_hex(fixture.active.pair().catalogue().to_bytes()),
+                raw_id_hex(foreign_function.to_bytes()),
+                raw_id_hex(foreign_revision.to_bytes()),
+            ),
+        )
+        .await?;
+
+        let error = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("a foreign application authority target must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_target_authorities",
+                    rule: "application invocation targets must resolve in the pinned application catalogue",
+                    ..
+                }
+            ),
+            "foreign application authority target returned the wrong durable invariant",
+        )?;
+        require(
+            active_revision_pair(&database).await? == active_before,
+            "rejected foreign application authority tamper changed the active revision pair",
+        )?;
+        let retained: i64 = {
+            let session = database.open().await?;
+            let operation: TestResult<i64> = async {
+                Ok(session
+                    .client()
+                    .query_one(
+                        "SELECT count(*) FROM _orna_kernel.invocation_target_authorities
+                         WHERE catalogue_revision_id = $1 AND function_id = $2",
+                        &[
+                            &fixture.active.pair().catalogue().to_bytes().to_vec(),
+                            &foreign_function.to_bytes().to_vec(),
+                        ],
+                    )
+                    .await?
+                    .get(0))
+            }
+            .await;
+            finish_session(
+                operation,
+                session.shutdown().await,
+                "foreign application authority retention check",
+            )?
+        };
+        require(
+            retained == 1,
+            "recovery repaired the foreign application authority target",
         )?;
         require_no_session_leaks(&database).await
     })
