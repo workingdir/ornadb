@@ -80,6 +80,21 @@ impl ThreadModel {
     pub(super) const CallerPumps: Self = Self(3);
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RuntimeFeature(pub(super) i32);
+
+#[allow(dead_code, non_upper_case_globals)]
+impl RuntimeFeature {
+    pub(super) const MultipleWindows: Self = Self(1 << 0);
+    pub(super) const Accessibility: Self = Self(1 << 1);
+    pub(super) const Clipboard: Self = Self(1 << 2);
+    pub(super) const DragDrop: Self = Self(1 << 3);
+    pub(super) const NativeMenus: Self = Self(1 << 4);
+    pub(super) const Printing: Self = Self(1 << 5);
+    pub(super) const OpaqueLayoutState: Self = Self(1 << 6);
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct ContractVersion {
@@ -365,7 +380,10 @@ pub(super) struct RuntimeApi {
     pub(super) cancel_request: CancelRequestFn,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const _: () = {
+    assert!(std::mem::size_of::<Handle>() == 8);
+    assert!(std::mem::align_of::<Handle>() == 8);
     assert!(std::mem::size_of::<StringView>() == 16);
     assert!(std::mem::align_of::<StringView>() == 8);
     assert!(std::mem::offset_of!(StringView, data) == 0);
@@ -395,11 +413,26 @@ const _: () = {
     assert!(std::mem::align_of::<Status>() == 8);
     assert!(std::mem::offset_of!(Status, code) == 0);
     assert!(std::mem::offset_of!(Status, message) == 8);
+    assert!(std::mem::size_of::<SurfaceClosedEvent>() == 8);
+    assert!(std::mem::align_of::<SurfaceClosedEvent>() == 8);
+    assert!(std::mem::offset_of!(SurfaceClosedEvent, surface) == 0);
+    assert!(std::mem::size_of::<DiagnosticEvent>() == 24);
+    assert!(std::mem::align_of::<DiagnosticEvent>() == 8);
+    assert!(std::mem::offset_of!(DiagnosticEvent, status) == 0);
     assert!(std::mem::size_of::<ThreadModel>() == 4);
     assert!(std::mem::align_of::<ThreadModel>() == 4);
     assert!(ThreadModel::ClientEventLoop.0 == 1);
     assert!(ThreadModel::RuntimeEventLoop.0 == 2);
     assert!(ThreadModel::CallerPumps.0 == 3);
+    assert!(std::mem::size_of::<RuntimeFeature>() == 4);
+    assert!(std::mem::align_of::<RuntimeFeature>() == 4);
+    assert!(RuntimeFeature::MultipleWindows.0 == (1 << 0));
+    assert!(RuntimeFeature::Accessibility.0 == (1 << 1));
+    assert!(RuntimeFeature::Clipboard.0 == (1 << 2));
+    assert!(RuntimeFeature::DragDrop.0 == (1 << 3));
+    assert!(RuntimeFeature::NativeMenus.0 == (1 << 4));
+    assert!(RuntimeFeature::Printing.0 == (1 << 5));
+    assert!(RuntimeFeature::OpaqueLayoutState.0 == (1 << 6));
     assert!(std::mem::size_of::<ContractVersion>() == 40);
     assert!(std::mem::align_of::<ContractVersion>() == 8);
     assert!(std::mem::offset_of!(ContractVersion, name) == 0);
@@ -569,3 +602,35 @@ const _: () = {
     assert!(std::mem::offset_of!(RuntimeApi, apply_model_rows) == 104);
     assert!(std::mem::offset_of!(RuntimeApi, cancel_request) == 112);
 };
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn c_header_layout_matches_rust_mirror() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = manifest_dir.join("tests/runtime_abi_parity.c");
+    let canonical_include = manifest_dir.join("../../..").join("spec");
+    let canonical_header = canonical_include.join("spec/orna_runtime_abi_v1.h");
+    let mut command = std::process::Command::new("gcc");
+    command.args([
+        "-std=c11",
+        "-fno-short-enums",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fsyntax-only",
+    ]);
+    command.arg("-I").arg(&canonical_include);
+    if !canonical_header.is_file() {
+        command.arg("-DORNA_RUNTIME_ABI_USE_LOCAL_FIXTURE=1");
+    }
+    let output = command
+        .arg(source)
+        .output()
+        .expect("gcc is required for the runtime ABI parity proof");
+
+    assert!(
+        output.status.success(),
+        "runtime ABI C parity failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
