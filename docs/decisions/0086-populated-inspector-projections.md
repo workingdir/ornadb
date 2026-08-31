@@ -55,11 +55,13 @@ resource cache after the epoch is captured.
 
 ## Decision
 
-### 1. Keep every existing `@1` identity and frame
+### 1. Keep the canonical `@1` identities and frame
 
-Population does not add a protocol version, projection tag, carrier type, row
-field, or alternate decoder. The following remain byte-for-byte identities:
-
+Population keeps the canonical `@1` identities and frame fields. For this
+release, the canonical `ORNA-INSPECT/1` wire layout uses the complete
+kernel-generated `InspectEpochId` as an exact 16-byte value. An earlier
+low-`u64` implementation or draft was nonconforming and is not a supported
+wire variant; readers and writers must use the canonical layout together.
 * `ORNA-INSPECT/1 ` magic and carrier version `u16 = 1`;
 * carrier tag `1` for the snapshot and tags `2` through `9` for invocation
   nodes, calls, resources, state cells, UI nodes, presentation candidates,
@@ -71,9 +73,10 @@ field, or alternate decoder. The following remain byte-for-byte identities:
   `sys.security.principal`, and `...f8` through `...ff` for the eight
   projection result carriers;
 * representation contracts `orna.sys.inspect.*@1`;
-* the envelope order: the complete kernel-generated `InspectEpochId` (exact
-  16-byte identity in network byte order), source revision, catalogue revision,
-  bounded row count, then length-delimited row frames; and
+* the envelope order: magic, carrier version, projection tag, complete
+  kernel-generated `InspectEpochId` (exact 16-byte identity in network byte
+  order), source revision, catalogue revision, bounded row count, then
+  length-delimited row frames; and
 * the exact nine-parameter `std.inspect.render@1` order: snapshot,
   invocation nodes, calls, resources, state cells, UI nodes, presentation
   candidates, runtime bindings, and security decisions.
@@ -374,12 +377,19 @@ repeat provenance and authorization checks.
 
 ## Compatibility
 
-This decision is a clean population of existing contracts, not a wire-version
-migration.
+This release freezes the canonical `ORNA-INSPECT/1` wire layout. The canonical
+epoch field is the complete 16-byte `InspectEpochId`; an earlier low-`u64`
+implementation or draft was pre-release and nonconforming, not a supported
+wire variant. There is no mixed-width compatibility mode, so readers and
+writers must be upgraded together.
 
-* Existing `ORNA-INSPECT/1` decoders continue to decode old empty projections
+* Canonical `ORNA-INSPECT/1` decoders continue to decode old empty projections
   and newly populated rows using the same tag, field, provenance, and ORV5
-  framing. Existing persisted epochs are not rewritten.
+  framing. Existing canonical persisted epochs are not rewritten.
+* A pre-release decoder that expects only the low eight epoch bytes cannot
+  decode canonical carriers; it must be upgraded before deployment. This
+  coordinated implementation change does not introduce a second carrier
+  version because carrier version `1` is the frozen canonical contract.
 * Existing snapshot, projection, security-decision, state-cell, and trace
   identities remain stable. `sys.inspect.trace` remains the existing separate
   model-expressible trace API; this ADR does not make projection rows into a
@@ -391,9 +401,9 @@ migration.
   lifecycle validation, runtime offer selection, and authenticated sealed
   `sys.invoke` behavior remain authoritative. The projection observes those
   facts; it does not change their execution.
-* No migration is required: the existing inspection relations and `INEP` epoch
-  payload are reused. Recovery must continue to round-trip both old empty
-  vectors and new populated vectors canonically.
+* No database migration is required: the existing inspection relations and
+  `INEP` epoch payload are reused. Recovery must continue to round-trip both
+  old empty vectors and new populated vectors canonically.
 
 ## Explicitly deferred
 
