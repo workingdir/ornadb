@@ -497,7 +497,7 @@ fn valid_grant_role_rebuilds_candidate_without_changing_existing_state() {
             vec![RoleMembership::new(ROLE, MEMBER)],
             vec![],
             vec![],
-            vec![existing_privilege_grant.clone()],
+            vec![existing_privilege_grant],
         )
         .expect("the existing role-membership snapshot should be valid");
     let mutation = SecurityAdminMutation::GrantRole {

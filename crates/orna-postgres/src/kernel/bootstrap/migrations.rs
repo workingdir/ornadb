@@ -555,14 +555,14 @@ fn migration_sql_contains_anonymous_do_block_with_mode(
 
 fn do_statement_has_code(bytes: &[u8], do_end: usize, standard_conforming_strings: bool) -> bool {
     let mut index = skip_sql_trivia(bytes, do_end);
-    if let Some((word_start, word_end)) = sql_identifier(bytes, index) {
-        if sql_identifier_is(bytes, word_start, word_end, b"language") {
-            index = skip_sql_trivia(bytes, word_end);
-            index = skip_sql_literal(bytes, index, standard_conforming_strings)
-                .or_else(|| sql_identifier(bytes, index).map(|(_, word_end)| word_end))
-                .unwrap_or(index);
-            index = skip_sql_trivia(bytes, index);
-        }
+    if let Some((word_start, word_end)) = sql_identifier(bytes, index)
+        && sql_identifier_is(bytes, word_start, word_end, b"language")
+    {
+        index = skip_sql_trivia(bytes, word_end);
+        index = skip_sql_literal(bytes, index, standard_conforming_strings)
+            .or_else(|| sql_identifier(bytes, index).map(|(_, word_end)| word_end))
+            .unwrap_or(index);
+        index = skip_sql_trivia(bytes, index);
     }
 
     is_sql_code_literal_start(bytes, index)
