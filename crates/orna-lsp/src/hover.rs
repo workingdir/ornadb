@@ -83,6 +83,21 @@ pub fn standard_schema_hover(name: &str, doc_link: Option<&str>) -> Hover {
     hover(value)
 }
 
+/// Builds the hover for one standard-library function.
+pub fn standard_function_hover(
+    domain: &str,
+    name: &str,
+    parameters: &str,
+    return_type: &str,
+    doc_link: Option<&str>,
+) -> Hover {
+    let mut value = format!(
+        "**{domain} function**\n\n```orna\n{domain} FUNCTION {name}({parameters}) RETURNS {return_type}\n```"
+    );
+    append_spec_link(&mut value, doc_link);
+    hover(value)
+}
+
 /// Builds the hover for one declaration.
 pub fn declaration_hover(
     declaration: DeclarationRef<'_>,

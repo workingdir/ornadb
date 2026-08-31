@@ -416,7 +416,8 @@ fn request_signature_help(
         return Ok(serde_json::Value::Null);
     };
     let (parse, mapper) = parse_document(document);
-    let help = analysis::signature_help(document, &parse, position, &mapper);
+    let help =
+        analysis::signature_help(document, &parse, state.standard.as_ref(), position, &mapper);
     Ok(serde_json::to_value(help)?)
 }
 

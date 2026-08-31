@@ -137,21 +137,6 @@ pub(super) fn source_metadata_type_id(
     }
 }
 
-pub(super) fn source_metadata_body_kind(
-    artifact: &ExecutableArtifact,
-) -> orna_core::source_metadata::SourceBodyKind {
-    match artifact.version() {
-        EXPRESSION_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Expression,
-        PROCEDURAL_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::Procedural,
-        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION => {
-            orna_core::source_metadata::SourceBodyKind::ControlFlow
-        }
-        STATE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::State,
-        OPAQUE_FORMAT_VERSION => orna_core::source_metadata::SourceBodyKind::ExternalContract,
-        _ => orna_core::source_metadata::SourceBodyKind::Unknown,
-    }
-}
-
 pub(super) fn source_metadata_return_metadata(
     active: &ActiveDatabaseRevision,
     return_type: &FunctionReturn,

@@ -1987,6 +1987,87 @@ fn serves_semantic_tokens_document_symbols_and_completion() {
 }
 
 #[test]
+fn serves_standard_function_hover_signature_and_unknown_fallback() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/standard-function.orna";
+    let source =
+        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.increment(1);\n";
+    open_document(&mut client, uri, source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(source, "RETURN ", "increment"),
+        }),
+    );
+    let hover_value = hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("standard function hover response has no markdown value"));
+    assert!(
+        hover_value.contains("**CLIENT function**"),
+        "standard hover domain: {hover_value}"
+    );
+    assert!(
+        hover_value.contains("CLIENT FUNCTION std.math.increment"),
+        "standard hover name: {hover_value}"
+    );
+    assert!(
+        hover_value.contains("p_value"),
+        "standard hover parameter: {hover_value}"
+    );
+    assert_eq!(
+        hover_value.lines().find(|line| line.contains("RETURNS")),
+        Some("CLIENT FUNCTION std.math.increment(p_value) RETURNS INTEGER"),
+        "standard hover return type: {hover_value}",
+    );
+
+    let signature = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_after(source, "std.math.increment("),
+        }),
+    );
+    let signature = signature.as_object().expect("standard signature response");
+    let signatures = signature
+        .get("signatures")
+        .and_then(Value::as_array)
+        .expect("standard signatures");
+    assert_eq!(signatures.len(), 1);
+    let label = signatures[0]["label"]
+        .as_str()
+        .expect("standard signature label");
+    assert!(label.contains("CLIENT FUNCTION std.math.increment"));
+    assert!(label.contains("p_value"));
+    assert!(
+        label.contains("RETURNS"),
+        "standard signature return type: {label}"
+    );
+
+    let unknown_uri = "file:///test/unknown-standard-function.orna";
+    let unknown_source =
+        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.unknown(1);\n";
+    open_document(&mut client, unknown_uri, unknown_source, 1);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let unknown_signature = client.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": unknown_uri },
+            "position": position_after(unknown_source, "std.math.unknown("),
+        }),
+    );
+    assert!(
+        unknown_signature.is_null(),
+        "unknown standard function must fail closed: {unknown_signature}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn serves_rich_hover_content() {
     let fixture_root =
         std::env::temp_dir().join(format!("orna-lsp-rich-hover-{}", std::process::id()));
