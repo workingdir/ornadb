@@ -700,7 +700,7 @@ fn inspect_carrier_payload(active: &ActiveDatabaseRevision, tag: u8, rows: &[&[u
     let mut payload = b"ORNA-INSPECT/1 ".to_vec();
     payload.extend_from_slice(&1_u16.to_be_bytes());
     payload.push(tag);
-    payload.extend_from_slice(&7_u64.to_be_bytes());
+    payload.extend_from_slice(&[0x11; 16]);
     payload.extend_from_slice(&active.pair().source().to_bytes());
     payload.extend_from_slice(&active.pair().catalogue().to_bytes());
     payload.extend_from_slice(&u32::try_from(rows.len()).unwrap().to_be_bytes());
@@ -786,7 +786,7 @@ fn inspect_opaque_constructor_rejects_malformed_trailing_and_mismatched_payloads
     );
 
     let mut wrong_revision = payload.clone();
-    let source_offset = b"ORNA-INSPECT/1 ".len() + 2 + 1 + 8;
+    let source_offset = b"ORNA-INSPECT/1 ".len() + 2 + 1 + 16;
     wrong_revision[source_offset] ^= 1;
     assert_eq!(
         OpaqueValue::new_inspect_carrier(&active, opaque_type, wrong_revision),
@@ -899,11 +899,19 @@ fn rows_opaque_registration_rejects_malformed_variable_orv5_cells() {
         cell
     };
 
+    let scalar_type = |tag: u8| {
+        let mut type_id = [0; 16];
+        type_id[15] = tag;
+        type_id
+    };
+
     for cell in [
         orv5(0x06, [0x01; 16], &[0xff]),
         orv5(0x0a, [0x02; 16], &[0xff]),
         orv5(0x06, [0; 16], b"text"),
+        orv5(0x06, scalar_type(0x07), b"text"),
         orv5(0x07, [0; 16], &[0xde, 0xad]),
+        orv5(0x07, scalar_type(0x06), &[0xde, 0xad]),
         orv5(0x0c, [0x03; 16], &[0xde, 0xad]),
     ] {
         assert_eq!(
@@ -914,9 +922,52 @@ fn rows_opaque_registration_rejects_malformed_variable_orv5_cells() {
         );
     }
 
-    let bytes = orv5(0x07, [0x04; 16], &[0xde, 0xad, 0xbe, 0xef]);
-    let payload = rows_frame(&bytes);
-    let value = OpaqueValue::new(&active, &registry, ROWS_TYPE, payload.clone())
-        .expect("bounded arbitrary BYTES cells are structurally valid");
-    assert_eq!(value.canonical_payload(), payload);
+    let valid_text = orv5(0x06, scalar_type(0x06), b"text");
+    let mut truncated = valid_text.clone();
+    truncated.pop();
+    assert_eq!(
+        OpaqueValue::new(&active, &registry, ROWS_TYPE, rows_frame(&truncated)),
+        Err(OpaqueValueError::InvalidRowsFrame {
+            opaque_type: ROWS_TYPE,
+        })
+    );
+
+    let mut declared_truncated = valid_text.clone();
+    declared_truncated[21..25].copy_from_slice(&5_u32.to_be_bytes());
+    assert_eq!(
+        OpaqueValue::new(
+            &active,
+            &registry,
+            ROWS_TYPE,
+            rows_frame(&declared_truncated),
+        ),
+        Err(OpaqueValueError::InvalidRowsFrame {
+            opaque_type: ROWS_TYPE,
+        })
+    );
+
+    let mut declared_trailing = valid_text.clone();
+    declared_trailing[21..25].copy_from_slice(&3_u32.to_be_bytes());
+    assert_eq!(
+        OpaqueValue::new(
+            &active,
+            &registry,
+            ROWS_TYPE,
+            rows_frame(&declared_trailing),
+        ),
+        Err(OpaqueValueError::InvalidRowsFrame {
+            opaque_type: ROWS_TYPE,
+        })
+    );
+
+    for cell in [
+        valid_text,
+        orv5(0x07, scalar_type(0x07), &[0xde, 0xad, 0xbe, 0xef]),
+        orv5(0x0a, [0x05; 16], b"qualified"),
+    ] {
+        let payload = rows_frame(&cell);
+        let value = OpaqueValue::new(&active, &registry, ROWS_TYPE, payload.clone())
+            .expect("valid variable ORV5 cells are structurally accepted");
+        assert_eq!(value.canonical_payload(), payload);
+    }
 }
