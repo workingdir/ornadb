@@ -2,7 +2,7 @@
 
 ;; Author: OrnaDB
 ;; Keywords: languages
-;; Version: 0.1.0
+;; Version: 1.0.0
 ;; Package-Requires: ((emacs "28.1") (eglot "1.0"))
 
 ;;; Commentary:
