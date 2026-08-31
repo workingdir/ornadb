@@ -1,5 +1,223 @@
 use super::*;
 
+fn sealed_no_argument_request(
+    function_parts: [&str; 2],
+) -> TestResult<orna_core::invocation::InvokeRequest> {
+    use orna_core::invocation::{
+        InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationOutputRequirement, InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
+        InvocationTarget as RequestTarget,
+    };
+
+    Ok(InvokeRequest::new(InvokeRequestInput {
+        target: RequestTarget::qualified_name(
+            orna_core::catalogue::QualifiedSemanticName::new(function_parts)?,
+        )?,
+        arguments: Vec::<orna_core::invocation::InvocationArgument>::new(),
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )?,
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )?,
+        output_requirement: Option::<InvocationOutputRequirement>::None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })?)
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn executes_sealed_security_definer_denial_before_target_dispatch() -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x41; 16]);
+    const SOURCE: &str = "CREATE SCHEMA app;\n\
+        CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
+        CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
+        TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
+        CREATE SERVER FUNCTION app.definer() RETURNS ROWS (value BOOLEAN)\n\
+        SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
+        CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let schema_bundle =
+            orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+                "schema.orna",
+                STANDARD_CLIENT_SCHEMA_SOURCE,
+            )])?;
+        let schema_report = check(&schema_bundle, empty.catalogue());
+        require(
+            schema_report.diagnostics().is_empty(),
+            "sealed SECURITY DEFINER proof schema did not compile",
+        )?;
+        let version_one = kernel
+            .apply(&prepare(&schema_report, empty.pair(), &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let active = kernel
+            .apply(&standard_client_candidate(SOURCE, &version_two, &upgrade)?)
+            .await?;
+        let definer = active
+            .catalogue()
+            .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+                "app", "definer",
+            ])?)
+            .ok_or_else(|| failure("SECURITY DEFINER proof target was not recovered"))?
+            .id();
+        let invoker = active
+            .catalogue()
+            .function_by_name(&orna_core::catalogue::QualifiedSemanticName::new([
+                "app", "enabled",
+            ])?)
+            .ok_or_else(|| failure("SECURITY INVOKER control target was not recovered"))?
+            .id();
+        let function_targets = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|definition| definition.id())
+            .collect::<Vec<_>>();
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            function_targets,
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(USER, definer), ExecuteGrant::new(USER, invoker)],
+        )?;
+        let security = kernel.replace_security_snapshot(&granted).await?;
+        let session = security.bind_authenticated_session(USER, vec![])?;
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("sealed SECURITY DEFINER proof has no standard snapshot"))?;
+        let registry = orna_standard::registered_opaque_codecs(standard)?;
+
+        let definer_request = sealed_no_argument_request(["app", "definer"])?;
+        let retained_definer =
+            orna_protocol::encode_invoke_request(&active, &registry, &definer_request)?;
+        let preflight = kernel
+            .validate_sealed_sys_invoke(&session, 5, &retained_definer)
+            .await?;
+        let continuation = match preflight {
+            orna_postgres::SealedInvocationPreflight::Accepted(continuation) => continuation,
+            orna_postgres::SealedInvocationPreflight::Rejected {
+                failure: call_failure,
+            } => {
+                return Err(failure(format!(
+                    "SECURITY DEFINER proof was rejected before CALL_ACCEPTED: {call_failure:?}"
+                )));
+            }
+        };
+        let invocation = continuation.invocation();
+        let mut operation = continuation.prepare_sealed_sys_invoke_after_accept().await?;
+        let mut state = orna_client::ClientStateStore::new();
+        let mut capability_audit_appended = false;
+        let cancellation = orna_postgres::ResourceCancellation::new();
+        let execution = operation
+            .execute_after_started(
+                None,
+                &mut state,
+                &mut capability_audit_appended,
+                &cancellation,
+                tokio::runtime::Handle::current(),
+            )
+            .await?;
+        require(
+            matches!(
+                execution,
+                orna_postgres::SealedInvocationExecution::Result(
+                    orna_postgres::SealedInvocationResult::Denied { invocation: actual }
+                ) if actual == invocation
+            ),
+            "SECURITY DEFINER did not become a sealed denial before target dispatch",
+        )?;
+
+        // An invoker control still traverses the accepted continuation and
+        // evaluator path instead of being rejected by the SECURITY DEFINER
+        // guard.
+        let invoker_request = sealed_no_argument_request(["app", "enabled"])?;
+        let retained_invoker =
+            orna_protocol::encode_invoke_request(&active, &registry, &invoker_request)?;
+        let preflight = kernel
+            .validate_sealed_sys_invoke(&session, 5, &retained_invoker)
+            .await?;
+        let continuation = match preflight {
+            orna_postgres::SealedInvocationPreflight::Accepted(continuation) => continuation,
+            orna_postgres::SealedInvocationPreflight::Rejected {
+                failure: call_failure,
+            } => {
+                return Err(failure(format!(
+                    "SECURITY INVOKER control was rejected before CALL_ACCEPTED: {call_failure:?}"
+                )));
+            }
+        };
+        let mut operation = continuation.prepare_sealed_sys_invoke_after_accept().await?;
+        let mut state = orna_client::ClientStateStore::new();
+        let mut capability_audit_appended = false;
+        let cancellation = orna_postgres::ResourceCancellation::new();
+        let control_execution = operation
+            .execute_after_started(
+                None,
+                &mut state,
+                &mut capability_audit_appended,
+                &cancellation,
+                tokio::runtime::Handle::current(),
+            )
+            .await?;
+        require(
+            matches!(
+                control_execution,
+                orna_postgres::SealedInvocationExecution::Result(
+                    orna_postgres::SealedInvocationResult::Completed { .. }
+                )
+            ),
+            "SECURITY INVOKER control no longer executes through the accepted path",
+        )?;
+
+        let audit = kernel.recover_security_audit_events().await?;
+        let definer_target = InvocationTarget::new(definer, active.pair());
+        require(
+            audit.iter().any(|event| {
+                event.decision().kind() == SecurityAuditKind::Execute
+                    && event.decision().outcome() == SecurityAuditOutcome::Denied
+                    && event.decision().target() == Some(definer_target)
+                    && event.decision().denial()
+                        == Some(SecurityAuditDenial::Execute(
+                            ExecuteDenial::UnsupportedSecurityDefiner,
+                        ))
+            }),
+            "SECURITY DEFINER denial did not retain its exact target audit evidence",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
