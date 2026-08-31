@@ -1239,7 +1239,7 @@ mod tests {
         .encode()
         .expect("valid record carrier encodes");
         let second_identity =
-            66 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES + integer_row(1).len();
+            70 + 4 + ORV5_HEADER_BYTES + 4 + RECORD_FIELD_HEADER_BYTES + integer_row(1).len();
 
         let mut duplicate_wire = valid.clone();
         duplicate_wire[second_identity..second_identity + 16].copy_from_slice(&[1; 16]);
