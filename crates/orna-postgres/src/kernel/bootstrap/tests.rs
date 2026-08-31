@@ -1,12 +1,12 @@
 use std::{str::FromStr, sync::Arc};
 
-use super::{
-    MIGRATIONS, PostgresKernel, legacy_migration_checksum, migration_checksum,
-    migration_checksum_matches, validated_migration_registry,
-};
 use super::migrations::{
     migration_sql_contains_anonymous_do_block,
     migration_sql_contains_anonymous_do_block_with_standard_conforming_strings,
+};
+use super::{
+    MIGRATIONS, PostgresKernel, legacy_migration_checksum, migration_checksum,
+    migration_checksum_matches, validated_migration_registry,
 };
 
 #[test]
@@ -164,8 +164,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
 
 #[test]
 fn production_migration_registry_has_no_anonymous_do_blocks() {
-    for migration in validated_migration_registry()
-        .expect("production migration registry is valid")
+    for migration in validated_migration_registry().expect("production migration registry is valid")
     {
         assert!(
             !migration_sql_contains_anonymous_do_block(migration.sql),
