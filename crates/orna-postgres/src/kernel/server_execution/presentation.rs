@@ -308,7 +308,7 @@ impl fmt::Display for SealedPresentationError {
 /// `json` -> `std.json.encode` (input `std.json.Value`, output
 /// `std.io.ByteStream` with media type `application/json`), alias `table` ->
 /// `std.terminal.present_table` (input `std.data.Rows`, output
-/// `std.terminal.Document`, no media type), and alias `csv` ->
+/// `std.terminal.Document` with media type `text/plain`), and alias `csv` ->
 /// `std.csv.encode` (input `std.data.Rows`, output `std.io.ByteStream` with
 /// media type `text/csv`). The table selector is only compatibility metadata:
 /// V8/V9 execution resolves the function and retained executable from the
@@ -332,7 +332,7 @@ fn sealed_presenter_registry() -> &'static PresenterRegistry {
             STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
             STD_DATA_ROWS_TYPE_ID,
             orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
-            None,
+            Some(String::from("text/plain")),
             false,
             0,
         )
@@ -410,6 +410,36 @@ pub(super) fn resolve_sealed_presenter_type_name(
     }
 }
 
+/// Returns whether the client offer admits the selected sealed presenter
+/// output.
+///
+/// Admission requires the exact output descriptor and a compatible media
+/// type. The installed byte-stream sink advertises `application/octet-stream`
+/// and consumes raw bytes of any byte stream, so it is the one generic media
+/// fallback; all other media types must match exactly.
+fn sealed_output_sink_matches(
+    entry: &PresenterEntry,
+    client_offer: &InvocationClientOffer,
+) -> bool {
+    let output_descriptor = TypeDescriptor::named(entry.output_type());
+    client_offer.sink_offers().iter().any(|offer| {
+        if offer.descriptor() != &output_descriptor {
+            return false;
+        }
+        if entry.streaming() && !offer.streaming() {
+            return false;
+        }
+        match entry.media_type() {
+            Some(media_type) => offer.media_types().iter().any(|offered| {
+                offered == media_type
+                    || (entry.output_type() == STD_IO_BYTE_STREAM_TYPE_ID
+                        && offered == "application/octet-stream")
+            }),
+            None => false,
+        }
+    })
+}
+
 /// Resolves one sealed output requirement and presents the canonical result
 /// through the matched presenter engine (ADR 0057 step 7).
 ///
@@ -473,24 +503,7 @@ pub(crate) fn present_sealed_standard_output(
     if !requirement_matches {
         return Err(SealedPresentationError::NoPath);
     }
-    let output_descriptor = TypeDescriptor::named(entry.output_type());
-    let sink_matches = client_offer.sink_offers().iter().any(|offer| {
-        if offer.descriptor() != &output_descriptor {
-            return false;
-        }
-        if entry.streaming() && !offer.streaming() {
-            return false;
-        }
-        match entry.media_type() {
-            Some(media_type) => offer.media_types().iter().any(|offered| {
-                offered == media_type
-                    || (entry.output_type() == orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
-                        && offered == "application/octet-stream")
-            }),
-            None => true,
-        }
-    });
-    if !sink_matches {
+    if !sealed_output_sink_matches(entry, client_offer) {
         return Err(SealedPresentationError::NoPath);
     }
     match entry.function() {

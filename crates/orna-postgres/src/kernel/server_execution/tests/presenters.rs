@@ -1453,6 +1453,20 @@ fn sealed_output_requires_matching_sink_descriptor_and_media_type() {
         ),
         Err(SealedPresentationError::NoPath)
     ));
+    let wrong_document_media = offer(
+        TypeDescriptor::named(orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID),
+        &["application/json"],
+    );
+    assert!(matches!(
+        present_sealed_standard_output(
+            &table,
+            RuntimeValue::Integer(42),
+            &wrong_document_media,
+            &active,
+            &registry,
+        ),
+        Err(SealedPresentationError::NoPath)
+    ));
 
     let matching_byte_stream = offer(
         TypeDescriptor::named(orna_standard::STD_IO_BYTE_STREAM_TYPE_ID),
@@ -1537,6 +1551,83 @@ fn sealed_output_media_type_requirement_resolves_to_the_json_presenter() {
     expected.extend_from_slice(&7_u32.to_be_bytes());
     expected.extend_from_slice(b"\"hello\"");
     assert_eq!(value.canonical_payload(), expected);
+}
+
+#[test]
+fn sealed_output_media_type_requirement_resolves_to_the_table_presenter() {
+    let standard = presenter_standard();
+    let registry =
+        orna_standard::registered_opaque_codecs(&standard).expect("the V3 opaque codecs register");
+    let active = presenter_active(&standard);
+    let requirement = InvocationOutputRequirement::new(
+        None,
+        Some(String::from("text/plain")),
+        None,
+        InvocationStreamingRequirement::Unspecified,
+    )
+    .expect("the media-type output requirement is valid");
+    let presented = present_sealed_standard_output(
+        &requirement,
+        RuntimeValue::Integer(42),
+        &presenter_client_offer(),
+        &active,
+        &registry,
+    )
+    .expect("the media-type requirement must resolve to the table presenter");
+    let RuntimeValue::Opaque(value) = presented else {
+        panic!("the table presenter must return one opaque value");
+    };
+    assert_eq!(
+        value.opaque_type(),
+        orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+    );
+}
+
+#[test]
+fn sealed_output_rejects_unoffered_sink_before_presenter_execution() {
+    let standard = presenter_standard();
+    let mismatched_standard = presenter_v5_standard();
+    let registry = orna_standard::registered_opaque_codecs(&mismatched_standard)
+        .expect("the V5 opaque codecs register");
+    let active = presenter_active(&standard);
+    let requirement = InvocationOutputRequirement::new(
+        Some(String::from("json")),
+        None,
+        None,
+        InvocationStreamingRequirement::Unspecified,
+    )
+    .expect("the json requirement is valid");
+    let sink = InvocationSinkOffer::new(
+        TypeDescriptor::named(orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID),
+        ["text/plain"],
+        false,
+        0,
+        None,
+    )
+    .expect("the non-matching document sink offer is valid");
+    let client_offer = InvocationClientOffer::new(
+        5,
+        "en-GB",
+        "Europe/London",
+        [sink],
+        [],
+        1_024,
+        0,
+        None,
+        None,
+    )
+    .expect("the client offer is valid");
+
+    assert!(matches!(
+        present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Integer(42),
+            &client_offer,
+            &active,
+            &registry,
+        ),
+        Err(SealedPresentationError::NoPath)
+    ));
 }
 
 #[test]
