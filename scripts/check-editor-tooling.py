@@ -42,6 +42,15 @@ TARGET_HIGHLIGHT_EXPECTATIONS = (
     ("accepted_resources_streams.orna", {"function": ("overdue", "execute_sql"), "property": ("payload",)}),
     ("accepted_actions_inspector.orna", {"function": ("echo",), "property": ("invoke",)}),
 )
+QUALIFIED_NAME_HIGHLIGHT_EXPECTATIONS = {
+    "namespace": ("SELECT", "FROM"),
+    "type": ("END",),
+    "function": ("RETURN",),
+}
+QUALIFIED_NAME_HIGHLIGHT_FORBIDDEN = {
+    "function": ("action_fixture",),
+    "type": ("action_fixture",),
+}
 TEXTMATE_PARITY_COMPARABLE_KEYS = ("scopeName", "patterns", "repository")
 # Only editor metadata may differ; every other root and nested grammar rule is compared.
 TEXTMATE_PARITY_ALLOWED_ROOT_KEYS = frozenset({"$schema", "name"})
@@ -961,6 +970,13 @@ def check_alter_rename_highlights(
             tree_sitter,
             tree_sitter_directory,
             repository,
+            "keyword_qualified_names.orna",
+            4,
+        )
+        and check_highlight_fixture(
+            tree_sitter,
+            tree_sitter_directory,
+            repository,
             "accepted_actions_inspector.orna",
             18,
         )
@@ -972,6 +988,97 @@ def check_alter_rename_highlights(
             14,
         )
     )
+
+def check_qualified_name_highlights(
+    tree_sitter: str,
+    zed_directory: Path,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Check keyword-shaped declaration names in both shipped highlight queries."""
+    query_paths = (
+        ("tree-sitter", tree_sitter_directory / "queries" / "highlights.scm"),
+        ("Zed", zed_directory / "languages" / "orna" / "highlights.scm"),
+    )
+    capture_line = re.compile(
+        r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
+    )
+    fixtures = (
+        ("keyword_qualified_names.orna", QUALIFIED_NAME_HIGHLIGHT_EXPECTATIONS, {}),
+        ("accepted_actions_inspector.orna", {}, QUALIFIED_NAME_HIGHLIGHT_FORBIDDEN),
+    )
+    for fixture_name, expected, forbidden in fixtures:
+        fixture_path = tree_sitter_directory / "test" / "highlight" / fixture_name
+        if not fixture_path.is_file():
+            log(
+                f"required qualified-name highlight fixture is missing: "
+                f"{display_path(fixture_path, repository)}",
+                error=True,
+            )
+            return False
+        for label, query_path in query_paths:
+            if not query_path.is_file():
+                log(
+                    f"required {label} highlight query is missing: "
+                    f"{display_path(query_path, repository)}",
+                    error=True,
+                )
+                return False
+            result = run_command(
+                [
+                    tree_sitter,
+                    "query",
+                    "--grammar-path",
+                    str(tree_sitter_directory),
+                    "--captures",
+                    str(query_path),
+                    str(fixture_path),
+                ],
+                cwd=tree_sitter_directory,
+                label=f"tree-sitter {label} qualified-name highlight query",
+            )
+            if result is None or result.returncode != 0:
+                status = (
+                    "could not start"
+                    if result is None
+                    else f"exited with status {result.returncode}"
+                )
+                log(
+                    f"{label} qualified-name highlight query failed for "
+                    f"{fixture_name} ({status})",
+                    error=True,
+                )
+                return False
+            captures = [
+                (match.group("name"), match.group("text"))
+                for line in result.stdout.splitlines()
+                if (match := capture_line.search(line)) is not None
+            ]
+            for capture_name, expected_texts in expected.items():
+                observed = [text for name, text in captures if name == capture_name]
+                missing = [text for text in expected_texts if text not in observed]
+                if missing:
+                    log(
+                        f"{label} qualified-name query for {fixture_name} did not capture "
+                        f"{capture_name} texts {missing!r}; observed {observed!r}",
+                        error=True,
+                    )
+                    return False
+            for capture_name, forbidden_texts in forbidden.items():
+                observed = [
+                    text
+                    for name, text in captures
+                    if name == capture_name and text in forbidden_texts
+                ]
+                if observed:
+                    log(
+                        f"{label} qualified-name query for {fixture_name} over-captured "
+                        f"{capture_name} texts {observed!r}",
+                        error=True,
+                    )
+                    return False
+            log(f"{label} qualified-name captures passed for {fixture_name}")
+    return True
 
 
 def check_tree_sitter_package(tree_sitter_directory: Path, repository: Path) -> bool:
@@ -2312,6 +2419,10 @@ def main() -> int:
 
     if not check_alter_rename_highlights(
         tree_sitter, tree_sitter_directory, repository
+    ):
+        return 1
+    if not check_qualified_name_highlights(
+        tree_sitter, zed_directory, tree_sitter_directory, repository
     ):
         return 1
     remaining_corpus_cases = len(deferred_case_names)
