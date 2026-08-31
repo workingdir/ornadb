@@ -579,6 +579,105 @@ fn v5_to_v6_upgrade_rejects_a_non_v5_parent_before_child_work() {
 }
 
 #[test]
+fn retains_and_verifies_v7_window_standard_snapshot() {
+    let snapshot = super::super::retained_standard_library_v7_snapshot()
+        .expect("the retained V7 source is valid");
+    assert_eq!(snapshot.source().units().len(), 7);
+    assert_eq!(
+        snapshot.source().parent(),
+        Some(super::super::STANDARD_SOURCE_V6_REVISION_ID)
+    );
+
+    let window = &snapshot.source().units()[6];
+    assert_eq!(window.id(), super::super::STD_WINDOW_SOURCE_UNIT_ID);
+    assert_eq!(window.ordinal(), 6);
+    assert_eq!(
+        window.logical_path(),
+        super::super::STD_WINDOW_SOURCE_LOGICAL_PATH
+    );
+    assert_eq!(
+        window.content(),
+        include_str!("../../../../stdlib/std/window.orna")
+    );
+    assert_eq!(
+        window.content_hash(),
+        source_unit_content_digest(window.content()).expect("window source hash is valid")
+    );
+
+    assert_eq!(
+        snapshot.source().bundle_hash(),
+        source_bundle_digest(snapshot.source().units()).expect("V7 bundle hash is valid")
+    );
+    assert_eq!(
+        snapshot.source().revision_hash(),
+        source_revision_record_digest(
+            super::super::STANDARD_SOURCE_V7_BUNDLE_ID,
+            Some(super::super::STANDARD_SOURCE_V6_REVISION_ID),
+            snapshot.source().bundle_hash(),
+        )
+        .expect("V7 revision hash is valid")
+    );
+
+    let window_definition = snapshot
+        .catalogue()
+        .function_by_id(super::super::STD_UI_WINDOW_FUNCTION_ID)
+        .expect("V7 catalogue contains std.ui.window");
+    assert_eq!(
+        window_definition.domain(),
+        orna_core::catalogue::FunctionDomain::Client
+    );
+    assert_eq!(
+        window_definition.current_revision(),
+        super::super::STD_UI_WINDOW_FUNCTION_REVISION_ID
+    );
+    assert_eq!(window_definition.parameters().len(), 2);
+    assert_eq!(
+        window_definition.parameters()[0].id(),
+        super::super::STD_UI_WINDOW_TITLE_PARAMETER_ID
+    );
+    assert_eq!(
+        window_definition.parameters()[1].id(),
+        super::super::STD_UI_WINDOW_CONTENT_PARAMETER_ID
+    );
+
+    let window_executable = snapshot
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == super::super::STD_UI_WINDOW_FUNCTION_ID)
+        .expect("V7 snapshot contains the window executable");
+    assert_eq!(
+        window_executable.revision().artifact().kind(),
+        ExecutableArtifactKind::Client
+    );
+    assert_eq!(
+        window_executable.revision().artifact().content_hash(),
+        artifact_payload_digest(window_executable.revision().artifact().payload())
+            .expect("window artifact hash is valid")
+    );
+    assert_eq!(
+        window_executable.revision().semantic_hash(),
+        function_semantic_digest_with_version(
+            window_executable.revision().semantic_hash_version(),
+            window_definition,
+            window_executable.revision().language_version(),
+            window_executable.revision().artifact(),
+            &[],
+            window_executable.references(),
+        )
+        .expect("window semantic hash is valid")
+    );
+
+    let verified = super::super::verify_standard_library_v7_snapshot(snapshot)
+        .expect("the retained V7 source verifies");
+    orna_compiler::check_standard_library_source(&verified)
+        .expect("the verified V7 source checks through the compiler");
+    assert_eq!(
+        verified.digest(),
+        super::super::ACCEPTED_V7_STANDARD_LIBRARY_DIGEST
+    );
+}
+
+#[test]
 fn prepares_the_v7_to_v8_standard_upgrade_from_an_empty_v7_active_revision() {
     let version_seven = super::super::verify_standard_library_v7_snapshot(
         super::super::retained_standard_library_v7_snapshot()
