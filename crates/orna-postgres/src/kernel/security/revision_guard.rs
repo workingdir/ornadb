@@ -65,6 +65,27 @@ fn validate_locked_active_revision(
     Ok(())
 }
 
+/// Requires a recovered target list to cover the canonical non-system
+/// function set before any other security rows are materialized.
+///
+/// This is the pre-construction counterpart to [`require_complete_function_set`].
+/// Keeping the comparison at the target-authority boundary means a deleted
+/// application target cannot be hidden by a later dangling grant error.
+pub(crate) fn require_complete_function_targets(
+    active: &ActiveDatabaseRevision,
+    targets: &[SecurityFunctionTarget],
+) -> Result<(), PostgresKernelError> {
+    let mut functions = targets
+        .iter()
+        .map(|target| target.function())
+        .collect::<Vec<_>>();
+    functions.sort_unstable();
+    if security_function_targets(active) != functions {
+        return Err(PostgresKernelError::SecurityFunctionSetMismatch);
+    }
+    Ok(())
+}
+
 pub(crate) fn require_complete_function_set(
     active: &ActiveDatabaseRevision,
     snapshot: &SecuritySnapshot,

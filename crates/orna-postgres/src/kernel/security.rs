@@ -103,7 +103,9 @@ pub(crate) use resource_producer::{
     ResourceProducerExit, ResourceProducerFailed, ResourceProducerPull,
 };
 use revision_guard::lock_active_revision_for_resource;
-pub(crate) use revision_guard::{lock_active_revision, require_complete_function_set};
+pub(crate) use revision_guard::{
+    lock_active_revision, require_complete_function_set, require_complete_function_targets,
+};
 use sealed_audit::{
     append_allowed_invocation_audit, append_allowed_invocation_audit_evidence,
     append_linked_invocation_audit, append_sealed_denied_audit, append_unresolved_invocation_audit,
