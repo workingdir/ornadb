@@ -476,3 +476,62 @@ fn malformed_grant_role_inputs_fail_at_candidate_validation_boundary() {
         PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::CyclicRoleMembership)
     ));
 }
+#[test]
+fn valid_grant_role_rebuilds_candidate_without_changing_existing_state() {
+    let existing_privilege_grant = PrivilegeGrant::new(
+        USER,
+        PrivilegeClass::Execute,
+        Some(SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID),
+    )
+    .expect("existing privilege grant should be valid");
+    let current =
+        SecuritySnapshot::new_with_function_targets_local_peer_credentials_and_privilege_grants(
+            REVISION,
+            vec![],
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(OTHER_ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(MEMBER, PrincipalKind::User, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(ROLE, MEMBER)],
+            vec![],
+            vec![],
+            vec![existing_privilege_grant.clone()],
+        )
+        .expect("the existing role-membership snapshot should be valid");
+    let mutation = SecurityAdminMutation::GrantRole {
+        role: OTHER_ROLE,
+        member: ROLE,
+    }
+    .validate(&current)
+    .expect("a valid role grant should pass admin validation");
+    let SecurityAdminMutation::GrantRole { role, member } = mutation else {
+        unreachable!("GrantRole validation must preserve the mutation kind")
+    };
+
+    let mut memberships = current.memberships().collect::<Vec<_>>();
+    memberships.push(RoleMembership::new(role, member));
+    let candidate = rebuild_candidate(
+        &current,
+        current.principals().collect(),
+        memberships,
+        current.privilege_grants().collect(),
+    )
+    .expect("a valid role grant should rebuild the candidate");
+
+    assert!(candidate
+        .memberships()
+        .any(|membership| membership == RoleMembership::new(ROLE, MEMBER)));
+    assert!(candidate
+        .memberships()
+        .any(|membership| membership == RoleMembership::new(OTHER_ROLE, ROLE)));
+    assert_eq!(
+        candidate.principals().collect::<Vec<_>>(),
+        current.principals().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        candidate.privilege_grants().collect::<Vec<_>>(),
+        current.privilege_grants().collect::<Vec<_>>()
+    );
+}
