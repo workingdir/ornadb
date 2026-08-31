@@ -1,10 +1,11 @@
 use super::{
-    StandardLibrary, completion_at, declaration_at, hover, references, type_owner_name_from_source,
+    StandardLibrary, check_document, completion_at, declaration_at, hover, references,
+    type_owner_name_from_source,
 };
 use crate::documents::{Document, PositionMapper};
 use lsp_types::{
-    CompletionContext, CompletionItemKind, CompletionTriggerKind, Hover, HoverContents, Position,
-    Range,
+    CompletionContext, CompletionItemKind, CompletionTriggerKind, DiagnosticSeverity,
+    DiagnosticTag, Hover, HoverContents, NumberOrString, Position, Range,
 };
 
 fn hover_at(text: &str, byte: usize) -> Option<Hover> {
@@ -19,6 +20,139 @@ fn hover_markdown(hover: &Hover) -> &str {
         HoverContents::Markup(markup) => &markup.value,
         other => panic!("expected markdown hover, got {other:?}"),
     }
+}
+
+#[test]
+fn compiler_diagnostics_preserve_raw_message_and_related_metadata() {
+    let standard = StandardLibrary::load().expect("retained V11 standard must load");
+    let text = "CREATE SCHEMA app;\nCREATE SCHEMA app;";
+    let document = Document::new(
+        "file:///duplicate.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let mapper = PositionMapper::new(text);
+
+    let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+    assert_eq!(
+        diagnostic.code,
+        Some(NumberOrString::String("ORNA0103".to_owned()))
+    );
+    assert_eq!(diagnostic.message, "duplicate schema definition app");
+    let primary_start = text.rfind("app").expect("redefined schema");
+    assert_eq!(
+        diagnostic.range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start: primary_start,
+            end: primary_start + "app".len(),
+        })
+    );
+
+    let related = diagnostic
+        .related_information
+        .as_ref()
+        .expect("duplicate diagnostic has related information");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "first defined here");
+    let first_start = text.find("app").expect("first schema");
+    assert_eq!(
+        related[0].location.range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start: first_start,
+            end: first_start + "app".len(),
+        })
+    );
+
+    let data = diagnostic.data.as_ref().expect("structured diagnostic data");
+    assert_eq!(data["severity"], "error");
+    assert_eq!(data["primaryLabel"], "redefined here");
+    assert_eq!(
+        data["help"],
+        "rename one of the definitions or remove the duplicate"
+    );
+    assert_eq!(data["notes"], serde_json::json!([]));
+    assert_eq!(data["related"][0]["path"], document.logical_path());
+    assert_eq!(data["related"][0]["start"], first_start);
+    assert_eq!(
+        data["related"][0]["end"],
+        first_start + "app".len()
+    );
+    assert_eq!(data["related"][0]["label"], "first defined here");
+}
+
+#[test]
+fn unreachable_diagnostic_preserves_warning_metadata_and_return_cause() {
+    let standard = StandardLibrary::load().expect("retained V11 standard must load");
+    let text = concat!(
+        "CREATE SCHEMA app;\n",
+        "CREATE CLIENT FUNCTION app.unreachable()\n",
+        "RETURNS BOOLEAN\n",
+        "IS\n",
+        "BEGIN\n",
+        "RETURN TRUE;\n",
+        "LET ignored := FALSE;\n",
+        "END;",
+    );
+    let document = Document::new("file:///warning.orna".parse().unwrap(), text.to_owned(), 1);
+    let mapper = PositionMapper::new(text);
+
+    let diagnostics = check_document(&document, Some(&standard), &mapper);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::WARNING));
+    assert_eq!(
+        diagnostic.code,
+        Some(NumberOrString::String("ORNA0401".to_owned()))
+    );
+    assert_eq!(diagnostic.message, "unreachable statement");
+    assert_eq!(diagnostic.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+
+    let unreachable_start = text.find("LET ignored").expect("unreachable statement");
+    let unreachable_end = unreachable_start + "LET ignored := FALSE;".len();
+    assert_eq!(
+        diagnostic.range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start: unreachable_start,
+            end: unreachable_end,
+        })
+    );
+
+    let related = diagnostic
+        .related_information
+        .as_ref()
+        .expect("warning has return-cause information");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "this statement returns from the function");
+    let return_start = text.find("RETURN TRUE;").expect("return statement");
+    assert_eq!(
+        related[0].location.range,
+        mapper.range(&orna_syntax::SourceSpan {
+            start: return_start,
+            end: return_start + "RETURN TRUE;".len(),
+        })
+    );
+
+    let data = diagnostic.data.as_ref().expect("structured diagnostic data");
+    assert_eq!(data["severity"], "warning");
+    assert_eq!(data["primaryLabel"], "unreachable code");
+    assert_eq!(
+        data["notes"][0],
+        "unreachable statements are still checked but can never execute"
+    );
+    assert_eq!(data["related"][0]["start"], return_start);
+    assert_eq!(
+        data["related"][0]["end"],
+        return_start + "RETURN TRUE;".len()
+    );
+    assert_eq!(
+        data["related"][0]["label"],
+        "this statement returns from the function"
+    );
 }
 
 #[test]

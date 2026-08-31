@@ -7,10 +7,13 @@
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
-    NumberOrString, Position, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol, Hover,
+    Location, NumberOrString, Position, SymbolKind,
 };
-use orna_compiler::{CompilerDiagnostic, check_standard_library_source};
+use orna_compiler::{
+    CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
+    SourceLocation, check_standard_library_source,
+};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
@@ -50,8 +53,23 @@ impl StandardLibrary {
 /// This path needs no standard library and is used when the verified
 /// standard snapshot cannot be loaded.
 pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let parse = orna_syntax::parse(&document.text);
-    parse
+    let logical_path = document.logical_path();
+    if let Ok(bundle) =
+        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
+    {
+        let report = orna_compiler::parse_bundle(&bundle);
+        return report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
+            .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
+            .collect();
+    }
+
+    // Keep the parser-only fallback deliberately minimal. A source bundle
+    // normally succeeds for an open document, but if its logical path is
+    // rejected there is no compiler metadata to project or invent.
+    orna_syntax::parse(&document.text)
         .diagnostics()
         .iter()
         .map(|diagnostic| Diagnostic {
@@ -61,18 +79,13 @@ pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> V
             code_description: None,
             source: Some("orna".to_owned()),
             message: diagnostic.message.clone(),
-            related_information: Some(vec![DiagnosticRelatedInformation {
-                location: Location {
-                    uri: document.uri.clone(),
-                    range: mapper.range(&diagnostic.span),
-                },
-                message: syntax_help(diagnostic.message.as_str()),
-            }]),
+            related_information: None,
             tags: None,
             data: None,
         })
         .collect()
 }
+
 pub fn check_document(
     document: &Document,
     standard: Option<&StandardLibrary>,
@@ -101,60 +114,77 @@ pub fn check_document(
         .diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri))
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
         .collect()
 }
+
 fn compiler_diagnostic(
     diagnostic: &CompilerDiagnostic,
     mapper: &PositionMapper<'_>,
     uri: &lsp_types::Uri,
+    logical_path: &str,
 ) -> Diagnostic {
-    let span = SourceSpan {
-        start: diagnostic.location().span().start(),
-        end: diagnostic.location().span().end(),
-    };
+    let span = compiler_span(diagnostic.location());
+    let related_information = diagnostic
+        .related()
+        .iter()
+        // PositionMapper is tied to this open document. Do not project a
+        // foreign source location using the current document's text.
+        .filter(|related| related.location().logical_path() == logical_path)
+        .map(|related| DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: mapper.range(&compiler_span(related.location())),
+            },
+            message: related.message().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let related_data = diagnostic
+        .related()
+        .iter()
+        .map(|related| {
+            serde_json::json!({
+                "path": related.location().logical_path(),
+                "start": related.location().span().start(),
+                "end": related.location().span().end(),
+                "label": related.message(),
+            })
+        })
+        .collect::<Vec<_>>();
+
     Diagnostic {
         range: mapper.range(&span),
-        severity: Some(DiagnosticSeverity::ERROR),
+        severity: Some(match diagnostic.severity() {
+            CompilerDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+            CompilerDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+        }),
         code: Some(NumberOrString::String(
             diagnostic.code().as_str().to_owned(),
         )),
         code_description: None,
         source: Some("orna".to_owned()),
+        // Keep the protocol message byte-for-byte equivalent to the
+        // compiler's raw message. Rich labels and notes live in data.
         message: diagnostic.message().to_owned(),
-        related_information: Some(vec![DiagnosticRelatedInformation {
-            location: Location {
-                uri: uri.clone(),
-                range: mapper.range(&span),
-            },
-            message: diagnostic_help(diagnostic),
-        }]),
-        tags: None,
-        data: None,
+        related_information: (!related_information.is_empty()).then_some(related_information),
+        tags: (diagnostic.code() == DiagnosticCode::UnreachableCode)
+            .then_some(vec![DiagnosticTag::UNNECESSARY]),
+        data: Some(serde_json::json!({
+            "severity": diagnostic.severity().as_str(),
+            "title": diagnostic.code().title(),
+            "summary": diagnostic.code().summary(),
+            "primaryLabel": diagnostic.primary_label(),
+            "help": diagnostic.help(),
+            "notes": diagnostic.notes(),
+            "related": related_data,
+        })),
     }
 }
 
-fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
-    let mut help = format!(
-        "{} {}: {}",
-        diagnostic.code().as_str(),
-        diagnostic.code().title(),
-        diagnostic.code().summary()
-    );
-    if let Some(next_step) = diagnostic.code().help() {
-        help.push_str(" Help: ");
-        help.push_str(next_step);
-    }
-    help
-}
-
-fn syntax_help(message: &str) -> String {
-    if message.contains("expected a name") {
-        "Add the missing name at this location.".to_owned()
-    } else if message.contains("expected") {
-        "Add the expected token or close the current construct.".to_owned()
-    } else {
-        "Review the syntax at this location.".to_owned()
+fn compiler_span(location: &SourceLocation) -> SourceSpan {
+    SourceSpan {
+        start: location.span().start(),
+        end: location.span().end(),
     }
 }
 
