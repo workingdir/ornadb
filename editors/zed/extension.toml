@@ -1,6 +1,6 @@
 id = "orna"
 name = "Orna"
-version = "0.1.0"
+version = "1.0.0"
 schema_version = 1
 authors = ["OrnaDB"]
 description = "Orna language support for Zed"
