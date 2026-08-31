@@ -3372,6 +3372,35 @@ fn serves_source_check_diagnostic_matrix_with_lsp_byte_span_parity() {
 }
 
 #[test]
+fn serves_canonical_source_check_diagnostic_parity_for_one_invalid_fixture() {
+    let source = SOURCE_CHECK_PARITY_ASCII_SOURCE;
+    let uri = "file:///test/source-check-parity.orna";
+    let canonical = canonical_source_check_diagnostics(source, uri);
+    assert_eq!(canonical.len(), 1);
+
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    open_document(&mut client, uri, source, 1);
+    let pushed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(
+        lsp_diagnostic_projections(source, &pushed["diagnostics"]),
+        canonical,
+        "check_document diagnostics must match source-check code, byte span, and message",
+    );
+    let pulled = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pulled["kind"], "full");
+    assert_eq!(
+        lsp_diagnostic_projections(source, &pulled["items"]),
+        canonical,
+        "pulled check_document diagnostics must match source-check code, byte span, and message",
+    );
+    client.shutdown();
+}
+
+#[test]
 fn serves_syntax_diagnostic_for_malformed_schema_in_push_and_pull() {
     let mut client = Client::spawn();
     initialize(&mut client);
