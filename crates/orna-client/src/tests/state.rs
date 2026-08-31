@@ -513,6 +513,7 @@ fn client_user_state_load_rejects_mixed_context_batch_atomically() {
         )])
         .unwrap();
     let before = state.user().clone();
+    let before_epoch = state.user_state_epoch();
 
     let error = state
         .load_user_state(&[
@@ -539,6 +540,85 @@ fn client_user_state_load_rejects_mixed_context_batch_atomically() {
             if key.root_function() == FunctionId::from_bytes([0x75; 16])
     ));
     assert_eq!(state.user(), &before);
+    assert_eq!(state.user_state_epoch(), before_epoch);
+}
+
+#[test]
+fn client_user_state_reload_advances_epoch_for_changed_state_and_skips_identical_snapshot() {
+    let root_function = FunctionId::from_bytes([0x76; 16]);
+    let function = FunctionId::from_bytes([0x77; 16]);
+    let slot = StateSlotId::from_bytes([0x78; 16]);
+    let principal = PrincipalId::from_bytes([0x79; 16]);
+    let value_type = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+    let context = super::super::ClientStateContext::new(
+        root_function,
+        "profile".to_owned(),
+        "root-instance".to_owned(),
+    )
+    .unwrap();
+    let key = UserStateKey::new(
+        principal,
+        root_function,
+        "profile".to_owned(),
+        function,
+        "root-instance".to_owned(),
+        slot,
+    )
+    .unwrap();
+    let loaded = UserStateCell::new(
+        key.clone(),
+        RuntimeValue::Text("loaded".to_owned()),
+        value_type,
+        1,
+        SystemTime::UNIX_EPOCH,
+    );
+    let mut state = super::super::ClientStateStore::new();
+    state.set_context(context);
+    assert_eq!(state.user_state_epoch(), 0);
+
+    state
+        .load_user_state(std::slice::from_ref(&loaded))
+        .unwrap();
+    let first_epoch = state.user_state_epoch();
+    assert_eq!(first_epoch, 1);
+
+    state
+        .load_user_state(std::slice::from_ref(&loaded))
+        .unwrap();
+    assert_eq!(
+        state.user_state_epoch(),
+        first_epoch,
+        "an identical durable snapshot does not invalidate resources"
+    );
+
+    let changed = UserStateCell::new(
+        key,
+        RuntimeValue::Text("changed".to_owned()),
+        value_type,
+        2,
+        SystemTime::UNIX_EPOCH,
+    );
+    state
+        .load_user_state(std::slice::from_ref(&changed))
+        .unwrap();
+    assert_eq!(state.user_state_epoch(), first_epoch + 1);
+
+    state.load_user_state(&[]).unwrap();
+    assert_eq!(state.user_state_epoch(), first_epoch + 2);
+    assert!(state.user().is_empty());
+
+    state.user_state_epoch = u64::MAX;
+    let before_overflow = state.clone();
+    let error = state
+        .load_user_state(std::slice::from_ref(&loaded))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        super::super::ClientUserStateError::InvalidChange(
+            "USER state invalidation epoch exhausted".to_owned()
+        )
+    );
+    assert_eq!(state, before_overflow);
 }
 
 #[test]
@@ -662,6 +742,7 @@ fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context
         )
         .unwrap();
     state.set_context(context.clone());
+    let epoch_before_filtered = state.user_state_epoch();
 
     state
         .load_user_state_for_instances(
@@ -684,6 +765,12 @@ fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context
             &requested_instances,
         )
         .unwrap();
+    assert_eq!(
+        state.user_state_epoch(),
+        epoch_before_filtered + 1,
+        "filtered reload changes the selected USER snapshot"
+    );
+
     assert_eq!(state.user().len(), 3);
     assert!(
         !state
@@ -752,6 +839,8 @@ fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context
     ));
 
     let before_unexpected = state.user().clone();
+    let epoch_before_unexpected = state.user_state_epoch();
+
     let unexpected_error = state
         .load_user_state_for_instances(
             &[UserStateCell::new(
@@ -770,8 +859,11 @@ fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context
             if key.instance_key() == "row:99"
     ));
     assert_eq!(state.user(), &before_unexpected);
+    assert_eq!(state.user_state_epoch(), epoch_before_unexpected);
 
     let before_duplicate = state.user().clone();
+    let epoch_before_duplicate = state.user_state_epoch();
+
     let duplicate_error = state
         .load_user_state(&[
             UserStateCell::new(
@@ -796,6 +888,7 @@ fn client_user_state_load_accepts_multiple_instances_and_rejects_foreign_context
             if key.instance_key() == "row:42"
     ));
     assert_eq!(state.user(), &before_duplicate);
+    assert_eq!(state.user_state_epoch(), epoch_before_duplicate);
 
     let before_foreign = state.user().clone();
     let error = state
@@ -2108,6 +2201,98 @@ fn evaluator_resource_key_changes_after_user_state_mutation() {
         executor_b.executed.len(),
         1,
         "the READY result must not be reused"
+    );
+    assert_eq!(result_b.value(), &RuntimeValue::Text("after".to_owned()));
+    assert_eq!(key_a.target(), key_b.target());
+    assert_eq!(key_a.arguments_digest(), key_b.arguments_digest());
+    assert_ne!(key_a.invalidation_token(), key_b.invalidation_token());
+}
+
+#[test]
+fn evaluator_resource_key_changes_after_user_state_reload() {
+    let (active, function, pair, _, parameter) = version_six_client_resource_action_active();
+    let grants =
+        capability::LocalCapabilityGrantSet::from_grants([capability::LocalCapabilityGrant::new(
+            capability::LocalCapabilityName::StdFsRead,
+            capability::LocalCapabilityScope::path("/tmp").unwrap(),
+        )
+        .unwrap()])
+        .unwrap();
+    let argument =
+        FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/user-reload".to_owned())).unwrap();
+    let context = super::super::ClientStateContext::new(
+        function,
+        "profile".to_owned(),
+        "instance".to_owned(),
+    )
+    .unwrap();
+    let mut state = ClientStateStore::new();
+    let mut executor_a =
+        RecordingActionExecutor::new(Some(RuntimeValue::Text("before".to_owned())));
+    let result_a = super::super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+        &active,
+        &authorise(pair, function),
+        &context,
+        std::slice::from_ref(&argument),
+        &[],
+        &grants,
+        &mut state,
+        InvocationId::from_bytes([0xc1; 16]),
+        &mut executor_a,
+    )
+    .unwrap();
+    let key_a = executor_a.executed[0].key();
+    assert_eq!(result_a.value(), &RuntimeValue::Text("before".to_owned()));
+    assert_eq!(
+        state.resource(key_a).map(ClientResource::status),
+        Some(ClientResourceStatus::Ready)
+    );
+    assert_eq!(state.user_state_epoch(), 0);
+
+    let durable_key = UserStateKey::new(
+        PrincipalId::from_bytes([0x7a; 16]),
+        function,
+        "profile".to_owned(),
+        function,
+        "instance".to_owned(),
+        StateSlotId::from_bytes([0xc2; 16]),
+    )
+    .unwrap();
+    state
+        .load_user_state(&[UserStateCell::new(
+            durable_key,
+            RuntimeValue::Text("reloaded".to_owned()),
+            orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID,
+            1,
+            SystemTime::UNIX_EPOCH,
+        )])
+        .unwrap();
+    assert_eq!(state.user_state_epoch(), 1);
+
+    let mut executor_b =
+        RecordingActionExecutor::new(Some(RuntimeValue::Text("after".to_owned())));
+    let result_b = super::super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
+        &active,
+        &authorise(pair, function),
+        &context,
+        std::slice::from_ref(&argument),
+        &[],
+        &grants,
+        &mut state,
+        InvocationId::from_bytes([0xc3; 16]),
+        &mut executor_b,
+    )
+    .unwrap();
+    let key_b = executor_b.executed[0].key();
+
+    assert_ne!(
+        key_a, key_b,
+        "USER reload must select a new local cache identity"
+    );
+    assert_eq!(
+        executor_b.executed.len(),
+        1,
+        "the READY result from before the reload must not be reused"
     );
     assert_eq!(result_b.value(), &RuntimeValue::Text("after".to_owned()));
     assert_eq!(key_a.target(), key_b.target());

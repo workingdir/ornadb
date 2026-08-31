@@ -3946,6 +3946,38 @@ impl ClientStateStore {
         self.user_state_epoch
     }
 
+    /// Computes the USER invalidation epoch for a validated reload.
+    ///
+    /// The comparison is against the exact selected map that the reload will
+    /// replace. Identical stored values do not need a new resource identity,
+    /// while any insertion, replacement, or removal advances the epoch before
+    /// the map is committed. Overflow is reported through the existing public
+    /// state error so the caller's map and epoch remain unchanged.
+    fn user_state_epoch_after_reload(
+        &self,
+        loaded: &HashMap<ClientStateKey, ClientUserState>,
+        is_selected: impl Fn(&ClientStateKey) -> bool,
+    ) -> Result<u64, ClientUserStateError> {
+        let current_count = self
+            .user
+            .keys()
+            .filter(|key| is_selected(key))
+            .count();
+        let changed = current_count != loaded.len()
+            || loaded
+                .iter()
+                .any(|(key, value)| self.user.get(key) != Some(value));
+        if changed {
+            self.user_state_epoch.checked_add(1).ok_or_else(|| {
+                ClientUserStateError::InvalidChange(
+                    "USER state invalidation epoch exhausted".to_owned(),
+                )
+            })
+        } else {
+            Ok(self.user_state_epoch)
+        }
+    }
+
     /// Creates one state key in the selected root context.
     fn key_for(&self, function: FunctionId, slot: StateSlotId) -> ClientStateKey {
         ClientStateKey::from_context(&self.context, function, slot)
@@ -4226,6 +4258,9 @@ impl ClientStateStore {
     /// authenticated adapter binds the store before transport access, and the
     /// store itself carries no principal identity. Existing cells in that root
     /// context are replaced; cells for other contexts remain available.
+    /// A successful reload advances the resource invalidation epoch when this
+    /// selected map differs; an identical snapshot keeps the current epoch.
+
     /// Single-instance updates remain enforced by [`Self::set_user_state`].
     // ClientUserStateError preserves both keys in its public mismatch diagnostic.
     #[allow(clippy::result_large_err)]
@@ -4246,11 +4281,16 @@ impl ClientStateStore {
                 return Err(ClientUserStateError::DuplicateKey(key));
             }
         }
+        let next_epoch = self.user_state_epoch_after_reload(&loaded, |key| {
+            key.root_function() == context.root_function()
+                && key.state_profile() == context.state_profile()
+        })?;
         self.user.retain(|key, _| {
             key.root_function() != context.root_function()
                 || key.state_profile() != context.state_profile()
         });
         self.user.extend(loaded);
+        self.user_state_epoch = next_epoch;
         Ok(())
     }
 
@@ -4260,6 +4300,9 @@ impl ClientStateStore {
     /// the requested instances. Existing cells for other instances, including
     /// dirty values, remain untouched; requested instances absent from `cells`
     /// are removed after the complete batch passes validation.
+    /// A changed selected map advances the resource invalidation epoch; an
+    /// identical selected snapshot keeps the current epoch.
+
     // ClientUserStateError preserves both keys in its public mismatch diagnostic.
     #[allow(clippy::result_large_err)]
     pub fn load_user_state_for_instances(
@@ -4295,12 +4338,18 @@ impl ClientStateStore {
                 return Err(ClientUserStateError::DuplicateKey(key));
             }
         }
+        let next_epoch = self.user_state_epoch_after_reload(&loaded, |key| {
+            key.root_function() == context.root_function()
+                && key.state_profile() == context.state_profile()
+                && requested.contains_key(&(key.function(), key.instance_key().to_owned()))
+        })?;
         self.user.retain(|key, _| {
             key.root_function() != context.root_function()
                 || key.state_profile() != context.state_profile()
                 || !requested.contains_key(&(key.function(), key.instance_key().to_owned()))
         });
         self.user.extend(loaded);
+        self.user_state_epoch = next_epoch;
         Ok(())
     }
 
