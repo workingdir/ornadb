@@ -1197,9 +1197,8 @@ fn rejects_await_in_non_suspending_contexts_with_lossless_later_recovery() {
     ];
 
     for (invalid, context) in cases {
-        let source = format!(
-            "{invalid}CREATE CLIENT FUNCTION examples.recovered() RETURNS TEXT AS 'ok';"
-        );
+        let source =
+            format!("{invalid}CREATE CLIENT FUNCTION examples.recovered() RETURNS TEXT AS 'ok';");
         let parsed = parse(&source);
 
         assert_eq!(parsed.syntax().text(), source, "{context}");
@@ -1229,7 +1228,6 @@ fn rejects_await_in_non_suspending_contexts_with_lossless_later_recovery() {
         );
     }
 }
-
 
 #[test]
 fn rejects_client_expression_trailing_dots() {
