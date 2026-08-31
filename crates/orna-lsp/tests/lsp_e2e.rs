@@ -1857,6 +1857,14 @@ fn serves_accepted_expression_client_fixture_without_diagnostics_and_with_symbol
         labels.contains(&"CREATE"),
         "global completion preserved: {labels:?}"
     );
+
+    let incomplete_source = "CREATE CLIENT FUNCTION app.probe(p_item REF expr.item) RETURNS TEXT AS p_item.;\n";
+    let incomplete_parse = orna_syntax::parse(incomplete_source);
+    assert!(
+        incomplete_parse.diagnostics().iter().any(|diagnostic| diagnostic.message.contains("CLIENT expression dot")),
+        "incomplete CLIENT member path must remain an explicit parser diagnostic"
+    );
+
     assert_hover_contains(
         &mut client,
         uri,
