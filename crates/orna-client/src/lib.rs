@@ -25,8 +25,8 @@ use orna_artifact::client_plan::{
     ResourceOperationNode, STATE_FORMAT_VERSION, StateClientPlan, StateDefault, StateScope,
 };
 use orna_core::{
-    CallSiteId, FieldId, FunctionId, FunctionRevisionId, InvocationId, LocalId, ObjectId,
-    ParameterId, PrincipalId, StateSlotId, TypeId,
+    CallSiteId, FieldId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationId, LocalId,
+    ObjectId, ParameterId, PrincipalId, StateSlotId, TypeId,
     canonical_hash::{CanonicalHashError, artifact_payload_digest, catalogue_digest_with_context},
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility,
