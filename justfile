@@ -167,12 +167,17 @@ kernel-resource-audit-proof:
 kernel-test:
     #!/usr/bin/env bash
     set -euo pipefail
-    kernel_database=ornadb_kernel_gate
+    kernel_database="ornadb_kernel_gate_${BASHPID}_$(date -u +%s%N)"
     cleanup() {
-        docker compose exec -T postgres dropdb --if-exists --username=ornadb_dev "$kernel_database" || true
+        local status=$?
+        trap - EXIT INT TERM
+        docker compose exec -T postgres dropdb --if-exists --force --username=ornadb_dev "$kernel_database" || true
         docker compose stop postgres || true
+        exit "$status"
     }
     trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     docker compose up --detach --wait postgres
     export ORNA_TEST_POSTGRES_ADMIN_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password"
     export ORNA_TEST_POSTGRES_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=ornadb_dev"
@@ -187,8 +192,8 @@ kernel-test:
         postgres_tests+=(--test "${test_name%.rs}")
     done
     cargo test --package orna-server --features test-hooks "${server_tests[@]}" -- --ignored --test-threads=1
-    docker compose exec -T postgres dropdb --if-exists --username=ornadb_dev "$kernel_database"
-    docker compose exec -T postgres createdb --username=ornadb_dev "$kernel_database"
+    docker compose exec -T postgres dropdb --if-exists --force --username=ornadb_dev "$kernel_database"
+    docker compose exec -T postgres createdb --template=template0 --username=ornadb_dev "$kernel_database"
     export ORNA_TEST_POSTGRES_URL="host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password dbname=$kernel_database"
     cargo test --package orna-postgres --features test-hooks --lib -- --ignored --test-threads=1
     cargo test --package orna-postgres --features test-hooks "${postgres_tests[@]}" -- --ignored --test-threads=1
