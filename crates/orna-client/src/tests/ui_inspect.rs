@@ -1,5 +1,12 @@
 use super::*;
 
+fn inspect_epoch(high: u8, low: u8) -> super::super::InspectEpochId {
+    let mut bytes = [0; 16];
+    bytes[..8].fill(high);
+    bytes[8..].fill(low);
+    super::super::InspectEpochId::from_bytes(bytes)
+}
+
 #[test]
 fn standard_ui_text_constructor_builds_canonical_value_without_executor() {
     let standard = standard_v9();
@@ -824,7 +831,7 @@ fn inspect_snapshot_validation_rejects_empty_carrier_rows() {
     let (active, _, pair, _) = version_one_active(true);
     let envelope = super::super::InspectCarrierEnvelope::new(
         super::super::InspectCarrierKind::Snapshot,
-        7,
+        inspect_epoch(0, 7),
         pair.source(),
         pair.catalogue(),
         Vec::new(),
@@ -851,24 +858,35 @@ fn inspect_snapshot_row_binding_preserves_server_root_authority() {
     row.push(0);
     row.push(0);
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Ok(target)
+    );
+    let mut high_half_mismatch = row.clone();
+    high_half_mismatch[9] = 1;
+    assert_eq!(
+        super::super::decode_inspect_snapshot_target_row(
+            &high_half_mismatch,
+            inspect_epoch(0, 7)
+        ),
+        Err(super::super::ClientInspectError::Failed(
+            "inspect.epoch_mismatch".to_owned()
+        ))
     );
     let forged_root = super::super::FunctionId::from_bytes([0x19; 16]);
     row[41..57].copy_from_slice(&forged_root.to_bytes());
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Ok(target)
     );
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 8),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 8)),
         Err(super::super::ClientInspectError::Failed(
             "inspect.epoch_mismatch".to_owned()
         ))
     );
     row.extend_from_slice(&[0x19; 16]);
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Err(super::super::ClientInspectError::Failed(
             "inspect.malformed_carrier".to_owned()
         ))
@@ -890,19 +908,19 @@ fn inspect_snapshot_row_rejects_zero_value_batch_count() {
 
     assert_eq!(row.len(), 76);
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Err(super::super::ClientInspectError::Failed(
             "inspect.malformed_carrier".to_owned()
         ))
     );
     row[67..75].copy_from_slice(&1_u64.to_be_bytes());
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Ok(target)
     );
     row.push(0x19);
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(&row, 7),
+        super::super::decode_inspect_snapshot_target_row(&row, inspect_epoch(0, 7)),
         Err(super::super::ClientInspectError::Failed(
             "inspect.malformed_carrier".to_owned()
         ))
@@ -941,7 +959,7 @@ fn inspect_render_rejects_mixed_target_before_rendering() {
     let function = FunctionId::from_bytes([0x90; 16]);
     let function_revision = FunctionRevisionId::from_bytes([0x8f; 16]);
     let target = InvocationId::from_bytes([0x91; 16]);
-    let epoch = 7_u64;
+    let epoch = inspect_epoch(0x96, 7);
     let parameter = ParameterId::from_bytes([0x92; 16]);
     let context = super::super::ClientExecutionContext {
         pair,
@@ -969,8 +987,7 @@ fn inspect_render_rejects_mixed_target_before_rendering() {
         orna_protocol::encode_constructed_value(&active, &registry, &value).expect("encoded row")
     };
 
-    let mut epoch_bytes = [0x96; 16];
-    epoch_bytes[8..].copy_from_slice(&epoch.to_be_bytes());
+    let epoch_bytes = epoch.to_bytes();
     let mut snapshot_row = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
     snapshot_row.extend_from_slice(&epoch_bytes);
     snapshot_row.extend_from_slice(&target.to_bytes());
@@ -1148,7 +1165,7 @@ fn inspector_carriers_reject_malformed_and_stale_revision_envelopes() {
     let (active, _, pair, _) = version_one_active(true);
     let payload = super::super::InspectCarrierEnvelope::new(
         super::super::InspectCarrierKind::Snapshot,
-        7,
+        inspect_epoch(0, 7),
         pair.source(),
         pair.catalogue(),
         vec![],
@@ -1177,7 +1194,7 @@ fn inspector_carriers_reject_malformed_and_stale_revision_envelopes() {
 
     let stale_payload = super::super::InspectCarrierEnvelope::new(
         super::super::InspectCarrierKind::Snapshot,
-        7,
+        inspect_epoch(0, 7),
         SourceRevisionId::from_bytes([0x91; 16]),
         pair.catalogue(),
         vec![],
