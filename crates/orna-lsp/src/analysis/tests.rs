@@ -67,7 +67,10 @@ fn compiler_diagnostics_preserve_raw_message_and_related_metadata() {
         })
     );
 
-    let data = diagnostic.data.as_ref().expect("structured diagnostic data");
+    let data = diagnostic
+        .data
+        .as_ref()
+        .expect("structured diagnostic data");
     assert_eq!(data["severity"], "error");
     assert_eq!(data["primaryLabel"], "redefined here");
     assert_eq!(
@@ -77,10 +80,7 @@ fn compiler_diagnostics_preserve_raw_message_and_related_metadata() {
     assert_eq!(data["notes"], serde_json::json!([]));
     assert_eq!(data["related"][0]["path"], document.logical_path());
     assert_eq!(data["related"][0]["start"], first_start);
-    assert_eq!(
-        data["related"][0]["end"],
-        first_start + "app".len()
-    );
+    assert_eq!(data["related"][0]["end"], first_start + "app".len());
     assert_eq!(data["related"][0]["label"], "first defined here");
 }
 
@@ -127,7 +127,10 @@ fn unreachable_diagnostic_preserves_warning_metadata_and_return_cause() {
         .as_ref()
         .expect("warning has return-cause information");
     assert_eq!(related.len(), 1);
-    assert_eq!(related[0].message, "this statement returns from the function");
+    assert_eq!(
+        related[0].message,
+        "this statement returns from the function"
+    );
     let return_start = text.find("RETURN TRUE;").expect("return statement");
     assert_eq!(
         related[0].location.range,
@@ -137,7 +140,10 @@ fn unreachable_diagnostic_preserves_warning_metadata_and_return_cause() {
         })
     );
 
-    let data = diagnostic.data.as_ref().expect("structured diagnostic data");
+    let data = diagnostic
+        .data
+        .as_ref()
+        .expect("structured diagnostic data");
     assert_eq!(data["severity"], "warning");
     assert_eq!(data["primaryLabel"], "unreachable code");
     assert_eq!(
@@ -236,8 +242,8 @@ fn completion_resolves_nested_client_fields_through_utf16_cursor() {
         parse.diagnostics()
     );
     let mapper = PositionMapper::new(text);
-    let outer_cursor = text.find("p_item.nested.").expect("outer field cursor")
-        + "p_item.nested.".len();
+    let outer_cursor =
+        text.find("p_item.nested.").expect("outer field cursor") + "p_item.nested.".len();
     let outer_position = mapper.position(outer_cursor);
     assert_eq!(outer_position.line, 5);
     let body_line = text.lines().nth(5).expect("CLIENT body line");
