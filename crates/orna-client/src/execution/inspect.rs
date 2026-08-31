@@ -279,11 +279,8 @@ fn inspect_projection_target_from_envelope(
         if payload.len() < 91 || payload[0] != expected_kind.tag() {
             return Err(inspect_carrier_error("inspect.malformed_carrier"));
         }
-        if InspectEpochId::from_bytes(
-            payload[9..25]
-                .try_into()
-                .expect("projection epoch width"),
-        ) != envelope.epoch_id()
+        if InspectEpochId::from_bytes(payload[9..25].try_into().expect("projection epoch width"))
+            != envelope.epoch_id()
         {
             return Err(inspect_carrier_error("inspect.epoch_mismatch"));
         }
@@ -386,8 +383,7 @@ pub(super) fn decode_inspect_snapshot_target_row(
     if row.len() < 68 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
         return Err(inspect_carrier_error("inspect.malformed_carrier"));
     }
-    if InspectEpochId::from_bytes(row[9..25].try_into().expect("snapshot epoch width"))
-        != epoch_id
+    if InspectEpochId::from_bytes(row[9..25].try_into().expect("snapshot epoch width")) != epoch_id
     {
         return Err(inspect_carrier_error("inspect.epoch_mismatch"));
     }
