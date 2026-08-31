@@ -28,7 +28,9 @@ recipes.
 
 When using a prebuilt engine instead of the build script's Docker or source
 build, `ORNA_POSTGRES_ENGINE_OUTPUT` must be an **absolute** path to a complete
-engine output directory, such as `$PWD/third_party/postgresql/output`.
+engine output directory, such as
+`$PWD/target/postgresql-embedded-native-one/output` after the native lifecycle
+recipe has produced it.
 
 This checkout currently has neither `./spec/` nor the sibling `../spec/`
 checkout. The latter owns `../spec/spec/orna_runtime_abi_v1.h`; it is required
@@ -103,8 +105,9 @@ retained. A prerequisite that is intentionally not installed is **skipped** or
 **unavailable** only when the evidence record names the gate and missing
 prerequisite; it is never a pass. A command that was invoked and exited
 non-zero is a **failure**, not a skip. The current missing `./spec`/`../spec`
-inputs therefore make the ABI and Qt gates unavailable, rather than evidence
-of success.
+inputs therefore make the canonical-header-consuming ABI and CMake/CTest Qt
+gates unavailable, rather than evidence of success; path-dependent Rust runtime
+smokes remain separate.
 
 ## Repository map
 
@@ -223,7 +226,7 @@ V10 revision.
 
 `compose.yaml` defines the development `postgres` service using
 `postgres:18.4-bookworm`. It binds PostgreSQL to `127.0.0.1:55432` and stores
-data in the named `orna_postgres_data` volume. Its credentials are development
+data in the named `ornadb_postgres_data` volume. Its credentials are development
 fixtures only.
 
 The basic Compose lifecycle recipes (`postgres-up`, `postgres-status`,
