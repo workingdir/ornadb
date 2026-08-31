@@ -564,8 +564,8 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
         0x04 | 0x05 => (payload.len() == 8).then_some(()).ok_or(()),
         0x06 => (is_rows_standard_scalar_type_id_for_tag(type_identity, 0x06)
             && std::str::from_utf8(payload).is_ok())
-            .then_some(())
-            .ok_or(()),
+        .then_some(())
+        .ok_or(()),
         0x07 => is_rows_standard_scalar_type_id_for_tag(type_identity, 0x07)
             .then_some(())
             .ok_or(()),

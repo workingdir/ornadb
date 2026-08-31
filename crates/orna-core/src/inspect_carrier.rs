@@ -1101,8 +1101,9 @@ mod tests {
             InspectCarrierKind::SecurityDecisions,
         ];
         for kind in kinds {
-            let carrier = InspectCarrierEnvelope::new(kind, epoch(7), source(), catalogue(), vec![])
-                .expect("empty rows are valid");
+            let carrier =
+                InspectCarrierEnvelope::new(kind, epoch(7), source(), catalogue(), vec![])
+                    .expect("empty rows are valid");
             let encoded = carrier.encode().expect("carrier encodes");
             assert_eq!(InspectCarrierEnvelope::decode(&encoded), Ok(carrier));
         }
