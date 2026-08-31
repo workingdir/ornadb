@@ -162,19 +162,21 @@ The canonical envelope is ordered as follows:
 magic                 "ORNA-INSPECT/1 "
 carrier_version       u16 = 1
 projection_tag        u8
-epoch_id              u64
+epoch_id              exact 16-byte InspectEpochId
 source_revision_id    canonical source revision identity
 catalogue_revision_id canonical catalogue revision identity
 row_count             bounded u32
 rows                  canonical length-delimited row frames
 ```
 
-The existing canonical identity widths, byte order, and active-value bounds
-apply. Encoders use one field order and big-endian integers. Decoders reject
-unknown versions/tags, truncation, duplicate or unsorted identity fields,
-invalid nested values, excessive row counts, and trailing bytes. Carrier
-construction is atomic. Epoch and revision evidence are kernel-generated, not
-caller-supplied authority.
+The `epoch_id` field is the complete, kernel-generated `InspectEpochId`: an
+exact 16-byte identity encoded in network byte order. It must never be
+truncated to a counter or low-width integer. The existing canonical identity
+widths, byte order, and active-value bounds apply. Encoders use one field order
+and big-endian integers. Decoders reject unknown versions/tags, truncation,
+duplicate or unsorted identity fields, invalid nested values, excessive row
+counts, and trailing bytes. Carrier construction is atomic. Epoch and revision
+evidence are kernel-generated, not caller-supplied authority.
 
 ### Projection row schemas
 

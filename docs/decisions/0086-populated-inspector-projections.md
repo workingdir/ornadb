@@ -71,9 +71,9 @@ field, or alternate decoder. The following remain byte-for-byte identities:
   `sys.security.principal`, and `...f8` through `...ff` for the eight
   projection result carriers;
 * representation contracts `orna.sys.inspect.*@1`;
-* the envelope order: magic, version, projection tag, server epoch number,
-  source revision, catalogue revision, bounded row count, then
-  length-delimited row frames; and
+* the envelope order: the complete kernel-generated `InspectEpochId` (exact
+  16-byte identity in network byte order), source revision, catalogue revision,
+  bounded row count, then length-delimited row frames; and
 * the exact nine-parameter `std.inspect.render@1` order: snapshot,
   invocation nodes, calls, resources, state cells, UI nodes, presentation
   candidates, runtime bindings, and security decisions.
