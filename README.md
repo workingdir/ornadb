@@ -29,7 +29,8 @@ Requirements:
 
 `ORNA_POSTGRES_ENGINE_OUTPUT`, when used instead of the build script's Docker
 or source build, must be an **absolute** path to a complete prebuilt engine
-output directory (for example, `$PWD/third_party/postgresql/output`).
+output directory (for example, `$PWD/target/postgresql-embedded-native-one/output`
+after the native lifecycle recipe has produced it).
 
 Build from a source checkout after warming the locked dependency cache:
 
