@@ -6,7 +6,7 @@
 //! by a future adapter without changing the contract.
 
 use orna_core::{
-    CatalogueRevisionId, InvocationId, PrincipalId, SourceRevisionId,
+    CatalogueRevisionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
     inspect::{INSPECT_RENDER_CARRIER_SIGNATURE, InspectProjection},
     inspect_carrier::{
         InspectCarrierEnvelope, InspectCarrierError, InspectCarrierKind, InspectCarrierProvenance,
@@ -33,6 +33,13 @@ fn catalogue(byte: u8) -> CatalogueRevisionId {
     CatalogueRevisionId::from_bytes([byte; 16])
 }
 
+fn epoch(high: u8, low: u8) -> InspectEpochId {
+    let mut bytes = [0; 16];
+    bytes[..8].fill(high);
+    bytes[8..].fill(low);
+    InspectEpochId::from_bytes(bytes)
+}
+
 fn integer_row(value: i32) -> Vec<u8> {
     let mut row = Vec::with_capacity(25 + 4);
     row.extend_from_slice(b"ORV5");
@@ -46,7 +53,7 @@ fn integer_row(value: i32) -> Vec<u8> {
 fn binding(generation: u64, target: InvocationId) -> InspectEpochBinding {
     InspectEpochBinding::new(
         invocation(0x10),
-        0x0102_0304_0506_0708,
+        epoch(0xa1, 0xa8),
         target,
         principal(0x20),
         RevisionPair::new(source(0x30), catalogue(0x40)),
@@ -132,7 +139,7 @@ fn carrier_identity_and_provenance_are_stable_across_all_projections() {
 
     let target = invocation(0x70);
     let provenance = InspectCarrierProvenance::trusted_for_target(
-        0x0102_0304_0506_0708,
+        epoch(0xa1, 0xa8),
         target,
         source(0x80),
         catalogue(0x90),
@@ -179,7 +186,7 @@ fn carrier_identity_and_provenance_are_stable_across_all_projections() {
 fn malformed_carrier_bytes_and_rows_fail_closed() {
     let carrier = InspectCarrierEnvelope::new(
         InspectCarrierKind::Calls,
-        7,
+        epoch(0, 7),
         source(0xa1),
         catalogue(0xb2),
         vec![integer_row(1)],
@@ -224,7 +231,7 @@ fn malformed_carrier_bytes_and_rows_fail_closed() {
 
     let malformed_row = InspectCarrierEnvelope::new(
         InspectCarrierKind::Calls,
-        7,
+        epoch(0, 7),
         source(0xa1),
         catalogue(0xb2),
         vec![b"not-an-orv5-row".to_vec()],
@@ -242,7 +249,12 @@ fn target_provenance_and_stale_epoch_bindings_fail_closed() {
     let target = invocation(0xc1);
     let other_target = invocation(0xc2);
     let provenance =
-        InspectCarrierProvenance::trusted_for_target(11, target, source(0xd1), catalogue(0xe1));
+        InspectCarrierProvenance::trusted_for_target(
+            epoch(0, 11),
+            target,
+            source(0xd1),
+            catalogue(0xe1),
+        );
 
     assert_eq!(
         provenance.bind_target(other_target),
@@ -308,7 +320,7 @@ fn revision_mismatch_fails_closed_with_public_epoch_error() {
     let current = binding(4, target);
     let revision_mismatch = InspectEpochBinding::new(
         invocation(0x10),
-        0x0102_0304_0506_0708,
+        epoch(0x01, 0x08),
         target,
         principal(0x20),
         RevisionPair::new(source(0x31), catalogue(0x40)),
