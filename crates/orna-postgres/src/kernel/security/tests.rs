@@ -74,6 +74,69 @@ fn resource_lineage_validation_rejects_zero_request_id_before_other_lineage_chec
     assert_eq!(request, before);
 }
 
+#[tokio::test]
+async fn direct_resource_entry_points_reject_zero_request_id_before_database_access() {
+    let principal = PrincipalId::from_bytes([0x06; 16]);
+    let security = SecuritySnapshot::new(
+        RevisionPair::new(
+            SourceRevisionId::from_bytes([0x07; 16]),
+            CatalogueRevisionId::from_bytes([0x08; 16]),
+        ),
+        vec![],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![],
+    )
+    .expect("zero-request producer test security snapshot is valid");
+    let session = security
+        .bind_authenticated_session(principal, vec![])
+        .expect("zero-request producer test session binds");
+    let mut request = resource_request_lineage_fixture();
+    request.request_id = InvocationId::from_bytes([0; 16]);
+    let before = request.clone();
+    let mut database_config = tokio_postgres::Config::new();
+    database_config.host("127.0.0.1");
+    database_config.port(1);
+    let kernel = PostgresKernel::new(database_config);
+
+    let dispatch_error = kernel
+        .dispatch_authenticated_server_resource(&session, &request)
+        .await
+        .expect_err("zero request identity must fail before direct dispatch opens a session");
+    assert!(matches!(
+        dispatch_error,
+        PostgresKernelError::DurableInvariant {
+            relation: "resource request",
+            record,
+            rule: "resource request identity must be non-zero",
+        } if record == request.request_id.canonical()
+    ));
+    assert_eq!(request, before);
+
+    let cancellation = ResourceCancellation::new();
+    let start_error = kernel
+        .start_authenticated_server_resource_producer(&session, &request, &cancellation)
+        .await
+        .expect_err("zero request identity must fail before producer reservation");
+    assert!(matches!(
+        start_error,
+        PostgresKernelError::DurableInvariant {
+            relation: "resource request",
+            record,
+            rule: "resource request identity must be non-zero",
+        } if record == request.request_id.canonical()
+    ));
+    assert_eq!(request, before);
+    assert!(
+        !cancellation.is_requested(),
+        "pre-reservation identity rejection must not request producer cancellation"
+    );
+}
+
 #[test]
 fn resource_lineage_validation_rejects_zero_call_site_before_other_request_validation() {
     let mut request = resource_request_lineage_fixture();
