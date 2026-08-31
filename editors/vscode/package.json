@@ -2,7 +2,7 @@
     "name": "orna-vscode",
     "displayName": "Orna",
     "description": "Language support for the Orna language.",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "publisher": "ornadb",
     "engines": {
         "vscode": "^1.85.0"
