@@ -3953,6 +3953,7 @@ impl ClientStateStore {
     /// while any insertion, replacement, or removal advances the epoch before
     /// the map is committed. Overflow is reported through the existing public
     /// state error so the caller's map and epoch remain unchanged.
+    #[allow(clippy::result_large_err)]
     fn user_state_epoch_after_reload(
         &self,
         loaded: &HashMap<ClientStateKey, ClientUserState>,
@@ -4256,9 +4257,8 @@ impl ClientStateStore {
     /// context are replaced; cells for other contexts remain available.
     /// A successful reload advances the resource invalidation epoch when this
     /// selected map differs; an identical snapshot keeps the current epoch.
-
+    ///
     /// Single-instance updates remain enforced by [`Self::set_user_state`].
-    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
     #[allow(clippy::result_large_err)]
     pub fn load_user_state(&mut self, cells: &[UserStateCell]) -> Result<(), ClientUserStateError> {
         let context = &self.context;
@@ -4298,8 +4298,8 @@ impl ClientStateStore {
     /// are removed after the complete batch passes validation.
     /// A changed selected map advances the resource invalidation epoch; an
     /// identical selected snapshot keeps the current epoch.
-
-    // ClientUserStateError preserves both keys in its public mismatch diagnostic.
+    ///
+    /// Single-instance updates remain enforced by [`Self::set_user_state`].
     #[allow(clippy::result_large_err)]
     pub fn load_user_state_for_instances(
         &mut self,
