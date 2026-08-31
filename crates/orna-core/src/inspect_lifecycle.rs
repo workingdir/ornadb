@@ -30,7 +30,7 @@ impl Default for InspectProjectionVersions {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InspectEpochBinding {
     client_epoch_id: InvocationId,
-    server_epoch_id: u64,
+    server_epoch_id: InspectEpochId,
     target_invocation_id: InvocationId,
     principal: PrincipalId,
     revision: RevisionPair,
@@ -45,7 +45,7 @@ impl InspectEpochBinding {
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         client_epoch_id: InvocationId,
-        server_epoch_id: u64,
+        server_epoch_id: InspectEpochId,
         target_invocation_id: InvocationId,
         principal: PrincipalId,
         revision: RevisionPair,
@@ -72,8 +72,8 @@ impl InspectEpochBinding {
         self.client_epoch_id
     }
 
-    /// Returns the server epoch identity from ORNA-INSPECT/1.
-    pub const fn server_epoch_id(self) -> u64 {
+    /// Returns the complete server epoch identity from ORNA-INSPECT/1.
+    pub const fn server_epoch_id(self) -> InspectEpochId {
         self.server_epoch_id
     }
 
@@ -252,10 +252,15 @@ mod tests {
         InvocationId::from_bytes([byte; 16])
     }
 
+    fn epoch_id(high: u8, low: u8) -> InspectEpochId {
+        let mut bytes = [low; 16];
+        bytes[..8].fill(high);
+        InspectEpochId::from_bytes(bytes)
+    }
+
     fn principal_id(byte: u8) -> PrincipalId {
         PrincipalId::from_bytes([byte; 16])
     }
-
     fn revision_pair(byte: u8) -> RevisionPair {
         RevisionPair::new(
             SourceRevisionId::from_bytes([byte; 16]),
@@ -266,7 +271,7 @@ mod tests {
     fn binding(generation: u64) -> InspectEpochBinding {
         InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(5),
@@ -304,7 +309,7 @@ mod tests {
 
         let principal_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(8),
             revision_pair(5),
@@ -317,10 +322,25 @@ mod tests {
             principal_mismatch.validate_against(&expected),
             Err(InspectLifecycleError::PrincipalMismatch)
         );
+        let server_epoch_mismatch = InspectEpochBinding::new(
+            invocation_id(1),
+            epoch_id(8, 2),
+            invocation_id(3),
+            principal_id(4),
+            revision_pair(5),
+            invocation_id(6),
+            invocation_id(7),
+            InspectProjectionVersions::v1(),
+            4,
+        );
+        assert_eq!(
+            server_epoch_mismatch.validate_against(&expected),
+            Err(InspectLifecycleError::EpochMismatch)
+        );
 
         let revision_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(9),
@@ -339,7 +359,7 @@ mod tests {
 
         let identity_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(10),
             principal_id(4),
             revision_pair(5),
