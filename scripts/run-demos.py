@@ -131,6 +131,7 @@ def cargo_command(demo: Demo, source_path: Path) -> list[str]:
         return [
             "cargo",
             "--locked",
+            "--offline",
             "run",
             "-p",
             "orna-server",
@@ -144,6 +145,7 @@ def cargo_command(demo: Demo, source_path: Path) -> list[str]:
         return [
             "cargo",
             "--locked",
+            "--offline",
             "test",
             "-p",
             "orna-server",
