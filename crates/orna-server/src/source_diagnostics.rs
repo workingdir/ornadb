@@ -49,7 +49,7 @@ fn display_column(text: &str) -> usize {
         .map(|character| match character {
             '\t' => 4,
             '\r' => 0,
-            character if character.is_control() => {
+            character if source_character_is_escaped(character) => {
                 format!("\\u{{{:04X}}}", character as u32).chars().count()
             }
             _ => 1,
@@ -83,12 +83,9 @@ fn write_human_diagnostic(
     colour: bool,
 ) -> io::Result<()> {
     write_level(output, diagnostic.severity(), colour)?;
-    writeln!(
-        output,
-        "[{}]: {}",
-        diagnostic.code().as_str(),
-        diagnostic.message()
-    )?;
+    write!(output, "[{}]: ", diagnostic.code().as_str(),)?;
+    write_human_text(output, diagnostic.message())?;
+    output.write_all(b"\n")?;
 
     let gutter_width = write_source_annotation(
         output,
@@ -115,11 +112,15 @@ fn write_human_diagnostic(
     }
     if let Some(help) = help {
         write_metadata_name(output, "help", "\x1b[1;32m", colour, gutter_width)?;
-        writeln!(output, ": {help}")?;
+        output.write_all(b": ")?;
+        write_human_text(output, help)?;
+        output.write_all(b"\n")?;
     }
     for note in diagnostic.notes() {
         write_metadata_name(output, "note", "\x1b[1;36m", colour, gutter_width)?;
-        writeln!(output, ": {note}")?;
+        output.write_all(b": ")?;
+        write_human_text(output, note)?;
+        output.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -146,13 +147,15 @@ fn write_source_annotation(
         } else {
             write!(output, "  {arrow} ")?;
         }
-        writeln!(
+        write!(
             output,
-            "{}:{}..{}: {label}",
+            "{}:{}..{}: ",
             location.logical_path(),
             location.span().start(),
             location.span().end(),
         )?;
+        write_human_text(output, label)?;
+        output.write_all(b"\n")?;
         return Ok(2);
     };
 
@@ -222,9 +225,12 @@ fn write_source_annotation(
         }
         if line_index == end_line {
             if colour {
-                write!(output, " {}{label}\x1b[0m", kind.colour())?;
+                write!(output, " {}", kind.colour())?;
+                write_human_text(output, label)?;
+                write!(output, "\x1b[0m")?;
             } else {
-                write!(output, " {label}")?;
+                write!(output, " ")?;
+                write_human_text(output, label)?;
             }
             if end == source.len() && start == source.len() {
                 write!(output, " EOF")?;
@@ -303,7 +309,11 @@ fn write_summary(
 }
 
 fn plural_suffix(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn severity_colour_code(severity: DiagnosticSeverity) -> u8 {
@@ -418,16 +428,51 @@ fn clip_source_line(
 }
 
 fn render_source_line(line: &str) -> String {
-    line.chars()
-        .flat_map(|character| match character {
-            '\t' => "    ".chars().collect::<Vec<_>>(),
-            '\r' => Vec::new(),
-            character if character.is_control() => {
-                format!("\\u{{{:04X}}}", character as u32).chars().collect()
+    let mut rendered = String::new();
+    for character in line.chars() {
+        match character {
+            '\t' => rendered.push_str("    "),
+            '\r' => {}
+            character if source_character_is_escaped(character) => {
+                rendered.push_str(&format!("\\u{{{:04X}}}", character as u32));
             }
-            character => vec![character],
-        })
-        .collect()
+            character => rendered.push(character),
+        }
+    }
+    rendered
+}
+
+fn source_character_is_escaped(character: char) -> bool {
+    character.is_control()
+        || matches!(character, '\u{2028}' | '\u{2029}')
+        || is_format_control(character)
+}
+
+fn is_format_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 fn help_for(diagnostic: &CompilerDiagnostic) -> Option<&str> {
@@ -474,14 +519,39 @@ fn write_escaped_message(output: &mut impl Write, message: &str) -> io::Result<(
     Ok(())
 }
 
+fn write_human_text(output: &mut impl Write, text: &str) -> io::Result<()> {
+    for character in text.chars() {
+        match character {
+            '\n' => output.write_all(b"\\n")?,
+            '\r' => output.write_all(b"\\r")?,
+            '\t' => output.write_all(b"\\t")?,
+            character if source_character_is_escaped(character) => {
+                write!(output, "\\u{{{:04X}}}", character as u32)?;
+            }
+            character => {
+                let mut encoded = [0; 4];
+                output.write_all(character.encode_utf8(&mut encoded).as_bytes())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use orna_core::source::{SourceBundle, SourceUnit};
 
     fn report_for(source_text: &str) -> orna_compiler::StandardApplicationCheckReport {
+        report_for_path("main.orna", source_text)
+    }
+
+    fn report_for_path(
+        logical_path: &str,
+        source_text: &str,
+    ) -> orna_compiler::StandardApplicationCheckReport {
         let source =
-            SourceBundle::new([SourceUnit::new("main.orna", source_text)]).expect("source bundle");
+            SourceBundle::new([SourceUnit::new(logical_path, source_text)]).expect("source bundle");
         let standard = orna_compiler::check_standard_library_source(
             &orna_standard::retained_standard_library_v11_snapshot()
                 .and_then(orna_standard::verify_standard_library_v11_snapshot)
@@ -509,6 +579,34 @@ mod tests {
         assert!(rendered.contains("1 | CREATE SCHEMA ;"));
         assert!(rendered.contains("^"));
         assert!(rendered.contains("= help: write a schema name before the semicolon"));
+    }
+    #[test]
+    fn renders_zero_width_eof_span_at_source_length() {
+        let source = "CREATE SCHEMA ";
+        let report = report_for(source);
+        let diagnostic = report
+            .diagnostics()
+            .first()
+            .expect("source check should report missing schema name");
+        assert_eq!(diagnostic.location().span().start(), source.len());
+        assert_eq!(diagnostic.location().span().end(), source.len());
+
+        let rendered = String::from_utf8(render_human_diagnostics(
+            report.parse_report(),
+            std::slice::from_ref(diagnostic),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+        assert!(rendered.contains("  --> main.orna:1:15"));
+        assert!(rendered.contains(" 1 | CREATE SCHEMA "));
+        let marker = rendered
+            .lines()
+            .find(|line| line.contains("^"))
+            .expect("EOF caret line");
+        assert_eq!(
+            marker,
+            format!("   | {}^ unexpected syntax EOF", " ".repeat(source.len()))
+        );
     }
 
     #[test]
@@ -569,6 +667,42 @@ mod tests {
         assert!(rendered.contains("= help: rename one of the definitions or remove the duplicate"));
         assert!(rendered.ends_with("error: aborting due to 1 previous error\n"));
     }
+    #[test]
+    fn escapes_hostile_quoted_name_in_human_header_and_excerpt() {
+        let name = "quoted\nname\r\t\u{2028}\u{2029}\u{202E}";
+        let source = format!("CREATE SCHEMA \"{name}\";\nCREATE SCHEMA \"{name}\";");
+        let report = report_for(&source);
+        let rendered = String::from_utf8(render_human_diagnostics(
+            report.parse_report(),
+            report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+
+        assert!(rendered.contains(
+            "error[ORNA0103]: duplicate schema definition quoted\\nname\\r\\t\\u{2028}\\u{2029}\\u{202E}"
+        ));
+        assert!(rendered.contains("name    \\u{2028}\\u{2029}\\u{202E}\";"));
+        assert!(!rendered.contains('\r'));
+        assert!(!rendered.contains('\u{2028}'));
+        assert!(!rendered.contains('\u{2029}'));
+        assert!(!rendered.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn retains_pathless_fallback_annotation_format() {
+        let source_report = report_for("CREATE SCHEMA ;");
+        let foreign_report = report_for_path("other.orna", "CREATE SCHEMA ;");
+        let rendered = String::from_utf8(render_human_diagnostics(
+            source_report.parse_report(),
+            foreign_report.diagnostics(),
+            false,
+        ))
+        .expect("diagnostics are UTF-8");
+
+        assert!(rendered.contains("  --> other.orna:14..15: unexpected syntax"));
+        assert!(!rendered.contains("1 | CREATE SCHEMA ;"));
+    }
 
     #[test]
     fn renders_nonblocking_warning_with_note_and_summary() {
@@ -595,11 +729,22 @@ mod tests {
         assert!(rendered.contains("unreachable code"));
         assert!(rendered.contains("  ::: main.orna:6:1"));
         assert!(rendered.contains("this statement returns from the function"));
-        assert!(
-            rendered
-                .contains("= note: unreachable statements are still checked but can never execute")
-        );
+        assert!(rendered
+            .contains("= note: unreachable statements are still checked but can never execute"));
         assert!(rendered.ends_with("warning: 1 warning emitted\n"));
+    }
+    #[test]
+    fn escapes_human_metadata_without_physical_control_effects() {
+        let mut output = Vec::new();
+        write_human_text(
+            &mut output,
+            "a\n\r\t\u{0007}\u{2028}\u{2029}\u{202E}\u{200B}é",
+        )
+        .expect("Vec accepts every write");
+        assert_eq!(
+            output,
+            "a\\n\\r\\t\\u{0007}\\u{2028}\\u{2029}\\u{202E}\\u{200B}é".as_bytes()
+        );
     }
 }
 
@@ -619,7 +764,10 @@ mod source_context_tests {
             render_source_line("CREATE\tSCHEMA\r"),
             "CREATE    SCHEMA".to_owned()
         );
-        assert_eq!(render_source_line("bad\u{0007}"), "bad\\u{0007}".to_owned());
+        assert_eq!(
+            render_source_line("bad\u{0007}\u{2028}\u{2029}\u{202E}\u{200B}"),
+            "bad\\u{0007}\\u{2028}\\u{2029}\\u{202E}\\u{200B}".to_owned()
+        );
     }
 
     #[test]
