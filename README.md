@@ -142,6 +142,23 @@ Display-backed `runtime-qt-demo`, `studio-qt-display-smoke`,
 `studio-qt-action-smoke`, and `runtime-display-suite` additionally require
 `DISPLAY` or `WAYLAND_DISPLAY`.
 
+The checked-in `packaging/linux/` command produces a deterministic Linux
+x86_64 root-relative artifact and verifies the installed-command provenance
+boundary. It is not a Debian package or publication authority:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh test
+SOURCE_DATE_EPOCH=1700000000 PYTHONDONTWRITEBYTECODE=1 \
+  packaging/linux/package.sh build
+PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh verify \
+  target/orna-1.0.0-linux-amd64.tar --source-date-epoch 1700000000
+```
+
+The default package build uses a fresh `target/linux-package/` Cargo target
+and its generated embedded-engine manifest. It requires Linux x86_64 and the
+same engine build prerequisite described above; no clean-host, signing, SBOM,
+repository, or production-package claim follows from this local artifact.
+
 Record a gate as **pass** only when the command exits zero and its output is
 retained. A manifest-declared `compose-only` demo, absent optional
 `../spec/examples`, or unavailable optional Emacs/host runtime is an explicit

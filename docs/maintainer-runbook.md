@@ -127,10 +127,14 @@ smokes remain separate.
 12. `.beads/`: the tracked issue ledger; preserve it when cleaning other
     repository state.
 13. `docs/`: maintained operator guidance and historical design decisions.
+14. `packaging/linux/`: deterministic Linux artifact builder, verifier, installer,
+    and focused package tests.
 
-The repository intentionally has no website, distribution package, or generated
-root status ledger. Keep planning and issue state in the issue ledger and
-maintained documentation rather than restoring removed snapshots.
+The repository intentionally has no website, Debian release package, or
+generated root status ledger. The Linux artifact recipe is a local provenance
+and install smoke boundary, not a production distribution authority. Keep
+planning and issue state in the issue ledger and maintained documentation rather
+than restoring removed snapshots.
 
 ## Local check flow
 
@@ -504,6 +508,34 @@ identities, decision/terminal outcomes, and optional item/byte counts. It
 deliberately does not retain arguments or returned values. This is redacted
 history/audit, not durable `Resources` streaming; do not document it as durable
 payload/result storage.
+
+## Linux distribution artifact
+
+The checked-in `packaging/linux/` command builds the smallest accepted Linux
+x86_64 distribution artifact: a deterministic root-relative USTAR archive
+containing `orna`, the distribution manifest, and the embedded-engine manifest.
+It is a provenance/install smoke artifact, not the Debian 12 release authority
+reserved by ADR 0047 and not a production package publication.
+
+Run the focused packaging tests and a deterministic build from Linux x86_64:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh test
+SOURCE_DATE_EPOCH=1700000000 PYTHONDONTWRITEBYTECODE=1 \
+  packaging/linux/package.sh build
+PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh verify \
+  target/orna-1.0.0-linux-amd64.tar --source-date-epoch 1700000000
+PYTHONDONTWRITEBYTECODE=1 packaging/linux/package.sh install \
+  target/orna-1.0.0-linux-amd64.tar --root "$PWD/target/package-root"
+```
+
+The default build compiles `orna-server` into a fresh `target/linux-package/`
+tree and pairs that executable with its generated engine manifest. A caller
+supplying `--executable` and `--engine-manifest` must take both files from the
+same build; the installed command still verifies the compiled engine identity
+before serving. The output archive is intentionally not a `.deb`, and no
+clean-host, signing, SBOM, repository, or publication result follows from
+these local commands.
 
 ## Issue ledger and status
 
