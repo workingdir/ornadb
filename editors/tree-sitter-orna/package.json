@@ -1,6 +1,6 @@
 {
     "name": "tree-sitter-orna",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "private": true,
     "description": "Tree-sitter grammar for the Orna language",
     "tree-sitter": {
