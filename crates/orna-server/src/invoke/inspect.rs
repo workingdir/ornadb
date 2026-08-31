@@ -262,12 +262,7 @@ pub(super) async fn run_installed_external_contract(
     // projections have no row payload, so their header epoch is checked
     // against this anchor and the authenticated snapshot below.
     let server_epoch = server_epoch.ok_or_else(|| "inspect.malformed_carrier".to_owned())?;
-    if u64::from_be_bytes(
-        server_epoch.to_bytes()[8..]
-            .try_into()
-            .expect("inspect epoch identity width"),
-    ) != epoch_id
-    {
+    if server_epoch != epoch_id {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     let target_invocation_id =
@@ -777,12 +772,7 @@ pub(super) fn validate_inspect_projection_binding(
     {
         return Err("inspect.epoch_mismatch".to_owned());
     }
-    let decoded_epoch_id = u64::from_be_bytes(
-        decoded_epoch.to_bytes()[8..]
-            .try_into()
-            .expect("inspect epoch identity width"),
-    );
-    if envelope.epoch_id() != decoded_epoch_id {
+    if envelope.epoch_id() != decoded_epoch {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     if envelope.source_revision_id() != pair.source()
@@ -895,7 +885,7 @@ pub(super) fn make_inspect_carrier(
     rows: Vec<Vec<u8>>,
     classification: u8,
 ) -> Result<Vec<u8>, String> {
-    let epoch_id = u64::from_be_bytes(snapshot.id().to_bytes()[8..].try_into().expect("epoch id"));
+    let epoch_id = snapshot.id();
     let mut encoded_rows = rows
         .into_iter()
         .map(|row| {
@@ -1128,7 +1118,7 @@ pub(super) fn decode_enriched_inspect_row_target(
     registry: &OpaqueCodecRegistry,
     row: &[u8],
     expected_kind: InspectCarrierKind,
-    epoch_id: u64,
+    epoch_id: InspectEpochId,
 ) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     let value = decode_constructed_value(active, registry, row)
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
@@ -1155,7 +1145,7 @@ pub(super) fn decode_enriched_inspect_row_target(
             .try_into()
             .map_err(|_| "inspect.malformed_carrier".to_owned())?,
     );
-    if u64::from_be_bytes(epoch.to_bytes()[8..].try_into().expect("epoch id")) != epoch_id {
+    if epoch != epoch_id {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     if payload[57..73] != active.pair().source().to_bytes()
@@ -1186,7 +1176,7 @@ fn decode_snapshot_row_epoch(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
     row: &[u8],
-    epoch_id: u64,
+    epoch_id: InspectEpochId,
 ) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     let value = decode_constructed_value(active, registry, row)
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
@@ -1210,7 +1200,7 @@ fn decode_snapshot_row_epoch(
 
 pub(super) fn decode_snapshot_row_payload(
     row: &[u8],
-    epoch_id: u64,
+    epoch_id: InspectEpochId,
 ) -> Result<(InspectEpochId, InvocationId, FunctionId), String> {
     if row.len() < 68 || row[0] != INSPECT_SNAPSHOT_ROW_TAG || row[1..9] != [0; 8] {
         return Err("inspect.malformed_carrier".to_owned());
@@ -1219,7 +1209,7 @@ pub(super) fn decode_snapshot_row_payload(
         .try_into()
         .map_err(|_| "inspect.malformed_carrier".to_owned())?;
     let id = InspectEpochId::from_bytes(bytes);
-    if u64::from_be_bytes(id.to_bytes()[8..].try_into().expect("epoch id")) != epoch_id {
+    if id != epoch_id {
         return Err("inspect.epoch_mismatch".to_owned());
     }
     let invocation = InvocationId::from_bytes(
