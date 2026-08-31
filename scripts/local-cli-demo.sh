@@ -62,7 +62,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 printf '%s\n' '[local-cli-demo] building the Orna binary'
-cargo build --quiet --locked --manifest-path "${repository_root}/Cargo.toml" -p orna-server
+cargo build --quiet --locked --offline --manifest-path "${repository_root}/Cargo.toml" -p orna-server
 
 printf '%s\n' '[local-cli-demo] starting a temporary local server'
 XDG_STATE_HOME="${state_home}" XDG_RUNTIME_DIR="${runtime_home}" \
