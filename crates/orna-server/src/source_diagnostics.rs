@@ -309,11 +309,7 @@ fn write_summary(
 }
 
 fn plural_suffix(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if count == 1 { "" } else { "s" }
 }
 
 fn severity_colour_code(severity: DiagnosticSeverity) -> u8 {
@@ -729,8 +725,10 @@ mod tests {
         assert!(rendered.contains("unreachable code"));
         assert!(rendered.contains("  ::: main.orna:6:1"));
         assert!(rendered.contains("this statement returns from the function"));
-        assert!(rendered
-            .contains("= note: unreachable statements are still checked but can never execute"));
+        assert!(
+            rendered
+                .contains("= note: unreachable statements are still checked but can never execute")
+        );
         assert!(rendered.ends_with("warning: 1 warning emitted\n"));
     }
     #[test]
