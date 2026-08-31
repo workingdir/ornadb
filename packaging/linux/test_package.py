@@ -63,6 +63,12 @@ def main() -> None:
     repository = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="orna-linux-package-") as scratch_name:
         scratch = Path(scratch_name)
+        stale_target = scratch / "build-repository" / "target" / "linux-package"
+        stale_target.mkdir(mode=0o700, parents=True)
+        (stale_target / "stale-engine-manifest.json").write_text("stale")
+        fresh_target = package.prepare_build_target(stale_target.parents[1])
+        if (fresh_target / "stale-engine-manifest.json").exists():
+            raise AssertionError("package build target retained stale output")
         executable = scratch / "orna"
         shutil.copyfile("/bin/true", executable)
         executable.chmod(0o755)
