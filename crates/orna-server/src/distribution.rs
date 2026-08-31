@@ -11,6 +11,8 @@ use orna_postgres::ENGINE_MANIFEST;
 use sha2::{Digest, Sha256};
 
 const DISTRIBUTION_MANIFEST_PATH: &str = "/usr/share/orna/distribution-manifest.toml";
+const INSTALLED_EXECUTABLE_PATH: &str = "/usr/bin/orna";
+const CURRENT_EXECUTABLE_PATH: &str = "/proc/self/exe";
 const MAXIMUM_MANIFEST_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,10 +21,33 @@ pub(super) enum DistributionError {
     Invalid,
 }
 
-pub(super) fn verify_current_distribution() -> Result<(), DistributionError> {
+/// Verifies the installed package when this process is the packaged command.
+///
+/// Development binaries remain usable from Cargo target directories.  The
+/// packaged command is intentionally identified by its fixed installation
+/// path; once that boundary is reached a missing or invalid root-owned
+/// manifest is an error rather than a reason to fall back to development mode.
+pub(super) fn verify_if_installed() -> Result<(), DistributionError> {
+    let executable = fs::read_link(CURRENT_EXECUTABLE_PATH).map_err(|_| DistributionError::Invalid)?;
+    if is_installed_executable_path(&executable) {
+        verify_distribution()
+    } else {
+        Ok(())
+    }
+}
+
+fn is_installed_executable_path(path: &Path) -> bool {
+    path == Path::new(INSTALLED_EXECUTABLE_PATH)
+}
+
+
+fn verify_distribution() -> Result<(), DistributionError> {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return Err(DistributionError::Invalid);
+    }
     let bytes = read_manifest(Path::new(DISTRIBUTION_MANIFEST_PATH))?;
     let engine_sha256 = digest_bytes(ENGINE_MANIFEST);
-    let executable_sha256 = digest_file(Path::new("/proc/self/exe"))?;
+    let executable_sha256 = digest_file(Path::new(CURRENT_EXECUTABLE_PATH))?;
     validate_manifest(&bytes, &engine_sha256, &executable_sha256)
 }
 
@@ -35,6 +60,7 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, DistributionError> {
             std::io::ErrorKind::NotFound => DistributionError::Missing,
             _ => DistributionError::Invalid,
         })?;
+    require_manifest_parent(path)?;
     let metadata = file.metadata().map_err(|_| DistributionError::Invalid)?;
     if !metadata.is_file()
         || metadata.uid() != 0
@@ -48,16 +74,45 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, DistributionError> {
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes)
         .map_err(|_| DistributionError::Invalid)?;
+
     if bytes.len() as u64 != metadata.len() {
         return Err(DistributionError::Invalid);
     }
     Ok(bytes)
 }
 
+fn require_manifest_parent(path: &Path) -> Result<(), DistributionError> {
+    let parent = path.parent().ok_or(DistributionError::Invalid)?;
+    let metadata = fs::symlink_metadata(parent).map_err(|_| DistributionError::Invalid)?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o755
+    {
+        return Err(DistributionError::Invalid);
+    }
+    Ok(())
+}
+
 fn digest_file(path: &Path) -> Result<String, DistributionError> {
-    let mut file = fs::File::open(path).map_err(|_| DistributionError::Invalid)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| DistributionError::Invalid)?;
+    let initial = file.metadata().map_err(|_| DistributionError::Invalid)?;
+    if !initial.is_file()
+        || initial.uid() != 0
+        || initial.gid() != 0
+        || initial.mode() & 0o7777 != 0o755
+        || initial.nlink() != 1
+    {
+        return Err(DistributionError::Invalid);
+    }
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut length = 0_u64;
+    let mut file = file;
     loop {
         let read = file
             .read(&mut buffer)
@@ -65,10 +120,28 @@ fn digest_file(path: &Path) -> Result<String, DistributionError> {
         if read == 0 {
             break;
         }
+        length = length
+            .checked_add(read as u64)
+            .ok_or(DistributionError::Invalid)?;
         digest.update(&buffer[..read]);
+    }
+    let final_metadata = file.metadata().map_err(|_| DistributionError::Invalid)?;
+    if final_metadata.dev() != initial.dev()
+        || final_metadata.ino() != initial.ino()
+        || final_metadata.uid() != initial.uid()
+        || final_metadata.gid() != initial.gid()
+        || final_metadata.mode() & 0o7777 != initial.mode() & 0o7777
+        || final_metadata.nlink() != initial.nlink()
+        || final_metadata.len() != initial.len()
+        || final_metadata.len() != length
+        || final_metadata.mtime_nsec() != initial.mtime_nsec()
+        || final_metadata.ctime_nsec() != initial.ctime_nsec()
+    {
+        return Err(DistributionError::Invalid);
     }
     Ok(hex(digest.finalize()))
 }
+
 
 fn digest_bytes(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes))
@@ -237,6 +310,25 @@ executable_sha256 = \"{EXECUTABLE}\"\n"
         assert_eq!(
             digest_bytes(b"orna"),
             "3ea53f51c6c9f57e94378af053fd1668a5f88a08d946a3e21a512ffa45578ecb"
+        );
+    }
+
+    #[test]
+    fn only_the_fixed_installed_path_enables_distribution_verification() {
+        assert!(is_installed_executable_path(Path::new("/usr/bin/orna")));
+        assert!(!is_installed_executable_path(Path::new("target/release/orna")));
+        assert!(!is_installed_executable_path(Path::new("/tmp/orna")));
+    }
+
+    #[test]
+    fn executable_metadata_is_checked_before_hash_binding() {
+        assert_eq!(
+            digest_file(Path::new("/dev/null")),
+            Err(DistributionError::Invalid)
+        );
+        assert_eq!(
+            digest_file(Path::new("/definitely/not/an/orna/executable")),
+            Err(DistributionError::Invalid)
         );
     }
 }
