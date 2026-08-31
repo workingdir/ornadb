@@ -261,7 +261,10 @@ pub(super) enum SealedInvocationPreparedOutcome {
     },
 }
 impl SealedInvocationPreparedOutcome {
-    pub(super) fn unsupported_security_definer_target(&self) -> Option<InvocationTarget> {
+    pub(super) fn unsupported_security_definer_target(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<Option<InvocationTarget>, PostgresKernelError> {
         match self {
             Self::Allowed {
                 target,
@@ -272,19 +275,32 @@ impl SealedInvocationPreparedOutcome {
                 target,
                 security_target,
                 ..
-            } => (!target.security_is_supported()).then_some(*security_target),
-            Self::TargetDenied { .. } => None,
+            } => {
+                let expected = target.security_target(active)?;
+                if expected != *security_target {
+                    return Err(sealed_target_invariant(
+                        active,
+                        "prepared sealed invocation security target must match its pinned target",
+                    ));
+                }
+                Ok((!target.security_is_supported()).then_some(*security_target))
+            }
+            Self::TargetDenied { .. } => Ok(None),
         }
     }
 
-    pub(super) fn reject_unsupported_security_definer(&mut self) {
-        let Some(security_target) = self.unsupported_security_definer_target() else {
-            return;
+    pub(super) fn reject_unsupported_security_definer(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<(), PostgresKernelError> {
+        let Some(security_target) = self.unsupported_security_definer_target(active)? else {
+            return Ok(());
         };
         *self = Self::TargetDenied {
             security_target: Some(security_target),
             denial: Some(ExecuteDenial::UnsupportedSecurityDefiner),
         };
+        Ok(())
     }
 }
 
@@ -303,6 +319,45 @@ pub(super) enum PreparedSealedTarget {
 }
 
 impl PreparedSealedTarget {
+    fn security_target(
+        &self,
+        active: &ActiveDatabaseRevision,
+    ) -> Result<InvocationTarget, PostgresKernelError> {
+        match self {
+            Self::Application { definition } => {
+                Ok(InvocationTarget::new(definition.id(), active.pair()))
+            }
+            Self::System { definition } => {
+                Ok(InvocationTarget::new(definition.id(), active.pair()))
+            }
+            Self::VerifiedStandard {
+                definition,
+                executable,
+            } => {
+                let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+                    sealed_target_invariant(
+                        active,
+                        "prepared verified-standard target requires its pinned standard snapshot",
+                    )
+                })?;
+                if executable.function() != definition.id()
+                    || executable.revision().function() != definition.id()
+                    || executable.revision().id() != definition.current_revision()
+                {
+                    return Err(sealed_target_invariant(
+                        active,
+                        "prepared verified-standard target must retain its pinned executable",
+                    ));
+                }
+                Ok(InvocationTarget::verified_standard(
+                    definition.id(),
+                    active.pair(),
+                    standard.revision(),
+                    executable.revision().id(),
+                ))
+            }
+        }
+    }
     fn function(&self) -> FunctionId {
         match self {
             Self::Application { definition } | Self::VerifiedStandard { definition, .. } => {
@@ -683,7 +738,7 @@ impl SealedInvocationOperation {
                 rule: "execute_after_started may only be called once",
             });
         }
-        self.outcome.reject_unsupported_security_definer();
+        self.outcome.reject_unsupported_security_definer(&self.active)?;
 
         self.consumed = true;
         self.append_prepared_audit().await?;
