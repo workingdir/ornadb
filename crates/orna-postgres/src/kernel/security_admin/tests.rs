@@ -520,12 +520,16 @@ fn valid_grant_role_rebuilds_candidate_without_changing_existing_state() {
     )
     .expect("a valid role grant should rebuild the candidate");
 
-    assert!(candidate
-        .memberships()
-        .any(|membership| membership == RoleMembership::new(ROLE, MEMBER)));
-    assert!(candidate
-        .memberships()
-        .any(|membership| membership == RoleMembership::new(OTHER_ROLE, ROLE)));
+    assert!(
+        candidate
+            .memberships()
+            .any(|membership| membership == RoleMembership::new(ROLE, MEMBER))
+    );
+    assert!(
+        candidate
+            .memberships()
+            .any(|membership| membership == RoleMembership::new(OTHER_ROLE, ROLE))
+    );
     assert_eq!(
         candidate.principals().collect::<Vec<_>>(),
         current.principals().collect::<Vec<_>>()

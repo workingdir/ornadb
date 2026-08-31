@@ -5,14 +5,14 @@ fn sealed_no_argument_request(
 ) -> TestResult<orna_core::invocation::InvokeRequest> {
     use orna_core::invocation::{
         InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
-        InvocationOutputRequirement, InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
-        InvocationTarget as RequestTarget,
+        InvocationOutputRequirement, InvocationTarget as RequestTarget, InvocationTracePolicy,
+        InvokeRequest, InvokeRequestInput,
     };
 
     Ok(InvokeRequest::new(InvokeRequestInput {
-        target: RequestTarget::qualified_name(
-            orna_core::catalogue::QualifiedSemanticName::new(function_parts)?,
-        )?,
+        target: RequestTarget::qualified_name(orna_core::catalogue::QualifiedSemanticName::new(
+            function_parts,
+        )?)?,
         arguments: Vec::<orna_core::invocation::InvocationArgument>::new(),
         caller_context: InvocationCallerContext::new(
             InvocationCallerKind::TestRunner,
@@ -107,7 +107,10 @@ async fn executes_sealed_security_definer_denial_before_target_dispatch() -> Tes
                 PrincipalStatus::Active,
             )],
             vec![],
-            vec![ExecuteGrant::new(USER, definer), ExecuteGrant::new(USER, invoker)],
+            vec![
+                ExecuteGrant::new(USER, definer),
+                ExecuteGrant::new(USER, invoker),
+            ],
         )?;
         let security = kernel.replace_security_snapshot(&granted).await?;
         let session = security.bind_authenticated_session(USER, vec![])?;
@@ -134,7 +137,9 @@ async fn executes_sealed_security_definer_denial_before_target_dispatch() -> Tes
             }
         };
         let invocation = continuation.invocation();
-        let mut operation = continuation.prepare_sealed_sys_invoke_after_accept().await?;
+        let mut operation = continuation
+            .prepare_sealed_sys_invoke_after_accept()
+            .await?;
         let mut state = orna_client::ClientStateStore::new();
         let mut capability_audit_appended = false;
         let cancellation = orna_postgres::ResourceCancellation::new();
@@ -176,7 +181,9 @@ async fn executes_sealed_security_definer_denial_before_target_dispatch() -> Tes
                 )));
             }
         };
-        let mut operation = continuation.prepare_sealed_sys_invoke_after_accept().await?;
+        let mut operation = continuation
+            .prepare_sealed_sys_invoke_after_accept()
+            .await?;
         let mut state = orna_client::ClientStateStore::new();
         let mut capability_audit_appended = false;
         let cancellation = orna_postgres::ResourceCancellation::new();
