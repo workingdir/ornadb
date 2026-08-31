@@ -116,6 +116,7 @@ pub(crate) async fn recover_security_snapshot_for_active(
     active: &ActiveDatabaseRevision,
 ) -> Result<SecuritySnapshot, PostgresKernelError> {
     let function_targets = load_invocation_target_authorities(transaction, active).await?;
+    require_complete_function_targets(active, &function_targets)?;
     let principals = load_principals(transaction).await?;
     let memberships = load_memberships(transaction).await?;
     let grants = load_grants(transaction).await?;
