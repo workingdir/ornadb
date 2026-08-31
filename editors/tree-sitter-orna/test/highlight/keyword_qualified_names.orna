@@ -1,0 +1,9 @@
+CREATE SCHEMA SELECT.FROM;
+--            ^^^^^^ namespace
+--                     ^^^^ namespace
+
+CREATE TYPE END AS OBJECT ();
+--          ^^^ type
+
+CREATE SERVER FUNCTION RETURN() RETURNS BOOL AS TRUE;
+--                     ^^^^^^ function
