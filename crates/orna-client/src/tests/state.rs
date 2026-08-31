@@ -2219,7 +2219,8 @@ fn evaluator_resource_key_changes_after_user_state_reload() {
         .unwrap()])
         .unwrap();
     let argument =
-        FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/user-reload".to_owned())).unwrap();
+        FunctionArgument::new(parameter, RuntimeValue::Text("/tmp/user-reload".to_owned()))
+            .unwrap();
     let context = super::super::ClientStateContext::new(
         function,
         "profile".to_owned(),
@@ -2269,8 +2270,7 @@ fn evaluator_resource_key_changes_after_user_state_reload() {
         .unwrap();
     assert_eq!(state.user_state_epoch(), 1);
 
-    let mut executor_b =
-        RecordingActionExecutor::new(Some(RuntimeValue::Text("after".to_owned())));
+    let mut executor_b = RecordingActionExecutor::new(Some(RuntimeValue::Text("after".to_owned())));
     let result_b = super::super::evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation(
         &active,
         &authorise(pair, function),

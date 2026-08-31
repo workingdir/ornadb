@@ -864,10 +864,7 @@ fn inspect_snapshot_row_binding_preserves_server_root_authority() {
     let mut high_half_mismatch = row.clone();
     high_half_mismatch[9] = 1;
     assert_eq!(
-        super::super::decode_inspect_snapshot_target_row(
-            &high_half_mismatch,
-            inspect_epoch(0, 7)
-        ),
+        super::super::decode_inspect_snapshot_target_row(&high_half_mismatch, inspect_epoch(0, 7)),
         Err(super::super::ClientInspectError::Failed(
             "inspect.epoch_mismatch".to_owned()
         ))
