@@ -553,11 +553,7 @@ fn migration_sql_contains_anonymous_do_block_with_mode(
     false
 }
 
-fn do_statement_has_code(
-    bytes: &[u8],
-    do_end: usize,
-    standard_conforming_strings: bool,
-) -> bool {
+fn do_statement_has_code(bytes: &[u8], do_end: usize, standard_conforming_strings: bool) -> bool {
     let mut index = skip_sql_trivia(bytes, do_end);
     if let Some((word_start, word_end)) = sql_identifier(bytes, index) {
         if sql_identifier_is(bytes, word_start, word_end, b"language") {
@@ -576,15 +572,13 @@ fn is_sql_code_literal_start(bytes: &[u8], index: usize) -> bool {
     if index >= bytes.len() {
         return false;
     }
-    matches!(
-        bytes[index],
-        b'\'' | b'e' | b'E' | b'u' | b'U' | b'$'
-    ) && (bytes[index] == b'\''
-        || (matches!(bytes[index], b'e' | b'E') && bytes.get(index + 1) == Some(&b'\''))
-        || (matches!(bytes[index], b'u' | b'U')
-            && bytes.get(index + 1) == Some(&b'&')
-            && bytes.get(index + 2) == Some(&b'\''))
-        || (bytes[index] == b'$' && dollar_quote_end(bytes, index).is_some()))
+    matches!(bytes[index], b'\'' | b'e' | b'E' | b'u' | b'U' | b'$')
+        && (bytes[index] == b'\''
+            || (matches!(bytes[index], b'e' | b'E') && bytes.get(index + 1) == Some(&b'\''))
+            || (matches!(bytes[index], b'u' | b'U')
+                && bytes.get(index + 1) == Some(&b'&')
+                && bytes.get(index + 2) == Some(&b'\''))
+            || (bytes[index] == b'$' && dollar_quote_end(bytes, index).is_some()))
 }
 
 fn sql_identifier(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
@@ -668,9 +662,7 @@ fn skip_sql_literal(
     if bytes.get(index) == Some(&b'"') {
         return Some(skip_quoted_sql_literal(bytes, index, b'"', false));
     }
-    if matches!(bytes.get(index), Some(b'e' | b'E'))
-        && bytes.get(index + 1) == Some(&b'\'')
-    {
+    if matches!(bytes.get(index), Some(b'e' | b'E')) && bytes.get(index + 1) == Some(&b'\'') {
         return Some(skip_quoted_sql_literal(bytes, index + 1, b'\'', true));
     }
     if matches!(bytes.get(index), Some(b'u' | b'U'))
@@ -753,8 +745,7 @@ fn dollar_quote_delimiter_end(bytes: &[u8], start: usize) -> Option<usize> {
         return None;
     }
     index += 1;
-    while index < bytes.len()
-        && (is_sql_identifier_continue(bytes[index]) && bytes[index] != b'$')
+    while index < bytes.len() && (is_sql_identifier_continue(bytes[index]) && bytes[index] != b'$')
     {
         index += 1;
     }
