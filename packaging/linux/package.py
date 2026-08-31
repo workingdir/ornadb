@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
@@ -323,10 +324,32 @@ def source_engine_path(
     return input_path(str(candidates[0]), "embedded engine manifest")
 
 
+def prepare_build_target(repository: Path) -> Path:
+    """Reset the package-owned Cargo target to avoid stale provenance inputs."""
+    target = repository / "target" / "linux-package"
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        metadata = None
+    except OSError as error:
+        fail(f"cannot inspect package build target {target}: {error}")
+    if metadata is not None:
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            fail(f"package build target is not a directory: {target}")
+        try:
+            shutil.rmtree(target)
+        except OSError as error:
+            fail(f"cannot reset package build target {target}: {error}")
+    try:
+        target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"cannot create package build target {target}: {error}")
+    return target
+
+
 def build_executable(repository: Path, source_date_epoch: int) -> Path:
     reject_compiler_overrides()
-    target = repository / "target" / "linux-package"
-    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = prepare_build_target(repository)
     environment = os.environ.copy()
     environment.update(
         {
