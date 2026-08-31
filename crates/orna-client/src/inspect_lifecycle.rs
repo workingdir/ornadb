@@ -168,10 +168,17 @@ impl ClientInspectLifecycle {
 mod tests {
     use super::*;
     use orna_core::revision::RevisionPair;
-    use orna_core::{CatalogueRevisionId, InvocationId, PrincipalId, SourceRevisionId};
+    use orna_core::{
+        CatalogueRevisionId, InspectEpochId, InvocationId, PrincipalId, SourceRevisionId,
+    };
 
     fn invocation_id(byte: u8) -> InvocationId {
         InvocationId::from_bytes([byte; 16])
+    }
+    fn epoch_id(high: u8, low: u8) -> InspectEpochId {
+        let mut bytes = [low; 16];
+        bytes[..8].fill(high);
+        InspectEpochId::from_bytes(bytes)
     }
 
     fn principal_id(byte: u8) -> PrincipalId {
@@ -188,7 +195,7 @@ mod tests {
     fn binding(generation: u64) -> InspectEpochBinding {
         InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(5),
@@ -270,7 +277,7 @@ mod tests {
 
         let principal_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(8),
             revision_pair(5),
@@ -286,7 +293,7 @@ mod tests {
 
         let revision_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(9),
@@ -320,7 +327,7 @@ mod tests {
         assert_eq!(lifecycle.replace_epoch(current), Ok(()));
         let same_generation_different_identity = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(9),
             principal_id(4),
             revision_pair(5),
@@ -340,7 +347,7 @@ mod tests {
         let current = binding(1);
         let foreign_principal = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(8),
             revision_pair(5),
@@ -366,7 +373,7 @@ mod tests {
         let current = binding(1);
         let revision_mismatch = InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(9),

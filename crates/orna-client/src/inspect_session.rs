@@ -368,12 +368,17 @@ mod tests {
     use super::*;
     use crate::ClientExecutionContext;
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, PrincipalId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, ObjectId, PrincipalId,
         SourceRevisionId, revision::RevisionPair,
     };
 
     fn invocation_id(byte: u8) -> InvocationId {
         InvocationId::from_bytes([byte; 16])
+    }
+    fn epoch_id(high: u8, low: u8) -> InspectEpochId {
+        let mut bytes = [low; 16];
+        bytes[..8].fill(high);
+        InspectEpochId::from_bytes(bytes)
     }
 
     fn principal_id(byte: u8) -> PrincipalId {
@@ -390,7 +395,7 @@ mod tests {
     fn binding(generation: u64) -> InspectEpochBinding {
         InspectEpochBinding::new(
             invocation_id(1),
-            2,
+            epoch_id(2, 2),
             invocation_id(3),
             principal_id(4),
             revision_pair(5),
@@ -759,7 +764,7 @@ mod tests {
 
         let refreshed = InspectEpochBinding::new(
             replacement.client_epoch_id(),
-            replacement.server_epoch_id() + 1,
+            epoch_id(2, 3),
             replacement.target_invocation_id(),
             replacement.principal(),
             replacement.revision(),
