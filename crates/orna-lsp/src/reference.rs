@@ -390,7 +390,7 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
     // Procedural
     KeywordReference {
         keyword: "IS",
-        summary: "Introduces the declarative body of a function. Null and identity comparison.",
+        summary: "Introduces a declarative function body and compares an expression with NULL or another identity.",
         context: "IS declarations BEGIN statements END; after RETURNS. expression IS [NOT] NULL. Null and identity comparison.",
         example: "IS\n  LET v TIMESTAMP := sys.time.now();\nBEGIN\n  RETURN v;\nEND;",
     },
