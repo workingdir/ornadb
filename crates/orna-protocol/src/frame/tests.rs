@@ -3297,6 +3297,177 @@ fn invocation_client_validates_split_event_batches_and_terminal_completion() {
 }
 
 #[test]
+fn invocation_client_rejects_inner_sequence_exhaustion_without_restarting() {
+    let active = empty_active_revision();
+    let registry = test_registry();
+    let retained =
+        encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+    let (mut client, _) = InvocationClient::start(retained);
+    let invocation = InvocationId::from_bytes([0x76; 16]);
+    let accepted = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        },
+    )
+    .expect("accepted frame");
+    client
+        .receive_encoded(&active, &registry, &accepted)
+        .expect("accepted response");
+
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .expect("started event");
+    let started_frame = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::InvokeEvent(started)),
+            }],
+        },
+    )
+    .expect("started frame");
+    client
+        .receive_encoded(&active, &registry, &started_frame)
+        .expect("started response");
+
+    // Simulate the last representable inner sequence without constructing
+    // u64::MAX intermediate events.
+    client.next_inner_sequence = Some(u64::MAX);
+    let value = InvokeEvent::new(
+        invocation,
+        u64::MAX,
+        InvocationEventBody::ValueBatch {
+            schema: None,
+            values: vec![InvokeValue::new(RuntimeValue::Integer(7)).expect("value")],
+        },
+    )
+    .expect("last value event");
+    let value_frame = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 2,
+                event: Event::Value(RuntimeValue::InvokeEvent(value)),
+            }],
+        },
+    )
+    .expect("last value frame");
+    client
+        .receive_encoded(&active, &registry, &value_frame)
+        .expect("last value response");
+
+    let repeated_started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .expect("repeated started event");
+    let repeated_started_frame = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 3,
+                event: Event::Value(RuntimeValue::InvokeEvent(repeated_started)),
+            }],
+        },
+    )
+    .expect("repeated started frame");
+    let before = client.clone();
+    assert_eq!(
+        client.receive_encoded(&active, &registry, &repeated_started_frame),
+        Err(InvocationClientError::SequenceExhausted)
+    );
+    assert_eq!(client, before);
+}
+
+#[test]
+fn invocation_client_debits_exact_encoded_event_batch_payload() {
+    let active = empty_active_revision();
+    let registry = test_registry();
+    let retained =
+        encode_invoke_request(&active, &registry, &minimal_request(None)).expect("request");
+    let invocation = InvocationId::from_bytes([0x77; 16]);
+    let accepted = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        },
+    )
+    .expect("accepted frame");
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .expect("started event");
+    let event = encode_constructed_server_frame(
+        &active,
+        &registry,
+        &ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::InvokeEvent(started)),
+            }],
+        },
+    )
+    .expect("event frame");
+    let required = u64::try_from(event.len() - HEADER_LENGTH).expect("bounded payload");
+    assert!(required > 0);
+
+    let (mut exact, _) = InvocationClient::start(retained.clone());
+    exact
+        .receive_encoded(&active, &registry, &accepted)
+        .expect("accepted response");
+    exact.remaining_result_credit = required;
+    assert!(matches!(
+        exact.receive_encoded(&active, &registry, &event),
+        Ok(InvocationClientResponse::EventBatch(_))
+    ));
+    assert_eq!(exact.remaining_result_credit, 0);
+
+    let (mut short, _) = InvocationClient::start(retained);
+    short
+        .receive_encoded(&active, &registry, &accepted)
+        .expect("accepted response");
+    short.remaining_result_credit = required - 1;
+    let before = short.clone();
+    assert_eq!(
+        short.receive_encoded(&active, &registry, &event),
+        Err(InvocationClientError::InsufficientCredit {
+            available: required - 1,
+            required,
+        })
+    );
+    assert_eq!(short, before);
+}
+
+#[test]
 fn invocation_client_cancellation_is_explicit_and_one_shot() {
     let active = empty_active_revision();
     let registry = test_registry();
