@@ -1,3 +1,4 @@
+#[cfg(feature = "test-hooks")]
 use super::*;
 
 // The version-2 standard source constants below are the exact retained

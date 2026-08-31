@@ -3170,6 +3170,22 @@ fn source_metadata_maps_capability_envelope_to_inner_body_kind() {
             ),
             orna_core::source_metadata::SourceBodyKind::ControlFlow,
         ),
+        (
+            orna_artifact::client_plan::InnerClientPlan::State(
+                orna_artifact::client_plan::StateClientPlan::new(
+                    orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+                    vec![orna_artifact::client_plan::StateSlot::new(
+                        StateSlotId::from_bytes([0x22; 16]),
+                        orna_standard::INTEGER_TYPE_ID,
+                        orna_artifact::client_plan::StateScope::Local,
+                        orna_artifact::client_plan::StateDefault::Expression(
+                            orna_artifact::client_plan::ClientExpressionNode::Integer { value: 1 },
+                        ),
+                    )],
+                ),
+            ),
+            orna_core::source_metadata::SourceBodyKind::State,
+        ),
     ];
     for (inner, expected) in plans {
         let payload = orna_artifact::client_plan::CapabilityClientPlan::new(

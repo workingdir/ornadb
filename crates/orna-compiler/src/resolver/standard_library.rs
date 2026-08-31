@@ -187,18 +187,20 @@ pub fn check_standard_source_v11(
         .ok_or(StandardLibraryCheckError::SourceMismatch)?;
     let mut checked_executables = parent.checked_executables().to_vec();
     let math_functions = checked_bundle.client_functions().collect::<Vec<_>>();
-    if math_functions.len() != 6 {
+    let math_executables = snapshot
+        .executables()
+        .get(12..)
+        .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
+    if math_functions.len() != 6 || math_executables.len() != math_functions.len() {
         return Err(StandardLibraryCheckError::ExecutableMismatch);
     }
-    for (stored, checked) in snapshot.executables()[12..]
-        .iter()
-        .zip(math_functions.iter())
-    {
+    for (stored, checked) in math_executables.iter().zip(math_functions.iter()) {
         let function = snapshot
             .catalogue()
             .function_by_id(stored.function())
             .ok_or(StandardLibraryCheckError::ExecutableMismatch)?;
-        if checked.parameters().len() != function.parameters().len()
+        if checked.id().existing() != Some(stored.function())
+            || checked.parameters().len() != function.parameters().len()
             || checked.domain() != function.domain()
         {
             return Err(StandardLibraryCheckError::ExecutableMismatch);

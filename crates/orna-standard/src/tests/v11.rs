@@ -218,6 +218,30 @@ fn v11_checker_rejects_wrong_math_source_identity_and_ordinal() {
         super::super::StandardLibraryError::RetainedSourceMismatch
     ));
 }
+
+#[test]
+fn v11_checker_rejects_missing_math_executable() {
+    let snapshot = super::super::retained_standard_library_v11_snapshot()
+        .expect("the retained V11 source is valid");
+    let mut executables = snapshot.executables().to_vec();
+    executables.pop();
+    let tampered = orna_core::revision::StandardLibrarySnapshot::new_with_executables(
+        snapshot.revision(),
+        snapshot.digest_version(),
+        snapshot.source().clone(),
+        snapshot.language_version(),
+        snapshot.catalogue().clone(),
+        executables,
+        snapshot.origins().to_vec(),
+        snapshot.digest(),
+    )
+    .expect_err("the public snapshot constructor must reject a short executable set");
+    assert!(matches!(
+        tampered,
+        orna_core::revision::RevisionInvariantError::StandardExecutableSequenceLengthMismatch { .. }
+    ));
+}
+
 #[test]
 fn v11_verifier_rejects_tampered_library_digest() {
     let snapshot = super::super::retained_standard_library_v11_snapshot()
