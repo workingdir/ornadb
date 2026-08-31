@@ -48,8 +48,9 @@ runtime-qt-build:
 
 
 # Build and run the Qt runtime demo against a real display.
-runtime-qt-demo: runtime-qt-build
+runtime-qt-demo:
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "runtime-qt-demo: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    just runtime-qt-build
     env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-demo
 
 # Build the Qt runtime and run the static Studio shell smoke.
@@ -78,18 +79,21 @@ studio-qt-smoke runtime_path:
     QT_QPA_PLATFORM=offscreen cargo run --locked --offline -p orna-client --example studio_demo -- {{runtime_path}} --smoke
 
 # Run the Rust Studio shell interactively against a display server.
-studio-qt-display: runtime-qt-build
+studio-qt-display:
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "studio-qt-display: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    just runtime-qt-build
     env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so
 
 # Run the Rust Studio shell once against a display server and exit.
-studio-qt-display-smoke: runtime-qt-build
+studio-qt-display-smoke:
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "studio-qt-display-smoke: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    just runtime-qt-build
     env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so --smoke
 
 # Emit one registered Studio action and verify its feedback update.
-studio-qt-action-smoke: runtime-qt-build
+studio-qt-action-smoke:
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "studio-qt-action-smoke: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    just runtime-qt-build
     env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so --smoke-action
 
 # Exercise the accepted TTY and Qt runtime smoke paths without a display server.
@@ -98,8 +102,9 @@ runtime-suite: runtime-qt-test
     QT_QPA_PLATFORM=offscreen target/runtime-qt/orna-runtime-qt-demo --smoke
 
 # Exercise the Qt visual and action paths against a display server.
-runtime-display-suite: runtime-qt-build
+runtime-display-suite:
     test -n "${DISPLAY-}${WAYLAND_DISPLAY-}" || (echo "runtime-display-suite: DISPLAY or WAYLAND_DISPLAY is required" >&2; exit 2)
+    just runtime-qt-build
     env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-visual target/runtime-qt/orna-runtime-qt-display.png
     env -u QT_QPA_PLATFORM target/runtime-qt/orna-runtime-qt-demo --smoke
 
