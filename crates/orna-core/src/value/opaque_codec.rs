@@ -531,6 +531,9 @@ fn is_rows_standard_scalar_type_id(type_id: &[u8]) -> bool {
         && type_id[..15].iter().all(|byte| *byte == 0)
         && matches!(type_id[15], 0x01 | 0x02 | 0x03 | 0x04 | 0x06 | 0x07)
 }
+fn is_rows_standard_scalar_type_id_for_tag(type_id: &[u8], tag: u8) -> bool {
+    is_rows_standard_scalar_type_id(type_id) && type_id[15] == tag
+}
 fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
     const HEADER: usize = 25;
     const MARKER: &[u8; 4] = b"ORV5";
@@ -559,10 +562,16 @@ fn validate_rows_orv5_value(bytes: &[u8], depth: usize) -> Result<(), ()> {
             .ok_or(()),
         0x03 => (payload.len() == 4).then_some(()).ok_or(()),
         0x04 | 0x05 => (payload.len() == 8).then_some(()).ok_or(()),
-        0x06 | 0x0a => (has_type_identity && std::str::from_utf8(payload).is_ok())
+        0x06 => (is_rows_standard_scalar_type_id_for_tag(type_identity, 0x06)
+            && std::str::from_utf8(payload).is_ok())
             .then_some(())
             .ok_or(()),
-        0x07 => has_type_identity.then_some(()).ok_or(()),
+        0x07 => is_rows_standard_scalar_type_id_for_tag(type_identity, 0x07)
+            .then_some(())
+            .ok_or(()),
+        0x0a => (has_type_identity && std::str::from_utf8(payload).is_ok())
+            .then_some(())
+            .ok_or(()),
         0x0c => Err(()),
         0x08 => (payload.len() == 16).then_some(()).ok_or(()),
         0x0b => validate_rows_record_payload(payload, depth),
