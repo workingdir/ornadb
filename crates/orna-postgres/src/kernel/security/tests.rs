@@ -661,6 +661,31 @@ fn invocation_audit_decision_uses_only_closed_execute_evidence() {
         .expect("unresolved denied decision must remain closed");
 }
 
+fn sealed_test_active_revision(pair: RevisionPair) -> ActiveDatabaseRevision {
+    let source = orna_core::revision::StoredSourceRevision::new(
+        orna_core::SourceBundleId::from_bytes([0; 16]),
+        pair.source(),
+        None,
+        Vec::new(),
+        orna_core::revision::Sha256Digest::from_bytes([0; 32]),
+        orna_core::revision::Sha256Digest::from_bytes([0; 32]),
+    )
+    .expect("sealed invocation test source revision");
+    let catalogue = CatalogueSnapshot::new(pair.catalogue(), Vec::new(), Vec::new())
+        .expect("sealed invocation test catalogue");
+    ActiveDatabaseRevision::new(
+        pair,
+        source,
+        catalogue,
+        orna_core::revision::Sha256Digest::from_bytes([0; 32]),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("sealed invocation test active revision")
+}
+
 #[test]
 fn sealed_invocation_security_guard_rejects_security_definer_targets() {
     use orna_core::{
@@ -694,6 +719,223 @@ fn sealed_invocation_security_guard_rejects_security_definer_targets() {
     ));
     assert!(!resource_target_security_is_supported(&definer));
     assert!(resource_target_security_is_supported(&invoker));
+
+    let prepared_definer =
+        PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definer));
+    let prepared_invoker =
+        PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&invoker));
+    assert!(
+        !prepared_definer.security_is_supported(),
+        "prepared SECURITY DEFINER targets must not enter continuation execution"
+    );
+    assert!(
+        prepared_invoker.security_is_supported(),
+        "prepared SECURITY INVOKER targets must retain the accepted path"
+    );
+}
+
+#[test]
+fn prepared_security_definer_is_rejected_before_audit_or_execution() {
+    use orna_core::{
+        catalogue::{
+            FunctionSecurity, FunctionTransaction, FunctionVolatility, QualifiedSemanticName,
+        },
+        types::{ResolvedType, StandardScalar},
+    };
+
+    let function = FunctionId::from_bytes([0xf4; 16]);
+    let revision = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xf5; 16]),
+        CatalogueRevisionId::from_bytes([0xf6; 16]),
+    );
+    let principal = PrincipalId::from_bytes([0xf7; 16]);
+    let definition = FunctionDefinition::new(
+        function,
+        QualifiedSemanticName::new(["app", "definer_continuation"]).expect("function name"),
+        FunctionDomain::Server,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+        FunctionRevisionId::from_bytes([0xf8; 16]),
+        FunctionSecurity::Definer,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    );
+
+    let security = SecuritySnapshot::new(
+        revision,
+        vec![function],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![ExecuteGrant::new(principal, function)],
+    )
+    .expect("security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("authenticated session");
+    let security_target = InvocationTarget::new(function, revision);
+    let active = sealed_test_active_revision(revision);
+    let ExecuteDecision::Allowed(authorisation) =
+        authorise_sealed_target(&security, &session, security_target)
+    else {
+        panic!("the fixture grant must create allowed evidence");
+    };
+    let mut outcome = SealedInvocationPreparedOutcome::Allowed {
+        target: PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definition)),
+        security_target,
+        authorisation,
+    };
+
+    assert_eq!(
+        outcome
+            .unsupported_security_definer_target(&active)
+            .expect("prepared outcome target must be internally consistent"),
+        Some(security_target)
+    );
+    outcome
+        .reject_unsupported_security_definer(&active)
+        .expect("supported target tuple must permit the SECURITY DEFINER recheck");
+    assert!(matches!(
+        outcome,
+        SealedInvocationPreparedOutcome::TargetDenied {
+            security_target: Some(actual_target),
+            denial: Some(ExecuteDenial::UnsupportedSecurityDefiner),
+        } if actual_target == security_target
+    ));
+    let denied_audit = SecurityAuditDecision::execute_denied(
+        &session,
+        security_target,
+        ExecuteDenial::UnsupportedSecurityDefiner,
+    );
+    assert_eq!(denied_audit.outcome(), SecurityAuditOutcome::Denied);
+    assert_eq!(denied_audit.session_principal(), Some(principal));
+    assert_eq!(denied_audit.effective_principal(), None);
+    assert_eq!(denied_audit.authorising_principal(), None);
+    assert_eq!(denied_audit.target(), Some(security_target));
+    assert_eq!(
+        denied_audit.denial(),
+        Some(SecurityAuditDenial::Execute(
+            ExecuteDenial::UnsupportedSecurityDefiner
+        ))
+    );
+    let invocation_audit = InvocationAuditDecision::from_execute_evidence(
+        InvocationId::from_bytes([0xfa; 16]),
+        &SecurityAuditEvent::new(
+            SecurityAuditEventId::from_bytes([0xfb; 16]),
+            1,
+            UNIX_EPOCH,
+            denied_audit,
+        ),
+    )
+    .expect("denied EXECUTE evidence must remain a closed invocation audit");
+    assert_eq!(invocation_audit.outcome, SecurityAuditOutcome::Denied);
+    assert_eq!(invocation_audit.target, Some(security_target));
+    assert_eq!(invocation_audit.effective_principal, None);
+    assert_eq!(invocation_audit.authorising_principal, None);
+    assert!(invocation_audit.security_audit_event.is_some());
+}
+
+#[test]
+fn prepared_security_definer_mismatched_target_tuple_fails_closed() {
+    let function = FunctionId::from_bytes([0xc1; 16]);
+    let revision = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xc2; 16]),
+        CatalogueRevisionId::from_bytes([0xc3; 16]),
+    );
+    let definition = FunctionDefinition::new(
+        function,
+        orna_core::catalogue::QualifiedSemanticName::new(["app", "definer_tuple"])
+            .expect("function name"),
+        FunctionDomain::Server,
+        Vec::new(),
+        FunctionReturn::Single(
+            orna_core::types::ResolvedType::scalar(orna_core::types::StandardScalar::Integer),
+        ),
+        FunctionRevisionId::from_bytes([0xc4; 16]),
+        FunctionSecurity::Definer,
+        Some(orna_core::catalogue::FunctionTransaction::ReadOnly),
+        orna_core::catalogue::FunctionVolatility::Stable,
+    );
+    let principal = PrincipalId::from_bytes([0xc5; 16]);
+    let security = SecuritySnapshot::new(
+        revision,
+        vec![function],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![ExecuteGrant::new(principal, function)],
+    )
+    .expect("security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("authenticated session");
+    let expected_target = InvocationTarget::new(function, revision);
+    let ExecuteDecision::Allowed(authorisation) =
+        authorise_sealed_target(&security, &session, expected_target)
+    else {
+        panic!("the fixture grant must create allowed evidence");
+    };
+    let active = sealed_test_active_revision(revision);
+    let prepared = PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definition));
+    let mismatches = [
+        InvocationTarget::new(FunctionId::from_bytes([0xc6; 16]), revision),
+        InvocationTarget::new(
+            function,
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0xc7; 16]),
+                CatalogueRevisionId::from_bytes([0xc8; 16]),
+            ),
+        ),
+        InvocationTarget::verified_standard(
+            function,
+            revision,
+            StandardLibraryRevisionId::from_bytes([0xc9; 16]),
+            FunctionRevisionId::from_bytes([0xca; 16]),
+        ),
+    ];
+
+    for security_target in mismatches {
+        for bind_failure in [false, true] {
+            let mut outcome = if bind_failure {
+                SealedInvocationPreparedOutcome::BindFailure {
+                    target: prepared.clone(),
+                    security_target,
+                    authorisation: authorisation.clone(),
+                }
+            } else {
+                SealedInvocationPreparedOutcome::Allowed {
+                    target: prepared.clone(),
+                    security_target,
+                    authorisation: authorisation.clone(),
+                }
+            };
+            let error = outcome
+                .reject_unsupported_security_definer(&active)
+                .expect_err("an inconsistent SECURITY DEFINER outcome must fail closed");
+            assert!(matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "active catalogue",
+                    rule: "prepared sealed invocation security target must match its pinned target",
+                    ..
+                }
+            ));
+            assert!(
+                matches!(
+                    outcome,
+                    SealedInvocationPreparedOutcome::Allowed { .. }
+                        | SealedInvocationPreparedOutcome::BindFailure { .. }
+                ),
+                "invariant rejection must not convert the forged outcome into an audit-able denial"
+            );
+        }
+    }
 }
 
 #[test]
