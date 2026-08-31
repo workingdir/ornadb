@@ -269,6 +269,102 @@ fn rejects_inline_row_resource_descriptors_in_both_procedural_local_paths() {
 }
 
 #[test]
+fn rejects_inline_row_resource_descriptor_in_control_flow_local_path() {
+    let base = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::from_bytes([0x51; 16]),
+        vec![SchemaDefinition::new(
+            SchemaId::from_bytes([0x52; 16]),
+            QualifiedSemanticName::new(["tasks"]).unwrap(),
+        )],
+        Vec::new(),
+        vec![FunctionDefinition::new(
+            FunctionId::from_bytes([0x53; 16]),
+            QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+            FunctionRevisionId::from_bytes([0x54; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )],
+    )
+    .unwrap();
+
+    for descriptor in [
+        "TABLE (task_id UUID, title TEXT)",
+        "RECORD (task_id UUID, title TEXT)",
+    ] {
+        let source = format!(
+            "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS TEXT IS \
+             BEGIN IF TRUE THEN LET rows std.data.Resource<{descriptor}> := \
+             std.data.resource(target => tasks.find, arguments => std.call.args()); \
+             RETURN AWAIT rows; ELSE RETURN 'fallback'; END IF; END;"
+        );
+        let parsed = parse(&source);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{source}: {:?}",
+            parsed.diagnostics()
+        );
+
+        let source_bundle =
+            SourceBundle::new([SourceUnit::new("resource-control-flow.orna", source)]).unwrap();
+        let report = check(&source_bundle, &base);
+        assert_eq!(report.diagnostics().len(), 1, "{descriptor}: {:?}", report.diagnostics());
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "CLIENT local rows uses an inline TABLE/RECORD resource descriptor; row-resource transport is deferred"
+        );
+        assert_no_checked_bundle(&report);
+    }
+}
+
+#[test]
+fn accepts_scalar_resource_descriptor_in_control_flow_local_path() {
+    let base = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::from_bytes([0x61; 16]),
+        vec![SchemaDefinition::new(
+            SchemaId::from_bytes([0x62; 16]),
+            QualifiedSemanticName::new(["tasks"]).unwrap(),
+        )],
+        Vec::new(),
+        vec![FunctionDefinition::new(
+            FunctionId::from_bytes([0x63; 16]),
+            QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::CharacterLargeObject)),
+            FunctionRevisionId::from_bytes([0x64; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )],
+    )
+    .unwrap();
+    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS TEXT IS \
+                  BEGIN IF TRUE THEN LET value std.data.Resource<TEXT> := \
+                  std.data.resource(target => tasks.find, arguments => std.call.args()); \
+                  RETURN AWAIT value; ELSE RETURN 'fallback'; END IF; END;";
+    let parsed = parse(source);
+    assert!(
+        parsed.diagnostics().is_empty(),
+        "{source}: {:?}",
+        parsed.diagnostics()
+    );
+    let source_bundle =
+        SourceBundle::new([SourceUnit::new("resource-control-flow.orna", source)]).unwrap();
+    let report = check(&source_bundle, &base);
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:?}",
+        report.diagnostics()
+    );
+    assert!(report.checked_bundle().is_some());
+}
+
+#[test]
 fn rejects_client_resource_table_descriptor_with_deferred_row_diagnostic() {
     let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.find() RETURNS TEXT IS BEGIN LET rows std.data.Resource<TABLE (task_id UUID, title TEXT)> := std.data.resource(target => tasks.find, arguments => std.call.args()); RETURN AWAIT rows; END;";
     let parsed = parse(source);
