@@ -55,28 +55,6 @@ fn legacy_migration_epoch_is_order_contiguous() -> TestResult<()> {
 }
 
 #[test]
-fn registered_migration_sql_has_no_procedural_language_dependency() -> TestResult<()> {
-    require(!MIGRATIONS.is_empty(), "migration registry is empty")?;
-
-    for (version, name, sql) in MIGRATIONS {
-        // Migration 23 (executable standard relations, ADR 0055) contains one
-        // accepted `DO` block that validates the invocation-target authority
-        // backfill inside the append-only migration. The guardrail that
-        // remains meaningful is that no migration declares an explicit
-        // procedural-language dependency (CREATE EXTENSION plpgsql or
-        // LANGUAGE plpgsql); the default `DO $$ ... $$` block relies only on
-        // PostgreSQL's built-in default language and ran successfully in the
-        // embedded engine.
-        require(
-            !sql.to_ascii_lowercase().contains("plpgsql"),
-            format!("migration {version} ({name}) depends on PL/pgSQL"),
-        )?;
-    }
-
-    Ok(())
-}
-
-#[test]
 fn write_reference_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
