@@ -12,6 +12,43 @@ OrnaDB ships three layers of editor support for `.orna` files:
 3. **A TextMate grammar** plus small per-editor integration packages,
    for editors that use static grammars (VS Code, Sublime Text).
 
+## Fresh-checkout prerequisites and evidence
+
+Run the static gate from the repository root after the locked Cargo cache has
+been provisioned and the embedded-engine prerequisite is available:
+
+```bash
+cargo fetch --locked
+cargo fetch --locked --manifest-path editors/zed/Cargo.toml
+CARGO_NET_OFFLINE=true just editor-tooling-check
+```
+
+The two `cargo fetch --locked` commands are the networked dependency bootstrap
+for the root workspace and separate `editors/zed` workspace. The editor gate
+requires Python 3.11 or newer (for TOML validation), `tree-sitter-cli` 0.26.5,
+Node, Cargo, Git, and the checked-in `editors/` tree. Its Cargo checks and
+tests use `--locked --offline`; the source-check parity phase also invokes
+`orna-server`, whose embedded-engine build requires a Linux x86_64 host plus
+either `ORNA_POSTGRES_ENGINE_OUTPUT` naming a complete prebuilt engine output
+directory with an **absolute** path (for example,
+`$PWD/third_party/postgresql/output`) or the environment-dependent
+Docker-backed build. Cargo offline mode does not disable that build script's
+host/network work.
+The script generates Tree-sitter output in a temporary directory and does not
+rewrite the checkout.
+
+The canonical `spec` bundle is not part of this checkout: both `./spec/` and
+the sibling `../spec/` are absent. The static gate can still validate the
+checked-in accepted corpus and logs `../spec/examples` as skipped when that
+optional proposal/deferred directory is absent. Neither that skip nor a
+successful static gate proves parity with the missing canonical bundle.
+
+`emacs` is optional. If `emacs` and its Eglot package are available, the gate
+batch-loads `editors/emacs/orna-eglot.el`; otherwise it records the Emacs
+runtime check as unavailable while still requiring the checked-in integration
+file. Neovim, Vim, Helix, Zed, VS Code, and Sublime host processes are not
+started by this gate.
+
 ## Features
 
 The language server provides:
@@ -41,6 +78,11 @@ everything else can fall back to the TextMate grammar.
 
 ## Grammar and evidence boundary
 
+The paths in this section refer to the external canonical bundle. This
+checkout currently has neither `./spec/` nor `../spec/`; work ADRs in
+`docs/decisions/` are not a substitute for that source authority. Do not turn
+an absent canonical input into a parity claim.
+
 The canonical EBNF (`spec/spec/orna.ebnf`) and the grammar/AST discussion
 in `spec/docs/28-ebnf-ast.md` are **current proposal** text.
 `spec/docs/25-source-compiler-ir.md` and `spec/docs/39-testing.md` combine
@@ -67,7 +109,7 @@ Keep the evidence classes separate:
 ## Building the language server
 
 ```bash
-cargo build -p orna-lsp --release
+cargo build --locked --offline -p orna-lsp --release
 ```
 
 The binary is `target/release/orna-lsp`. Install it somewhere on
@@ -76,8 +118,17 @@ The binary is `target/release/orna-lsp`. Install it somewhere on
 Run the protocol tests:
 
 ```bash
-cargo test -p orna-lsp
+cargo test --locked --offline -p orna-lsp
 ```
+
+For the complete static gate, run `just editor-tooling-check`. A zero exit
+status is evidence for the checked-in JSON, grammar generation, accepted
+corpus, parser/LSP contracts, Zed extension, fallback parity, and VS Code
+syntax only. The script reports optional Emacs runtime unavailability and
+skips absent `../spec/examples`; those messages are not failures, but they
+must remain in the evidence log. Any missing required file, missing CLI
+prerequisite, Cargo cache miss, parser error, or non-zero subprocess is a gate
+failure and must not be relabelled as a skip.
 
 A manual smoke test of the framed lifecycle (the helper computes each JSON body's exact UTF-8 byte length and checks that the binary exits successfully):
 
@@ -138,8 +189,15 @@ the Run view, or package it:
 ```bash
 cd editors/vscode
 npx @vscode/vsce package
-code --install-extension orna-vscode-0.1.0.vsix
+code --install-extension orna-vscode-1.0.0.vsix
 ```
+
+Packaging is a separate network/editor-host gate: `npx` may download
+`@vscode/vsce`, and `code --install-extension` requires a VS Code host. The
+expected artifact is `editors/vscode/orna-vscode-1.0.0.vsix`; this checkout has
+no such artifact until the packaging command succeeds. Neither packaging nor
+installation is executed by `just editor-tooling-check`. Record a missing npm
+network, `npx`, or VS Code host as unavailable, not as static editor evidence.
 
 The extension launches `orna-lsp` from `PATH`. To use a specific
 binary, set `orna.lsp.path` in settings. The extension bundles the
@@ -223,6 +281,32 @@ file patterns `["**/*.orna"]`, and UTF-16 position encoding (the
 default). The server needs no configuration and no workspace
 initialization beyond the standard handshake.
 
+## Gate result and host-runtime boundary
+
+Capture the static result when it is used as release evidence:
+
+```bash
+mkdir -p ci-evidence
+set -o pipefail
+just editor-tooling-check 2>&1 | tee ci-evidence/editor-tooling.log
+```
+
+The static gate passes only when it exits zero. It validates checked-in
+metadata, generated grammar bytes, accepted/deferred manifest classification,
+accepted parser and LSP tests, fallback grammar parity, the Zed extension's
+locked offline Cargo check, and the VS Code JavaScript syntax with
+`node --check`. It does not launch an editor, open a buffer, install an
+extension, or prove host-session behavior. A missing required CLI prerequisite
+or file, an offline Cargo cache miss, parser error, or non-zero child process
+is a failure; do not relabel it as an expected skip.
+
+The only expected static-gate skip is an absent optional `../spec/examples`
+directory, which is logged as proposal/deferred input. Emacs runtime loading
+is separately **unavailable** when `emacs` or Eglot is absent, while the
+checked-in Emacs source remains required. Neovim/Vim/Helix/Zed/VS Code/Sublime
+launches are host gates outside this command and must be recorded separately
+with the host version and configuration if performed.
+
 ## Writing documentation for hovers
 
 Attach `DOCUMENTATION '...'` clauses to object and value types, fields,
@@ -234,8 +318,9 @@ CREATE TYPE tasks.task AS OBJECT (
 ) DOCUMENTATION 'a durable task';
 ```
 
-The clauses are part of the grammar (`spec/spec/orna.ebnf`) and are
-captured by the lossless parser; they never change runtime behaviour.
+The clauses are implemented by the lossless parser; the referenced canonical
+grammar is proposal text and is absent from this checkout. They never change
+runtime behaviour.
 
 ## Language reference for tooling authors
 
