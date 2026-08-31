@@ -1567,7 +1567,10 @@ impl InvocationClient {
                 if channel != Channel::ResultValues {
                     return Err(InvocationClientError::WrongChannel { actual: channel });
                 }
-                let first_batch = self.next_inner_sequence.is_none();
+                let first_batch = self.next_outer_sequence == Some(1);
+                if self.next_inner_sequence.is_none() && !first_batch {
+                    return Err(InvocationClientError::SequenceExhausted);
+                }
                 let mut next_outer_sequence = self.next_outer_sequence;
                 let mut next_inner_sequence = self.next_inner_sequence;
                 let mut records = Vec::with_capacity(events.len());
@@ -1596,9 +1599,6 @@ impl InvocationClient {
                     next_outer_sequence = expected_outer.checked_add(1);
                     next_inner_sequence = expected_inner.checked_add(1);
                     records.push(InvocationEventRecord::new(event.sequence, value));
-                }
-                if next_inner_sequence == Some(0) {
-                    return Err(InvocationClientError::SequenceExhausted);
                 }
                 if first_batch
                     && records.first().is_none_or(|record| {
