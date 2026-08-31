@@ -7,13 +7,10 @@
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
-    DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol, Hover,
-    Location, NumberOrString, Position, SymbolKind,
+    DiagnosticRelatedInformation, DiagnosticSeverity, DocumentSymbol, Hover, Location,
+    NumberOrString, Position, SymbolKind,
 };
-use orna_compiler::{
-    CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
-    SourceLocation, check_standard_library_source,
-};
+use orna_compiler::{CompilerDiagnostic, check_standard_library_source};
 use orna_core::catalogue::ValueTypePersistence;
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
@@ -53,45 +50,29 @@ impl StandardLibrary {
 /// This path needs no standard library and is used when the verified
 /// standard snapshot cannot be loaded.
 pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let logical_path = document.logical_path();
-    if let Ok(bundle) =
-        SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())])
-    {
-        let report = orna_compiler::parse_bundle(&bundle);
-        return report
-            .diagnostics()
-            .iter()
-            .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-            .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
-            .collect();
-    }
-
-    orna_syntax::parse(&document.text)
+    let parse = orna_syntax::parse(&document.text);
+    parse
         .diagnostics()
         .iter()
-        .map(|diagnostic| {
-            let help = syntax_help(diagnostic.message.as_str());
-            Diagnostic {
-                range: mapper.range(&diagnostic.span),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(NumberOrString::String(diagnostic.code.to_owned())),
-                code_description: None,
-                source: Some("orna".to_owned()),
-                message: format!("{}\n\nhelp: {help}", diagnostic.message),
-                related_information: None,
-                tags: None,
-                data: Some(serde_json::json!({
-                    "severity": "error",
-                    "primaryLabel": "unexpected syntax",
-                    "help": help,
-                    "notes": [],
-                    "related": [],
-                })),
-            }
+        .map(|diagnostic| Diagnostic {
+            range: mapper.range(&diagnostic.span),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String(diagnostic.code.to_owned())),
+            code_description: None,
+            source: Some("orna".to_owned()),
+            message: diagnostic.message.clone(),
+            related_information: Some(vec![DiagnosticRelatedInformation {
+                location: Location {
+                    uri: document.uri.clone(),
+                    range: mapper.range(&diagnostic.span),
+                },
+                message: syntax_help(diagnostic.message.as_str()),
+            }]),
+            tags: None,
+            data: None,
         })
         .collect()
 }
-
 pub fn check_document(
     document: &Document,
     standard: Option<&StandardLibrary>,
@@ -120,96 +101,60 @@ pub fn check_document(
         .diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
+        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri))
         .collect()
 }
-
 fn compiler_diagnostic(
     diagnostic: &CompilerDiagnostic,
     mapper: &PositionMapper<'_>,
     uri: &lsp_types::Uri,
-    logical_path: &str,
 ) -> Diagnostic {
-    let span = compiler_span(diagnostic.location());
-    let related_information = diagnostic
-        .related()
-        .iter()
-        .filter(|related| related.location().logical_path() == logical_path)
-        .map(|related| DiagnosticRelatedInformation {
-            location: Location {
-                uri: uri.clone(),
-                range: mapper.range(&compiler_span(related.location())),
-            },
-            message: related.message().to_owned(),
-        })
-        .collect::<Vec<_>>();
-    let related_data = diagnostic
-        .related()
-        .iter()
-        .map(|related| {
-            serde_json::json!({
-                "path": related.location().logical_path(),
-                "start": related.location().span().start(),
-                "end": related.location().span().end(),
-                "label": related.message(),
-            })
-        })
-        .collect::<Vec<_>>();
-
+    let span = SourceSpan {
+        start: diagnostic.location().span().start(),
+        end: diagnostic.location().span().end(),
+    };
     Diagnostic {
         range: mapper.range(&span),
-        severity: Some(match diagnostic.severity() {
-            CompilerDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
-            CompilerDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
-        }),
+        severity: Some(DiagnosticSeverity::ERROR),
         code: Some(NumberOrString::String(
             diagnostic.code().as_str().to_owned(),
         )),
         code_description: None,
         source: Some("orna".to_owned()),
-        message: diagnostic_message(diagnostic),
-        related_information: (!related_information.is_empty()).then_some(related_information),
-        tags: (diagnostic.code() == DiagnosticCode::UnreachableCode)
-            .then_some(vec![DiagnosticTag::UNNECESSARY]),
-        data: Some(serde_json::json!({
-            "severity": diagnostic.severity().as_str(),
-            "title": diagnostic.code().title(),
-            "summary": diagnostic.code().summary(),
-            "primaryLabel": diagnostic.primary_label(),
-            "help": diagnostic.help(),
-            "notes": diagnostic.notes(),
-            "related": related_data,
-        })),
+        message: diagnostic.message().to_owned(),
+        related_information: Some(vec![DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range: mapper.range(&span),
+            },
+            message: diagnostic_help(diagnostic),
+        }]),
+        tags: None,
+        data: None,
     }
 }
 
-fn compiler_span(location: &SourceLocation) -> SourceSpan {
-    SourceSpan {
-        start: location.span().start(),
-        end: location.span().end(),
+fn diagnostic_help(diagnostic: &CompilerDiagnostic) -> String {
+    let mut help = format!(
+        "{} {}: {}",
+        diagnostic.code().as_str(),
+        diagnostic.code().title(),
+        diagnostic.code().summary()
+    );
+    if let Some(next_step) = diagnostic.code().help() {
+        help.push_str(" Help: ");
+        help.push_str(next_step);
     }
+    help
 }
 
-fn diagnostic_message(diagnostic: &CompilerDiagnostic) -> String {
-    let mut message = diagnostic.message().to_owned();
-    if let Some(help) = diagnostic.help() {
-        message.push_str("\n\nhelp: ");
-        message.push_str(help);
-    }
-    for note in diagnostic.notes() {
-        message.push_str("\n\nnote: ");
-        message.push_str(note);
-    }
-    message
-}
-
-fn syntax_help(message: &str) -> &'static str {
+fn syntax_help(message: &str) -> String {
     if message.contains("expected a name") {
-        "Add the missing name at this location."
+        "Add the missing name at this location.".to_owned()
     } else if message.contains("expected") {
-        "Add the expected token or close the current construct."
+        "Add the expected token or close the current construct.".to_owned()
     } else {
-        "Review the syntax at this location."
+        "Review the syntax at this location.".to_owned()
     }
 }
 
@@ -1522,6 +1467,56 @@ fn client_expression_part_in_parse<'a>(
             return None;
         }
         client_body_part_at(declaration, selected_span).map(|part| (declaration, part))
+    })
+}
+
+fn client_call_callee_at<'a>(
+    parse: &'a Parse,
+    selected_span: &SourceSpan,
+) -> Option<&'a orna_syntax::QualifiedName> {
+    fn find_callee<'a>(
+        node: &'a ClientExpression,
+        selected_span: &SourceSpan,
+    ) -> Option<&'a orna_syntax::QualifiedName> {
+        match node {
+            ClientExpression::Call {
+                callee, arguments, ..
+            } => {
+                if callee
+                    .parts
+                    .iter()
+                    .any(|part| name_part_matches_span(part, selected_span))
+                {
+                    return Some(callee);
+                }
+                arguments
+                    .iter()
+                    .find_map(|argument| find_callee(&argument.value, selected_span))
+            }
+            ClientExpression::Await { expression, .. }
+            | ClientExpression::Parenthesized { expression, .. } => {
+                find_callee(expression, selected_span)
+            }
+            ClientExpression::Concat { left, right, .. }
+            | ClientExpression::Binary(orna_syntax::ClientBinaryExpression {
+                left, right, ..
+            }) => find_callee(left, selected_span).or_else(|| find_callee(right, selected_span)),
+            ClientExpression::Unary(unary) => find_callee(&unary.expression, selected_span),
+            _ => None,
+        }
+    }
+
+    parse.client_functions().iter().find_map(|declaration| {
+        if !span_contains_span(&declaration.span, selected_span) {
+            return None;
+        }
+        match &declaration.body {
+            orna_syntax::ClientFunctionBody::Expression { expression: body }
+            | orna_syntax::ClientFunctionBody::ReturnExpression { expression: body } => {
+                find_callee(body, selected_span)
+            }
+            _ => None,
+        }
     })
 }
 
@@ -2901,13 +2896,47 @@ pub fn hover(
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
     let highlighted = parse.highlight();
-    let (name, kind, span) = token_at(&document.text, &highlighted, byte)?;
     let doc_link = crate::hover::spec_doc_link(&document.uri);
-    if let Some(declaration) = client_target_declaration(parse, &span) {
-        let mut hover =
-            crate::hover::declaration_hover(declaration, &document.text, doc_link.as_deref());
-        hover.range = Some(mapper.range(&span));
-        return Some(hover);
+    let (name, kind, span) = token_at(&document.text, &highlighted, byte)?;
+    let target_function =
+        client_expression_part_in_parse(parse, &span).and_then(|(_declaration, part)| match part {
+            ClientExpressionPart::TargetFunction { root, members, .. } => Some(
+                std::iter::once(root.text.as_str())
+                    .chain(members.iter().map(|member| member.text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            _ => None,
+        });
+    if let Some(target_name) = target_function {
+        if let Some(declaration) = client_target_declaration(parse, &span) {
+            let mut hover =
+                crate::hover::declaration_hover(declaration, &document.text, doc_link.as_deref());
+            hover.range = Some(mapper.range(&span));
+            return Some(hover);
+        }
+        if let Some(hover) = standard
+            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        {
+            let mut hover = hover;
+            hover.range = Some(mapper.range(&span));
+            return Some(hover);
+        }
+    }
+    if let Some(callee) = client_call_callee_at(parse, &span) {
+        let target_name = callee
+            .parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(hover) = standard
+            .and_then(|library| standard_function_hover(library, &target_name, doc_link.as_deref()))
+        {
+            let mut hover = hover;
+            hover.range = Some(mapper.range(&span));
+            return Some(hover);
+        }
     }
     // A standard or external target has no same-document declaration. Do not
     // fall through to a same-spelled function from another schema.
@@ -3014,7 +3043,9 @@ pub fn hover(
                     .map(|reference| crate::hover::scalar_hover(reference, doc_link.as_deref()))
                     .or_else(|| {
                         standard.and_then(|standard| {
-                            standard_value_hover(standard, &name, doc_link.as_deref())
+                            standard_function_hover(standard, &name, doc_link.as_deref()).or_else(
+                                || standard_value_hover(standard, &name, doc_link.as_deref()),
+                            )
                         })
                     })
             }
@@ -3175,11 +3206,11 @@ pub fn references(
 pub fn signature_help(
     document: &Document,
     parse: &Parse,
+    standard: Option<&StandardLibrary>,
     position: Position,
     mapper: &PositionMapper<'_>,
 ) -> Option<lsp_types::SignatureHelp> {
     let byte = mapper.byte_offset(position);
-    let highlighted = parse.highlight();
     let mut open = None;
     let mut depth = 0usize;
     for (index, character) in document.text[..byte].char_indices().rev() {
@@ -3194,32 +3225,15 @@ pub fn signature_help(
         }
     }
     let open = open?;
-    let function_byte = document.text[..open]
+    let function_start = document.text[..open]
         .char_indices()
         .rev()
-        .find(|(_, character)| !character.is_whitespace())
-        .map(|(index, _)| index)?;
-    let token = highlighted
-        .iter()
-        .find(|token| token.range.start <= function_byte && function_byte < token.range.end)?;
-    if token.kind != HighlightKind::FunctionName {
-        return None;
-    }
-    let name = &document.text[token.range.clone()];
-    let declaration = declaration_at(parse, name)?;
-    let (parameters, return_type, label) = match declaration {
-        DeclarationRef::ServerFunction(function) => (
-            function.parameters.as_slice(),
-            return_text(&function.return_type, &document.text),
-            format!("SERVER FUNCTION {}", qualified_name_text(&function.name)),
-        ),
-        DeclarationRef::ClientFunction(function) => (
-            function.parameters.as_slice(),
-            return_text(&function.return_type, &document.text),
-            format!("CLIENT FUNCTION {}", qualified_name_text(&function.name)),
-        ),
-        _ => return None,
-    };
+        .take_while(|(_, character)| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '.'
+        })
+        .last()
+        .map_or(0, |(index, _)| index);
+    let name = document.text[function_start..open].trim().to_owned();
     let active_parameter = document.text[open + 1..byte]
         .chars()
         .fold(
@@ -3232,37 +3246,183 @@ pub fn signature_help(
             },
         )
         .1;
-    let parameter_labels = parameters
-        .iter()
-        .map(|parameter| parameter.name.text.clone())
+    if let Some(declaration) = declaration_at(parse, &name) {
+        match declaration {
+            DeclarationRef::ServerFunction(function) => {
+                return Some(signature_information(
+                    format!("SERVER FUNCTION {}", qualified_name_text(&function.name)),
+                    function.parameters.iter().map(|parameter| {
+                        (
+                            parameter.name.text.clone(),
+                            parameter.documentation.as_ref().and_then(|documentation| {
+                                documentation_text(Some(documentation)).map(str::to_owned)
+                            }),
+                        )
+                    }),
+                    return_text(&function.return_type, &document.text),
+                    active_parameter,
+                ));
+            }
+            DeclarationRef::ClientFunction(function) => {
+                return Some(signature_information(
+                    format!("CLIENT FUNCTION {}", qualified_name_text(&function.name)),
+                    function.parameters.iter().map(|parameter| {
+                        (
+                            parameter.name.text.clone(),
+                            parameter.documentation.as_ref().and_then(|documentation| {
+                                documentation_text(Some(documentation)).map(str::to_owned)
+                            }),
+                        )
+                    }),
+                    return_text(&function.return_type, &document.text),
+                    active_parameter,
+                ));
+            }
+            _ => {}
+        }
+    }
+    let standard = standard?;
+    let function = standard_function(standard, &name)?;
+    Some(signature_information(
+        format!("{} FUNCTION {}", function.domain, function.name),
+        function
+            .parameters
+            .iter()
+            .map(|(name, _)| (name.clone(), None)),
+        function.return_type,
+        active_parameter,
+    ))
+}
+fn resolved_type_name(
+    return_type: orna_core::types::ResolvedType,
+    standard: &StandardLibrary,
+) -> String {
+    match return_type {
+        orna_core::types::ResolvedType::Scalar(scalar) => format!("{scalar:?}").to_uppercase(),
+        orna_core::types::ResolvedType::Value(type_id) => standard
+            .checked
+            .value_types()
+            .iter()
+            .find(|value_type| value_type.id() == type_id)
+            .and_then(|value_type| value_type.name().parts().last())
+            .map(|name| name.to_uppercase())
+            .unwrap_or_else(|| format!("TYPE {type_id:?}")),
+        orna_core::types::ResolvedType::Named(type_id)
+        | orna_core::types::ResolvedType::Reference { target: type_id } => {
+            format!("TYPE {type_id:?}")
+        }
+    }
+}
+
+struct StandardFunctionSignature {
+    name: String,
+    domain: &'static str,
+    parameters: Vec<(String, Option<String>)>,
+    return_type: String,
+}
+fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardFunctionSignature> {
+    let target = source_name_parts(name)
+        .into_iter()
+        .map(identifier_key)
         .collect::<Vec<_>>();
-    Some(lsp_types::SignatureHelp {
+    let definition = standard
+        .checked
+        .verified_snapshot()
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| {
+            function
+                .name()
+                .parts()
+                .iter()
+                .map(|part| identifier_key(part))
+                .eq(target.iter().cloned())
+        })?;
+    let parameters = definition
+        .parameters()
+        .iter()
+        .map(|parameter| (parameter.name().to_owned(), None))
+        .collect();
+    let return_type = match definition.return_type() {
+        orna_core::catalogue::FunctionReturn::Single(return_type)
+        | orna_core::catalogue::FunctionReturn::Stream(return_type) => {
+            resolved_type_name(*return_type, standard)
+        }
+        orna_core::catalogue::FunctionReturn::Rows(columns) => format!(
+            "ROWS ({})",
+            columns
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    Some(StandardFunctionSignature {
+        name: definition.name().to_string(),
+        domain: match definition.domain() {
+            orna_core::catalogue::FunctionDomain::Server => "SERVER",
+            orna_core::catalogue::FunctionDomain::Client => "CLIENT",
+        },
+        parameters,
+        return_type,
+    })
+}
+
+/// Builds hover content for one checked standard-library function.
+fn standard_function_hover(
+    standard: &StandardLibrary,
+    name: &str,
+    doc_link: Option<&str>,
+) -> Option<lsp_types::Hover> {
+    let function = standard_function(standard, name)?;
+    Some(crate::hover::standard_function_hover(
+        function.domain,
+        &function.name,
+        &function
+            .parameters
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        &function.return_type,
+        doc_link,
+    ))
+}
+
+fn signature_information(
+    label: String,
+    parameters: impl IntoIterator<Item = (String, Option<String>)>,
+    return_type: String,
+    active_parameter: usize,
+) -> lsp_types::SignatureHelp {
+    let parameters = parameters
+        .into_iter()
+        .map(|(name, documentation)| lsp_types::ParameterInformation {
+            label: lsp_types::ParameterLabel::Simple(name),
+            documentation: documentation.map(lsp_types::Documentation::String),
+        })
+        .collect::<Vec<_>>();
+    lsp_types::SignatureHelp {
         signatures: vec![lsp_types::SignatureInformation {
             label: format!(
                 "{label}({}) RETURNS {return_type}",
-                parameter_labels.join(", ")
-            ),
-            documentation: None,
-            parameters: Some(
                 parameters
                     .iter()
-                    .map(|parameter| lsp_types::ParameterInformation {
-                        label: lsp_types::ParameterLabel::Simple(parameter.name.text.clone()),
-                        documentation: parameter.documentation.as_ref().map(|documentation| {
-                            lsp_types::Documentation::String(
-                                documentation_text(Some(documentation))
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                            )
-                        }),
+                    .map(|parameter| match &parameter.label {
+                        lsp_types::ParameterLabel::Simple(label) => label.clone(),
+                        lsp_types::ParameterLabel::LabelOffsets { .. } => String::new(),
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
+            documentation: None,
+            parameters: Some(parameters),
             active_parameter: Some(active_parameter as u32),
         }],
         active_signature: Some(0),
         active_parameter: Some(active_parameter as u32),
-    })
+    }
 }
 fn return_text(return_type: &FunctionReturnType, text: &str) -> String {
     let span_text = |type_specification: &TypeSpecification| {
@@ -3314,6 +3474,23 @@ pub fn completion_at(
                     detail: Some(format!("standard type {name}")),
                     documentation: Some(lsp_types::Documentation::String(format!(
                         "Standard-library value type `{name}`."
+                    ))),
+                    sort_text: Some(format!("0-{last}")),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+    }
+    if let Some(standard) = standard {
+        for function in standard.checked.verified_snapshot().catalogue().functions() {
+            if let Some(last) = function.name().parts().last() {
+                items.push(CompletionItem {
+                    label: last.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("standard {:?} function", function.domain())),
+                    documentation: Some(lsp_types::Documentation::String(format!(
+                        "Standard-library function `{}`.",
+                        function.name()
                     ))),
                     sort_text: Some(format!("0-{last}")),
                     ..CompletionItem::default()
@@ -3733,813 +3910,5 @@ fn client_field_path_at_byte(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        StandardLibrary, check_document, completion_at, declaration_at, hover, references,
-        syntax_diagnostics, type_owner_name_from_source,
-    };
-    use crate::documents::{Document, PositionMapper};
-    use lsp_types::{
-        DiagnosticSeverity, DiagnosticTag, Hover, HoverContents, NumberOrString, Position, Range,
-    };
-
-    fn hover_at(text: &str, byte: usize) -> Option<Hover> {
-        let document = Document::new("file:///hover.orna".parse().unwrap(), text.to_owned(), 1);
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        hover(&document, &parse, None, mapper.position(byte), &mapper)
-    }
-
-    fn hover_markdown(hover: &Hover) -> &str {
-        match &hover.contents {
-            HoverContents::Markup(markup) => &markup.value,
-            other => panic!("expected markdown hover, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn standard_library_loads_verified_v11_snapshot() {
-        let standard = StandardLibrary::load().expect("retained V11 standard must load");
-        let snapshot = standard.checked.verified_snapshot();
-
-        assert_eq!(
-            snapshot.revision(),
-            orna_standard::STANDARD_LIBRARY_V11_REVISION_ID
-        );
-        assert_eq!(
-            snapshot.source().id(),
-            orna_standard::STANDARD_SOURCE_V11_REVISION_ID
-        );
-    }
-
-    #[test]
-    fn syntax_diagnostics_publish_compiler_metadata() {
-        let text = "CREATE SCHEMA ;";
-        let document = Document::new("file:///syntax.orna".parse().unwrap(), text.to_owned(), 1);
-        let mapper = PositionMapper::new(text);
-
-        let diagnostics = syntax_diagnostics(&document, &mapper);
-
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(
-            diagnostic.code,
-            Some(NumberOrString::String("ORNA0001".to_owned()))
-        );
-        assert!(diagnostic.message.contains("help:"));
-        assert_eq!(diagnostic.related_information, None);
-        let data = diagnostic
-            .data
-            .as_ref()
-            .expect("structured diagnostic data");
-        assert_eq!(data["severity"], "error");
-        assert_eq!(data["title"], "unexpected syntax");
-        assert_eq!(data["summary"], "The source contains invalid syntax.");
-        assert_eq!(data["primaryLabel"], "unexpected syntax");
-    }
-
-    #[test]
-    fn duplicate_diagnostics_publish_the_first_definition() {
-        let standard = StandardLibrary::load().expect("retained V11 standard must load");
-        let text = "CREATE SCHEMA app;\nCREATE SCHEMA app;";
-        let document = Document::new(
-            "file:///duplicate.orna".parse().unwrap(),
-            text.to_owned(),
-            1,
-        );
-        let mapper = PositionMapper::new(text);
-
-        let diagnostics = check_document(&document, Some(&standard), &mapper);
-
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(
-            diagnostic.code,
-            Some(NumberOrString::String("ORNA0103".to_owned()))
-        );
-        let related = diagnostic
-            .related_information
-            .as_ref()
-            .expect("duplicate diagnostic has related information");
-        assert_eq!(related.len(), 1);
-        assert_eq!(related[0].message, "first defined here");
-        assert_eq!(related[0].location.range.start, Position::new(0, 14));
-        assert_eq!(related[0].location.range.end, Position::new(0, 17));
-        let data = diagnostic
-            .data
-            .as_ref()
-            .expect("structured diagnostic data");
-        assert_eq!(data["primaryLabel"], "redefined here");
-        assert_eq!(
-            data["help"],
-            "rename one of the definitions or remove the duplicate"
-        );
-        assert_eq!(data["related"][0]["label"], "first defined here");
-    }
-
-    #[test]
-    fn unreachable_code_is_a_warning_with_an_unnecessary_tag() {
-        let standard = StandardLibrary::load().expect("retained V11 standard must load");
-        let text = "CREATE SCHEMA app;\n\
-                    CREATE CLIENT FUNCTION app.unreachable()\n\
-                    RETURNS BOOLEAN\n\
-                    IS\n\
-                    BEGIN\n\
-                        RETURN TRUE;\n\
-                        LET ignored := FALSE;\n\
-                    END;";
-        let document = Document::new("file:///warning.orna".parse().unwrap(), text.to_owned(), 1);
-        let mapper = PositionMapper::new(text);
-
-        let diagnostics = check_document(&document, Some(&standard), &mapper);
-
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::WARNING));
-        assert_eq!(
-            diagnostic.code,
-            Some(NumberOrString::String("ORNA0401".to_owned()))
-        );
-        assert_eq!(diagnostic.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
-        assert_eq!(diagnostic.range.start, Position::new(6, 0));
-        let related = diagnostic
-            .related_information
-            .as_ref()
-            .expect("warning has return-cause information");
-        assert_eq!(related[0].location.range.start, Position::new(5, 0));
-        assert_eq!(
-            related[0].message,
-            "this statement returns from the function"
-        );
-        assert!(diagnostic.message.contains("help:"));
-        assert!(diagnostic.message.contains("note:"));
-        let data = diagnostic
-            .data
-            .as_ref()
-            .expect("structured diagnostic data");
-        assert_eq!(data["severity"], "warning");
-        assert_eq!(data["primaryLabel"], "unreachable code");
-        assert_eq!(
-            data["notes"][0],
-            "unreachable statements are still checked but can never execute"
-        );
-    }
-
-    #[test]
-    fn completion_includes_canonical_scalar_type_spellings() {
-        let parse = orna_syntax::parse("");
-        let labels: Vec<_> = completion_at(&parse, None, None, None)
-            .into_iter()
-            .map(|item| item.label)
-            .collect();
-
-        for expected in [
-            "BOOLEAN",
-            "INTEGER",
-            "CHARACTER LARGE OBJECT",
-            "BINARY LARGE OBJECT",
-        ] {
-            assert!(
-                labels.iter().any(|label| label == expected),
-                "missing {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn hover_multiword_scalars_cover_the_complete_type_span() {
-        let text = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
-        let mapper = PositionMapper::new(text);
-        for (spelling, canonical) in [
-            ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
-            ("BINARY LARGE OBJECT", "BINARY_LARGE_OBJECT"),
-        ] {
-            let start = text.find(spelling).expect("scalar spelling");
-            let end = start + spelling.len();
-            for byte in [start, start + "LARGE".len(), end - 1] {
-                let result = hover_at(text, byte).expect("scalar hover");
-                assert_eq!(
-                    result.range,
-                    Some(mapper.range(&orna_syntax::SourceSpan { start, end })),
-                    "hover range for {spelling} at byte {byte}",
-                );
-                assert!(
-                    hover_markdown(&result).contains(canonical)
-                        && hover_markdown(&result).contains("standard type"),
-                    "hover content for {spelling}: {}",
-                    hover_markdown(&result),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn hover_multiword_scalars_respect_utf16_positions_and_context() {
-        let text = "CREATE TYPE files.document AS OBJECT (\"😀body\" CHARACTER LARGE OBJECT, data BINARY LARGE OBJECT);";
-        let mapper = PositionMapper::new(text);
-        let character_start = text
-            .find("CHARACTER LARGE OBJECT")
-            .expect("character scalar");
-        let character_end = character_start + "CHARACTER LARGE OBJECT".len();
-        let start_position = mapper.position(character_start);
-        assert_eq!(
-            start_position.character as usize,
-            text[..character_start].encode_utf16().count(),
-            "scalar start uses UTF-16 code units",
-        );
-        let scalar_hover = hover_at(text, character_start).expect("scalar hover");
-        assert_eq!(
-            scalar_hover.range,
-            Some(Range {
-                start: Position {
-                    line: 0,
-                    character: 47,
-                },
-                end: Position {
-                    line: 0,
-                    character: 69,
-                },
-            }),
-            "hover range uses UTF-16 units after the quoted emoji name",
-        );
-        assert!(hover_at(text, character_end - 1).is_some());
-        assert!(hover_at(text, character_end).is_none());
-
-        let generic_text = "CREATE TYPE files.document AS OBJECT (LARGE BOOLEAN, value OBJECT);";
-        for word in ["LARGE", "OBJECT"] {
-            let byte = generic_text.rfind(word).expect("generic word");
-            if let Some(result) = hover_at(generic_text, byte) {
-                assert!(
-                    !hover_markdown(&result).contains("standard type"),
-                    "generic word {word} incorrectly resolved as scalar: {}",
-                    hover_markdown(&result),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn hover_client_local_type_sources_cover_complete_multiword_ranges() {
-        let text = concat!(
-            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-            "    LET body CHARACTER LARGE OBJECT := \x27body\x27;\n",
-            "BEGIN\n",
-            "    LET data BINARY LARGE OBJECT := body;\n",
-            "    RETURN body;\n",
-            "END;",
-        );
-        for (spelling, canonical) in [
-            ("CHARACTER LARGE OBJECT", "CHARACTER_LARGE_OBJECT"),
-            ("BINARY LARGE OBJECT", "BINARY_LARGE_OBJECT"),
-        ] {
-            let mapper = PositionMapper::new(text);
-            let start = text.find(spelling).expect("local scalar spelling");
-            let end = start + spelling.len();
-            for byte in [start, start + "LARGE".len(), end - 1] {
-                let result = hover_at(text, byte).expect("local scalar hover");
-                assert_eq!(
-                    result.range,
-                    Some(mapper.range(&orna_syntax::SourceSpan { start, end })),
-                    "hover range for {spelling} at byte {byte}",
-                );
-                assert!(
-                    hover_markdown(&result).contains(canonical)
-                        && hover_markdown(&result).contains("standard type"),
-                    "hover content for {spelling}: {}",
-                    hover_markdown(&result),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn hover_client_procedural_local_use_resolves_type() {
-        let text = concat!(
-            "CREATE CLIENT FUNCTION files.document() RETURNS BOOLEAN IS\n",
-            "    LET body BOOLEAN := TRUE;\n",
-            "BEGIN\n",
-            "    RETURN body;\n",
-            "END;",
-        );
-        let byte = text.rfind("body").expect("local use");
-        let result = hover_at(text, byte).expect("procedural local hover");
-        let markdown = hover_markdown(&result);
-        assert!(
-            markdown.starts_with("**parameter**"),
-            "local hover kind: {markdown}"
-        );
-        assert!(markdown.contains("BOOLEAN"), "local hover type: {markdown}");
-    }
-
-    #[test]
-    fn hover_client_local_type_sources_reject_comment_separators() {
-        let text = concat!(
-            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-            "    LET body CHARACTER /* kept */ LARGE OBJECT := \x27body\x27;\n",
-            "    LET data BINARY /* kept */ LARGE OBJECT := body;\n",
-            "    LET invalid CHARACTERLARGEOBJECT := body;\n",
-            "BEGIN\n",
-            "    RETURN body;\n",
-            "END;",
-        );
-
-        for (spelling, canonical) in [
-            (
-                "CHARACTER /* kept */ LARGE OBJECT",
-                "CHARACTER_LARGE_OBJECT",
-            ),
-            ("BINARY /* kept */ LARGE OBJECT", "BINARY_LARGE_OBJECT"),
-        ] {
-            let start = text.find(spelling).expect("commented scalar spelling");
-            let end = start + spelling.len();
-            let words = [
-                spelling
-                    .split_ascii_whitespace()
-                    .next()
-                    .expect("first scalar word"),
-                "LARGE",
-                "OBJECT",
-            ];
-            for word in words {
-                let byte = text[start..end]
-                    .find(word)
-                    .map(|offset| start + offset)
-                    .expect("commented scalar word");
-                let result = hover_at(text, byte);
-                let has_standard_hover = result.as_ref().is_some_and(|hover| {
-                    hover_markdown(hover).contains(canonical)
-                        && hover_markdown(hover).contains("standard type")
-                });
-                let description = result
-                    .as_ref()
-                    .map(|hover| hover_markdown(hover).to_owned());
-                assert!(
-                    !has_standard_hover,
-                    "commented local must not acquire standard scalar hover for {spelling}: {description:?}",
-                );
-            }
-        }
-
-        let invalid = text
-            .find("CHARACTERLARGEOBJECT")
-            .expect("invalid scalar spelling");
-        assert!(
-            !hover_at(text, invalid)
-                .is_some_and(|hover| { hover_markdown(&hover).contains("CHARACTER_LARGE_OBJECT") })
-        );
-    }
-
-    #[test]
-    fn quoted_local_type_owner_allows_comment_markers_inside_identifier() {
-        let owner = type_owner_name_from_source("REF owners.\"foo--bar\"")
-            .expect("quoted owner type source");
-        assert_eq!(
-            owner.parts.last().map(|part| part.text.as_str()),
-            Some("\"foo--bar\"")
-        );
-    }
-
-    #[test]
-    fn hover_client_local_initializers_and_assignments_do_not_resolve_as_scalars() {
-        let text = concat!(
-            "CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS\n",
-            "    LET body CHARACTER LARGE OBJECT := std.large.object();\n",
-            "BEGIN\n",
-            "    LET data BINARY LARGE OBJECT := body;\n",
-            "    data := std.binary.large.object();\n",
-            "    RETURN body;\n",
-            "END;",
-        );
-
-        for occurrence in ["std.large.object", "std.binary.large.object"] {
-            let start = text.find(occurrence).expect("non-type occurrence");
-            for word in occurrence.split(".") {
-                let byte = text[start..]
-                    .find(word)
-                    .map(|offset| start + offset)
-                    .expect("occurrence word");
-                let result = hover_at(text, byte);
-                assert!(!result.is_some_and(|hover| {
-                    hover_markdown(&hover).contains("CHARACTER_LARGE_OBJECT")
-                        || hover_markdown(&hover).contains("BINARY_LARGE_OBJECT")
-                }));
-            }
-        }
-    }
-
-    #[test]
-    fn declaration_lookup_folds_unquoted_identifier_case_but_preserves_quotes() {
-        let parse = orna_syntax::parse("CREATE SCHEMA foo;");
-
-        assert!(declaration_at(&parse, "foo").is_some());
-        assert!(declaration_at(&parse, "Foo").is_some());
-
-        let quoted = orna_syntax::parse("CREATE SCHEMA \"Foo\";");
-        assert!(declaration_at(&quoted, "\"Foo\"").is_some());
-        assert!(declaration_at(&quoted, "\"foo\"").is_none());
-        assert!(declaration_at(&quoted, "foo").is_none());
-    }
-
-    #[test]
-    fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
-        let text = concat!(
-            "CREATE SCHEMA foo;\n",
-            "CREATE TYPE foo.bar AS OBJECT (value BOOLEAN);\n",
-            "CREATE SERVER FUNCTION baz() RETURNS BOOLEAN AS SELECT Foo;\n",
-        );
-        let document = Document::new("file:///test.orna".parse().unwrap(), text.to_owned(), 1);
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-
-        let foo_references = references(&document, &parse, Position::new(0, 14), &mapper, true);
-        assert_eq!(foo_references.len(), 2);
-        assert_eq!(foo_references[0].range.start, Position::new(0, 14));
-        assert_eq!(foo_references[1].range.start, Position::new(1, 12));
-        let without_declaration =
-            references(&document, &parse, Position::new(0, 14), &mapper, false);
-        assert_eq!(without_declaration.len(), 1);
-        assert_eq!(without_declaration[0].range.start, Position::new(1, 12));
-        let unqualified = references(&document, &parse, Position::new(2, 55), &mapper, true);
-        assert!(
-            unqualified.is_empty(),
-            "unqualified variable must not resolve as a schema: {unqualified:?}"
-        );
-
-        let qualified_text = "CREATE SCHEMA product_test;\nCREATE TYPE product_test.probe AS OBJECT (value BOOLEAN);\n";
-        let qualified_document = Document::new(
-            "file:///qualified.orna".parse().unwrap(),
-            qualified_text.to_owned(),
-            1,
-        );
-        let qualified_parse = orna_syntax::parse(qualified_text);
-        let qualified_mapper = PositionMapper::new(qualified_text);
-        let probe_without_declaration = references(
-            &qualified_document,
-            &qualified_parse,
-            Position::new(1, 25),
-            &qualified_mapper,
-            false,
-        );
-        assert!(probe_without_declaration.is_empty());
-        let namespace_without_declaration = references(
-            &qualified_document,
-            &qualified_parse,
-            Position::new(1, 12),
-            &qualified_mapper,
-            false,
-        );
-        assert_eq!(namespace_without_declaration.len(), 1);
-        assert_eq!(
-            namespace_without_declaration[0].range.start,
-            Position::new(1, 12)
-        );
-    }
-
-    #[test]
-    fn references_exclude_field_and_parameter_declarations() {
-        let field_text = "CREATE SCHEMA people;\n\
-              CREATE TYPE people.person AS OBJECT (stored BOOLEAN);\n\
-              CREATE SERVER FUNCTION read_value() RETURNS BOOLEAN AS \
-              SELECT probe.stored FROM people.person probe;\n";
-        let field_document = Document::new(
-            "file:///field.orna".parse().unwrap(),
-            field_text.to_owned(),
-            1,
-        );
-        let field_parse = orna_syntax::parse(field_text);
-        let field_mapper = PositionMapper::new(field_text);
-        let field_declaration = field_text
-            .find("stored BOOLEAN")
-            .expect("field declaration");
-        let field_use = field_text.find("probe.stored").expect("field use") + "probe.".len();
-        let field_references = references(
-            &field_document,
-            &field_parse,
-            field_mapper.position(field_declaration),
-            &field_mapper,
-            false,
-        );
-        assert_eq!(field_references.len(), 1);
-        assert_eq!(
-            field_references[0].range.start,
-            field_mapper.position(field_use)
-        );
-        let field_use_references = references(
-            &field_document,
-            &field_parse,
-            field_mapper.position(field_use),
-            &field_mapper,
-            false,
-        );
-        assert_eq!(field_use_references.len(), 1);
-        assert_eq!(
-            field_use_references[0].range.start,
-            field_mapper.position(field_use)
-        );
-
-        let parameter_text =
-            "CREATE SERVER FUNCTION read_value(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;\n";
-        let parameter_document = Document::new(
-            "file:///parameter.orna".parse().unwrap(),
-            parameter_text.to_owned(),
-            1,
-        );
-        let parameter_parse = orna_syntax::parse(parameter_text);
-        let parameter_mapper = PositionMapper::new(parameter_text);
-        let parameter_declaration = parameter_text
-            .find("stored BOOLEAN")
-            .expect("parameter declaration");
-        let parameter_use =
-            parameter_text.find("SELECT stored").expect("parameter use") + "SELECT ".len();
-        let parameter_references = references(
-            &parameter_document,
-            &parameter_parse,
-            parameter_mapper.position(parameter_declaration),
-            &parameter_mapper,
-            false,
-        );
-        assert_eq!(parameter_references.len(), 1);
-        assert_eq!(
-            parameter_references[0].range.start,
-            parameter_mapper.position(parameter_use)
-        );
-        let parameter_use_references = references(
-            &parameter_document,
-            &parameter_parse,
-            parameter_mapper.position(parameter_use),
-            &parameter_mapper,
-            false,
-        );
-        assert_eq!(parameter_use_references.len(), 1);
-        assert_eq!(
-            parameter_use_references[0].range.start,
-            parameter_mapper.position(parameter_use)
-        );
-    }
-
-    #[test]
-    fn definitions_scope_rows_columns_before_unrelated_fields() {
-        let text = concat!(
-            "CREATE SCHEMA people;\n",
-            "CREATE SCHEMA other;\n",
-            "CREATE TYPE people.person AS OBJECT (stored BOOLEAN);\n",
-            "CREATE TYPE other.person AS OBJECT (stored BOOLEAN);\n",
-            "CREATE SERVER FUNCTION read_stored() RETURNS ROWS (stored BOOLEAN) AS\n",
-            "SELECT probe.stored FROM other.person probe;\n",
-        );
-        let document = Document::new("file:///rows.orna".parse().unwrap(), text.to_owned(), 1);
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let field_declaration =
-            text.rfind("OBJECT (stored").expect("object field") + "OBJECT (".len();
-        let return_declaration = text.find("ROWS (stored").expect("return column") + "ROWS (".len();
-        let field_use = text.find("probe.stored").expect("field use") + "probe.".len();
-
-        let return_definition = super::definition(
-            &document,
-            &parse,
-            mapper.position(return_declaration),
-            &mapper,
-        )
-        .expect("return column definition");
-        assert_eq!(
-            return_definition.range.start,
-            mapper.position(return_declaration)
-        );
-
-        let field_definition =
-            super::definition(&document, &parse, mapper.position(field_use), &mapper)
-                .expect("object field definition");
-        assert_eq!(
-            field_definition.range.start,
-            mapper.position(field_declaration)
-        );
-
-        let return_references = references(
-            &document,
-            &parse,
-            mapper.position(return_declaration),
-            &mapper,
-            false,
-        );
-        assert!(
-            return_references.is_empty(),
-            "object field references leaked into ROWS column: {return_references:?}"
-        );
-
-        let field_references = references(
-            &document,
-            &parse,
-            mapper.position(field_declaration),
-            &mapper,
-            false,
-        );
-        assert_eq!(field_references.len(), 1);
-        assert_eq!(field_references[0].range.start, mapper.position(field_use));
-    }
-
-    #[test]
-    fn variable_definitions_and_references_stay_within_the_containing_function() {
-        let text = "CREATE SERVER FUNCTION first(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;
-\
-              CREATE SERVER FUNCTION second(stored BOOLEAN) RETURNS BOOLEAN AS SELECT stored;
-";
-        let document = Document::new(
-            "file:///variables.orna".parse().unwrap(),
-            text.to_owned(),
-            1,
-        );
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let first_parameter = text.find("first(stored").expect("first parameter") + "first(".len();
-        let second_parameter =
-            text.find("second(stored").expect("second parameter") + "second(".len();
-        let first_use = text.find("SELECT stored").expect("first use") + "SELECT ".len();
-        let second_use = text.rfind("SELECT stored").expect("second use") + "SELECT ".len();
-
-        let second_definition =
-            super::definition(&document, &parse, mapper.position(second_use), &mapper)
-                .expect("second parameter definition");
-        assert_eq!(
-            second_definition.range.start,
-            mapper.position(second_parameter)
-        );
-
-        let second_references = references(
-            &document,
-            &parse,
-            mapper.position(second_use),
-            &mapper,
-            false,
-        );
-        assert_eq!(second_references.len(), 1);
-        assert_eq!(
-            second_references[0].range.start,
-            mapper.position(second_use)
-        );
-        assert_ne!(second_references[0].range.start, mapper.position(first_use));
-
-        let first_definition =
-            super::definition(&document, &parse, mapper.position(first_parameter), &mapper)
-                .expect("first parameter definition");
-        assert_eq!(
-            first_definition.range.start,
-            mapper.position(first_parameter)
-        );
-    }
-
-    #[test]
-    fn client_state_definitions_stay_within_their_function() {
-        let text = "CREATE CLIENT FUNCTION first() RETURNS BOOLEAN IS
-\
-              STATE stored BOOLEAN;
-\
-              BEGIN RETURN stored; END;
-\
-              CREATE CLIENT FUNCTION second() RETURNS BOOLEAN IS
-\
-              STATE stored BOOLEAN;
-\
-              BEGIN RETURN stored; END;
-";
-        let document = Document::new(
-            "file:///client-variables.orna".parse().unwrap(),
-            text.to_owned(),
-            1,
-        );
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let second_state = text.rfind("STATE stored").expect("second state") + "STATE ".len();
-        let second_use = text.rfind("RETURN stored").expect("second state use") + "RETURN ".len();
-
-        let definition = super::definition(&document, &parse, mapper.position(second_use), &mapper)
-            .expect("second state definition");
-        assert_eq!(definition.range.start, mapper.position(second_state));
-
-        let references = references(
-            &document,
-            &parse,
-            mapper.position(second_use),
-            &mapper,
-            false,
-        );
-        assert_eq!(references.len(), 1);
-        assert_eq!(references[0].range.start, mapper.position(second_use));
-    }
-
-    #[test]
-    fn client_pre_begin_local_shadows_parameter_in_navigation() {
-        let text = "CREATE CLIENT FUNCTION shadowed(p BOOLEAN) RETURNS BOOLEAN IS
-\
-              LET p BOOLEAN := TRUE;
-\
-              LET q BOOLEAN := p;
-\
-              BEGIN RETURN q; END;
-";
-        let document = Document::new(
-            "file:///client-shadowing.orna".parse().unwrap(),
-            text.to_owned(),
-            1,
-        );
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let local_definition = text.find("LET p").expect("local declaration") + "LET ".len();
-        let local_use = text.rfind(":= p").expect("local initializer") + ":= ".len();
-
-        let definition = super::definition(&document, &parse, mapper.position(local_use), &mapper)
-            .expect("local shadow definition");
-        assert_eq!(definition.range.start, mapper.position(local_definition));
-
-        let references = references(
-            &document,
-            &parse,
-            mapper.position(local_use),
-            &mapper,
-            false,
-        );
-        assert_eq!(references.len(), 1);
-        assert_eq!(references[0].range.start, mapper.position(local_use));
-    }
-
-    #[test]
-    fn client_local_definitions_stay_within_their_function() {
-        let text = "CREATE CLIENT FUNCTION first() RETURNS BOOLEAN IS
-\
-              LET marker BOOLEAN := TRUE;
-\
-              BEGIN RETURN marker; END;
-\
-              CREATE CLIENT FUNCTION second() RETURNS BOOLEAN IS
-\
-              LET marker BOOLEAN := TRUE;
-\
-              BEGIN RETURN marker; END;
-";
-        let document = Document::new(
-            "file:///client-locals.orna".parse().unwrap(),
-            text.to_owned(),
-            1,
-        );
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let second_local = text.rfind("LET marker").expect("second local") + "LET ".len();
-        let second_use = text.rfind("RETURN marker").expect("second local use") + "RETURN ".len();
-
-        let definition = super::definition(&document, &parse, mapper.position(second_use), &mapper)
-            .expect("second local definition");
-        assert_eq!(definition.range.start, mapper.position(second_local));
-
-        let references = references(
-            &document,
-            &parse,
-            mapper.position(second_use),
-            &mapper,
-            false,
-        );
-        assert_eq!(references.len(), 1);
-        assert_eq!(references[0].range.start, mapper.position(second_use));
-    }
-
-    #[test]
-    fn references_fold_unicode_unquoted_identifier_case() {
-        let text = "CREATE SCHEMA café;\nCREATE TYPE CAFÉ.probe AS OBJECT (value BOOLEAN);\n";
-        let document = Document::new("file:///unicode.orna".parse().unwrap(), text.to_owned(), 1);
-        let parse = orna_syntax::parse(text);
-        let mapper = PositionMapper::new(text);
-        let declaration = text.find("café").expect("unicode declaration");
-        let use_position = text.find("CAFÉ").expect("unicode use");
-
-        let with_declaration = references(
-            &document,
-            &parse,
-            mapper.position(declaration),
-            &mapper,
-            true,
-        );
-        assert_eq!(with_declaration.len(), 2);
-        assert_eq!(
-            with_declaration[0].range.start,
-            mapper.position(declaration)
-        );
-        assert_eq!(
-            with_declaration[1].range.start,
-            mapper.position(use_position)
-        );
-
-        let without_declaration = references(
-            &document,
-            &parse,
-            mapper.position(declaration),
-            &mapper,
-            false,
-        );
-        assert_eq!(without_declaration.len(), 1);
-        assert_eq!(
-            without_declaration[0].range.start,
-            mapper.position(use_position)
-        );
-    }
-}
+#[path = "analysis/tests.rs"]
+mod tests;
