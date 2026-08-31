@@ -28,7 +28,8 @@ pub(super) enum DistributionError {
 /// path; once that boundary is reached a missing or invalid root-owned
 /// manifest is an error rather than a reason to fall back to development mode.
 pub(super) fn verify_if_installed() -> Result<(), DistributionError> {
-    let executable = fs::read_link(CURRENT_EXECUTABLE_PATH).map_err(|_| DistributionError::Invalid)?;
+    let executable =
+        fs::read_link(CURRENT_EXECUTABLE_PATH).map_err(|_| DistributionError::Invalid)?;
     if is_installed_executable_path(&executable) {
         verify_distribution()
     } else {
@@ -39,7 +40,6 @@ pub(super) fn verify_if_installed() -> Result<(), DistributionError> {
 fn is_installed_executable_path(path: &Path) -> bool {
     path == Path::new(INSTALLED_EXECUTABLE_PATH)
 }
-
 
 fn verify_distribution() -> Result<(), DistributionError> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -141,7 +141,6 @@ fn digest_file(path: &Path) -> Result<String, DistributionError> {
     }
     Ok(hex(digest.finalize()))
 }
-
 
 fn digest_bytes(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes))
@@ -316,7 +315,9 @@ executable_sha256 = \"{EXECUTABLE}\"\n"
     #[test]
     fn only_the_fixed_installed_path_enables_distribution_verification() {
         assert!(is_installed_executable_path(Path::new("/usr/bin/orna")));
-        assert!(!is_installed_executable_path(Path::new("target/release/orna")));
+        assert!(!is_installed_executable_path(Path::new(
+            "target/release/orna"
+        )));
         assert!(!is_installed_executable_path(Path::new("/tmp/orna")));
     }
 
