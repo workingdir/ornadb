@@ -477,7 +477,9 @@ fn endpoint_command_is_unsupported(
                 | Command::RawCall(_, _)
         ),
         orna_client::endpoint::DatabaseEndpoint::UnixSocket { .. }
-        | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => true,
+        | orna_client::endpoint::DatabaseEndpoint::RemoteTls { .. } => {
+            !matches!(command, Command::SourceCheck(_))
+        }
     }
 }
 
