@@ -185,6 +185,13 @@ integration file. `../spec/examples` is optional proposal/deferred input; the
 script logs it as absent and skips it when, as in this checkout, the directory
 is missing.
 
+The retained static `just editor-tooling-check` result dated 2026-08-25 is
+the current documented editor-tooling baseline. It is bounded evidence for
+only the checked-in static contracts listed above, not a full editor-parity or
+runtime result. Neovim/Vim host sessions are unavailable and not proven in the
+current environment. No manual Zed host launch was run; VSIX packaging,
+installation, and launch were not run and remain unclaimed.
+
 `just demo-suite` combines `demo-check` with the standalone TTY renderer,
 client artifact-integrity, and local capability-matching demos. `demo-check`
 source-check entries can compile `orna-server`; provide the embedded-engine
