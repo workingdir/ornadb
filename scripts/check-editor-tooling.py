@@ -1945,6 +1945,22 @@ def check_zed_extension_metadata(extension_path: Path, repository: Path) -> bool
     return True
 
 
+def _toml_values_match(actual: object, expected: object) -> bool:
+    """Compare TOML values without Python's bool/int equality coercion."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _toml_values_match(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _toml_values_match(actual_value, expected_value)
+            for actual_value, expected_value in zip(actual, expected)
+        )
+    return actual == expected
+
+
 def check_zed_language_configuration(
     language_path: Path,
     language_server_path: Path,
@@ -2017,7 +2033,7 @@ def check_zed_language_configuration(
     )
     for key, expected in language_expectations:
         actual = language.get(key)
-        if actual != expected:
+        if not _toml_values_match(actual, expected):
             log(
                 f"Zed language configuration {display_path(language_path, repository)} "
                 f"key '{key}' must be {expected!r}; found {actual!r}",
@@ -2033,7 +2049,7 @@ def check_zed_language_configuration(
     )
     for key, expected in language_server_expectations:
         actual = language_server.get(key)
-        if actual != expected:
+        if not _toml_values_match(actual, expected):
             log(
                 f"Zed language-server configuration {display_path(language_server_path, repository)} "
                 f"key '{key}' must be {expected!r}; found {actual!r}",
