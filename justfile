@@ -1,7 +1,7 @@
 default: check
 
-# Run the default local fmt/build/lint/non-ignored test gate; CI also runs separate editor-tooling and Compose kernel gates.
-check: fmt build lint test
+# Run the default local fmt/build/lint/non-ignored test/rustdoc gate; CI also runs separate editor-tooling and Compose kernel gates.
+check: fmt build lint test rustdoc-check
 
 # Check the SQLite adapter, storage contract, and local CLI binary offline.
 sqlite-check:
@@ -18,6 +18,10 @@ sqlite-smoke:
 fmt:
     cargo fmt --all -- --check
 
+
+# Build all workspace API documentation and reject rustdoc warnings.
+rustdoc-check:
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 
 # Run the accepted TTY renderer demo for terminal documents and byte streams.
 runtime-tty-demo:
