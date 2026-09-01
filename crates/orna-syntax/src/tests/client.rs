@@ -714,6 +714,53 @@ fn parses_client_action_call_with_named_target_arguments_and_exact_spans() {
         }
     );
 }
+#[test]
+fn rejects_trailing_commas_in_client_calls_without_partial_declarations() {
+    let cases = [
+        (
+            "CREATE CLIENT FUNCTION examples.trailing() RETURNS TEXT AS app.first('ready',);",
+            "'ready',)",
+        ),
+        (
+            "CREATE CLIENT FUNCTION examples.trailing_resource() RETURNS TEXT AS\n\
+                    std.data.resource(\n\
+                        target => tasks.get,\n\
+                        arguments => std.call.args(p_value => p_value,)\n\
+                    );",
+            "p_value,)",
+        ),
+    ];
+
+    for (source, trailing_marker) in cases {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().text(), source, "{trailing_marker}");
+        assert!(
+            parsed.client_functions().is_empty(),
+            "{trailing_marker}: unexpected declaration"
+        );
+        assert_eq!(
+            parsed.diagnostics().len(),
+            1,
+            "{trailing_marker}: {:?}",
+            parsed.diagnostics()
+        );
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(diagnostic.message, "expected a CLIENT expression");
+        let close_start = source
+            .find(trailing_marker)
+            .expect("trailing comma marker")
+            + trailing_marker.len()
+            - 1;
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: close_start,
+                end: close_start + 1,
+            }
+        );
+    }
+}
 
 #[test]
 fn parses_client_await_expression_losslessly_with_complete_span() {
