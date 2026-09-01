@@ -52,6 +52,188 @@ fn vm_admission_resolves_and_decodes_an_authorised_client_revision() {
 }
 
 #[test]
+fn vm_admission_rejects_stale_active_catalogue_before_root_binding() {
+    let (base, function, pair, _) = version_one_active(true);
+    let stale_origin = SourceOrigin::new(SourceUnitId::from_bytes([1; 16]), 0, 0)
+        .expect("valid stale source origin");
+    let active = active_with_replaced_first_origin(&base, stale_origin)
+        .expect("stale active revision should retain structural validity");
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &[],
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
+    ));
+    assert!(!host.has_root_binding());
+}
+
+#[test]
+fn vm_admission_rejects_mismatched_opaque_plan_type_before_root_binding() {
+    let mismatched_type = TypeId::from_bytes([0x55; 16]);
+    let (active, function, pair, _) = version_two_opaque_active(mismatched_type, [0x01; 16]);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &[],
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
+    ));
+    assert!(!host.has_root_binding());
+}
+
+#[test]
+fn vm_admission_accepts_matching_opaque_plan_type() {
+    let opaque_type = orna_standard::OPAQUE_TOKEN_TYPE_ID;
+    let (active, function, pair, _) = version_two_opaque_active(opaque_type, [0x02; 16]);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    )
+    .expect("matching opaque plan type should be admitted");
+    assert!(matches!(
+        admission.plan(),
+        super::super::vm::ClientVmDecodedPlan::Opaque(plan) if plan.opaque_type() == opaque_type
+    ));
+    assert!(host.has_root_binding());
+}
+
+#[test]
+fn vm_admission_rejects_mismatched_inner_opaque_plan_type() {
+    use orna_artifact::client_plan::{
+        CAPABILITY_FORMAT_VERSION, CapabilityArgumentSource, CapabilityClientPlan,
+        CapabilityRequirement, InnerClientPlan, OpaqueClientPlan,
+    };
+
+    let mismatched_type = TypeId::from_bytes([0x56; 16]);
+    let payload = CapabilityClientPlan::new(
+        InnerClientPlan::Opaque(OpaqueClientPlan::return_opaque(mismatched_type, [0x03; 16])),
+        vec![CapabilityRequirement::new(
+            "std.fs.read",
+            CapabilityArgumentSource::Text("scope".to_owned()),
+        )],
+    )
+    .encode()
+    .expect("capability opaque payload");
+    let (active, function, pair, _) = version_two_active_with_artifact(
+        standard_v6(),
+        orna_standard::OPAQUE_TOKEN_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::OPAQUE_TOKEN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        CAPABILITY_FORMAT_VERSION,
+        payload,
+    );
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let declarations = [super::super::vm::ClientVmCapabilityDeclaration::new(
+        "std.fs.read",
+        super::super::vm::ClientVmCapabilityArgument::Text("scope".to_owned()),
+    )];
+
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &declarations,
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
+    ));
+    assert!(!host.has_root_binding());
+}
+
+#[test]
 fn vm_admission_reports_digest_error_before_cancelled_host() {
     let (base, function, pair, _) = version_one_active(true);
     let active = active_with_mismatched_function_artifact_payload_hash(&base);
