@@ -1382,6 +1382,38 @@ fn sealed_presentation_failure_actions(
         ServerAction::Completed { stream },
     ])
 }
+fn rejected_sealed_dispatch(
+    stream: u64,
+    invocation: InvocationId,
+    started_events: InvocationEventBatch,
+) -> StartedDispatch {
+    let future = Box::pin(async move {
+        DispatchCompletion {
+            actions: sealed_presentation_failure_actions(stream, invocation),
+            cancellation: ServerAction::InvokeCancelled { stream },
+            cancellation_token: None,
+            sealed_producer: None,
+            sealed_invocation: Some(invocation),
+            sealed_next_event_sequence: 2,
+            sealed_next_outer_sequence: 3,
+            start_gate: None,
+            start_delivered: false,
+            terminal_delivered: false,
+            terminal_claimed: false,
+            worker_completed: true,
+            _guards: None,
+        }
+    });
+    StartedDispatch {
+        accepted: ServerAction::Accepted { stream, invocation },
+        started: Some(ServerAction::InvokeEvents {
+            stream,
+            events: started_events,
+        }),
+        start_gate: None,
+        future,
+    }
+}
 
 #[derive(Clone)]
 struct RawDispatchService {
@@ -1585,9 +1617,10 @@ impl DispatchService for RawDispatchService {
     ) -> StartedDispatch {
         let continuation = continuation.expect("sealed invocation preflight continuation");
         let invocation = continuation.invocation();
-        let _session_bridge = self
-            .install_session_bridge(invocation, stream)
-            .expect("one session bridge per authenticated root invocation");
+        let started_events = continuation.started_events().clone();
+        if self.install_session_bridge(invocation, stream).is_err() {
+            return rejected_sealed_dispatch(stream, invocation, started_events);
+        }
         let dispatch_session = _session.clone();
         // The worker below uses a short-lived runtime; stream producers must
         // stay owned by this raw-socket driver runtime.
@@ -1595,7 +1628,7 @@ impl DispatchService for RawDispatchService {
         let kernel = self.kernel.clone();
         let started = ServerAction::InvokeEvents {
             stream,
-            events: continuation.started_events().clone(),
+            events: started_events,
         };
         let accepted = ServerAction::Accepted { stream, invocation };
         let (start_gate, start_signal) = oneshot::channel();
@@ -4635,7 +4668,7 @@ mod daemon_session_tests {
     use std::str::FromStr;
 
     #[test]
-    fn raw_dispatcher_installs_per_connection_session_bridge() {
+    fn raw_dispatcher_rejects_second_sealed_stream_with_bounded_failure() {
         let dispatcher = RawDispatchService {
             kernel: PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent")
                 .expect("kernel config"),
@@ -4643,13 +4676,51 @@ mod daemon_session_tests {
             session_broker: SharedInvokeBroker::session_only(),
             resource_broker: None,
         };
-        let root = InvocationId::from_bytes([0xa1; 16]);
-        let bridge = dispatcher
-            .install_session_bridge(root, 23)
-            .expect("session bridge installs");
+        let first_root = InvocationId::from_bytes([0xa1; 16]);
+        let first_bridge = dispatcher
+            .install_session_bridge(first_root, 23)
+            .expect("first session bridge installs");
+        let second_root = InvocationId::from_bytes([0xa2; 16]);
+        assert!(matches!(
+            dispatcher.install_session_bridge(second_root, 24),
+            Err(orna_protocol::SessionStateError::WrongState)
+        ));
         let current = dispatcher
             .session_bridge()
-            .expect("session bridge is visible");
-        assert!(Arc::ptr_eq(&bridge, &current));
+            .expect("first session bridge remains visible");
+        assert!(Arc::ptr_eq(&first_bridge, &current));
+
+        let started = InvokeEvent::new(
+            second_root,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .expect("started event");
+        let started_events =
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+                .expect("started event batch");
+        let rejected = rejected_sealed_dispatch(24, second_root, started_events);
+        assert!(matches!(
+            &rejected.accepted,
+            ServerAction::Accepted {
+                stream: 24,
+                invocation
+            } if *invocation == second_root
+        ));
+        let completion = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(rejected.future);
+        assert_eq!(completion.sealed_invocation, Some(second_root));
+        assert!(completion.worker_completed);
+        assert!(
+            completion
+                .actions
+                .iter()
+                .any(|action| matches!(action, ServerAction::Completed { stream: 24 }))
+        );
     }
 }
