@@ -2983,9 +2983,10 @@ pub fn hover(
             let mut hover = crate::hover::keyword_hover(reference, doc_link.as_deref());
             if name.eq_ignore_ascii_case("IS") {
                 let is_procedural = parse.client_functions().iter().any(|function| {
-                    function.body.as_state_block().is_some_and(|block| {
-                        block.span.start <= span.start && block.span.end >= span.end
-                    })
+                    function
+                        .body
+                        .as_state_block()
+                        .is_some_and(|block| block.span.start == span.start)
                 });
                 if !is_procedural
                     && let lsp_types::HoverContents::Markup(markup) = &mut hover.contents
