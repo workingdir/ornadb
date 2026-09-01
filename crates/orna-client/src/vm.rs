@@ -85,12 +85,13 @@ pub fn admit_client_function(
     declared_contracts: &[String],
 ) -> Result<ClientVmAdmission<ClientVmDecodedPlan>, ClientVmAdmissionError> {
     let target = authorisation.target();
-    if target.revision() != active.pair()
-        || !super::client_invocation_target_is_resolved(active, target)
-    {
+    if target.revision() != active.pair() {
         return Err(ClientVmAdmissionError::TupleMismatch {
             field: "authorisation",
         });
+    }
+    if !super::client_invocation_target_is_resolved(active, target) {
+        return Err(ClientVmAdmissionError::TupleMismatch { field: "revision" });
     }
     let resolved = super::resolve_client_function(active, target.function())
         .ok_or(ClientVmAdmissionError::TupleMismatch { field: "revision" })?;
@@ -143,6 +144,8 @@ pub fn admit_client_function(
     if payload_digest != artifact.content_hash().to_bytes() {
         return Err(ClientVmAdmissionError::DigestMismatch);
     }
+    super::execution::validate_active_catalogue_for_vm(active, target.function())
+        .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
     let outer_version = artifact.version();
     let inner_version = if outer_version == CAPABILITY_FORMAT_VERSION {
         Some(capability_inner_version(artifact.payload())?)
@@ -238,7 +241,15 @@ pub fn admit_client_function(
                 return Err(ClientVmAdmissionError::SemanticRejected);
             }
             match plan {
-                ClientVmDecodedPlan::Boolean(_) | ClientVmDecodedPlan::Opaque(_) => {}
+                ClientVmDecodedPlan::Boolean(_) => {}
+                ClientVmDecodedPlan::Opaque(plan) => {
+                    let super::execution::ClientReturnShape::Opaque(expected) = return_shape else {
+                        return Err(ClientVmAdmissionError::SemanticRejected);
+                    };
+                    if plan.opaque_type() != expected {
+                        return Err(ClientVmAdmissionError::SemanticRejected);
+                    }
+                }
                 ClientVmDecodedPlan::Expression(plan) => {
                     super::execution::preflight_client_expression_calls(
                         active,
@@ -256,6 +267,17 @@ pub fn admit_client_function(
                         return Err(ClientVmAdmissionError::TupleMismatch {
                             field: "inner_version",
                         });
+                    }
+                    if let orna_artifact::client_plan::InnerClientPlan::Opaque(inner_plan) =
+                        plan.inner_plan()
+                    {
+                        let super::execution::ClientReturnShape::Opaque(expected) = return_shape
+                        else {
+                            return Err(ClientVmAdmissionError::SemanticRejected);
+                        };
+                        if inner_plan.opaque_type() != expected {
+                            return Err(ClientVmAdmissionError::SemanticRejected);
+                        }
                     }
                     let mut requirements = plan
                         .requirements()
