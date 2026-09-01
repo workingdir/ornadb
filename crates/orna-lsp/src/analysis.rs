@@ -554,7 +554,7 @@ fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
 ///
 /// The SQL highlighter keeps quoted components as `QuotedIdentifier` rather
 /// than reclassifying them as namespaces, so accept either kind while walking
-/// backwards across dotted separators. Context-specific field resolution runs
+/// in both directions across dotted separators. Context-specific field resolution
 /// before this top-level fallback and keeps member paths out of the lookup.
 fn qualified_name_keys_at(
     text: &str,
@@ -567,12 +567,14 @@ fn qualified_name_keys_at(
     let mut first_index = selected_index;
     let mut right_start = selected_span.start;
     while first_index > 0 {
-        let previous_index = highlighted[..first_index].iter().rposition(|token| {
+        let Some(previous_index) = highlighted[..first_index].iter().rposition(|token| {
             matches!(
                 token.kind,
                 HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
             )
-        })?;
+        }) else {
+            break;
+        };
         let previous = &highlighted[previous_index];
         if !dotted_name_separator(text, previous.range.end, right_start) {
             break;
@@ -580,8 +582,30 @@ fn qualified_name_keys_at(
         first_index = previous_index;
         right_start = previous.range.start;
     }
+    let mut last_index = selected_index;
+    let mut left_end = selected_span.end;
+    while last_index + 1 < highlighted.len() {
+        let Some(next_index) = highlighted[last_index + 1..]
+            .iter()
+            .position(|token| {
+                matches!(
+                    token.kind,
+                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
+                )
+            })
+            .map(|index| last_index + 1 + index)
+        else {
+            break;
+        };
+        let next = &highlighted[next_index];
+        if !dotted_name_separator(text, left_end, next.range.start) {
+            break;
+        }
+        last_index = next_index;
+        left_end = next.range.end;
+    }
     Some(
-        highlighted[first_index..=selected_index]
+        highlighted[first_index..=last_index]
             .iter()
             .filter(|token| {
                 matches!(
@@ -786,6 +810,66 @@ fn declaration_for_keys<'a>(
     }
 }
 
+fn top_level_declaration_at_span<'a>(
+    parse: &'a Parse,
+    selected_span: &SourceSpan,
+) -> Option<DeclarationRef<'a>> {
+    parse
+        .schemas()
+        .iter()
+        .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+        .map(DeclarationRef::Schema)
+        .or_else(|| {
+            parse
+                .object_types()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::ObjectType)
+        })
+        .or_else(|| {
+            parse
+                .enum_types()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::EnumType)
+        })
+        .or_else(|| {
+            parse
+                .record_value_types()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::RecordValueType)
+        })
+        .or_else(|| {
+            parse
+                .primitive_value_types()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::PrimitiveValueType)
+        })
+        .or_else(|| {
+            parse
+                .opaque_value_types()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::OpaqueValueType)
+        })
+        .or_else(|| {
+            parse
+                .server_functions()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::ServerFunction)
+        })
+        .or_else(|| {
+            parse
+                .client_functions()
+                .iter()
+                .find(|declaration| qualified_name_matches_span(&declaration.name, selected_span))
+                .map(DeclarationRef::ClientFunction)
+        })
+}
+
 fn declaration_at_span<'a>(
     parse: &'a Parse,
     text: &str,
@@ -794,6 +878,11 @@ fn declaration_at_span<'a>(
     kind: HighlightKind,
     selected_span: &SourceSpan,
 ) -> Option<DeclarationRef<'a>> {
+    if kind == HighlightKind::QuotedIdentifier {
+        if let Some(declaration) = top_level_declaration_at_span(parse, selected_span) {
+            return Some(declaration);
+        }
+    }
     if let Some(keys) = qualified_name_keys_at(text, highlighted, selected_span) {
         if let Some(declaration) = declaration_for_keys(parse, &keys, kind) {
             return Some(declaration);
@@ -1571,10 +1660,7 @@ fn qualified_names_match(left: &QualifiedName, right: &QualifiedName) -> bool {
             .zip(&right.parts)
             .all(|(left, right)| identifier_spelling_matches(&left.text, &right.text))
 }
-fn semantic_name_matches_source(
-    candidate: &QualifiedSemanticName,
-    source: &QualifiedName,
-) -> bool {
+fn semantic_name_matches_source(candidate: &QualifiedSemanticName, source: &QualifiedName) -> bool {
     candidate.parts().len() == source.parts.len()
         && candidate
             .parts()
@@ -2082,6 +2168,81 @@ fn query_field_path_any_at<'a>(
         })
 }
 
+fn sql_source_object_type_contains_span(
+    parse: &Parse,
+    path: &[IdentifierKey],
+    selected_span: &SourceSpan,
+) -> bool {
+    let matches = |object_type: &QualifiedName| {
+        qualified_name_matches_keys(object_type, path)
+            && object_type
+                .parts
+                .iter()
+                .any(|part| name_part_matches_span(part, selected_span))
+    };
+    parse
+        .server_functions()
+        .iter()
+        .any(|declaration| match &declaration.body {
+            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
+                matches(&body.query.source_object.object_type)
+            }
+            orna_syntax::ServerFunctionBody::SqlInsert(body) => matches(&body.insert.target_object),
+            orna_syntax::ServerFunctionBody::SqlUpdate(body) => matches(&body.update.target_object),
+            orna_syntax::ServerFunctionBody::SqlDelete(body) => matches(&body.delete.target_object),
+            _ => false,
+        })
+}
+
+fn sql_object_type_declaration_at<'a>(
+    parse: &'a Parse,
+    text: &str,
+    highlighted: &[orna_syntax::HighlightToken],
+    selected_span: &SourceSpan,
+) -> Option<DeclarationRef<'a>> {
+    let path = qualified_name_keys_at(text, highlighted, selected_span).unwrap_or_else(|| {
+        vec![identifier_key(
+            &text[selected_span.start..selected_span.end],
+        )]
+    });
+    sql_source_object_type_contains_span(parse, &path, selected_span)
+        .then(|| declaration_for_keys(parse, &path, HighlightKind::TypeName))
+        .flatten()
+}
+
+fn query_expression_alias_or_parameter_contains_span(
+    expression: &orna_syntax::QueryExpression,
+    selected_span: &SourceSpan,
+) -> bool {
+    match expression {
+        orna_syntax::QueryExpression::ObjectReference { alias, .. }
+        | orna_syntax::QueryExpression::FieldPath { root: alias, .. } => {
+            name_part_matches_span(alias, selected_span)
+        }
+        orna_syntax::QueryExpression::ParameterRead { parameter } => {
+            name_part_matches_span(parameter, selected_span)
+        }
+        orna_syntax::QueryExpression::Equality { left, right, .. } => {
+            query_expression_alias_or_parameter_contains_span(left, selected_span)
+                || query_expression_alias_or_parameter_contains_span(right, selected_span)
+        }
+        orna_syntax::QueryExpression::BooleanLiteral { .. } => false,
+    }
+}
+
+fn sql_query_alias_or_parameter_contains_span(
+    query: &orna_syntax::SelectQuery,
+    selected_span: &SourceSpan,
+) -> bool {
+    query.projections.iter().any(|expression| {
+        query_expression_alias_or_parameter_contains_span(expression, selected_span)
+    }) || query.predicate.as_ref().is_some_and(|expression| {
+        query_expression_alias_or_parameter_contains_span(expression, selected_span)
+    }) || query.ordering.iter().any(|ordering| {
+        query_expression_alias_or_parameter_contains_span(&ordering.expression, selected_span)
+    })
+}
+
 fn sql_query_contains_span(parse: &Parse, selected_span: &SourceSpan) -> bool {
     parse
         .server_functions()
@@ -2101,6 +2262,9 @@ fn sql_unresolved_field_or_alias(parse: &Parse, selected_span: &SourceSpan) -> b
         .any(|declaration| match &declaration.body {
             orna_syntax::ServerFunctionBody::SqlQuery(body) => {
                 if name_part_matches_span(&body.query.source_object.alias, selected_span) {
+                    return true;
+                }
+                if sql_query_alias_or_parameter_contains_span(&body.query, selected_span) {
                     return true;
                 }
                 let Some((root, members)) = query_field_path_any_at(&body.query, selected_span)
@@ -2130,22 +2294,35 @@ fn sql_unresolved_field_or_alias(parse: &Parse, selected_span: &SourceSpan) -> b
                 false
             }
             orna_syntax::ServerFunctionBody::SqlInsert(body) => {
-                body.insert.target_fields.iter().any(|field| {
-                    name_part_matches_span(field, selected_span)
-                        && field_on_object_or_record(parse, &body.insert.target_object, &field.text)
+                name_part_matches_span(&body.insert.target_alias, selected_span)
+                    || name_part_matches_span(&body.insert.returning_alias, selected_span)
+                    || body.insert.target_fields.iter().any(|field| {
+                        name_part_matches_span(field, selected_span)
+                            && field_on_object_or_record(
+                                parse,
+                                &body.insert.target_object,
+                                &field.text,
+                            )
                             .is_none()
-                })
+                    })
             }
             orna_syntax::ServerFunctionBody::SqlUpdate(body) => {
-                body.update.assignments.iter().any(|assignment| {
-                    name_part_matches_span(&assignment.target_field, selected_span)
-                        && field_on_object_or_record(
-                            parse,
-                            &body.update.target_object,
-                            &assignment.target_field.text,
-                        )
-                        .is_none()
-                })
+                name_part_matches_span(&body.update.target_alias, selected_span)
+                    || name_part_matches_span(&body.update.selector_alias, selected_span)
+                    || name_part_matches_span(&body.update.returning_alias, selected_span)
+                    || body.update.assignments.iter().any(|assignment| {
+                        name_part_matches_span(&assignment.target_field, selected_span)
+                            && field_on_object_or_record(
+                                parse,
+                                &body.update.target_object,
+                                &assignment.target_field.text,
+                            )
+                            .is_none()
+                    })
+            }
+            orna_syntax::ServerFunctionBody::SqlDelete(body) => {
+                name_part_matches_span(&body.delete.target_alias, selected_span)
+                    || name_part_matches_span(&body.delete.selector_alias, selected_span)
             }
             _ => false,
         })
@@ -2266,6 +2443,13 @@ fn declaration_span_for_kind(
         && sql_unresolved_field_or_alias(parse, selected_span)
     {
         return None;
+    }
+    if kind == HighlightKind::QuotedIdentifier {
+        if let Some(declaration) =
+            sql_object_type_declaration_at(parse, text, highlighted, selected_span)
+        {
+            return Some(declaration.name_span().clone());
+        }
     }
     if let Some((declaration, part)) = client_expression_part_in_parse(parse, selected_span) {
         match part {
@@ -2483,10 +2667,28 @@ fn reference_scope(
             | ClientExpressionPart::CallArgumentLabel => return ReferenceScope::None,
         }
     }
+    let qualified_path = qualified_name_keys_at(text, highlighted, selected_span)
+        .or_else(|| Some(vec![identifier_key(name)]));
+    if kind == HighlightKind::QuotedIdentifier {
+        if let Some(declaration) =
+            sql_object_type_declaration_at(parse, text, highlighted, selected_span)
+        {
+            let path = qualified_path
+                .as_ref()
+                .expect("SQL object declaration requires a qualified path");
+            return ReferenceScope::TopLevel {
+                declaration_kind: top_level_declaration_kind(declaration),
+                selected_kind: kind,
+                path: path.clone(),
+            };
+        }
+    }
+    let has_qualified_path = qualified_path.as_ref().is_some_and(|path| path.len() > 1);
     if matches!(
         kind,
         HighlightKind::VariableName | HighlightKind::QuotedIdentifier
-    ) && containing_function_span(parse, selected_span).is_some()
+    ) && !has_qualified_path
+        && containing_function_span(parse, selected_span).is_some()
     {
         if let Some(declaration_span) = variable_declaration_span(parse, name, selected_span) {
             return ReferenceScope::Variable {
@@ -2502,8 +2704,7 @@ fn reference_scope(
     if let Some(declaration) =
         declaration_at_span(parse, text, highlighted, name, kind, selected_span)
     {
-        let path = qualified_name_keys_at(text, highlighted, selected_span)
-            .unwrap_or_else(|| vec![identifier_key(name)]);
+        let path = qualified_path.unwrap_or_else(|| vec![identifier_key(name)]);
         return ReferenceScope::TopLevel {
             declaration_kind: top_level_declaration_kind(declaration),
             selected_kind: kind,
@@ -2551,8 +2752,7 @@ fn variable_reference_declaration_span(
 ///
 /// Unlike declaration tokens, SQL quoted identifiers have no semantic role in
 /// the highlighter. Reject known field, alias, local, and target paths first,
-/// then use the same declaration lookup to keep a quoted token in its
-/// resolved schema/type/function category.
+/// then resolve the full path in the selected top-level category.
 fn quoted_top_level_token_matches_category(
     parse: &Parse,
     text: &str,
@@ -2564,22 +2764,40 @@ fn quoted_top_level_token_matches_category(
         start: token.range.start,
         end: token.range.end,
     };
-    if field_reference_declaration_span(parse, text, highlighted, &token_span).is_some()
-        || sql_unresolved_field_or_alias(parse, &token_span)
-        || client_expression_part_in_parse(parse, &token_span).is_some()
+    let name = text[token.range.clone()].to_owned();
+    let candidate_path = qualified_name_keys_at(text, highlighted, &token_span)
+        .or_else(|| Some(vec![identifier_key(&name)]));
+    let has_qualified_path = candidate_path.as_ref().is_some_and(|path| path.len() > 1);
+    let is_declaration = is_declaration_span(parse, &token_span);
+    if matches!(
+        declaration_kind,
+        TopLevelDeclarationKind::Schema | TopLevelDeclarationKind::Function
+    ) && candidate_path
+        .as_ref()
+        .is_some_and(|path| sql_source_object_type_contains_span(parse, path, &token_span))
     {
         return false;
     }
-    let name = text[token.range.clone()].to_owned();
-    declaration_at_span(
-        parse,
-        text,
-        highlighted,
-        &name,
-        HighlightKind::QuotedIdentifier,
-        &token_span,
-    )
-    .is_some_and(|declaration| top_level_declaration_kind(declaration) == declaration_kind)
+    if (is_declaration
+        && (field_declaration_span(parse, &token_span).is_some()
+            || return_column_scope(parse, &token_span).is_some()))
+        || field_reference_declaration_span(parse, text, highlighted, &token_span).is_some()
+        || sql_unresolved_field_or_alias(parse, &token_span)
+        || client_expression_part_in_parse(parse, &token_span).is_some()
+        || (!has_qualified_path
+            && (variable_reference_declaration_span(parse, text, token).is_some()
+                || variable_declaration_span(parse, &name, &token_span).is_some()))
+    {
+        return false;
+    }
+    let kind = match declaration_kind {
+        TopLevelDeclarationKind::Schema => HighlightKind::NamespaceName,
+        TopLevelDeclarationKind::Type => HighlightKind::TypeName,
+        TopLevelDeclarationKind::Function => HighlightKind::FunctionName,
+    };
+    candidate_path
+        .and_then(|keys| declaration_for_keys(parse, &keys, kind))
+        .is_some()
 }
 
 fn reference_token_in_scope(
@@ -2607,15 +2825,23 @@ fn reference_token_in_scope(
             if candidate_path.as_slice() != path.as_slice() {
                 return false;
             }
+            if is_declaration_span(parse, &token_span) {
+                let candidate_name = text[token.range.clone()].to_owned();
+                if field_declaration_span(parse, &token_span).is_some()
+                    || return_column_scope(parse, &token_span).is_some()
+                    || variable_declaration_span(parse, &candidate_name, &token_span).is_some()
+                {
+                    return false;
+                }
+            }
             if token.kind == HighlightKind::QuotedIdentifier {
-                return *selected_kind == HighlightKind::QuotedIdentifier
-                    && quoted_top_level_token_matches_category(
-                        parse,
-                        text,
-                        highlighted,
-                        token,
-                        *declaration_kind,
-                    );
+                return quoted_top_level_token_matches_category(
+                    parse,
+                    text,
+                    highlighted,
+                    token,
+                    *declaration_kind,
+                );
             }
             if *selected_kind == HighlightKind::QuotedIdentifier {
                 let declaration_token_kind = match declaration_kind {
@@ -2623,7 +2849,14 @@ fn reference_token_in_scope(
                     TopLevelDeclarationKind::Type => HighlightKind::TypeName,
                     TopLevelDeclarationKind::Function => HighlightKind::FunctionName,
                 };
-                return token.kind == declaration_token_kind;
+                return token.kind == declaration_token_kind
+                    && quoted_top_level_token_matches_category(
+                        parse,
+                        text,
+                        highlighted,
+                        token,
+                        *declaration_kind,
+                    );
             }
             token.kind == *selected_kind
         }
@@ -3183,6 +3416,15 @@ pub fn hover(
             } else if let Some(field) = sql_column_at(parse, byte, &document.text, &highlighted) {
                 Some(crate::hover::field_hover(
                     &field,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
+            } else if kind == HighlightKind::QuotedIdentifier
+                && let Some(declaration) =
+                    sql_object_type_declaration_at(parse, &document.text, &highlighted, &span)
+            {
+                Some(crate::hover::declaration_hover(
+                    declaration,
                     &document.text,
                     doc_link.as_deref(),
                 ))
@@ -3809,14 +4051,7 @@ fn stream_target_element_is_supported(
             let closed_scalar = name.parts.len() == 1
                 && !name.parts[0].text.starts_with('"')
                 && [
-                    "BOOLEAN",
-                    "BOOL",
-                    "INTEGER",
-                    "INT",
-                    "BIGINT",
-                    "FLOAT",
-                    "TEXT",
-                    "BYTES",
+                    "BOOLEAN", "BOOL", "INTEGER", "INT", "BIGINT", "FLOAT", "TEXT", "BYTES",
                 ]
                 .iter()
                 .any(|scalar| identifier_spelling_matches(&name.parts[0].text, scalar));
