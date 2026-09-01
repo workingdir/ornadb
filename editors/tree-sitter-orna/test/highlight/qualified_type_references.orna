@@ -1,0 +1,14 @@
+CREATE SERVER FUNCTION type_fixture.probe(
+    p_direct product_test.direct,
+--             ^^^^^^^^^^^^^^^^^^^ type
+    p_ref REF product_test.referenced,
+--              ^^^^^^^^^^^^^^^^^^^^^ type
+    p_list LIST<product_test.collection>,
+--                ^^^^^^^^^^^^^^^^^^^^^^ type
+    p_option OPTION<REF product_test.optional_value>
+--                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ type
+) RETURNS OPTION<LIST<REF product_test.returned_type>>
+--                           ^^^^^^^^^^^^^^^^^^^^^^^^^ type
+AS ordinary_namespace.member;
+--   ^^^^^^^^^^^^^^^^^^^^^^^^^ namespace
+--   ^^^^^^^^^^^^^^^^^^ namespace
