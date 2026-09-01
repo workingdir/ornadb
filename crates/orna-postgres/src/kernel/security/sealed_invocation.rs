@@ -204,6 +204,18 @@ pub struct SealedInvocationOperation {
     started_events: InvocationEventBatch,
     outcome: SealedInvocationPreparedOutcome,
     consumed: bool,
+    #[cfg(test)]
+    test_hooks: Option<SealedInvocationTestHooks>,
+}
+
+#[cfg(test)]
+struct SealedInvocationTestHooks {
+    audit: Box<dyn Fn(&SealedInvocationPreparedOutcome) -> Result<(), PostgresKernelError>>,
+    dispatch: Box<
+        dyn Fn(
+            &SealedInvocationPreparedOutcome,
+        ) -> Result<SealedInvocationExecution, PostgresKernelError>,
+    >,
 }
 
 impl SealedInvocationOperation {
@@ -232,6 +244,51 @@ impl SealedInvocationOperation {
             self.security.clone(),
             self.invocation,
         )
+    }
+}
+
+#[cfg(test)]
+impl SealedInvocationOperation {
+    pub(super) fn new_for_test(
+        kernel: PostgresKernel,
+        authenticated_session: AuthenticatedSession,
+        active: ActiveDatabaseRevision,
+        security: SecuritySnapshot,
+        registry: OpaqueCodecRegistry,
+        decoded: orna_core::invocation::InvokeRequest,
+        request: RetainedInvokeRequest,
+        invocation: InvocationId,
+        outcome: SealedInvocationPreparedOutcome,
+    ) -> Result<Self, PostgresKernelError> {
+        Ok(Self {
+            kernel,
+            authenticated_session,
+            active,
+            security,
+            registry,
+            decoded,
+            request,
+            invocation,
+            started_events: sealed_started_events(invocation)?,
+            outcome,
+            consumed: false,
+            test_hooks: None,
+        })
+    }
+
+    pub(super) fn with_test_hooks<A, D>(mut self, audit: A, dispatch: D) -> Self
+    where
+        A: Fn(&SealedInvocationPreparedOutcome) -> Result<(), PostgresKernelError> + 'static,
+        D: Fn(
+                &SealedInvocationPreparedOutcome,
+            ) -> Result<SealedInvocationExecution, PostgresKernelError>
+            + 'static,
+    {
+        self.test_hooks = Some(SealedInvocationTestHooks {
+            audit: Box::new(audit),
+            dispatch: Box::new(dispatch),
+        });
+        self
     }
 }
 
@@ -615,12 +672,18 @@ impl SealedInvocationContinuation {
             started_events,
             outcome,
             consumed: false,
+            #[cfg(test)]
+            test_hooks: None,
         })
     }
 }
 
 impl SealedInvocationOperation {
     async fn append_prepared_audit(&self) -> Result<(), PostgresKernelError> {
+        #[cfg(test)]
+        if let Some(hooks) = self.test_hooks.as_ref() {
+            return (hooks.audit)(&self.outcome);
+        }
         let mut database_session = self.kernel.open().await?;
         let operation = async {
             let transaction = database_session
@@ -768,6 +831,10 @@ impl SealedInvocationOperation {
                     invocation: self.invocation,
                 },
             ));
+        }
+        #[cfg(test)]
+        if let Some(hooks) = self.test_hooks.as_ref() {
+            return (hooks.dispatch)(&self.outcome);
         }
         // Native STREAM and accepted mutation ROWS targets use a live
         // producer. Read-only ROWS targets use the existing sealed executor.
