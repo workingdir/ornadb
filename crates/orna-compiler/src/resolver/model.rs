@@ -2022,8 +2022,8 @@ impl CheckedStandardParameterEcho {
     }
 }
 
-/// The checked declaration facts for the one accepted ADR 0057 JSON
-/// presenter function (`std.json.encode`).
+/// The checked declaration facts for the JSON presenter function retained by
+/// V5/ADR 0075 (`std.json.encode`).
 ///
 /// The model carries the fixed function, parameter, and version-1 revision
 /// identities. The exact-shape check rejects every variation of the closed

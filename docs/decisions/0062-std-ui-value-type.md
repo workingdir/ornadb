@@ -18,7 +18,7 @@ types unchanged, and appends the new schema, value type, binding, and
 source unit.
 
 `std.json.Value` is not a V4 identity; the V5 child snapshot introduces it
-(work ADR 0075).
+(work ADR 0075), and current standard manifests retain it unchanged.
 
 `std.ui.UI` is a transient immutable value, never a durable object. The
 core remains UI-ignorant; it sees only a standard `TypeId`, an opaque
