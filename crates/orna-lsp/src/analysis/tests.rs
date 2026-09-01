@@ -739,6 +739,65 @@ fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references(
         "qualified b.item references leaked across schemas: {references:?}",
     );
 }
+#[test]
+fn qualified_type_navigation_consumes_line_comments_between_components() {
+    let text = concat!(
+        "CREATE SCHEMA a;\n",
+        "CREATE SCHEMA b;\n",
+        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
+        "CREATE TYPE b.item AS OBJECT (b_value TEXT);\n",
+        "CREATE SERVER FUNCTION use_b() RETURNS b\n",
+        "-- keep the qualified path intact\n",
+        ".item AS SELECT TRUE;\n",
+    );
+    let document = Document::new(
+        "file:///qualified-comment-navigation.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_type_declaration = text
+        .find("CREATE TYPE b.item")
+        .expect("b type declaration")
+        + "CREATE TYPE ".len();
+    let b_type_use = text.find(".item AS SELECT").expect("b type use") + 1;
+
+    let hover = hover_at(text, b_type_use + 1).expect("comment-separated b.item hover");
+    let hover_value = hover_markdown(&hover);
+    assert!(hover_value.contains("b_value"), "b.item hover: {hover_value}");
+    assert!(
+        !hover_value.contains("a_value"),
+        "cross-schema comment-separated hover leak: {hover_value}"
+    );
+
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_type_use + 1),
+        &mapper,
+    )
+    .expect("comment-separated b.item definition");
+    assert_eq!(definition.range.start, mapper.position(b_type_declaration));
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_type_use + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_type_declaration + "b.".len()),
+            mapper.position(b_type_use),
+        ],
+        "comment-separated b.item references leaked across schemas: {references:?}",
+    );
+}
+
 
 #[test]
 fn qualified_function_navigation_uses_full_path_for_hover_definition_and_references() {
