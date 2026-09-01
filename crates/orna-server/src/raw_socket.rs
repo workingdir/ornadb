@@ -1007,10 +1007,12 @@ async fn negotiate_and_drive(
         return Ok(());
     }
 
+    let session_broker = SharedInvokeBroker::session_only();
     drive_versioned_authenticated_stream_until_shutdown(
         RawDispatchService {
             kernel,
             invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
+            session_broker,
             resource_broker: broker,
         },
         session,
@@ -1385,6 +1387,7 @@ fn sealed_presentation_failure_actions(
 struct RawDispatchService {
     kernel: PostgresKernel,
     invoke_cancellations: Arc<Mutex<BTreeMap<u64, ResourceCancellation>>>,
+    session_broker: SharedInvokeBroker,
     resource_broker: Option<SharedInvokeBroker>,
 }
 
@@ -1480,11 +1483,27 @@ fn sealed_result_cancellation_won(
         )
 }
 
+impl RawDispatchService {
+    fn install_session_bridge(
+        &self,
+        root_invocation: InvocationId,
+        stream: u64,
+    ) -> Result<Arc<crate::invoke::SessionBridge>, orna_protocol::SessionStateError> {
+        match &self.resource_broker {
+            Some(broker) => broker.install_session_bridge(root_invocation, stream),
+            None => self
+                .session_broker
+                .install_session_bridge(root_invocation, stream),
+        }
+    }
+}
+
 impl DispatchService for RawDispatchService {
     fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
         self.resource_broker
             .as_ref()
             .and_then(SharedInvokeBroker::session_bridge)
+            .or_else(|| self.session_broker.session_bridge())
     }
 
     fn cancelled(&self, stream: u64) {
@@ -1566,11 +1585,9 @@ impl DispatchService for RawDispatchService {
     ) -> StartedDispatch {
         let continuation = continuation.expect("sealed invocation preflight continuation");
         let invocation = continuation.invocation();
-        if let Some(broker) = &self.resource_broker {
-            broker
-                .install_session_bridge(invocation, stream)
-                .expect("one session bridge per authenticated root invocation");
-        }
+        let _session_bridge = self
+            .install_session_bridge(invocation, stream)
+            .expect("one session bridge per authenticated root invocation");
         let dispatch_session = _session.clone();
         // The worker below uses a short-lived runtime; stream producers must
         // stay owned by this raw-socket driver runtime.
@@ -1590,6 +1607,7 @@ impl DispatchService for RawDispatchService {
         let cancellation_for_task = cancellation.clone();
         let cancellations = self.invoke_cancellations.clone();
         let resource_broker = self.resource_broker.clone();
+        let session_broker = self.session_broker.clone();
         let future = Box::pin(async move {
             struct DynamicContextGuard {
                 broker: Option<SharedInvokeBroker>,
@@ -1652,20 +1670,22 @@ impl DispatchService for RawDispatchService {
             let worker_kernel = kernel.clone();
             let worker_session = dispatch_session.clone();
             let worker_active = operation.active_revision();
-            let _dynamic_context_guard = resource_broker.as_ref().map(|broker| {
-                let (context_session, context_security, root_invocation) =
-                    operation.client_evaluation_context();
-                broker.bind_dynamic_context(
-                    operation.active_revision(),
-                    context_security,
-                    context_session,
-                    root_invocation,
-                );
-                DynamicContextGuard {
-                    broker: Some(broker.clone()),
-                    root_invocation: Some(root_invocation),
-                }
-            });
+            let context_broker = resource_broker
+                .clone()
+                .unwrap_or_else(|| session_broker.clone());
+            let (context_session, context_security, root_invocation) =
+                operation.client_evaluation_context();
+            context_broker.bind_dynamic_context(
+                operation.active_revision(),
+                context_security,
+                context_session,
+                root_invocation,
+            );
+            let _dynamic_context_guard = DynamicContextGuard {
+                broker: Some(context_broker.clone()),
+                root_invocation: Some(root_invocation),
+            };
+            let executor_broker = resource_broker.clone().unwrap_or(session_broker);
             let execution = tokio::task::spawn_blocking(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1678,20 +1698,13 @@ impl DispatchService for RawDispatchService {
                 runtime.block_on(async move {
                     let mut state = ClientStateStore::new();
                     let mut capability_audit_appended = false;
-                    let mut resource_executor = match resource_broker {
-                        Some(broker) => InstalledClientResourceExecutor::new_with_broker(
-                            worker_kernel,
-                            worker_session,
-                            worker_active,
-                            broker,
-                            cancellation.clone(),
-                        ),
-                        None => InstalledClientResourceExecutor::new(
-                            worker_kernel,
-                            worker_session,
-                            worker_active,
-                        ),
-                    };
+                    let mut resource_executor = InstalledClientResourceExecutor::new_with_broker(
+                        worker_kernel,
+                        worker_session,
+                        worker_active,
+                        executor_broker,
+                        cancellation.clone(),
+                    );
                     operation
                         .execute_after_started(
                             Some(&mut resource_executor),
@@ -4615,3 +4628,28 @@ const fn client_stream(frame: &ClientFrame) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod daemon_session_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn raw_dispatcher_installs_per_connection_session_bridge() {
+        let dispatcher = RawDispatchService {
+            kernel: PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent")
+                .expect("kernel config"),
+            invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
+            session_broker: SharedInvokeBroker::session_only(),
+            resource_broker: None,
+        };
+        let root = InvocationId::from_bytes([0xa1; 16]);
+        let bridge = dispatcher
+            .install_session_bridge(root, 23)
+            .expect("session bridge installs");
+        let current = dispatcher
+            .session_bridge()
+            .expect("session bridge is visible");
+        assert!(Arc::ptr_eq(&bridge, &current));
+    }
+}
