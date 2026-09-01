@@ -65,7 +65,8 @@ The language server provides:
   functions and recognized standard-library functions, including parameter
   details, the active parameter, and the return type.
 - Workspace symbols (`workspace/symbol`) across all open documents, filtered by
-  a case-insensitive substring query on the symbol name.
+  a substring query on the symbol name, with ASCII letters matched
+  case-insensitively.
 - Hover for declared names and standard scalar types.
 - Rich hover documentation: full signatures, per-parameter and
   per-field detail with modifiers, `DOCUMENTATION` clause text, usage
