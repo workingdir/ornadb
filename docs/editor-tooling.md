@@ -61,6 +61,11 @@ The language server provides:
   keywords, types, functions, namespaces, properties, strings, numbers,
   comments, and operators.
 - Document symbols (schemas, types, functions, fields, parameters).
+- Signature help (`textDocument/signatureHelp`) for declared server and client
+  functions and recognized standard-library functions, including parameter
+  details, the active parameter, and the return type.
+- Workspace symbols (`workspace/symbol`) across all open documents, filtered by
+  a case-insensitive substring query on the symbol name.
 - Hover for declared names and standard scalar types.
 - Rich hover documentation: full signatures, per-parameter and
   per-field detail with modifiers, `DOCUMENTATION` clause text, usage
