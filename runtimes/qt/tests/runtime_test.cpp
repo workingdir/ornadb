@@ -186,7 +186,9 @@ int main() {
     OrnaRuntimeHandle runtime = 0;
     REQUIRE(api->create(&create_options, &runtime).code == ORNA_STATUS_OK);
     REQUIRE(runtime != 0);
-    REQUIRE(api->cancel_request(runtime, 1).code == ORNA_STATUS_UNSUPPORTED);
+    const auto cancel_status = api->cancel_request(runtime, 1);
+    REQUIRE(cancel_status.code == ORNA_STATUS_UNSUPPORTED);
+    REQUIRE(string_value(cancel_status.message) == "operation is not supported by the Qt v1 runtime");
 
     OrnaSurfaceCreateOptionsV1 surface_options{
         view("window"),
