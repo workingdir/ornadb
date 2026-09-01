@@ -134,10 +134,12 @@ image is prepared; its source build and lifecycle probes run with
 `target/postgresql-embedded-native-one/output/` and the comparison run is
 under the sibling `-two` directory.
 
-CMake/CTest Qt builds and ABI gates need CMake 3.21 or later, Qt 6.2+ Core
-and Widgets, a C++17 compiler, and `../spec/spec/orna_runtime_abi_v1.h`.
-The Rust loader and Studio smoke commands use the offscreen platform and only
-require an explicit compatible shared-library path.
+The ABI header/parity checks require a GCC-compatible C11 compiler, Linux
+x86_64 for the parity assertions, and `../spec/spec/orna_runtime_abi_v1.h`.
+The CMake/CTest Qt build additionally requires CMake 3.21 or later, CTest, a
+C++17 compiler, and Qt 6.2+ Core and Widgets development files. The Rust
+loader and Studio smoke commands use the offscreen platform and only require
+an explicit compatible shared-library path.
 Display-backed `runtime-qt-demo`, `studio-qt-display-smoke`,
 `studio-qt-action-smoke`, and `runtime-display-suite` additionally require
 `DISPLAY` or `WAYLAND_DISPLAY`.
