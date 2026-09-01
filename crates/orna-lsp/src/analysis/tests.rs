@@ -308,6 +308,127 @@ fn completion_resolves_nested_client_fields_through_utf16_cursor() {
 }
 
 #[test]
+fn completion_marks_targets_only_inside_accepted_constructor_arguments() {
+    let text = concat!(
+        "CREATE SCHEMA resource_fixture;\n",
+        "CREATE SCHEMA stream_fixture;\n",
+        "CREATE SCHEMA action_fixture;\n",
+        "CREATE TYPE resource_fixture.row AS OBJECT (title TEXT, value INTEGER);\n",
+        "CREATE SERVER FUNCTION resource_fixture.scalar() RETURNS INTEGER AS\n",
+        "    SELECT r.value FROM resource_fixture.row r;\n",
+        "CREATE SERVER FUNCTION stream_fixture.stream() RETURNS STREAM<TEXT> AS\n",
+        "    SELECT r.title FROM resource_fixture.row r;\n",
+        "CREATE SERVER FUNCTION stream_fixture.unsupported() RETURNS STREAM<UUID> AS\n",
+        "    SELECT r.value FROM resource_fixture.row r;\n",
+        "CREATE CLIENT FUNCTION action_fixture.client() RETURNS INTEGER AS 1;\n",
+        "CREATE CLIENT FUNCTION resource_fixture.resource_probe() RETURNS INTEGER IS\n",
+        "BEGIN\n",
+        "    RETURN AWAIT std.data.resource(\n",
+        "        target => resource_fixture.scalar,\n",
+        "        arguments => std.call.args()\n",
+        "    );\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION stream_fixture.stream_probe() RETURNS STREAM<TEXT> IS\n",
+        "BEGIN\n",
+        "    RETURN AWAIT std.data.stream_resource(\n",
+        "        target => stream_fixture.stream,\n",
+        "        arguments => std.call.args()\n",
+        "    );\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION action_fixture.action_probe() RETURNS std.Action AS\n",
+        "    std.action.call(\n",
+        "        target => action_fixture.client,\n",
+        "        arguments => std.call.args()\n",
+        "    );\n",
+        "CREATE CLIENT FUNCTION action_fixture.shadowed() RETURNS std.Action IS\n",
+        "    LET std INTEGER := 1;\n",
+        "BEGIN\n",
+        "    RETURN std.action.call(\n",
+        "        target => std.foo,\n",
+        "        arguments => std.call.args()\n",
+        "    );\n",
+        "END;\n",
+        "CREATE CLIENT FUNCTION resource_fixture.field_probe(p_item REF resource_fixture.row)\n",
+        "RETURNS TEXT AS p_item.title;\n",
+    );
+    let parse = orna_syntax::parse(text);
+    assert!(
+        parse.diagnostics().is_empty(),
+        "target completion fixture must parse: {:?}",
+        parse.diagnostics()
+    );
+    let mapper = PositionMapper::new(text);
+    let context = CompletionContext {
+        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+        trigger_character: Some(".".to_owned()),
+    };
+    let items_at = |prefix: &str| {
+        let byte = text.find(prefix).expect("completion prefix") + prefix.len();
+        completion_at(
+            &parse,
+            None,
+            Some(mapper.byte_offset(mapper.position(byte))),
+            Some(&context),
+        )
+    };
+    let detail = |items: &[lsp_types::CompletionItem], label: &str| {
+        items
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("missing completion {label}: {items:?}"))
+            .detail
+            .as_deref()
+            .unwrap_or("missing completion detail")
+            .to_owned()
+    };
+
+    let resource_items = items_at("target => resource_fixture.");
+    assert_eq!(detail(&resource_items, "scalar"), "server function target");
+    assert_eq!(detail(&resource_items, "stream"), "server function");
+    assert_eq!(detail(&resource_items, "client"), "client function");
+
+    let stream_items = items_at("target => stream_fixture.");
+    assert_eq!(detail(&stream_items, "stream"), "server function target");
+    assert_eq!(detail(&stream_items, "scalar"), "server function");
+    assert_eq!(detail(&stream_items, "client"), "client function");
+    assert_eq!(detail(&stream_items, "unsupported"), "server function");
+
+    let action_items = items_at("target => action_fixture.");
+    assert_eq!(detail(&action_items, "client"), "client function target");
+    assert_eq!(detail(&action_items, "scalar"), "server function target");
+    assert_eq!(detail(&action_items, "stream"), "server function");
+    let shadowed_items = items_at("target => std.");
+    assert_eq!(detail(&shadowed_items, "scalar"), "server function");
+    assert_eq!(detail(&shadowed_items, "client"), "client function");
+    assert!(
+        shadowed_items.iter().all(|item| {
+            !item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("function target"))
+        }),
+        "a local std binding leaked target details: {shadowed_items:?}"
+    );
+
+    let field_items = items_at("AS p_item.");
+    assert!(
+        field_items
+            .iter()
+            .any(|item| item.label == "title" && item.kind == Some(CompletionItemKind::FIELD)),
+        "ordinary field completion missing: {field_items:?}"
+    );
+    assert!(
+        field_items.iter().all(|item| {
+            !item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("function target"))
+        }),
+        "ordinary field path leaked target details: {field_items:?}"
+    );
+}
+
+#[test]
 fn standard_function_hover_and_signature_use_catalogue_data() {
     let standard = StandardLibrary::load().expect("standard library");
     let text = "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.increment(1);";
