@@ -2181,7 +2181,7 @@ fn client_expression_requires_control_flow(expression: &ClientExpression) -> boo
     }
 }
 
-fn validate_client_await_positions(
+pub(super) fn validate_client_await_positions(
     expression: &ClientExpression,
     allow_await: bool,
     input: &ResolvedClientFunctionInput<'_>,
@@ -2192,7 +2192,7 @@ fn validate_client_await_positions(
             if !allow_await {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
-                    "AWAIT is only valid as the CLIENT body return expression",
+                    "AWAIT is only valid in procedural CLIENT LET, assignment, and RETURN positions",
                     input.logical_path,
                     span,
                 ));
