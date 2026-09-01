@@ -214,6 +214,18 @@ class ZedLanguageConfigurationTests(unittest.TestCase):
                 '    { start = "(", end = ")", close = false, newline = false },',
                 "key 'brackets'",
             ),
+            (
+                "integer bracket close",
+                '    { start = "(", end = ")", close = true, newline = false },',
+                '    { start = "(", end = ")", close = 1, newline = false },',
+                "key 'brackets'",
+            ),
+            (
+                "integer bracket newline",
+                '    { start = "(", end = ")", close = true, newline = false },',
+                '    { start = "(", end = ")", close = true, newline = 0 },',
+                "key 'brackets'",
+            ),
         )
 
         with tempfile.TemporaryDirectory(prefix="orna-zed-language-tests-") as scratch_name:
