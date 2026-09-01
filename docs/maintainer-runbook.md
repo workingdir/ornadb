@@ -148,6 +148,7 @@ just fmt
 CARGO_NET_OFFLINE=true just build
 CARGO_NET_OFFLINE=true just lint
 CARGO_NET_OFFLINE=true just test
+CARGO_NET_OFFLINE=true just rustdoc-check
 CARGO_NET_OFFLINE=true just editor-tooling-check
 CARGO_NET_OFFLINE=true just demo-check
 ```
@@ -163,6 +164,9 @@ evidence instead of calling the whole command network-free.
 `just fmt` checks formatting without changing files. `just build` checks all
 workspace targets. `just lint` runs workspace Clippy with warnings denied.
 `just test` runs workspace tests except tests marked `#[ignore]`.
+`just rustdoc-check` builds all workspace API documentation with rustdoc
+warnings denied and `--no-deps`; it is included in `just check` and does not
+claim documentation for external dependencies.
 `just editor-tooling-check` is a static gate and does not launch editor
 runtimes, but its source-check parity child can compile `orna-server` and
 therefore needs the embedded-engine prerequisite described above.
