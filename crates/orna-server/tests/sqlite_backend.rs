@@ -320,11 +320,8 @@ struct SqliteSecurityRowCounts {
 fn apply_sqlite_fixture(directory: &Path, database: &Path) {
     let source = directory.join("security-tamper.orna");
     fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("write SQLite tamper source fixture");
-    let applied = run_orna(
-        directory,
-        &source_arguments(database, "apply", &source),
-    )
-    .expect("apply SQLite tamper source fixture");
+    let applied = run_orna(directory, &source_arguments(database, "apply", &source))
+        .expect("apply SQLite tamper source fixture");
     assert_eq!(
         applied.status.code(),
         Some(0),
@@ -439,11 +436,7 @@ fn sqlite_security_row_counts(database: &Path) -> SqliteSecurityRowCounts {
                 "orna_security_local_peer_credentials",
             )
             .await,
-            privilege_grants: sqlite_row_count(
-                &connection,
-                "orna_security_privilege_grants",
-            )
-            .await,
+            privilege_grants: sqlite_row_count(&connection, "orna_security_privilege_grants").await,
         }
     })
 }
@@ -989,11 +982,9 @@ fn assert_sqlite_security_admin_rejects_without_provisioning(database: &Path) {
 
 fn assert_sqlite_security_grant_rejects_without_provisioning(database: &Path) {
     let before = sqlite_security_row_counts(database);
-    let error = run_sqlite_security_grant_execute(
-        database.to_owned(),
-        FunctionId::from_bytes([0xa3; 16]),
-    )
-    .expect_err("tampered SQLite grant-execute state must be rejected");
+    let error =
+        run_sqlite_security_grant_execute(database.to_owned(), FunctionId::from_bytes([0xa3; 16]))
+            .expect_err("tampered SQLite grant-execute state must be rejected");
     assert_eq!(
         error.kind(),
         InstalledSecurityAdminErrorKind::Internal,
@@ -1008,9 +999,11 @@ fn assert_sqlite_security_grant_rejects_without_provisioning(database: &Path) {
 
 #[test]
 fn local_sqlite_security_admin_rejects_tampered_recovery_without_provisioning() {
-    let directory = TestDirectory::new("security-admin-recovery-tamper")
-        .expect("scratch directory");
-    let database = directory.path().join("security-admin-recovery-tamper.sqlite");
+    let directory =
+        TestDirectory::new("security-admin-recovery-tamper").expect("scratch directory");
+    let database = directory
+        .path()
+        .join("security-admin-recovery-tamper.sqlite");
     apply_sqlite_fixture(directory.path(), &database);
     let before_tamper = sqlite_security_row_counts(&database);
     tamper_sqlite_ledger_digest(&database);
@@ -1025,9 +1018,11 @@ fn local_sqlite_security_admin_rejects_tampered_recovery_without_provisioning() 
 
 #[test]
 fn local_sqlite_security_grant_rejects_tampered_recovery_without_provisioning() {
-    let directory = TestDirectory::new("security-grant-recovery-tamper")
-        .expect("scratch directory");
-    let database = directory.path().join("security-grant-recovery-tamper.sqlite");
+    let directory =
+        TestDirectory::new("security-grant-recovery-tamper").expect("scratch directory");
+    let database = directory
+        .path()
+        .join("security-grant-recovery-tamper.sqlite");
     apply_sqlite_fixture(directory.path(), &database);
     let before_tamper = sqlite_security_row_counts(&database);
     tamper_sqlite_ledger_digest(&database);
@@ -1042,9 +1037,11 @@ fn local_sqlite_security_grant_rejects_tampered_recovery_without_provisioning() 
 
 #[test]
 fn local_sqlite_security_admin_rejects_malformed_security_without_provisioning() {
-    let directory = TestDirectory::new("security-admin-security-tamper")
-        .expect("scratch directory");
-    let database = directory.path().join("security-admin-security-tamper.sqlite");
+    let directory =
+        TestDirectory::new("security-admin-security-tamper").expect("scratch directory");
+    let database = directory
+        .path()
+        .join("security-admin-security-tamper.sqlite");
     apply_sqlite_fixture(directory.path(), &database);
     tamper_sqlite_unknown_execute_grant(&database);
     let before = sqlite_security_row_counts(&database);
@@ -1058,9 +1055,11 @@ fn local_sqlite_security_admin_rejects_malformed_security_without_provisioning()
 
 #[test]
 fn local_sqlite_security_grant_rejects_malformed_security_without_provisioning() {
-    let directory = TestDirectory::new("security-grant-security-tamper")
-        .expect("scratch directory");
-    let database = directory.path().join("security-grant-security-tamper.sqlite");
+    let directory =
+        TestDirectory::new("security-grant-security-tamper").expect("scratch directory");
+    let database = directory
+        .path()
+        .join("security-grant-security-tamper.sqlite");
     apply_sqlite_fixture(directory.path(), &database);
     tamper_sqlite_unknown_execute_grant(&database);
     let before = sqlite_security_row_counts(&database);
