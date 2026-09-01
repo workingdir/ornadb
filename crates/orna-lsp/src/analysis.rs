@@ -554,8 +554,8 @@ fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
 ///
 /// The SQL highlighter keeps quoted components as `QuotedIdentifier` rather
 /// than reclassifying them as namespaces, so accept either kind while walking
-/// in both directions across dotted separators. Context-specific field resolution
-/// before this top-level fallback and keeps member paths out of the lookup.
+/// in the direction of the containing path. Context-specific field resolution
+/// runs before this top-level fallback and keeps member paths out of the lookup.
 fn qualified_name_keys_at(
     text: &str,
     highlighted: &[orna_syntax::HighlightToken],
@@ -582,30 +582,8 @@ fn qualified_name_keys_at(
         first_index = previous_index;
         right_start = previous.range.start;
     }
-    let mut last_index = selected_index;
-    let mut left_end = selected_span.end;
-    while last_index + 1 < highlighted.len() {
-        let Some(next_index) = highlighted[last_index + 1..]
-            .iter()
-            .position(|token| {
-                matches!(
-                    token.kind,
-                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
-                )
-            })
-            .map(|index| last_index + 1 + index)
-        else {
-            break;
-        };
-        let next = &highlighted[next_index];
-        if !dotted_name_separator(text, left_end, next.range.start) {
-            break;
-        }
-        last_index = next_index;
-        left_end = next.range.end;
-    }
     Some(
-        highlighted[first_index..=last_index]
+        highlighted[first_index..=selected_index]
             .iter()
             .filter(|token| {
                 matches!(
@@ -2193,6 +2171,37 @@ fn sql_source_object_type_contains_span(
             _ => false,
         })
 }
+fn sql_source_object_type_prefix_contains_span(
+    parse: &Parse,
+    path: &[IdentifierKey],
+    selected_span: &SourceSpan,
+) -> bool {
+    let matches = |object_type: &QualifiedName| {
+        object_type.parts.len() >= path.len()
+            && object_type
+                .parts
+                .iter()
+                .zip(path)
+                .all(|(part, key)| identifier_key(&part.text) == *key)
+            && object_type
+                .parts
+                .iter()
+                .take(path.len())
+                .any(|part| name_part_matches_span(part, selected_span))
+    };
+    parse
+        .server_functions()
+        .iter()
+        .any(|declaration| match &declaration.body {
+            orna_syntax::ServerFunctionBody::SqlQuery(body) => {
+                matches(&body.query.source_object.object_type)
+            }
+            orna_syntax::ServerFunctionBody::SqlInsert(body) => matches(&body.insert.target_object),
+            orna_syntax::ServerFunctionBody::SqlUpdate(body) => matches(&body.update.target_object),
+            orna_syntax::ServerFunctionBody::SqlDelete(body) => matches(&body.delete.target_object),
+            _ => false,
+        })
+}
 
 fn sql_object_type_declaration_at<'a>(
     parse: &'a Parse,
@@ -2774,7 +2783,7 @@ fn quoted_top_level_token_matches_category(
         TopLevelDeclarationKind::Schema | TopLevelDeclarationKind::Function
     ) && candidate_path
         .as_ref()
-        .is_some_and(|path| sql_source_object_type_contains_span(parse, path, &token_span))
+        .is_some_and(|path| sql_source_object_type_prefix_contains_span(parse, path, &token_span))
     {
         return false;
     }
@@ -2829,7 +2838,8 @@ fn reference_token_in_scope(
                 let candidate_name = text[token.range.clone()].to_owned();
                 if field_declaration_span(parse, &token_span).is_some()
                     || return_column_scope(parse, &token_span).is_some()
-                    || variable_declaration_span(parse, &candidate_name, &token_span).is_some()
+                    || (token.kind == HighlightKind::VariableName
+                        && variable_declaration_span(parse, &candidate_name, &token_span).is_some())
                 {
                     return false;
                 }
