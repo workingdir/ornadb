@@ -3249,7 +3249,9 @@ fn serves_warning_diagnostic_with_related_return_location_in_push_and_pull() {
         .as_array()
         .expect("warning related information");
     assert_eq!(related.len(), 1);
-    let return_start = WARNING_SOURCE.find("RETURN TRUE;").expect("return statement");
+    let return_start = WARNING_SOURCE
+        .find("RETURN TRUE;")
+        .expect("return statement");
     let return_end = return_start + "RETURN TRUE;".len();
     assert_eq!(related[0]["location"]["uri"], uri);
     assert_eq!(
