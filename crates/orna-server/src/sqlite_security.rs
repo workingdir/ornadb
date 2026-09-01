@@ -51,10 +51,9 @@ pub fn run_sqlite_security_grant_execute(
         let active = store.recover().await.map_err(|error| {
             admin_error(InstalledSecurityAdminErrorKind::Internal, error.to_string())
         })?;
-        store
-            .security_snapshot(&active)
-            .await
-            .map_err(|error| admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error))?;
+        store.security_snapshot(&active).await.map_err(|error| {
+            admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error)
+        })?;
         let uid = nix::unistd::geteuid().as_raw();
         store.provision_local_peer(uid).await.map_err(|error| {
             admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error)
