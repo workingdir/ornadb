@@ -157,9 +157,9 @@ parent before constructing the child; an already-installed or mismatched base
 fails closed.
 
 There is an unresolved release-evidence discrepancy: the current maintainer
-runbook and decision index still describe the accepted chain as V1 through V9,
-while the implementation and source-apply selection paths include V10 and V11.
-No tracked decision record for the V10/V11 addition is present. Consequently:
+runbook still describes the accepted chain as V1 through V9, while the decision
+index has no complete tracked work decision for the V10/V11 addition and the
+implementation/source-apply selection paths include V10 and V11. Consequently:
 
 - Treat V10/V11 as implementation evidence only, not as a 1.0 compatibility
   promise.
@@ -185,10 +185,11 @@ revision-pinned inspection records and treat an unavailable decoder as an
 explicit unavailable result.
 
 The explicit endpoint parser recognizes local paths, managed-local URIs,
-Unix-socket URIs, and remote Orna URIs. In the current command router, explicit
-Unix and remote routes fail closed because their client transport and
-authentication are not available. Parsing an endpoint is not evidence that a
-migration or remote session can use it.
+Unix-socket URIs, and remote Orna URIs. The bounded installed `invoke` route
+accepts only the current managed Orna Unix socket through local authentication;
+other explicit Unix command routes and remote routes fail closed because their
+session or transport support is unavailable. Parsing an endpoint is not
+evidence that migration or a general remote session can use it.
 
 ## Runtime and editor limits
 
@@ -236,7 +237,7 @@ prerequisites and evidence vocabulary. In particular:
 | `.orna` source | Backend-neutral typed source model | One portable source; no public backend-specific SQL |
 | Managed local endpoint | Private embedded PostgreSQL route | No public PostgreSQL/pgwire/driver compatibility |
 | Filesystem endpoint | Bounded direct SQLite route | No full physical/runtime parity claim |
-| Explicit Unix/remote endpoint | Parsed, transport unavailable | No migration/session support yet |
+| Explicit Unix/remote endpoint | Bounded current-socket `invoke` only for Unix; remote transport unavailable | No migration or general remote-session support |
 | Application source revisions | Typed ledger, hashes, atomic apply | Supported only on a ready compatible engine |
 | Engine predecessor upgrade | Empty accepted predecessor/edge sets | No 0.x/development in-place upgrade |
 | Standard library | Code through V11; acceptance records through V9 | V10/V11 not promised until evidence is reconciled |

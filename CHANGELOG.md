@@ -35,10 +35,10 @@ for the required release authority and the
   a bounded implementation/runtime route for the same source model; it does
   not define a second source language. Physical operations the adapter cannot
   represent are rejected rather than given backend-specific semantics.
-- `orna://` and `orna+unix://` endpoint forms are parsed, but explicit Unix and
-  remote transport routes are not available in this checkout. They fail closed
-  before command execution until the corresponding client transport and
-  authentication work is implemented.
+- `orna://` and `orna+unix://` endpoint forms are parsed. The bounded installed
+  `invoke` route supports only the current managed Orna Unix socket through
+  local authentication; remote TLS and other explicit-endpoint commands remain
+  unavailable in this checkout and fail closed.
 
 ### Implemented source and server surface
 
@@ -105,9 +105,9 @@ release gate has passed.
   rows is unsupported.
 - The implementation currently retains and opens standard-library snapshots
   through `orna.std/11`, with code paths for the sequential V1-to-V11 chain.
-  However, the current maintainer runbook and decision index still describe the
-  accepted chain as V1-to-V9, and no tracked decision record for the V10/V11
-  addition is present. V10/V11 are therefore recorded here as implementation
+  However, the current maintainer runbook still records the accepted chain as
+  V1-to-V9, and the decision index has no complete tracked work decision for
+  the V10/V11 addition. V10/V11 are therefore recorded here as implementation
   evidence, not as a 1.0 compatibility promise. This discrepancy must be
   reconciled in the product baseline before publication.
 - Local server sockets use the private Orna protocol handshake (versions 1–5,
@@ -127,9 +127,10 @@ from the implementation inventory:
   top-level INSERT, list/map/record literals and lambdas, broader SERVER
   expression calls/operators, additional CLIENT return forms, and
   value-type/user/role/grant/revoke declarations.
-- Remote Orna TLS sessions, explicit Unix-socket client routing, reflective
-  JSON-RPC/MCP gateways, a production CLIENT VM/sandbox, arbitrary toolkit or
-  browser runtimes, and richer Studio workflows.
+- Remote Orna TLS sessions, explicit Unix-socket routing beyond the bounded
+  installed `invoke` route, reflective JSON-RPC/MCP gateways, a production
+  CLIENT VM/sandbox, arbitrary toolkit or browser runtimes, and richer Studio
+  workflows.
 - PostgreSQL/SQLite physical or runtime parity beyond the bounded adapter
   capabilities described above. Unsupported SQLite physical shapes fail
   closed; the source language remains backend-neutral.
