@@ -705,21 +705,36 @@ fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references(
         "CREATE SERVER FUNCTION use_b() RETURNS b.item AS SELECT TRUE;\n",
         "CREATE SERVER FUNCTION use_a() RETURNS a.item AS SELECT TRUE;\n",
     );
-    let document = Document::new("file:///qualified-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let document = Document::new(
+        "file:///qualified-navigation.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);
-    let b_type_declaration = text.find("CREATE TYPE b.item").expect("b type declaration")
-        + "CREATE TYPE ".len();
+    let b_type_declaration =
+        text.find("CREATE TYPE b.item").expect("b type declaration") + "CREATE TYPE ".len();
     let b_type_use = text.find("RETURNS b.item").expect("b type use") + "RETURNS ".len();
     let b_type_final = b_type_use + "b.".len();
 
     let hover = hover_at(text, b_type_final + 1).expect("qualified b.item hover");
     let hover_value = hover_markdown(&hover);
-    assert!(hover_value.contains("b_value"), "b.item hover: {hover_value}");
-    assert!(!hover_value.contains("a_value"), "cross-schema hover leak: {hover_value}");
+    assert!(
+        hover_value.contains("b_value"),
+        "b.item hover: {hover_value}"
+    );
+    assert!(
+        !hover_value.contains("a_value"),
+        "cross-schema hover leak: {hover_value}"
+    );
 
-    let definition = super::definition(&document, &parse, mapper.position(b_type_final + 1), &mapper)
-        .expect("qualified b.item definition");
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+    )
+    .expect("qualified b.item definition");
     assert_eq!(definition.range.start, mapper.position(b_type_declaration));
 
     let references = references(
@@ -729,7 +744,10 @@ fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references(
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
@@ -757,27 +775,23 @@ fn qualified_type_navigation_consumes_line_comments_between_components() {
     );
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);
-    let b_type_declaration = text
-        .find("CREATE TYPE b.item")
-        .expect("b type declaration")
-        + "CREATE TYPE ".len();
+    let b_type_declaration =
+        text.find("CREATE TYPE b.item").expect("b type declaration") + "CREATE TYPE ".len();
     let b_type_use = text.find(".item AS SELECT").expect("b type use") + 1;
 
     let hover = hover_at(text, b_type_use + 1).expect("comment-separated b.item hover");
     let hover_value = hover_markdown(&hover);
-    assert!(hover_value.contains("b_value"), "b.item hover: {hover_value}");
+    assert!(
+        hover_value.contains("b_value"),
+        "b.item hover: {hover_value}"
+    );
     assert!(
         !hover_value.contains("a_value"),
         "cross-schema comment-separated hover leak: {hover_value}"
     );
 
-    let definition = super::definition(
-        &document,
-        &parse,
-        mapper.position(b_type_use + 1),
-        &mapper,
-    )
-    .expect("comment-separated b.item definition");
+    let definition = super::definition(&document, &parse, mapper.position(b_type_use + 1), &mapper)
+        .expect("comment-separated b.item definition");
     assert_eq!(definition.range.start, mapper.position(b_type_declaration));
 
     let references = references(
@@ -787,7 +801,10 @@ fn qualified_type_navigation_consumes_line_comments_between_components() {
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
@@ -807,7 +824,9 @@ fn quoted_top_level_references_do_not_include_same_path_fields() {
         "SELECT \"b\".\"item\" FROM \"b\".\"item\" \"b\";\n",
     );
     let document = Document::new(
-        "file:///quoted-top-level-reference-scope.orna".parse().unwrap(),
+        "file:///quoted-top-level-reference-scope.orna"
+            .parse()
+            .unwrap(),
         text.to_owned(),
         1,
     );
@@ -817,8 +836,7 @@ fn quoted_top_level_references_do_not_include_same_path_fields() {
         .find("CREATE TYPE \"b\".\"item\"")
         .expect("quoted b type declaration")
         + "CREATE TYPE ".len();
-    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use")
-        + "FROM ".len();
+    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use") + "FROM ".len();
     let b_type_final = b_type_use + "\"b\".".len();
 
     let definition = super::definition(
@@ -837,7 +855,10 @@ fn quoted_top_level_references_do_not_include_same_path_fields() {
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
@@ -858,7 +879,9 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
         "SELECT probe.\"item\" FROM \"app\".\"item\" probe;\n",
     );
     let document = Document::new(
-        "file:///quoted-type-function-categories.orna".parse().unwrap(),
+        "file:///quoted-type-function-categories.orna"
+            .parse()
+            .unwrap(),
         text.to_owned(),
         1,
     );
@@ -886,14 +909,13 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
         "quoted type hover: {}",
         hover_markdown(&type_hover),
     );
-    let type_definition = super::definition(
-        &document,
-        &parse,
-        mapper.position(type_final + 1),
-        &mapper,
-    )
-    .expect("quoted type definition");
-    assert_eq!(type_definition.range.start, mapper.position(type_declaration));
+    let type_definition =
+        super::definition(&document, &parse, mapper.position(type_final + 1), &mapper)
+            .expect("quoted type definition");
+    assert_eq!(
+        type_definition.range.start,
+        mapper.position(type_declaration)
+    );
     let type_references = references(
         &document,
         &parse,
@@ -912,6 +934,25 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
             mapper.position(type_final),
         ],
         "quoted type references crossed into the function: {type_references:?}",
+    );
+    let type_declaration_references = references(
+        &document,
+        &parse,
+        mapper.position(type_declaration + "\"app\".".len() + 1),
+        &mapper,
+        true,
+    );
+    let type_declaration_reference_starts: Vec<_> = type_declaration_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        type_declaration_reference_starts,
+        vec![
+            mapper.position(type_declaration + "\"app\".".len()),
+            mapper.position(type_final),
+        ],
+        "quoted type declaration references omitted SQL use: {type_declaration_references:?}",
     );
 
     let function_hover = hover_at(text, function_final + 1).expect("quoted function hover");
@@ -950,9 +991,461 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
         ],
         "quoted function references crossed into the type: {function_references:?}",
     );
+    let function_declaration_references = references(
+        &document,
+        &parse,
+        mapper.position(function_declaration + "\"app\".".len() + 1),
+        &mapper,
+        true,
+    );
+    let function_declaration_reference_starts: Vec<_> = function_declaration_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        function_declaration_reference_starts,
+        vec![
+            mapper.position(function_declaration + "\"app\".".len()),
+            mapper.position(function_final),
+        ],
+        "quoted function declaration references omitted SQL use: {function_declaration_references:?}",
+    );
+}
+#[test]
+fn quoted_dml_aliases_do_not_resolve_as_top_level_names() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION insert_item(p_value BOOLEAN)\n",
+        "RETURNS ROWS (created REF \"app\".\"item\") AS\n",
+        "INSERT INTO \"app\".\"item\" AS \"app\" (\"value\")\n",
+        "VALUES (p_value) RETURNING REF(\"app\");\n",
+        "CREATE SERVER FUNCTION update_item(p_value BOOLEAN, p_item REF \"app\".\"item\")\n",
+        "RETURNS ROWS (updated REF \"app\".\"item\") AS\n",
+        "UPDATE \"app\".\"item\" AS \"app\" SET \"value\" = p_value\n",
+        "WHERE REF(\"app\") = p_item RETURNING REF(\"app\");\n",
+        "CREATE SERVER FUNCTION delete_item(p_item REF \"app\".\"item\")\n",
+        "RETURNS ROWS (deleted BOOLEAN) AS\n",
+        "DELETE FROM \"app\".\"item\" AS \"app\" WHERE REF(\"app\") = p_item\n",
+        "RETURNING TRUE;\n",
+    );
+    let document = Document::new(
+        "file:///quoted-dml-aliases.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(parse.server_functions().len(), 3, "DML fixture must parse");
+    let mapper = PositionMapper::new(text);
+    let aliases = [
+        (
+            "INSERT target alias",
+            text.find("INSERT INTO \"app\".\"item\" AS \"app\"")
+                .expect("INSERT target alias")
+                + "INSERT INTO \"app\".\"item\" AS ".len(),
+        ),
+        (
+            "INSERT returning alias",
+            text.find("RETURNING REF(\"app\")")
+                .expect("INSERT returning alias")
+                + "RETURNING REF(".len(),
+        ),
+        (
+            "UPDATE target alias",
+            text.find("UPDATE \"app\".\"item\" AS \"app\"")
+                .expect("UPDATE target alias")
+                + "UPDATE \"app\".\"item\" AS ".len(),
+        ),
+        (
+            "UPDATE selector alias",
+            text.find("WHERE REF(\"app\")")
+                .expect("UPDATE selector alias")
+                + "WHERE REF(".len(),
+        ),
+        (
+            "UPDATE returning alias",
+            text.rfind("RETURNING REF(\"app\")")
+                .expect("UPDATE returning alias")
+                + "RETURNING REF(".len(),
+        ),
+        (
+            "DELETE target alias",
+            text.find("DELETE FROM \"app\".\"item\" AS \"app\"")
+                .expect("DELETE target alias")
+                + "DELETE FROM \"app\".\"item\" AS ".len(),
+        ),
+        (
+            "DELETE selector alias",
+            text.rfind("WHERE REF(\"app\")")
+                .expect("DELETE selector alias")
+                + "WHERE REF(".len(),
+        ),
+    ];
+    for (label, alias) in aliases {
+        let references = references(&document, &parse, mapper.position(alias + 1), &mapper, true);
+        assert!(
+            references.is_empty(),
+            "{label} incorrectly resolved as schema: {references:?}"
+        );
+    }
+}
+#[test]
+fn qualified_sql_type_path_wins_over_shadowing_parameter() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION use_item(\"item\" BOOLEAN)\n",
+        "RETURNS ROWS (\"item\" BOOLEAN) AS\n",
+        "SELECT probe.value FROM \"app\".\"item\" probe;\n",
+    );
+    let document = Document::new(
+        "file:///qualified-shadowed-type.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(parse.server_functions().len(), 1, "fixture must parse");
+    let mapper = PositionMapper::new(text);
+    let type_declaration = text
+        .find("CREATE TYPE \"app\".\"item\"")
+        .expect("quoted type declaration")
+        + "CREATE TYPE ".len();
+    let type_declaration_final = type_declaration + "\"app\".".len();
+    let type_use = text.find("FROM \"app\".\"item\"").expect("quoted type use") + "FROM ".len();
+    let type_use_final = type_use + "\"app\".".len();
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(type_declaration_final),
+            mapper.position(type_use_final),
+        ],
+        "shadowing parameter displaced qualified type references: {references:?}",
+    );
 }
 
+#[test]
+fn quoted_sql_type_prefers_type_over_same_path_schema() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\".\"item\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION use_item() RETURNS ROWS (value BOOLEAN) AS\n",
+        "SELECT probe.value FROM \"app\".\"item\" probe;\n",
+    );
+    let document = Document::new(
+        "file:///quoted-nested-schema-type.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(parse.schemas().len(), 1, "schema fixture must parse");
+    assert_eq!(parse.object_types().len(), 1, "type fixture must parse");
+    assert_eq!(
+        parse.server_functions().len(),
+        1,
+        "query fixture must parse"
+    );
+    let mapper = PositionMapper::new(text);
+    let type_declaration = text
+        .find("CREATE TYPE \"app\".\"item\"")
+        .expect("quoted type declaration")
+        + "CREATE TYPE ".len();
+    let type_declaration_final = type_declaration + "\"app\".".len();
+    let type_use = text.find("FROM \"app\".\"item\"").expect("quoted type use") + "FROM ".len();
+    let type_use_final = type_use + "\"app\".".len();
+    let schema_declaration = text
+        .find("CREATE SCHEMA \"app\"")
+        .expect("quoted schema declaration")
+        + "CREATE SCHEMA ".len();
+    let schema_declaration_final = schema_declaration + "\"app\".".len();
 
+    let type_declaration_hover =
+        hover_at(text, type_declaration_final + 1).expect("quoted type declaration hover");
+    assert!(
+        hover_markdown(&type_declaration_hover).contains("object type"),
+        "quoted type declaration resolved the wrong declaration: {}",
+        hover_markdown(&type_declaration_hover),
+    );
+    let type_declaration_definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(type_declaration_final + 1),
+        &mapper,
+    )
+    .expect("quoted type declaration definition");
+    assert_eq!(
+        type_declaration_definition.range.start,
+        mapper.position(type_declaration),
+    );
+    let type_declaration_references = references(
+        &document,
+        &parse,
+        mapper.position(type_declaration_final + 1),
+        &mapper,
+        true,
+    );
+    let type_declaration_reference_starts: Vec<_> = type_declaration_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        type_declaration_reference_starts,
+        vec![
+            mapper.position(type_declaration_final),
+            mapper.position(type_use_final),
+        ],
+        "quoted type declaration references omitted SQL use: {type_declaration_references:?}",
+    );
+
+    let schema_hover =
+        hover_at(text, schema_declaration_final + 1).expect("quoted schema declaration hover");
+    assert!(
+        hover_markdown(&schema_hover).contains("schema"),
+        "quoted schema declaration resolved the wrong declaration: {}",
+        hover_markdown(&schema_hover),
+    );
+    assert!(
+        !hover_markdown(&schema_hover).contains("object type"),
+        "quoted schema declaration resolved as a type: {}",
+        hover_markdown(&schema_hover),
+    );
+    let schema_definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(schema_declaration_final + 1),
+        &mapper,
+    )
+    .expect("quoted schema declaration definition");
+    assert_eq!(
+        schema_definition.range.start,
+        mapper.position(schema_declaration),
+    );
+    let schema_references = references(
+        &document,
+        &parse,
+        mapper.position(schema_declaration_final + 1),
+        &mapper,
+        true,
+    );
+    let schema_reference_starts: Vec<_> = schema_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        schema_reference_starts,
+        vec![mapper.position(schema_declaration_final)],
+        "quoted schema declaration picked up the same-path type: {schema_references:?}",
+    );
+
+    let hover = hover_at(text, type_use_final + 1).expect("quoted nested type hover");
+    assert!(
+        hover_markdown(&hover).contains("object type"),
+        "nested schema/type hover resolved the wrong declaration: {}",
+        hover_markdown(&hover),
+    );
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+    )
+    .expect("quoted nested type definition");
+    assert_eq!(definition.range.start, mapper.position(type_declaration));
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(type_declaration_final),
+            mapper.position(type_use_final),
+        ],
+        "same-path schema was selected for a quoted SQL type: {references:?}",
+    );
+}
+
+#[test]
+fn quoted_dml_target_prefers_type_over_same_path_schema() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\".\"item\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION insert_item() RETURNS ROWS (created BOOLEAN) AS\n",
+        "INSERT INTO \"app\".\"item\" AS \"target\" (\"value\")\n",
+        "VALUES (TRUE) RETURNING REF(\"target\");\n",
+    );
+    let document = Document::new(
+        "file:///quoted-dml-target-type.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(parse.schemas().len(), 1, "schema fixture must parse");
+    assert_eq!(parse.object_types().len(), 1, "type fixture must parse");
+    assert_eq!(parse.server_functions().len(), 1, "DML fixture must parse");
+    let mapper = PositionMapper::new(text);
+    let type_declaration = text
+        .find("CREATE TYPE \"app\".\"item\"")
+        .expect("quoted type declaration")
+        + "CREATE TYPE ".len();
+    let type_use = text
+        .find("INSERT INTO \"app\".\"item\"")
+        .expect("quoted DML target")
+        + "INSERT INTO ".len();
+    let type_use_final = type_use + "\"app\".".len();
+
+    let hover = hover_at(text, type_use_final + 1).expect("quoted DML target hover");
+    assert!(
+        hover_markdown(&hover).contains("object type"),
+        "quoted DML target resolved the wrong declaration: {}",
+        hover_markdown(&hover),
+    );
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+    )
+    .expect("quoted DML target definition");
+    assert_eq!(definition.range.start, mapper.position(type_declaration));
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(type_declaration + "\"app\".".len()),
+            mapper.position(type_use_final),
+        ],
+        "quoted DML target references resolved the wrong declaration: {references:?}",
+    );
+}
+
+#[test]
+fn quoted_query_object_reference_alias_is_not_a_schema_reference() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"value\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION use_item() RETURNS BOOLEAN AS\n",
+        "SELECT REF(\"app\") FROM \"app\".\"item\" \"app\";\n",
+    );
+    let document = Document::new(
+        "file:///quoted-query-object-reference.orna"
+            .parse()
+            .unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(
+        parse.server_functions().len(),
+        1,
+        "query fixture must parse"
+    );
+    let mapper = PositionMapper::new(text);
+    let schema_declaration = text
+        .find("CREATE SCHEMA \"app\"")
+        .expect("quoted schema declaration")
+        + "CREATE SCHEMA ".len();
+    let type_namespace = text
+        .find("CREATE TYPE \"app\"")
+        .expect("quoted type namespace")
+        + "CREATE TYPE ".len();
+    let alias_use = text
+        .find("SELECT REF(\"app\")")
+        .expect("quoted object reference alias")
+        + "SELECT REF(".len();
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(schema_declaration + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(schema_declaration),
+            mapper.position(type_namespace),
+        ],
+        "query object-reference alias leaked into schema references: {references:?}",
+    );
+    assert!(
+        !reference_starts.contains(&mapper.position(alias_use)),
+        "query object-reference alias was treated as schema: {references:?}",
+    );
+}
+
+#[test]
+fn quoted_top_level_type_references_exclude_field_and_return_declarations() {
+    let text = concat!(
+        "CREATE TYPE \"item\" AS OBJECT (\"item\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION read_items() RETURNS ROWS (\"item\" BOOLEAN) AS\n",
+        "SELECT probe.\"item\" FROM \"item\" probe;\n",
+    );
+    let document = Document::new(
+        "file:///quoted-field-return-scope.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    assert_eq!(parse.server_functions().len(), 1, "fixture must parse");
+    let mapper = PositionMapper::new(text);
+    let type_declaration = text
+        .find("CREATE TYPE \"item\"")
+        .expect("quoted type declaration")
+        + "CREATE TYPE ".len();
+    let type_use = text.find("FROM \"item\"").expect("quoted type use") + "FROM ".len();
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(type_use + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        reference_starts,
+        vec![mapper.position(type_declaration), mapper.position(type_use),],
+        "quoted field/return declarations leaked into top-level references: {references:?}",
+    );
+}
 
 #[test]
 fn qualified_function_navigation_uses_full_path_for_hover_definition_and_references() {
@@ -963,19 +1456,35 @@ fn qualified_function_navigation_uses_full_path_for_hover_definition_and_referen
         "CREATE CLIENT FUNCTION b.item() RETURNS BOOLEAN AS TRUE;\n",
         "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS b.item();\n",
     );
-    let document = Document::new("file:///qualified-function-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let document = Document::new(
+        "file:///qualified-function-navigation.orna"
+            .parse()
+            .unwrap(),
+        text.to_owned(),
+        1,
+    );
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);
-    let b_function_declaration = text.find("CREATE CLIENT FUNCTION b.item").expect("b function declaration")
+    let b_function_declaration = text
+        .find("CREATE CLIENT FUNCTION b.item")
+        .expect("b function declaration")
         + "CREATE CLIENT FUNCTION ".len();
-    let b_function_use = text.find("RETURNS BOOLEAN AS b.item").expect("b function use")
+    let b_function_use = text
+        .find("RETURNS BOOLEAN AS b.item")
+        .expect("b function use")
         + "RETURNS BOOLEAN AS ".len();
     let b_function_final = b_function_use + "b.".len();
 
     let hover = hover_at(text, b_function_final + 1).expect("qualified b.item function hover");
     let hover_value = hover_markdown(&hover);
-    assert!(hover_value.contains("b.item"), "b.item function hover: {hover_value}");
-    assert!(!hover_value.contains("a.item"), "cross-schema function hover leak: {hover_value}");
+    assert!(
+        hover_value.contains("b.item"),
+        "b.item function hover: {hover_value}"
+    );
+    assert!(
+        !hover_value.contains("a.item"),
+        "cross-schema function hover leak: {hover_value}"
+    );
 
     let definition = super::definition(
         &document,
@@ -996,7 +1505,10 @@ fn qualified_function_navigation_uses_full_path_for_hover_definition_and_referen
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
@@ -1007,7 +1519,6 @@ fn qualified_function_navigation_uses_full_path_for_hover_definition_and_referen
     );
 }
 
-
 #[test]
 fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
     let text = concat!(
@@ -1017,19 +1528,33 @@ fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
         "CREATE TYPE \"b\".\"item\" AS OBJECT (b_value TEXT);\n",
         "CREATE SERVER FUNCTION use_b() RETURNS \"b\".\"item\" AS SELECT TRUE;\n",
     );
-    let document = Document::new("file:///qualified-quoted-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let document = Document::new(
+        "file:///qualified-quoted-navigation.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);
-    let b_type_declaration = text.find("CREATE TYPE \"b\".\"item\"").expect("quoted b type declaration")
+    let b_type_declaration = text
+        .find("CREATE TYPE \"b\".\"item\"")
+        .expect("quoted b type declaration")
         + "CREATE TYPE ".len();
-    let b_type_use = text.find("RETURNS \"b\".\"item\"").expect("quoted b type use")
+    let b_type_use = text
+        .find("RETURNS \"b\".\"item\"")
+        .expect("quoted b type use")
         + "RETURNS ".len();
     let b_type_final = b_type_use + "\"b\".".len();
 
     let hover = hover_at(text, b_type_final + 1).expect("quoted b.item hover");
     let hover_value = hover_markdown(&hover);
-    assert!(hover_value.contains("\"b\".\"item\""), "quoted b.item hover: {hover_value}");
-    assert!(!hover_value.contains("a_value"), "cross-schema quoted hover leak: {hover_value}");
+    assert!(
+        hover_value.contains("\"b\".\"item\""),
+        "quoted b.item hover: {hover_value}"
+    );
+    assert!(
+        !hover_value.contains("a_value"),
+        "cross-schema quoted hover leak: {hover_value}"
+    );
 
     let definition = super::definition(
         &document,
@@ -1038,10 +1563,7 @@ fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
         &mapper,
     )
     .expect("quoted b.item definition");
-    assert_eq!(
-        definition.range.start,
-        mapper.position(b_type_declaration),
-    );
+    assert_eq!(definition.range.start, mapper.position(b_type_declaration),);
 
     let references = references(
         &document,
@@ -1050,7 +1572,10 @@ fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
@@ -1071,19 +1596,32 @@ fn qualified_quoted_sql_type_navigation_uses_full_path() {
         "CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS\n",
         "SELECT probe.b_value FROM \"b\".\"item\" probe;\n",
     );
-    let document = Document::new("file:///qualified-quoted-sql-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let document = Document::new(
+        "file:///qualified-quoted-sql-navigation.orna"
+            .parse()
+            .unwrap(),
+        text.to_owned(),
+        1,
+    );
     let parse = orna_syntax::parse(text);
     let mapper = PositionMapper::new(text);
-    let b_type_declaration = text.find("CREATE TYPE \"b\".\"item\"").expect("quoted b type declaration")
+    let b_type_declaration = text
+        .find("CREATE TYPE \"b\".\"item\"")
+        .expect("quoted b type declaration")
         + "CREATE TYPE ".len();
-    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use")
-        + "FROM ".len();
+    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use") + "FROM ".len();
     let b_type_final = b_type_use + "\"b\".".len();
 
     let hover = hover_at(text, b_type_final + 1).expect("quoted SQL b.item hover");
     let hover_value = hover_markdown(&hover);
-    assert!(hover_value.contains("\"b\".\"item\""), "quoted SQL b.item hover: {hover_value}");
-    assert!(!hover_value.contains("a_value"), "cross-schema quoted SQL hover leak: {hover_value}");
+    assert!(
+        hover_value.contains("\"b\".\"item\""),
+        "quoted SQL b.item hover: {hover_value}"
+    );
+    assert!(
+        !hover_value.contains("a_value"),
+        "cross-schema quoted SQL hover leak: {hover_value}"
+    );
 
     let definition = super::definition(
         &document,
@@ -1092,10 +1630,7 @@ fn qualified_quoted_sql_type_navigation_uses_full_path() {
         &mapper,
     )
     .expect("quoted SQL b.item definition");
-    assert_eq!(
-        definition.range.start,
-        mapper.position(b_type_declaration),
-    );
+    assert_eq!(definition.range.start, mapper.position(b_type_declaration),);
 
     let references = references(
         &document,
@@ -1104,7 +1639,10 @@ fn qualified_quoted_sql_type_navigation_uses_full_path() {
         &mapper,
         true,
     );
-    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    let reference_starts: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
     assert_eq!(
         reference_starts,
         vec![
