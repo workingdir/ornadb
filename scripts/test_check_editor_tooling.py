@@ -151,6 +151,156 @@ class ZedExtensionMetadataTests(unittest.TestCase):
                     )
 
 
+class ZedLanguageConfigurationTests(unittest.TestCase):
+    language_path = REPOSITORY / "editors" / "zed" / "languages" / "orna" / "config.toml"
+    language_server_path = (
+        REPOSITORY
+        / "editors"
+        / "zed"
+        / "languages"
+        / "orna"
+        / "language_servers"
+        / "orna_lsp"
+        / "config.toml"
+    )
+
+    def _copy_fixture(self, scratch: Path) -> tuple[Path, Path]:
+        language_candidate = scratch / "language.toml"
+        language_server_candidate = scratch / "language-server.toml"
+        shutil.copyfile(self.language_path, language_candidate)
+        shutil.copyfile(self.language_server_path, language_server_candidate)
+        return language_candidate, language_server_candidate
+
+    def _check(self, language_path: Path, language_server_path: Path) -> tuple[bool, str]:
+        errors = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+            accepted = checker.check_zed_language_configuration(
+                language_path,
+                language_server_path,
+                REPOSITORY,
+            )
+        return accepted, errors.getvalue()
+
+    def test_checked_in_metadata_is_valid(self) -> None:
+        accepted, diagnostics = self._check(self.language_path, self.language_server_path)
+        self.assertTrue(accepted, f"checked-in Zed language metadata was rejected: {diagnostics}")
+
+    def test_rejects_language_field_mutations(self) -> None:
+        metadata = self.language_path.read_text(encoding="utf-8")
+        cases = (
+            ("missing name", 'name = "Orna"\n', "", "key 'name'"),
+            ("wrong grammar", 'grammar = "orna"', 'grammar = "other"', "key 'grammar'"),
+            (
+                "malformed path suffixes",
+                'path_suffixes = ["orna"]',
+                'path_suffixes = "orna"',
+                "key 'path_suffixes'",
+            ),
+            (
+                "wrong line comments",
+                'line_comments = ["--"]',
+                'line_comments = ["//"]',
+                "key 'line_comments'",
+            ),
+            (
+                "malformed block comment",
+                'block_comment = ["/*", "*/"]',
+                'block_comment = "/*"',
+                "key 'block_comment'",
+            ),
+            (
+                "wrong brackets",
+                '    { start = "(", end = ")", close = true, newline = false },',
+                '    { start = "(", end = ")", close = false, newline = false },',
+                "key 'brackets'",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="orna-zed-language-tests-") as scratch_name:
+            language_candidate, language_server_candidate = self._copy_fixture(Path(scratch_name))
+            for label, original, replacement, diagnostic in cases:
+                with self.subTest(case=label):
+                    self.assertEqual(
+                        metadata.count(original),
+                        1,
+                        f"test fixture replacement for {label!r} was ambiguous",
+                    )
+                    language_candidate.write_text(
+                        metadata.replace(original, replacement, 1),
+                        encoding="utf-8",
+                    )
+                    accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+                    self.assertFalse(accepted, f"validator accepted {label}")
+                    self.assertIn(diagnostic, diagnostics)
+
+    def test_rejects_language_server_field_mutations(self) -> None:
+        metadata = self.language_server_path.read_text(encoding="utf-8")
+        cases = (
+            ("missing name", 'name = "orna-lsp"\n', "", "key 'name'"),
+            (
+                "wrong language",
+                'language = "Orna"',
+                'language = "Other"',
+                "key 'language'",
+            ),
+            (
+                "malformed command",
+                'command = "orna-lsp"',
+                'command = ["orna-lsp"]',
+                "key 'command'",
+            ),
+            ("wrong args", "args = []", 'args = ["--stdio"]', "key 'args'"),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="orna-zed-language-server-tests-") as scratch_name:
+            language_candidate, language_server_candidate = self._copy_fixture(Path(scratch_name))
+            for label, original, replacement, diagnostic in cases:
+                with self.subTest(case=label):
+                    self.assertEqual(
+                        metadata.count(original),
+                        1,
+                        f"test fixture replacement for {label!r} was ambiguous",
+                    )
+                    language_server_candidate.write_text(
+                        metadata.replace(original, replacement, 1),
+                        encoding="utf-8",
+                    )
+                    accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+                    self.assertFalse(accepted, f"validator accepted {label}")
+                    self.assertIn(diagnostic, diagnostics)
+
+    def test_rejects_missing_configuration_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="orna-zed-missing-config-tests-") as scratch_name:
+            language_candidate, language_server_candidate = self._copy_fixture(Path(scratch_name))
+            language_candidate.unlink()
+            accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+            self.assertFalse(accepted, "validator accepted a missing language configuration")
+            self.assertIn("required Zed language configuration is missing", diagnostics)
+
+            shutil.copyfile(self.language_path, language_candidate)
+            language_server_candidate.unlink()
+            accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+            self.assertFalse(accepted, "validator accepted a missing language-server configuration")
+            self.assertIn("required Zed language-server configuration is missing", diagnostics)
+
+    def test_rejects_malformed_toml(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="orna-zed-malformed-config-tests-") as scratch_name:
+            language_candidate, language_server_candidate = self._copy_fixture(Path(scratch_name))
+            language_candidate.write_text('name = "Orna"\npath_suffixes = [\n', encoding="utf-8")
+            accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+            self.assertFalse(accepted, "validator accepted malformed language TOML")
+            self.assertIn("invalid zed language configuration", diagnostics.lower())
+
+            shutil.copyfile(self.language_path, language_candidate)
+            language_server_candidate.write_text(
+                'name = "orna-lsp"\nlanguage = "Orna"\ncommand = "orna-lsp\nargs = []\n',
+                encoding="utf-8",
+            )
+            accepted, diagnostics = self._check(language_candidate, language_server_candidate)
+            self.assertFalse(accepted, "validator accepted malformed language-server TOML")
+            self.assertIn("invalid zed language-server configuration", diagnostics.lower())
+
+
 class TreeSitterMetadataTests(unittest.TestCase):
     tree_sitter_directory = REPOSITORY / "editors" / "tree-sitter-orna"
     metadata_path = tree_sitter_directory / "tree-sitter.json"
