@@ -181,6 +181,15 @@ fn hover_keyword_is_preserves_procedural_and_null_contexts() {
     assert!(expression_markdown.contains("expression IS [NOT] NULL."));
     assert!(!expression_markdown.contains("IS declarations BEGIN statements END;"));
 }
+
+#[test]
+fn hover_keyword_is_recognizes_pre_begin_declarations_as_procedural() {
+    let text = "CREATE CLIENT FUNCTION app.probe() RETURNS BOOLEAN IS\n    STATE stored BOOLEAN;\nBEGIN\n    RETURN stored;\nEND;";
+    let is = text.find(" IS\n").expect("procedural IS") + 1;
+    let hover = hover_at(text, is).expect("procedural IS hover");
+    let markdown = hover_markdown(&hover);
+    assert!(markdown.contains("IS declarations BEGIN statements END;"));
+}
 #[test]
 fn standard_library_loads_verified_v11_snapshot() {
     let standard = StandardLibrary::load().expect("retained V11 standard must load");
