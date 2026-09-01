@@ -154,12 +154,14 @@ def tool_version(command: str) -> str:
     return value
 
 def reject_compiler_overrides() -> None:
-    """Reject ambient compiler selection and flag overrides before Cargo runs."""
+    """Reject ambient compiler, target, profile, and flag overrides before Cargo runs."""
     exact_names = {
         "RUSTC",
         "RUSTFLAGS",
+        "RUSTUP_TOOLCHAIN",
         "CARGO_BUILD_RUSTC",
         "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
         "CARGO_ENCODED_RUSTFLAGS",
     }
     rejected: list[str] = []
@@ -167,7 +169,14 @@ def reject_compiler_overrides() -> None:
         if not value:
             continue
         target_override = name.startswith("CARGO_TARGET_") and name.endswith(
-            ("_RUSTC", "_RUSTC_WRAPPER", "_RUSTC_WORKSPACE_WRAPPER", "_RUSTFLAGS")
+            (
+                "_RUSTC",
+                "_RUSTC_WRAPPER",
+                "_RUSTC_WORKSPACE_WRAPPER",
+                "_RUSTFLAGS",
+                "_LINKER",
+                "_AR",
+            )
         )
         if (
             name in exact_names
@@ -175,6 +184,7 @@ def reject_compiler_overrides() -> None:
             or name in {"RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"}
             or name.startswith("CARGO_BUILD_RUSTC_")
             or target_override
+            or name.startswith("CARGO_PROFILE_")
         ):
             rejected.append(name)
     if rejected:
@@ -550,6 +560,16 @@ def prepare_install_root(root: Path) -> Path:
                 fail(f"cannot set package install root mode {current}: {error}")
         require_install_owner(current, metadata, created=created)
 
+
+    try:
+        root_metadata = normalized.lstat()
+    except OSError as error:
+        fail(f"cannot inspect package install root {normalized}: {error}")
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_IMODE(root_metadata.st_mode) != 0o755
+    ):
+        fail(f"package install root has the wrong mode: {normalized}")
 
     return normalized
 

@@ -110,6 +110,11 @@ def main() -> None:
             "RUSTC_WRAPPER",
             "CARGO_BUILD_RUSTC",
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTC",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_AR",
+            "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_BUILD_TARGET",
+            "RUSTUP_TOOLCHAIN",
         ):
             with patch.dict(package.os.environ, {override: "/tmp/compiler"}):
                 expect_failure(package.reject_compiler_overrides)
@@ -132,6 +137,10 @@ def main() -> None:
             raise AssertionError("installed executable mode changed")
         if stat.S_IMODE(installed_manifest.stat().st_mode) != 0o644:
             raise AssertionError("installed manifest mode changed")
+        wrong_mode_root = scratch / "wrong-mode-root"
+        wrong_mode_root.mkdir(mode=0o700)
+        wrong_mode_root.chmod(0o700)
+        expect_failure(lambda: package.install_archive(first, wrong_mode_root))
         symlink_target = scratch / "symlink-target"
         symlink_target.mkdir()
         symlink_root = scratch / "symlink-root"
