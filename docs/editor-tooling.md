@@ -307,6 +307,13 @@ extension, or prove host-session behavior. A missing required CLI prerequisite
 or file, an offline Cargo cache miss, parser error, or non-zero child process
 is a failure; do not relabel it as an expected skip.
 
+The retained static `just editor-tooling-check` result dated 2026-08-25 is
+the current documented editor-tooling baseline. It is bounded evidence for
+only the checked-in static contracts listed above, not a full editor-parity or
+runtime result. Neovim/Vim host sessions are unavailable and not proven in the
+current environment. No manual Zed host launch was run; VSIX packaging,
+installation, and launch were not run and remain unclaimed.
+
 The only expected static-gate skip is an absent optional `../spec/examples`
 directory, which is logged as proposal/deferred input. Emacs runtime loading
 is separately **unavailable** when `emacs` or Eglot is absent, while the

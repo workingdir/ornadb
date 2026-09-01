@@ -100,6 +100,14 @@ complete `ORNA_POSTGRES_ENGINE_OUTPUT` directory at an **absolute** path or the
 environment-dependent embedded-engine build. Record that prerequisite with the
 evidence; do not call a failed engine build an offline cache miss.
 
+The retained static `just editor-tooling-check` result dated 2026-08-25 is
+the current documented editor-tooling baseline. It is bounded evidence for
+only the checked-in static contracts listed for that gate, not a full
+editor-parity or runtime result. The static command does not launch editor
+hosts: Neovim/Vim host sessions are unavailable and not proven in the current
+environment. No manual Zed host launch was run; VSIX packaging, installation,
+and launch were not run and remain unclaimed.
+
 The remaining gates are environment-dependent:
 
 ```sh
