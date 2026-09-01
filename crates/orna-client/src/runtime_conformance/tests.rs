@@ -104,6 +104,7 @@ fn assert_unsupported_operation_preserves_surface_state(
             .expect("surface should be live");
         (
             surface_state.revision,
+            surface_state.visible,
             surface_state.node_aliases.clone(),
             surface_state.action_aliases.clone(),
             surface_state.owned_handles.clone(),
@@ -164,6 +165,7 @@ fn assert_unsupported_operation_preserves_surface_state(
             .expect("surface should be live");
         (
             surface_state.revision,
+            surface_state.visible,
             surface_state.node_aliases.clone(),
             surface_state.action_aliases.clone(),
             surface_state.owned_handles.clone(),
