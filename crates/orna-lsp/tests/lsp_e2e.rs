@@ -1526,6 +1526,95 @@ fn serves_ambiguous_target_references_fail_closed() {
 fn serves_target_function_navigation_and_semantic_kind_only_for_accepted_calls() {
     let mut client = Client::spawn();
     initialize(&mut client);
+    let scalar_uri = "file:///test/scalar-resource-target-navigation.orna";
+    let scalar_source = concat!(
+        "CREATE SCHEMA scalar_target;\n",
+        "CREATE TYPE scalar_target.row AS OBJECT (value INTEGER NOT NULL);\n",
+        "CREATE SERVER FUNCTION scalar_target.resource_server() RETURNS INTEGER\n",
+        "AS SELECT t.value FROM scalar_target.row t;\n",
+        "CREATE CLIENT FUNCTION scalar_target.call() RETURNS INTEGER IS\n",
+        "BEGIN\n",
+        "    RETURN AWAIT std.data.resource(\n",
+        "        target => scalar_target.resource_server,\n",
+        "        arguments => std.call.args()\n",
+        "    );\n",
+        "END;\n",
+    );
+    open_clean_document(&mut client, scalar_uri, scalar_source);
+    let scalar_target = position_inside(
+        scalar_source,
+        "target => scalar_target.",
+        "resource_server",
+    );
+    assert_hover_contains(
+        &mut client,
+        scalar_uri,
+        scalar_target.clone(),
+        "server function",
+    );
+    let scalar_declaration_line = scalar_source
+        .lines()
+        .position(|line| line.contains("CREATE SERVER FUNCTION scalar_target.resource_server"))
+        .expect("scalar target declaration") as u64;
+    assert_definition_starts_on(
+        &mut client,
+        scalar_uri,
+        scalar_target.clone(),
+        scalar_declaration_line,
+    );
+    let scalar_target_position = scalar_target.as_object().expect("scalar target position");
+    let scalar_target_line = scalar_target_position["line"]
+        .as_u64()
+        .expect("scalar target line");
+    let scalar_target_character = scalar_target_position["character"]
+        .as_u64()
+        .expect("scalar target character")
+        - 1;
+    let scalar_references = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": scalar_uri },
+            "position": scalar_target.clone(),
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let scalar_reference_lines: Vec<u64> = scalar_references
+        .as_array()
+        .expect("scalar target references")
+        .iter()
+        .map(|reference| {
+            reference["range"]["start"]["line"]
+                .as_u64()
+                .expect("scalar reference line")
+        })
+        .collect();
+    assert_eq!(
+        scalar_reference_lines,
+        vec![scalar_declaration_line, scalar_target_line],
+        "scalar target references: {scalar_references}"
+    );
+    let scalar_tokens = decode_semantic_tokens(&client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": scalar_uri } }),
+    ));
+    assert!(
+        scalar_tokens.iter().any(|token| {
+            token.line == scalar_target_line
+                && token.character == scalar_target_character
+                && token.length == "resource_server".len() as u64
+                && token.token_type == 2
+        }),
+        "scalar resource target must use the function semantic token: {scalar_tokens:?}"
+    );
+    assert!(
+        scalar_tokens.iter().all(|token| {
+            token.line != scalar_target_line
+                || token.character != scalar_target_character
+                || token.length != "resource_server".len() as u64
+                || token.token_type != 5
+        }),
+        "scalar resource target must not use the property semantic token: {scalar_tokens:?}"
+    );
 
     let stream_uri = "file:///test/stream-resource-target-navigation.orna";
     open_clean_document(&mut client, stream_uri, STREAM_RESOURCE_SOURCE);
