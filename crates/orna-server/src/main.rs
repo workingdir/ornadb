@@ -318,38 +318,16 @@ fn main() -> ExitCode {
             let mut stdout = stdout.lock();
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
-            let request = orna_server::InstalledInvokeRequest::new(
-                arguments.target,
-                arguments.arguments,
-                arguments.output,
-                arguments.trace,
-                arguments.no_progress,
-                arguments.explain,
-                arguments.runtime,
-            );
-            let result = match &endpoint {
-                orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
-                    orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
-                }
-                _ => orna_server::run_installed_invoke_at(
-                    &endpoint,
-                    request,
-                    &mut stdout,
-                    &mut stderr,
-                ),
-            };
-            match result {
-                Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
-                Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
-                Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
-                Ok(orna_server::InstalledInvokeOutcome::Cancelled) => ExitCode::from(6),
-                // A future closed outcome falls back to protocol / internal.
-                Ok(_) => ExitCode::from(7),
-                Err(error) => {
-                    write_stderr_line(&error.to_string());
-                    ExitCode::from(invoke_error_exit_code(&error))
-                }
-            }
+            run_invoke_command(
+                &endpoint,
+                arguments,
+                &mut stdout,
+                &mut stderr,
+                |path, request, stdout, stderr| {
+                    orna_server::run_sqlite_invoke(path, request, stdout, stderr)
+                },
+                run_managed_invoke,
+            )
         }
         Command::State(request) => {
             let stdout = io::stdout();
@@ -408,6 +386,75 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+fn run_invoke_command<W, E>(
+    endpoint: &orna_client::endpoint::DatabaseEndpoint,
+    arguments: cli::InvokeArguments,
+    stdout: &mut W,
+    stderr: &mut E,
+    run_local: impl FnOnce(
+        std::path::PathBuf,
+        orna_server::InstalledInvokeRequest,
+        &mut W,
+        &mut E,
+    ) -> Result<
+        orna_server::InstalledInvokeOutcome,
+        orna_server::InstalledInvokeError,
+    >,
+    run_managed: impl FnOnce(
+        &orna_client::endpoint::DatabaseEndpoint,
+        orna_server::InstalledInvokeRequest,
+        &mut W,
+        &mut E,
+    ) -> Result<
+        orna_server::InstalledInvokeOutcome,
+        orna_server::InstalledInvokeError,
+    >,
+) -> ExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let request = orna_server::InstalledInvokeRequest::new(
+        arguments.target,
+        arguments.arguments,
+        arguments.output,
+        arguments.trace,
+        arguments.no_progress,
+        arguments.explain,
+        arguments.runtime,
+    );
+    let result = match endpoint {
+        orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
+            run_local(path.clone(), request, stdout, stderr)
+        }
+        _ => run_managed(endpoint, request, stdout, stderr),
+    };
+    match result {
+        Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
+        Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
+        Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
+        Ok(orna_server::InstalledInvokeOutcome::Cancelled) => ExitCode::from(6),
+        // A future closed outcome falls back to protocol / internal.
+        Ok(_) => ExitCode::from(7),
+        Err(error) => {
+            let _ = writeln!(stderr, "{error}");
+            ExitCode::from(invoke_error_exit_code(&error))
+        }
+    }
+}
+fn run_managed_invoke<W, E>(
+    endpoint: &orna_client::endpoint::DatabaseEndpoint,
+    request: orna_server::InstalledInvokeRequest,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> Result<orna_server::InstalledInvokeOutcome, orna_server::InstalledInvokeError>
+where
+    W: Write,
+    E: Write,
+{
+    orna_server::run_installed_invoke_at(endpoint, request, stdout, stderr)
 }
 
 fn endpoint_command_is_unsupported(
@@ -2493,6 +2540,82 @@ mod tests {
         );
         assert!(parsed.endpoint_explicit);
         assert!(matches!(parsed.command, Command::Invoke(_)));
+    }
+
+    #[test]
+    fn defaults_invoke_to_authenticated_managed_route() {
+        let parsed = parse_invocation(arguments(&["orna", "invoke", "demo.main"]))
+            .expect("invoke without an endpoint should parse");
+        let ParsedInvocation {
+            endpoint,
+            endpoint_explicit,
+            command,
+            ..
+        } = parsed;
+        assert_eq!(
+            endpoint,
+            orna_client::endpoint::DatabaseEndpoint::managed_local(),
+        );
+        assert!(!endpoint_explicit);
+        let Command::Invoke(arguments) = command else {
+            panic!("expected invoke command");
+        };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit_code = run_invoke_command(
+            &endpoint,
+            arguments,
+            &mut stdout,
+            &mut stderr,
+            |_, _, _, _| panic!("default invoke must not use the local SQLite route"),
+            |endpoint, _, _, _| {
+                assert_eq!(
+                    endpoint,
+                    &orna_client::endpoint::DatabaseEndpoint::managed_local()
+                );
+                Err(orna_server::InstalledInvokeError::new(
+                    orna_server::InstalledInvokeErrorKind::Internal,
+                    "managed route selected".to_owned(),
+                ))
+            },
+        );
+        assert_eq!(exit_code, ExitCode::from(7));
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("managed route selected"),
+            "the managed runner's error should be rendered"
+        );
+    }
+
+    #[test]
+    fn managed_invoke_runner_uses_endpoint_authenticated_transport() {
+        let endpoint = orna_client::endpoint::DatabaseEndpoint::ManagedLocal {
+            instance: "other".to_owned(),
+        };
+        let request = orna_server::InstalledInvokeRequest::new(
+            InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["demo", "main"]).expect("qualified target"),
+            )
+            .expect("target"),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            None,
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_managed_invoke(&endpoint, request, &mut stdout, &mut stderr)
+            .expect_err("unsupported managed instances must fail before host startup");
+        assert_eq!(
+            error.kind(),
+            orna_server::InstalledInvokeErrorKind::Authentication
+        );
+        assert_eq!(
+            error.message(),
+            "managed local instance `other` is not available in this binary"
+        );
     }
 
     #[test]
