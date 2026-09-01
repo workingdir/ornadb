@@ -32,6 +32,7 @@ Commands:
   repl ...     Open the function-backed REPL.
   inspect ...  Inspect a completed invocation.
   source ...   Check or apply one source file.
+  state ...    Read or update user state.
 
 Host Mode:
   --daemon     Run the local server in the foreground.
@@ -190,6 +191,7 @@ fn is_help_heading(line: &str, line_number: usize) -> bool {
                 | "Common Commands:"
                 | "Management Commands:"
                 | "Host Mode:"
+                | "Operational Commands:"
                 | "Commands:"
                 | "Options:"
                 | "Topics:"
@@ -260,7 +262,7 @@ where
 {
     match args.next().as_deref() {
         None => Some(command),
-        Some(value) if value == OsStr::new("--help") => {
+        Some(value) if is_help_flag(value) => {
             args.next().is_none().then_some(Command::Help(topic))
         }
         _ => None,
@@ -320,6 +322,16 @@ where
         let _ = args.next();
     }
 
+    if args
+        .peek()
+        .is_some_and(|value| value == OsStr::new("--color"))
+    {
+        if color_seen {
+            return None;
+        }
+        let _ = args.next();
+        color = ColorChoice::parse(&args.next()?)?;
+    }
     let command_args = args.collect::<Vec<_>>();
     let command = parse_command_args(command_args)?;
     let command = if matches!(&endpoint, DatabaseEndpoint::LocalPath { .. }) {
@@ -339,6 +351,20 @@ where
     })
 }
 
+#[inline]
+fn is_help_flag<T>(value: &T) -> bool
+where
+    T: AsRef<OsStr> + ?Sized,
+{
+    let value: &OsStr = value.as_ref();
+    value == OsStr::new("--help") || value == OsStr::new("-h")
+}
+
+#[inline]
+fn is_version_flag(value: &OsStr) -> bool {
+    value == OsStr::new("--version") || value == OsStr::new("-V")
+}
+
 fn is_command_name(value: &OsStr) -> bool {
     value.to_str().is_some_and(|value| {
         matches!(
@@ -349,7 +375,9 @@ fn is_command_name(value: &OsStr) -> bool {
                 | "--daemon"
                 | "-d"
                 | "--help"
+                | "-h"
                 | "--version"
+                | "-V"
                 | "help"
                 | "server"
                 | "runtime"
@@ -419,19 +447,16 @@ where
         Some(value) if value == OsStr::new("--daemon") || value == OsStr::new("-d") => {
             args.next().is_none().then_some(Command::Run)
         }
-        Some(value) if value == OsStr::new("--help") => args
+        Some(value) if is_help_flag(value) => args
             .next()
             .is_none()
             .then_some(Command::Help(HelpTopic::TopLevel)),
         Some(value) if value == OsStr::new("help") => parse_help_command(args),
-        Some(value) if value == OsStr::new("--version") => {
+        Some(value) if is_version_flag(value) => {
             args.next().is_none().then_some(Command::Version)
         }
         Some(value) if value == OsStr::new("repl") => {
-            if args
-                .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -446,7 +471,7 @@ where
         }
 
         Some(value) if value == OsStr::new("server") => match args.next().as_deref() {
-            Some(value) if value == OsStr::new("--help") => args
+            Some(value) if is_help_flag(value) => args
                 .next()
                 .is_none()
                 .then_some(Command::Help(HelpTopic::Server)),
@@ -461,15 +486,12 @@ where
             _ => None,
         },
         Some(value) if value == OsStr::new("runtime") => match args.next().as_deref() {
-            Some(value) if value == OsStr::new("--help") => args
+            Some(value) if is_help_flag(value) => args
                 .next()
                 .is_none()
                 .then_some(Command::Help(HelpTopic::Runtime)),
             Some(value) if value == OsStr::new("describe") => {
-                if args
-                    .peek()
-                    .is_some_and(|value| value == OsStr::new("--help"))
-                {
+                if args.peek().is_some_and(is_help_flag) {
                     let _ = args.next();
                     return args
                         .next()
@@ -484,10 +506,7 @@ where
             _ => None,
         },
         Some(value) if value == OsStr::new("source") => {
-            if args
-                .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -504,10 +523,7 @@ where
             (args.next().is_none() && valid_source_path(&path)).then(|| command(path))
         }
         Some(value) if value == OsStr::new("raw-call") => {
-            if args
-                .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -552,10 +568,7 @@ where
             }
         }
         Some(value) if value == OsStr::new("invoke") => {
-            if args
-                .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -573,7 +586,7 @@ where
         Some(value) if value == OsStr::new("state") => {
             if args
                 .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
+                .is_some_and(is_help_flag)
             {
                 let _ = args.next();
                 return args
@@ -586,7 +599,7 @@ where
         Some(value) if value == OsStr::new("inspect") => {
             if args
                 .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
+                .is_some_and(is_help_flag)
             {
                 let _ = args.next();
                 return args
@@ -599,7 +612,7 @@ where
         Some(value) if value == OsStr::new("security") => {
             if args
                 .peek()
-                .is_some_and(|value| value == OsStr::new("--help"))
+                .is_some_and(is_help_flag)
             {
                 let _ = args.next();
                 return args

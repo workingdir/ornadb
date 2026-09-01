@@ -2375,6 +2375,7 @@ mod tests {
             "repl",
             "source",
             "inspect",
+            "state",
             "--daemon",
             "--db",
             "--runtime",
@@ -2489,6 +2490,69 @@ mod tests {
             assert_eq!(parsed.color, expected);
             assert_eq!(parsed.command, Command::Help(HelpTopic::TopLevel));
         }
+    }
+
+    #[test]
+    fn accepts_short_help_and_version_aliases() {
+        for (values, expected) in [
+            (vec!["orna", "-h"], Command::Help(HelpTopic::TopLevel)),
+            (vec!["orna", "-V"], Command::Version),
+            (vec!["orna", "repl", "-h"], Command::Help(HelpTopic::Repl)),
+            (vec!["orna", "server", "-h"], Command::Help(HelpTopic::Server)),
+            (
+                vec!["orna", "server", "run", "-h"],
+                Command::Help(HelpTopic::ServerRun),
+            ),
+            (
+                vec!["orna", "server", "backend-shell", "-h"],
+                Command::Help(HelpTopic::ServerBackendShell),
+            ),
+            (vec!["orna", "runtime", "-h"], Command::Help(HelpTopic::Runtime)),
+            (
+                vec!["orna", "runtime", "describe", "-h"],
+                Command::Help(HelpTopic::Runtime),
+            ),
+            (vec!["orna", "source", "-h"], Command::Help(HelpTopic::Source)),
+            (vec!["orna", "invoke", "-h"], Command::Help(HelpTopic::Invoke)),
+            (vec!["orna", "state", "-h"], Command::Help(HelpTopic::State)),
+            (
+                vec!["orna", "inspect", "-h"],
+                Command::Help(HelpTopic::Inspect),
+            ),
+            (
+                vec!["orna", "security", "-h"],
+                Command::Help(HelpTopic::Security),
+            ),
+            (
+                vec!["orna", "raw-call", "-h"],
+                Command::Help(HelpTopic::RawCall),
+            ),
+        ] {
+            assert_eq!(
+                parse_command(arguments(&values)),
+                Some(expected),
+                "{values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_colour_after_a_positional_endpoint() {
+        let parsed = parse_invocation(arguments(&[
+            "orna",
+            "./state.sqlite",
+            "--color",
+            "never",
+            "--help",
+        ]))
+        .expect("colour mode after an endpoint should parse");
+        assert_eq!(parsed.color, ColorChoice::Never);
+        assert!(parsed.endpoint_explicit);
+        assert!(matches!(
+            parsed.endpoint,
+            orna_client::endpoint::DatabaseEndpoint::LocalPath { .. }
+        ));
+        assert_eq!(parsed.command, Command::Help(HelpTopic::TopLevel));
     }
 
     #[test]
@@ -2715,5 +2779,6 @@ mod tests {
         let coloured = render_help(HelpTopic::TopLevel, ColorChoice::Always, false);
         assert!(coloured.contains("\x1b[1;36mOrna command line\x1b[0m"));
         assert!(coloured.contains("\x1b[1;36mCommands:\x1b[0m"));
+        assert!(coloured.contains("\x1b[1;36mOperational Commands:\x1b[0m"));
     }
 }
