@@ -873,8 +873,8 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
     let text = concat!(
         "CREATE SCHEMA \"app\";\n",
         "CREATE TYPE \"app\".\"item\" AS OBJECT (\"item\" BOOLEAN);\n",
-        "CREATE CLIENT FUNCTION \"app\".\"item\"() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS \"app\".\"item\"();\n",
+        "CREATE CLIENT FUNCTION \"app\".\"item\"(\"item\" BOOLEAN) RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS \"app\".\"item\"(TRUE);\n",
         "CREATE SERVER FUNCTION read_items() RETURNS ROWS (\"item\" BOOLEAN) AS\n",
         "SELECT probe.\"item\" FROM \"app\".\"item\" probe;\n",
     );
@@ -898,7 +898,7 @@ fn quoted_type_and_function_references_keep_declaration_categories() {
         .expect("quoted function declaration")
         + "CREATE CLIENT FUNCTION ".len();
     let function_use = text
-        .find("AS \"app\".\"item\"();")
+        .find("AS \"app\".\"item\"(TRUE);")
         .expect("quoted function use")
         + "AS ".len();
     let function_final = function_use + "\"app\".".len();
@@ -1650,6 +1650,107 @@ fn qualified_quoted_sql_type_navigation_uses_full_path() {
             mapper.position(b_type_use + "\"b\".".len()),
         ],
         "quoted SQL b.item references leaked across schemas: {references:?}",
+    );
+}
+
+#[test]
+fn mixed_qualified_type_path_preserves_schema_prefix() {
+    let text = concat!(
+        "CREATE SCHEMA app;\n",
+        "CREATE TYPE app.\"item\" AS OBJECT (value BOOLEAN);\n",
+        "CREATE SERVER FUNCTION use_item() RETURNS BOOLEAN AS\n",
+        "SELECT probe.value FROM app.\"item\" probe;\n",
+    );
+    let document = Document::new(
+        "file:///mixed-qualified-navigation.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let schema_declaration =
+        text.find("CREATE SCHEMA app").expect("schema declaration") + "CREATE SCHEMA ".len();
+    let type_declaration = text
+        .find("CREATE TYPE app.\"item\"")
+        .expect("type declaration")
+        + "CREATE TYPE ".len();
+    let type_declaration_final = type_declaration + "app.".len();
+    let type_use = text.find("FROM app.\"item\"").expect("qualified type use") + "FROM ".len();
+    let type_use_final = type_use + "app.".len();
+
+    let schema_hover = hover_at(text, type_use + 1).expect("mixed schema hover");
+    let schema_hover_value = hover_markdown(&schema_hover);
+    assert!(
+        schema_hover_value.contains("schema"),
+        "mixed qualified schema hover: {schema_hover_value}"
+    );
+    assert!(
+        !schema_hover_value.contains("object type"),
+        "mixed qualified schema resolved as type: {schema_hover_value}"
+    );
+    let schema_definition =
+        super::definition(&document, &parse, mapper.position(type_use + 1), &mapper)
+            .expect("mixed schema definition");
+    assert_eq!(
+        schema_definition.range.start,
+        mapper.position(schema_declaration)
+    );
+    let schema_references = references(
+        &document,
+        &parse,
+        mapper.position(type_use + 1),
+        &mapper,
+        true,
+    );
+    let schema_reference_starts: Vec<_> = schema_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        schema_reference_starts,
+        vec![
+            mapper.position(schema_declaration),
+            mapper.position(type_declaration),
+            mapper.position(type_use),
+        ],
+        "mixed qualified schema references lost prefix semantics: {schema_references:?}"
+    );
+
+    let type_hover = hover_at(text, type_use_final + 1).expect("mixed type hover");
+    let type_hover_value = hover_markdown(&type_hover);
+    assert!(
+        type_hover_value.contains("object type"),
+        "mixed qualified type hover: {type_hover_value}"
+    );
+    let type_definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+    )
+    .expect("mixed type definition");
+    assert_eq!(
+        type_definition.range.start,
+        mapper.position(type_declaration)
+    );
+    let type_references = references(
+        &document,
+        &parse,
+        mapper.position(type_use_final + 1),
+        &mapper,
+        true,
+    );
+    let type_reference_starts: Vec<_> = type_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        type_reference_starts,
+        vec![
+            mapper.position(type_declaration_final),
+            mapper.position(type_use_final),
+        ],
+        "mixed qualified type references lost final-component semantics: {type_references:?}"
     );
 }
 
