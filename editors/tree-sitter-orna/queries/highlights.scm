@@ -46,10 +46,13 @@
     (semicolon) (dot) (colon) (question_mark)
 ] @punctuation
 
-; Qualified names default to namespaces. Type references are promoted only
-; inside a type_spec, so namespace-only references in expressions stay intact.
+; Qualified names default to namespaces. A qualified name directly inside a
+; type_spec is promoted to a type. Because type_spec is recursive, this covers
+; parameter/return type fields and nested REF/LIST/OPTION specifications while
+; namespace-only references in expressions stay intact.
 (qualified_name) @namespace
-(type_spec (qualified_name) @type)
+(type_spec
+    (qualified_name) @type)
 
 (create_schema_statement name: (qualified_name) @namespace)
 (create_enum_type_statement name: (qualified_name) @type)
