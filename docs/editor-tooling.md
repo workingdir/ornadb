@@ -62,8 +62,9 @@ The language server provides:
   comments, and operators.
 - Document symbols (schemas, types, functions, fields, parameters).
 - Signature help (`textDocument/signatureHelp`) for declared server and client
-  functions and recognized standard-library functions, including parameter
-  details, the active parameter, and the return type.
+  functions and recognized standard-library functions for calls whose names use
+  ASCII identifier/name matching, including parameter details, the active
+  parameter, and the return type.
 - Workspace symbols (`workspace/symbol`) across all open documents, filtered by
   a substring query on the symbol name, with ASCII letters matched
   case-insensitively.
