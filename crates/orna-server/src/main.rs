@@ -2543,6 +2543,49 @@ mod tests {
     }
 
     #[test]
+    fn source_check_admits_explicit_transport_endpoints_without_client_transport() {
+        for endpoint in [
+            "orna+unix:///run/orna/default/orna.sock",
+            "orna://db.example.test/work",
+        ] {
+            let parsed = parse_invocation(arguments(&[
+                "orna",
+                "--db",
+                endpoint,
+                "source",
+                "check",
+                "file.orna",
+            ]))
+            .expect("explicit endpoint source check should parse");
+            assert!(parsed.endpoint_explicit, "{endpoint}");
+            assert!(
+                matches!(&parsed.command, Command::SourceCheck(path) if path == "file.orna"),
+                "{endpoint}"
+            );
+            assert!(
+                !endpoint_command_is_unsupported(&parsed.endpoint, &parsed.command),
+                "offline source checks must not require endpoint transport: {endpoint}",
+            );
+
+            let transport_command = parse_invocation(arguments(&[
+                "orna",
+                "--db",
+                endpoint,
+                "invoke",
+                "demo.main",
+            ]))
+            .expect("transport command should parse");
+            assert!(
+                endpoint_command_is_unsupported(
+                    &transport_command.endpoint,
+                    &transport_command.command
+                ),
+                "transport-dependent commands must remain rejected: {endpoint}",
+            );
+        }
+    }
+
+    #[test]
     fn defaults_invoke_to_authenticated_managed_route() {
         let parsed = parse_invocation(arguments(&["orna", "invoke", "demo.main"]))
             .expect("invoke without an endpoint should parse");
