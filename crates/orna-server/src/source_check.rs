@@ -2,7 +2,9 @@
 
 use std::{fs, io::Write, os::unix::fs::OpenOptionsExt};
 
-use orna_compiler::{NewApplicationCheckError, check_new_application, check_standard_library_source};
+use orna_compiler::{
+    NewApplicationCheckError, check_new_application, check_standard_library_source,
+};
 #[cfg(test)]
 use orna_compiler::{CheckedClientBodyKind, CheckedFunctionId};
 #[cfg(test)]
@@ -13,8 +15,9 @@ use orna_core::system::{
     SYS_INSPECT_RESOURCES_FUNCTION_ID, SYS_INSPECT_RESOURCES_TYPE_ID,
     SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID, SYS_INSPECT_RUNTIME_BINDINGS_TYPE_ID,
     SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID, SYS_INSPECT_SECURITY_DECISIONS_TYPE_ID,
-    SYS_INSPECT_SNAPSHOT_FUNCTION_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID, SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
-    SYS_INSPECT_STATE_CELLS_TYPE_ID, SYS_INSPECT_UI_NODES_FUNCTION_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
+    SYS_INSPECT_SNAPSHOT_FUNCTION_ID, SYS_INSPECT_SNAPSHOT_TYPE_ID,
+    SYS_INSPECT_STATE_CELLS_FUNCTION_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
+    SYS_INSPECT_UI_NODES_FUNCTION_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
 };
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::retained_standard_library_v11_snapshot;
