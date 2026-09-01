@@ -273,6 +273,92 @@ fn accepts_external_client_parameters_and_capabilities() {
 }
 
 #[test]
+fn matches_client_capability_exercise_by_exact_qualified_target_identity() {
+    let text = ResolvedType::Scalar(StandardScalar::CharacterLargeObject);
+    let matching_target_id = FunctionId::from_bytes([0xa1; 16]);
+    let qualified_mismatch_target_id = FunctionId::from_bytes([0xa2; 16]);
+    let base = catalogue(
+        vec![schema(1, &["std", "fs"]), schema(2, &["other", "fs"])],
+        Vec::new(),
+        vec![
+            FunctionDefinition::new(
+                matching_target_id,
+                QualifiedSemanticName::new(["std", "fs", "read"]).unwrap(),
+                FunctionDomain::Client,
+                vec![parameter(0xa3, "p_path", 0, text)],
+                FunctionReturn::Single(text),
+                FunctionRevisionId::from_bytes([0xb1; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            ),
+            FunctionDefinition::new(
+                qualified_mismatch_target_id,
+                QualifiedSemanticName::new(["other", "fs", "read"]).unwrap(),
+                FunctionDomain::Client,
+                vec![parameter(0xa4, "p_path", 0, text)],
+                FunctionReturn::Single(text),
+                FunctionRevisionId::from_bytes([0xb2; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            ),
+        ],
+    );
+
+    let matching_source = "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.match(p_path TEXT) \
+            RETURNS TEXT REQUIRES CAPABILITY std.fs.read(p_path) AS std.fs.read(p_path);";
+    let matching_report = check(&bundle([("capability-match.orna", matching_source)]), &base);
+    assert!(
+        matching_report.diagnostics().is_empty(),
+        "{:?}",
+        matching_report.diagnostics()
+    );
+    let checked = matching_report.checked_bundle().unwrap();
+    let function = &checked.client_functions()[0];
+    assert_eq!(function.name().to_string(), "app.match");
+    assert_eq!(function.capabilities().len(), 1);
+    assert_eq!(function.capabilities()[0].name(), "std.fs.read");
+    assert_eq!(
+        function.capabilities()[0].argument(),
+        &super::super::CheckedClientCapabilityArgument::Parameter("p_path".to_owned())
+    );
+    assert_eq!(
+        function.called_functions(),
+        vec![super::super::CheckedFunctionId::Existing(matching_target_id)]
+    );
+
+    let mismatch_source = "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.mismatch(p_path TEXT) \
+            RETURNS TEXT REQUIRES CAPABILITY std.fs.read(p_path) AS other.fs.read(p_path);";
+    let mismatch_report = check(
+        &bundle([("capability-qualified-mismatch.orna", mismatch_source)]),
+        &base,
+    );
+    assert_eq!(
+        mismatch_report.diagnostics().len(),
+        1,
+        "{:?}",
+        mismatch_report.diagnostics()
+    );
+    let diagnostic = &mismatch_report.diagnostics()[0];
+    assert_eq!(diagnostic.code(), DiagnosticCode::CapabilityRequirement);
+    assert_eq!(
+        diagnostic.message(),
+        "declared CLIENT capability std.fs.read is not exercised"
+    );
+    assert_eq!(
+        diagnostic.location().logical_path(),
+        "capability-qualified-mismatch.orna"
+    );
+    assert_eq!(
+        diagnostic.location().span().start(),
+        mismatch_source.find("CREATE CLIENT FUNCTION").unwrap()
+    );
+    assert_eq!(diagnostic.location().span().end(), mismatch_source.len());
+    assert_no_checked_bundle(&mismatch_report);
+}
+
+#[test]
 fn checks_client_state_slots_and_rejects_state_shape_type_errors() {
     let valid = "CREATE SCHEMA examples; \
             CREATE CLIENT FUNCTION examples.state() RETURNS TEXT IS \

@@ -59,6 +59,7 @@ proptest! {
             prop_assert!(source.is_char_boundary(span.end()));
         }
 
-        prop_assert!(report.checked_bundle().is_none() || report.diagnostics().is_empty());
+        // Warning-only reports, such as unreachable-code diagnostics, may still have a checked bundle.
+        prop_assert_eq!(report.checked_bundle().is_none(), report.has_errors());
     }
 }
