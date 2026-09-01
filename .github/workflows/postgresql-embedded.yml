@@ -33,6 +33,7 @@ jobs:
           make -C postgresql verify-lifecycle \
             TARGET_ROOT="${GITHUB_WORKSPACE}/target/postgresql-embedded-native"
       - name: Upload Docker-isolated embedded PostgreSQL build/verifier summary and static inputs
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: postgresql-embedded-build-verifier-summary-docker-isolated
