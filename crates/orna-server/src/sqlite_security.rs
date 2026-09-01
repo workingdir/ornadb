@@ -48,12 +48,16 @@ pub fn run_sqlite_security_grant_execute(
         })?;
     runtime.block_on(async move {
         let store = open_store(database_path.into()).await?;
+        let active = store.recover().await.map_err(|error| {
+            admin_error(InstalledSecurityAdminErrorKind::Internal, error.to_string())
+        })?;
+        store
+            .security_snapshot(&active)
+            .await
+            .map_err(|error| admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error))?;
         let uid = nix::unistd::geteuid().as_raw();
         store.provision_local_peer(uid).await.map_err(|error| {
             admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error)
-        })?;
-        let active = store.recover().await.map_err(|error| {
-            admin_error(InstalledSecurityAdminErrorKind::Internal, error.to_string())
         })?;
         let session = authenticate(&store, &active, uid).await?;
         store
@@ -77,14 +81,18 @@ async fn run_sqlite_security_admin_async(
     stdout: &mut impl Write,
 ) -> Result<InstalledSecurityAdminOutcome, InstalledSecurityAdminError> {
     let store = open_store(database_path).await?;
+    let active = store.recover().await.map_err(|error| {
+        admin_error(InstalledSecurityAdminErrorKind::Internal, error.to_string())
+    })?;
+    store
+        .security_snapshot(&active)
+        .await
+        .map_err(|error| admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error))?;
     let uid = nix::unistd::geteuid().as_raw();
     store
         .provision_local_peer(uid)
         .await
         .map_err(|error| admin_sqlite_error(InstalledSecurityAdminErrorKind::Internal, error))?;
-    let active = store.recover().await.map_err(|error| {
-        admin_error(InstalledSecurityAdminErrorKind::Internal, error.to_string())
-    })?;
     let session = authenticate(&store, &active, uid).await?;
     let snapshot = store
         .security_snapshot(&active)
