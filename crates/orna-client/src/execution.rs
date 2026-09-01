@@ -48,6 +48,19 @@ use validation::{
     client_call_target_is_referenced, validate_active_catalogue, validate_artifact_identity,
 };
 
+/// Reuses the evaluator's canonical active-catalogue check at VM admission.
+///
+/// This crate-private bridge keeps the hashing implementation in one place
+/// while preventing the VM boundary from exposing evaluator validation
+/// internals or accepting a stale active revision before root binding.
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_active_catalogue_for_vm(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Result<(), ClientExecutionError> {
+    validate_active_catalogue(active, function)
+}
+
 /// Evaluates one closed CLIENT function from one active revision.
 ///
 /// The allow evidence selects the only function and revision that may run. The
