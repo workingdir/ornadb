@@ -847,6 +847,111 @@ fn quoted_top_level_references_do_not_include_same_path_fields() {
         "same-path quoted field leaked into top-level references: {references:?}",
     );
 }
+#[test]
+fn quoted_type_and_function_references_keep_declaration_categories() {
+    let text = concat!(
+        "CREATE SCHEMA \"app\";\n",
+        "CREATE TYPE \"app\".\"item\" AS OBJECT (\"item\" BOOLEAN);\n",
+        "CREATE CLIENT FUNCTION \"app\".\"item\"() RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS \"app\".\"item\"();\n",
+        "CREATE SERVER FUNCTION read_items() RETURNS ROWS (\"item\" BOOLEAN) AS\n",
+        "SELECT probe.\"item\" FROM \"app\".\"item\" probe;\n",
+    );
+    let document = Document::new(
+        "file:///quoted-type-function-categories.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let type_declaration = text
+        .find("CREATE TYPE \"app\".\"item\"")
+        .expect("quoted type declaration")
+        + "CREATE TYPE ".len();
+    let type_use = text.find("FROM \"app\".\"item\"").expect("quoted type use") + "FROM ".len();
+    let type_final = type_use + "\"app\".".len();
+    let function_declaration = text
+        .find("CREATE CLIENT FUNCTION \"app\".\"item\"")
+        .expect("quoted function declaration")
+        + "CREATE CLIENT FUNCTION ".len();
+    let function_use = text
+        .find("AS \"app\".\"item\"();")
+        .expect("quoted function use")
+        + "AS ".len();
+    let function_final = function_use + "\"app\".".len();
+
+    let type_hover = hover_at(text, type_final + 1).expect("quoted type hover");
+    assert!(
+        hover_markdown(&type_hover).contains("object type"),
+        "quoted type hover: {}",
+        hover_markdown(&type_hover),
+    );
+    let type_definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(type_final + 1),
+        &mapper,
+    )
+    .expect("quoted type definition");
+    assert_eq!(type_definition.range.start, mapper.position(type_declaration));
+    let type_references = references(
+        &document,
+        &parse,
+        mapper.position(type_final + 1),
+        &mapper,
+        true,
+    );
+    let type_reference_starts: Vec<_> = type_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        type_reference_starts,
+        vec![
+            mapper.position(type_declaration + "\"app\".".len()),
+            mapper.position(type_final),
+        ],
+        "quoted type references crossed into the function: {type_references:?}",
+    );
+
+    let function_hover = hover_at(text, function_final + 1).expect("quoted function hover");
+    assert!(
+        hover_markdown(&function_hover).contains("client function"),
+        "quoted function hover: {}",
+        hover_markdown(&function_hover),
+    );
+    let function_definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(function_final + 1),
+        &mapper,
+    )
+    .expect("quoted function definition");
+    assert_eq!(
+        function_definition.range.start,
+        mapper.position(function_declaration),
+    );
+    let function_references = references(
+        &document,
+        &parse,
+        mapper.position(function_final + 1),
+        &mapper,
+        true,
+    );
+    let function_reference_starts: Vec<_> = function_references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    assert_eq!(
+        function_reference_starts,
+        vec![
+            mapper.position(function_declaration + "\"app\".".len()),
+            mapper.position(function_final),
+        ],
+        "quoted function references crossed into the type: {function_references:?}",
+    );
+}
+
 
 
 #[test]
