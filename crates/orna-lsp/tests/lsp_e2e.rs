@@ -125,6 +125,17 @@ const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
 CREATE SERVER FUNCTION broken_test.f()\n\
 RETURNS BOOLEAN\n\
 AS SELECT THIS IS NOT SQL;\n";
+/// A warning-only CLIENT source shared with the compiler and analysis tests.
+const WARNING_SOURCE: &str = concat!(
+    "CREATE SCHEMA app;\n",
+    "CREATE CLIENT FUNCTION app.unreachable()\n",
+    "RETURNS BOOLEAN\n",
+    "IS\n",
+    "BEGIN\n",
+    "RETURN TRUE;\n",
+    "LET ignored := FALSE;\n",
+    "END;",
+);
 
 /// One invalid source unit shared by the canonical source check and the LSP
 /// parity matrix. The multibyte and combining scalars keep the compiler's
@@ -3191,6 +3202,73 @@ fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
     assert_eq!(
         pushed_diagnostic["message"],
         "unknown schema app for object type app.task"
+    );
+
+    let pull = client.request(
+        "textDocument/diagnostic",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert_eq!(pull["kind"], "full");
+    assert_eq!(pull["items"], pushed["diagnostics"]);
+
+    client.shutdown();
+}
+
+#[test]
+fn serves_warning_diagnostic_with_related_return_location_in_push_and_pull() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/warning.orna";
+
+    open_document(&mut client, uri, WARNING_SOURCE, 1);
+    let pushed = client.read_notification("textDocument/publishDiagnostics");
+    assert_eq!(pushed["uri"], uri);
+    let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
+    assert_eq!(pushed_items.len(), 1, "warning diagnostic: {pushed}");
+    let diagnostic = &pushed_items[0];
+
+    let unreachable_start = WARNING_SOURCE
+        .find("LET ignored")
+        .expect("unreachable statement");
+    let unreachable_end = unreachable_start + "LET ignored := FALSE;".len();
+    assert_eq!(
+        diagnostic["range"],
+        json!({
+            "start": position_at_byte(WARNING_SOURCE, unreachable_start),
+            "end": position_at_byte(WARNING_SOURCE, unreachable_end),
+        })
+    );
+    assert_eq!(diagnostic["severity"], 2);
+    assert_eq!(diagnostic["code"], "ORNA0401");
+    assert_eq!(diagnostic["source"], "orna");
+    assert_eq!(diagnostic["message"], "unreachable statement");
+    assert_eq!(diagnostic["data"]["severity"], "warning");
+    assert_eq!(diagnostic["data"]["primaryLabel"], "unreachable code");
+
+    let related = diagnostic["relatedInformation"]
+        .as_array()
+        .expect("warning related information");
+    assert_eq!(related.len(), 1);
+    let return_start = WARNING_SOURCE.find("RETURN TRUE;").expect("return statement");
+    let return_end = return_start + "RETURN TRUE;".len();
+    assert_eq!(related[0]["location"]["uri"], uri);
+    assert_eq!(
+        related[0]["location"]["range"],
+        json!({
+            "start": position_at_byte(WARNING_SOURCE, return_start),
+            "end": position_at_byte(WARNING_SOURCE, return_end),
+        })
+    );
+    assert_eq!(
+        related[0]["message"],
+        "this statement returns from the function"
+    );
+    assert_eq!(diagnostic["data"]["related"][0]["path"], uri);
+    assert_eq!(diagnostic["data"]["related"][0]["start"], return_start);
+    assert_eq!(diagnostic["data"]["related"][0]["end"], return_end);
+    assert_eq!(
+        diagnostic["data"]["related"][0]["label"],
+        "this statement returns from the function"
     );
 
     let pull = client.request(
