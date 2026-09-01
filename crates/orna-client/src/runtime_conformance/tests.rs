@@ -2345,6 +2345,8 @@ fn headless_terminal_shutdown_rejects_new_work_without_callbacks() {
     assert_eq!(session.fixture.callback_log(), after_shutdown);
 }
 
+// The canonical ./spec is absent in this checkout; this follows the accepted
+// test-only contract in docs/decisions/0076-runtime-headless-conformance.md.
 #[test]
 fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_callbacks() {
     let session = FixtureSession::new();
@@ -2364,8 +2366,84 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         session.apply(surface, &batch(1, &operations)),
         StatusCode::Ok
     );
+    assert_eq!(
+        unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 1) }.code,
+        StatusCode::Ok
+    );
+    let before_capture = session.capture(surface);
+    assert!(
+        before_capture.starts_with(b"ORNA-UI/1 "),
+        "live surface should have canonical state before shutdown"
+    );
     let (node, action) = session.node_and_action(surface);
     let (model, request) = session.start_model_request(surface);
+    let runtime_snapshot = || {
+        let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+        let runtime = guard.runtime.as_ref().expect("fixture runtime should exist");
+        (
+            (runtime.handle, runtime.shutdown_requested, runtime.terminal),
+            (
+                runtime
+                    .surfaces
+                    .keys()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                runtime
+                    .requests
+                    .iter()
+                    .map(|(request, record)| (*request, record.surface, record._model))
+                    .collect::<HashSet<_>>(),
+                runtime.pending_events.len(),
+                runtime
+                    .cancelled_requests
+                    .iter()
+                    .map(|(request, record)| (*request, record.surface, record._model))
+                    .collect::<HashSet<_>>(),
+            ),
+            (runtime.node_tokens.clone(), runtime.action_tokens.clone()),
+            (
+                runtime.known_handles.clone(),
+                runtime.retired_handles.clone(),
+                runtime.known_surfaces.clone(),
+                runtime.known_nodes.clone(),
+                runtime.known_actions.clone(),
+                runtime.known_models.clone(),
+                runtime.known_requests.clone(),
+                runtime.allocated_nodes.clone(),
+                runtime.allocated_actions.clone(),
+            ),
+        )
+    };
+    let context_snapshot = || {
+        let handles = session
+            .client
+            .handles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            (
+                handles.known_surfaces.clone(),
+                handles.live_surfaces.clone(),
+                handles.known_nodes.clone(),
+                handles.live_nodes.clone(),
+                handles.known_actions.clone(),
+                handles.live_actions.clone(),
+                handles.known_models.clone(),
+                handles.live_models.clone(),
+                handles.known_requests.clone(),
+                handles.live_requests.clone(),
+            ),
+            (
+                handles.node_surfaces.clone(),
+                handles.action_surfaces.clone(),
+                handles.action_input_types.clone(),
+                handles.model_surfaces.clone(),
+                handles.request_surfaces.clone(),
+                handles.request_models.clone(),
+                handles.terminal_requests.clone(),
+            ),
+        )
+    };
 
     assert_eq!(session.shutdown(), StatusCode::Ok);
     let terminal = session.callback_log();
@@ -2426,19 +2504,100 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
             .take(terminal.sequence.len().saturating_sub(1))
             .all(|record| !record.terminal)
     );
+    {
+        let guard = global().lock().unwrap_or_else(|error| error.into_inner());
+        let runtime = guard.runtime.as_ref().expect("fixture runtime should exist");
+        assert!(runtime.surfaces.is_empty());
+        assert!(runtime.requests.is_empty());
+        assert!(runtime.pending_events.is_empty());
+        assert!(runtime.retired_handles.contains(&surface));
+        assert!(runtime.retired_handles.contains(&node));
+        assert!(runtime.retired_handles.contains(&action));
+        assert!(runtime.retired_handles.contains(&model));
+        assert!(runtime.retired_handles.contains(&request));
+    }
+    {
+        let handles = session
+            .client
+            .handles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(handles.live_surfaces.is_empty());
+        assert!(handles.live_nodes.is_empty());
+        assert!(handles.live_actions.is_empty());
+        assert!(handles.live_models.is_empty());
+        assert!(handles.live_requests.is_empty());
+    }
+    let terminal_runtime = runtime_snapshot();
+    let terminal_context = context_snapshot();
+    let terminal_releases = session.release_counts();
+    let assert_unchanged = || {
+        assert_eq!(runtime_snapshot(), terminal_runtime);
+        assert_eq!(context_snapshot(), terminal_context);
+        assert_eq!(session.callback_log(), terminal);
+        assert_eq!(session.release_counts(), terminal_releases);
+    };
 
     let context = (&*session.client as *const ClientContext).cast_mut().cast();
     let before_stale_handles = terminal.clone();
 
     // Surface operations are terminal once shutdown has drained the live surface.
-    assert_eq!(session.capture_result(surface), Err(StatusCode::Failed));
-    assert_eq!(session.destroy_surface(surface), StatusCode::Failed);
-    assert_eq!(
-        unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 1) }.code,
-        StatusCode::Failed
-    );
+    for _ in 0..2 {
+        assert_eq!(session.capture_result(surface), Err(StatusCode::Failed));
+        let mut semantic_state = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe {
+                (FIXTURE_API.capture_semantic_state)(
+                    session.runtime,
+                    surface,
+                    &mut semantic_state,
+                )
+            }
+            .code,
+            StatusCode::Failed
+        );
+        assert!(semantic_state.data.is_null());
+        assert_eq!(semantic_state.len, 0);
 
-    // Node and action handles are retired with their containing surface.
+        let mut opaque_state = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe {
+                (FIXTURE_API.capture_opaque_state)(session.runtime, surface, &mut opaque_state)
+            }
+            .code,
+            StatusCode::Failed
+        );
+        assert!(opaque_state.data.is_null());
+        assert_eq!(opaque_state.len, 0);
+        assert_eq!(
+            unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 0) }.code,
+            StatusCode::Failed
+        );
+
+        let stale_operations = [set_property(node, view(b"after-shutdown"))];
+        let stale_batch = batch(2, &stale_operations);
+        assert_eq!(
+            unsafe { (FIXTURE_API.apply_ui_batch)(session.runtime, surface, &stale_batch) }.code,
+            StatusCode::Failed
+        );
+        assert_eq!(
+            unsafe { (FIXTURE_API.destroy_surface)(session.runtime, surface) }.code,
+            StatusCode::Failed
+        );
+    }
+    assert_unchanged();
+
+    // Node, action, and surface callbacks reject their retired handles.
     let stale_action_event = RuntimeEvent {
         kind: EventKind::Action,
         as_: RuntimeEventArgs {
@@ -2450,22 +2609,53 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
             },
         },
     };
-    assert_eq!(
-        unsafe { client_emit_runtime_event(context, session.runtime, &stale_action_event) }.code,
-        StatusCode::NotFound
-    );
-    let mut metadata = OwnedBytes {
-        data: ptr::null_mut(),
-        len: 0,
-        owner: ptr::null_mut(),
-        release: release_owned,
+    let stale_focus_event = RuntimeEvent {
+        kind: EventKind::FocusChanged,
+        as_: RuntimeEventArgs {
+            action: ActionEvent {
+                surface,
+                node,
+                action: 0,
+                payload: empty_value(),
+            },
+        },
     };
-    assert_eq!(
-        unsafe { client_read_action_metadata(context, action, &mut metadata) }.code,
-        StatusCode::NotFound
-    );
-    assert!(metadata.data.is_null());
-    assert_eq!(metadata.len, 0);
+    let stale_surface_closed_event = RuntimeEvent {
+        kind: EventKind::SurfaceClosed,
+        as_: RuntimeEventArgs {
+            surface_closed: SurfaceClosedEvent { surface },
+        },
+    };
+    for _ in 0..2 {
+        for event in [
+            &stale_action_event,
+            &stale_focus_event,
+            &stale_surface_closed_event,
+        ] {
+            assert_eq!(
+                unsafe {
+                    client_emit_runtime_event(context, session.runtime, event as *const RuntimeEvent)
+                }
+                .code,
+                StatusCode::NotFound
+            );
+        }
+    }
+    for _ in 0..2 {
+        let mut metadata = OwnedBytes {
+            data: ptr::null_mut(),
+            len: 0,
+            owner: ptr::null_mut(),
+            release: release_owned,
+        };
+        assert_eq!(
+            unsafe { client_read_action_metadata(context, action, &mut metadata) }.code,
+            StatusCode::NotFound
+        );
+        assert!(metadata.data.is_null());
+        assert_eq!(metadata.len, 0);
+    }
+    assert_unchanged();
 
     // Model and request handles are retired after their one cancellation outcome.
     let stale_model_event = RuntimeEvent {
@@ -2480,27 +2670,45 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
             },
         },
     };
-    assert_eq!(
-        unsafe { client_emit_runtime_event(context, session.runtime, &stale_model_event) }.code,
-        StatusCode::NotFound
-    );
-    assert_eq!(session.apply_model_rows(request), StatusCode::Failed);
-    assert_eq!(session.cancel_request(request), StatusCode::Failed);
-    assert_eq!(
-        unsafe { client_complete_model_request(context, request, empty_value()) }.code,
-        StatusCode::Failed
-    );
-    assert_eq!(
-        unsafe {
-            client_fail_model_request(
-                context,
+    let stale_children_event = RuntimeEvent {
+        kind: EventKind::ModelChildrenRequest,
+        as_: RuntimeEventArgs {
+            children_request: ModelChildrenRequest {
                 request,
-                status(StatusCode::Cancelled, b"request cancelled"),
-            )
+                model,
+                parent_key: empty_value(),
+            },
+        },
+    };
+    for _ in 0..2 {
+        for event in [&stale_model_event, &stale_children_event] {
+            assert_eq!(
+                unsafe {
+                    client_emit_runtime_event(context, session.runtime, event as *const RuntimeEvent)
+                }
+                .code,
+                StatusCode::NotFound
+            );
         }
-        .code,
-        StatusCode::Failed
-    );
+        assert_eq!(session.apply_model_rows(request), StatusCode::Failed);
+        assert_eq!(session.cancel_request(request), StatusCode::Failed);
+        assert_eq!(
+            unsafe { client_complete_model_request(context, request, empty_value()) }.code,
+            StatusCode::Failed
+        );
+        assert_eq!(
+            unsafe {
+                client_fail_model_request(
+                    context,
+                    request,
+                    status(StatusCode::Cancelled, b"request cancelled"),
+                )
+            }
+            .code,
+            StatusCode::Failed
+        );
+    }
+    assert_unchanged();
 
     // No stale operation may append a callback after the terminal marker.
     assert_eq!(session.callback_log(), before_stale_handles);
