@@ -115,6 +115,15 @@ fn assert_unsupported_operation_preserves_surface_state(
             runtime.allocated_actions.clone(),
         )
     };
+    let before_callback_log = session.callback_log();
+    let before_release_counts = session.release_counts();
+    let before_unknown_releases = UNKNOWN_RELEASES.load(Ordering::SeqCst);
+    let before_allocation_owners = ALLOCATIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
     let before_reservations = HANDLE_RESERVATIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -126,6 +135,21 @@ fn assert_unsupported_operation_preserves_surface_state(
     assert_eq!(
         session.apply(surface, &batch(3, &mixed_operations)),
         StatusCode::Unsupported
+    );
+    assert_eq!(session.callback_log(), before_callback_log);
+    assert_eq!(session.release_counts(), before_release_counts);
+    assert_eq!(
+        UNKNOWN_RELEASES.load(Ordering::SeqCst),
+        before_unknown_releases
+    );
+    assert_eq!(
+        ALLOCATIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>(),
+        before_allocation_owners
     );
     assert_eq!(session.capture(surface), before_capture);
     let after_state = {
