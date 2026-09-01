@@ -1,6 +1,7 @@
 //! Relational query preparation and validation tests.
 
 use super::*;
+use orna_artifact::server_plan::{FieldStep, NullOrder, SortDirection};
 #[test]
 fn prepares_a_complete_source_catalogue_artifact_and_reference_revision() {
     let active = empty_active();
@@ -112,6 +113,26 @@ fn prepares_a_complete_source_catalogue_artifact_and_reference_revision() {
     };
     assert_eq!(steps[0].owner, task.id());
     assert_eq!(steps[0].field, title.id());
+    assert_eq!(plan.ordering.len(), 1);
+    assert_eq!(plan.ordering[0].direction, SortDirection::Unspecified);
+    assert_eq!(plan.ordering[0].null_order, NullOrder::Unspecified);
+    let ordering_expression = &plan.ordering[0].expression;
+    assert_eq!(
+        ordering_expression.value_type.resolved_type,
+        ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+    );
+    assert!(ordering_expression.value_type.nullable);
+    let ExpressionKind::FieldPath { input, steps } = &ordering_expression.kind else {
+        panic!("ordering is not a field path");
+    };
+    assert_eq!(*input, 0);
+    assert_eq!(
+        steps,
+        &[FieldStep {
+            owner: task.id(),
+            field: title.id(),
+        }]
+    );
 
     assert_eq!(prepared.references().len(), 6);
     assert_eq!(
