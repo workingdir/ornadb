@@ -2590,6 +2590,7 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
             unsafe { (FIXTURE_API.apply_ui_batch)(session.runtime, surface, &stale_batch) }.code,
             StatusCode::Failed
         );
+        assert_eq!(session.apply(surface, &stale_batch), StatusCode::Failed);
         assert_eq!(
             unsafe { (FIXTURE_API.destroy_surface)(session.runtime, surface) }.code,
             StatusCode::Failed
