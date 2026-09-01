@@ -451,7 +451,9 @@ fn validate_source_path(path: &str) -> Result<(), InstalledSourceApplyError> {
 
 fn map_host_error(source: EmbeddedHostError) -> InstalledSourceApplyError {
     let failure = match &source {
-        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
+        EmbeddedHostError::Engine(_)
+        | EmbeddedHostError::InvalidEngineManifest
+        | EmbeddedHostError::InvalidDistributionManifest => {
             InstalledSourceApplyHostFailure::EngineInvalid
         }
         EmbeddedHostError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -905,7 +907,7 @@ mod tests {
             InstalledSourceApplyHostFailure,
             &str,
             &str,
-        ); 4] = [
+        ); 5] = [
             (
                 "missing instance",
                 || {
@@ -924,6 +926,13 @@ mod tests {
                 InstalledSourceApplyHostFailure::EngineInvalid,
                 "orna: the embedded PostgreSQL engine is not valid",
                 "embedded PostgreSQL engine manifest is invalid",
+            ),
+            (
+                "distribution manifest",
+                || EmbeddedHostError::InvalidDistributionManifest,
+                InstalledSourceApplyHostFailure::EngineInvalid,
+                "orna: the embedded PostgreSQL engine is not valid",
+                "Orna distribution manifest is invalid",
             ),
             (
                 "engine adapter",
@@ -968,24 +977,44 @@ mod tests {
             SourceRevisionId::from_bytes([0x41; 16]),
             CatalogueRevisionId::from_bytes([0x42; 16]),
         );
-        let stale = map_apply_error(PostgresKernelError::ExpectedBaseMismatch { expected, active });
-        assert!(matches!(
-            &stale,
-            InstalledSourceApplyError::ExpectedBaseMismatch {
-                expected: actual_expected,
-                active: actual_active,
-            } if *actual_expected == expected && *actual_active == active
-        ));
-        assert_eq!(
-            stale.to_string(),
-            format!(
-                "orna: source apply expected {} {} but active is {} {}",
-                expected.source(),
-                expected.catalogue(),
-                active.source(),
-                active.catalogue(),
-            )
-        );
+        let stale_cases = [
+            (
+                "storage adapter",
+                map_storage_apply_error(StorageError::InvalidRequest(
+                    orna_storage::MigrationLedgerEntryError::ActiveBaseMismatch {
+                        expected,
+                        actual: active,
+                    },
+                )),
+            ),
+            (
+                "kernel",
+                map_apply_error(PostgresKernelError::ExpectedBaseMismatch { expected, active }),
+            ),
+        ];
+        for (name, stale) in stale_cases {
+            assert!(
+                matches!(
+                    &stale,
+                    InstalledSourceApplyError::ExpectedBaseMismatch {
+                        expected: actual_expected,
+                        active: actual_active,
+                    } if *actual_expected == expected && *actual_active == active
+                ),
+                "{name} mapping must preserve stale identities: {stale:?}"
+            );
+            assert_eq!(
+                stale.to_string(),
+                format!(
+                    "orna: source apply expected {} {} but active is {} {}",
+                    expected.source(),
+                    expected.catalogue(),
+                    active.source(),
+                    active.catalogue(),
+                ),
+                "{name} public stale error changed"
+            );
+        }
 
         let cases: [(&str, fn() -> PostgresKernelError, &str, &str); 3] = [
             (
