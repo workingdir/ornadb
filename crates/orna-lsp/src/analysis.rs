@@ -548,6 +548,12 @@ fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
     dot
 }
 
+/// Reconstructs the source-qualified path containing one highlighted token.
+///
+/// The SQL highlighter keeps quoted components as `QuotedIdentifier` rather
+/// than reclassifying them as namespaces, so accept either kind while walking
+/// backwards across dotted separators. Context-specific field resolution runs
+/// before this top-level fallback and keeps member paths out of the lookup.
 fn qualified_name_keys_at(
     text: &str,
     highlighted: &[orna_syntax::HighlightToken],
@@ -559,9 +565,12 @@ fn qualified_name_keys_at(
     let mut first_index = selected_index;
     let mut right_start = selected_span.start;
     while first_index > 0 {
-        let previous_index = highlighted[..first_index]
-            .iter()
-            .rposition(|token| token.kind == HighlightKind::NamespaceName)?;
+        let previous_index = highlighted[..first_index].iter().rposition(|token| {
+            matches!(
+                token.kind,
+                HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
+            )
+        })?;
         let previous = &highlighted[previous_index];
         if !dotted_name_separator(text, previous.range.end, right_start) {
             break;
@@ -573,9 +582,11 @@ fn qualified_name_keys_at(
         highlighted[first_index..=selected_index]
             .iter()
             .filter(|token| {
-                token.kind == HighlightKind::NamespaceName
-                    || (token.range.start == selected_span.start
-                        && token.range.end == selected_span.end)
+                matches!(
+                    token.kind,
+                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
+                ) || (token.range.start == selected_span.start
+                    && token.range.end == selected_span.end)
             })
             .map(|token| identifier_key(&text[token.range.clone()]))
             .collect(),
@@ -2287,11 +2298,32 @@ fn declaration_span_for_kind(
     }
 }
 
+#[derive(Clone, Copy)]
+enum TopLevelDeclarationKind {
+    Schema,
+    Type,
+    Function,
+}
+
+fn top_level_declaration_kind(declaration: DeclarationRef<'_>) -> TopLevelDeclarationKind {
+    match declaration {
+        DeclarationRef::Schema(_) => TopLevelDeclarationKind::Schema,
+        DeclarationRef::ObjectType(_)
+        | DeclarationRef::EnumType(_)
+        | DeclarationRef::RecordValueType(_)
+        | DeclarationRef::PrimitiveValueType(_)
+        | DeclarationRef::OpaqueValueType(_) => TopLevelDeclarationKind::Type,
+        DeclarationRef::ServerFunction(_) | DeclarationRef::ClientFunction(_) => {
+            TopLevelDeclarationKind::Function
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ReferenceScope {
     /// A resolved top-level name and its full source-qualified path.
     TopLevel {
-        kind: HighlightKind,
+        declaration_kind: TopLevelDeclarationKind,
         path: Vec<IdentifierKey>,
     },
     /// A parameter, state, or local inside one function.
@@ -2462,13 +2494,17 @@ fn reference_scope(
             return ReferenceScope::None;
         }
     }
-    if declaration_span_for_kind(parse, text, highlighted, name, kind, selected_span).is_some() {
+    if let Some(declaration) =
+        declaration_at_span(parse, text, highlighted, name, kind, selected_span)
+    {
         let path = qualified_name_keys_at(text, highlighted, selected_span)
             .unwrap_or_else(|| vec![identifier_key(name)]);
-        ReferenceScope::TopLevel { kind, path }
-    } else {
-        ReferenceScope::None
+        return ReferenceScope::TopLevel {
+            declaration_kind: top_level_declaration_kind(declaration),
+            path,
+        };
     }
+    ReferenceScope::None
 }
 
 fn variable_reference_declaration_span(
@@ -2520,8 +2556,25 @@ fn reference_token_in_scope(
         return false;
     }
     match scope {
-        ReferenceScope::TopLevel { kind, path } => {
-            token.kind == *kind
+        ReferenceScope::TopLevel {
+            declaration_kind,
+            path,
+        } => {
+            let kind_matches = match declaration_kind {
+                TopLevelDeclarationKind::Schema => matches!(
+                    token.kind,
+                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
+                ),
+                TopLevelDeclarationKind::Type => matches!(
+                    token.kind,
+                    HighlightKind::TypeName | HighlightKind::QuotedIdentifier
+                ),
+                TopLevelDeclarationKind::Function => matches!(
+                    token.kind,
+                    HighlightKind::FunctionName | HighlightKind::QuotedIdentifier
+                ),
+            };
+            kind_matches
                 && qualified_name_keys_at(text, highlighted, &token_span)
                     .unwrap_or_else(|| vec![identifier_key(&text[token.range.clone()])])
                     .as_slice()
