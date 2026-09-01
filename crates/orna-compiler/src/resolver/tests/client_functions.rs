@@ -878,6 +878,57 @@ fn rejects_bare_as_and_state_return_await_but_accepts_procedural_await() {
 }
 
 #[test]
+fn reports_the_client_await_position_message_for_nested_awaits() {
+    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.awaited() RETURNS TEXT RETURN AWAIT std.data.resource();";
+    let parsed = parse(source);
+    assert!(
+        parsed.diagnostics().is_empty(),
+        "{:?}",
+        parsed.diagnostics()
+    );
+    let declaration = &parsed.client_functions()[0];
+    let orna_syntax::ClientFunctionBody::ReturnExpression { expression } = &declaration.body else {
+        panic!("expected a RETURN expression body");
+    };
+    let nested = orna_syntax::ClientExpression::Parenthesized {
+        expression: Box::new(expression.clone()),
+        span: expression.span().clone(),
+    };
+    let input = super::super::ResolvedClientFunctionInput {
+        id: super::super::CheckedFunctionId::Existing(FunctionId::from_bytes([0x55; 16])),
+        name: QualifiedSemanticName::new(["ui", "awaited"]).unwrap(),
+        parameters: Vec::new(),
+        return_type: SemanticType::scalar(StandardScalar::CharacterLargeObject),
+        standard_value_type: None,
+        result_shape: super::super::ClientExpressionResultShape::Value,
+        return_shape: CheckedClientReturnShape::Single,
+        body: &declaration.body,
+        capabilities: &declaration.capabilities,
+        location: location("await-positions.orna", &declaration.span),
+        declaration_span: declaration.span.clone(),
+        logical_path: "await-positions.orna",
+        control_flow_required: false,
+    };
+    let mut diagnostics = Vec::new();
+    super::super::client::validate_client_await_positions(&nested, true, &input, &mut diagnostics);
+
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+    assert_eq!(
+        diagnostic.message(),
+        "AWAIT is only valid in procedural CLIENT LET, assignment, and RETURN positions"
+    );
+    let await_start = source.find("AWAIT").expect("AWAIT expression is present");
+    assert_eq!(diagnostic.location().logical_path(), "await-positions.orna");
+    assert_eq!(diagnostic.location().span().start(), await_start);
+    assert_eq!(
+        diagnostic.location().span().end(),
+        await_start + "AWAIT std.data.resource()".len()
+    );
+}
+
+#[test]
 fn rejects_scalar_and_stream_resource_descriptor_mismatches() {
     let base = CatalogueSnapshot::new_with_functions(
         CatalogueRevisionId::from_bytes([0x61; 16]),
