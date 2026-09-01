@@ -317,6 +317,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "application migration ledger baseline",
         include_str!("../migrations/0047_application_migration_ledger_baseline.sql"),
     ),
+    (
+        48,
+        "security admin audit boundary repair",
+        include_str!("../migrations/0048_security_admin_audit_boundary.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
