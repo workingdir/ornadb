@@ -2032,6 +2032,7 @@ async fn direct_committed_failure_wins_after_cancel() {
         ResourceServerFrame::Failed(frame)
             if frame.stream_id == request.stream_id
                 && frame.request_id == request.request_id
+                && frame.target_revision == request.target_revision
                 && frame.failure == CallFailure::InternalFailure
     ));
 }
@@ -2206,6 +2207,7 @@ async fn direct_committed_terminal_drains_late_values_without_mutating_protocol_
                 ResourceServerFrame::Completed(frame)
                     if frame.stream_id == request.stream_id
                         && frame.request_id == request.request_id
+                        && frame.target_revision == request.target_revision
                         && frame.final_batch_sequence == 1
                         && frame.total_items == 2
             ));
@@ -2215,6 +2217,7 @@ async fn direct_committed_terminal_drains_late_values_without_mutating_protocol_
                 ResourceServerFrame::Failed(frame)
                     if frame.stream_id == request.stream_id
                         && frame.request_id == request.request_id
+                        && frame.target_revision == request.target_revision
                         && frame.failure == CallFailure::InternalFailure
             ));
         }
