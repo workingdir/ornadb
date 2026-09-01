@@ -155,8 +155,8 @@ CARGO_NET_OFFLINE=true just demo-check
 
 `CARGO_NET_OFFLINE=true` makes Cargo registry and Git resolution fail closed,
 but it does not disable arbitrary build scripts. `build`, `test`,
-`editor-tooling-check`, and `demo-check` include paths that can compile
-`orna-server`/`orna-postgres`; those paths need a Linux x86_64 host plus either
+`rustdoc-check`, `editor-tooling-check`, and `demo-check` include paths that can
+compile `orna-server`/`orna-postgres`; those paths need a Linux x86_64 host plus
 a complete `ORNA_POSTGRES_ENGINE_OUTPUT` directory at an **absolute** path or
 the environment-dependent embedded-engine build. Keep that prerequisite in the
 evidence instead of calling the whole command network-free.
