@@ -2531,11 +2531,31 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
     let terminal_runtime = runtime_snapshot();
     let terminal_context = context_snapshot();
     let terminal_releases = session.release_counts();
+    let terminal_unknown_releases = UNKNOWN_RELEASES.load(Ordering::SeqCst);
+    let terminal_allocation_owners = ALLOCATIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
     let assert_unchanged = || {
         assert_eq!(runtime_snapshot(), terminal_runtime);
         assert_eq!(context_snapshot(), terminal_context);
         assert_eq!(session.callback_log(), terminal);
         assert_eq!(session.release_counts(), terminal_releases);
+        assert_eq!(
+            UNKNOWN_RELEASES.load(Ordering::SeqCst),
+            terminal_unknown_releases
+        );
+        assert_eq!(
+            ALLOCATIONS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>(),
+            terminal_allocation_owners
+        );
     };
 
     let context = (&*session.client as *const ClientContext).cast_mut().cast();
@@ -2563,6 +2583,8 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         );
         assert!(semantic_state.data.is_null());
         assert_eq!(semantic_state.len, 0);
+        assert!(semantic_state.owner.is_null());
+        assert_eq!(semantic_state.release as usize, release_owned as usize);
 
         let mut opaque_state = OwnedBytes {
             data: ptr::null_mut(),
@@ -2579,6 +2601,8 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         );
         assert!(opaque_state.data.is_null());
         assert_eq!(opaque_state.len, 0);
+        assert!(opaque_state.owner.is_null());
+        assert_eq!(opaque_state.release as usize, release_owned as usize);
         assert_eq!(
             unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 0) }.code,
             StatusCode::Failed
@@ -2655,6 +2679,8 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         );
         assert!(metadata.data.is_null());
         assert_eq!(metadata.len, 0);
+        assert!(metadata.owner.is_null());
+        assert_eq!(metadata.release as usize, release_owned as usize);
     }
     assert_unchanged();
 
