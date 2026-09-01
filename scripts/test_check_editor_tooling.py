@@ -9,9 +9,13 @@ import io
 import json
 from pathlib import Path
 import shutil
+import subprocess
+
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -249,6 +253,57 @@ class TreeSitterMetadataTests(unittest.TestCase):
                     self.assertFalse(accepted, f"validator accepted {label}")
                     self.assertIn(diagnostic, errors.getvalue())
 
+
+
+class SourceCheckParityTests(unittest.TestCase):
+    def _fixtures(self) -> list[checker.CorpusSourceFixture]:
+        return [
+            checker.CorpusSourceFixture(
+                name=name,
+                source="x" * 64,
+                expected_rejection=False,
+                path=REPOSITORY / "test-fixture.orna",
+            )
+            for name in checker.SOURCE_CHECK_CORPUS_CASE_NAMES
+        ]
+
+    def _run_parity(self, *, returncode: int, output: str) -> bool:
+        result = subprocess.CompletedProcess(
+            args=["cargo"],
+            returncode=returncode,
+            stdout=output,
+            stderr="",
+        )
+        with (
+            mock.patch.object(checker, "run_command", return_value=result),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            return checker.check_source_check_parity("cargo", REPOSITORY, self._fixtures())
+
+    def test_accepts_warning_only_success(self) -> None:
+        self.assertTrue(
+            self._run_parity(
+                returncode=0,
+                output="accepted.orna:10..20: ORNA0401: unreachable statement\n",
+            )
+        )
+
+    def test_rejects_error_diagnostic_even_if_command_succeeds(self) -> None:
+        self.assertFalse(
+            self._run_parity(
+                returncode=0,
+                output="accepted.orna:10..20: ORNA0101: unknown schema app\n",
+            )
+        )
+
+    def test_rejects_error_diagnostic_and_failed_command(self) -> None:
+        self.assertFalse(
+            self._run_parity(
+                returncode=1,
+                output="accepted.orna:10..20: ORNA0101: unknown schema app\n",
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -80,6 +80,10 @@ SOURCE_CHECK_DIAGNOSTIC_RE = re.compile(
     r"^(?P<path>.+):(?P<start>[0-9]+)\.\.(?P<end>[0-9]+): "
     r"(?P<code>ORNA[0-9]+): (?P<message>.*)$"
 )
+# Source-check output carries diagnostic codes but no severity field. Keep this
+# set synchronized with DiagnosticCode::severity in the compiler.
+SOURCE_CHECK_WARNING_CODES = frozenset({"ORNA0401"})
+
 
 
 @dataclass(frozen=True)
@@ -515,10 +519,11 @@ def _source_check_diagnostics(
     *,
     case_name: str,
     source_length: int,
-) -> tuple[bool, bool]:
-    """Report source-check diagnostics and reject malformed byte spans."""
+) -> tuple[bool, bool, bool]:
+    """Report diagnostics, reject malformed spans, and classify errors."""
     found = False
     valid = True
+    errors_found = False
     for line in output.splitlines():
         match = SOURCE_CHECK_DIAGNOSTIC_RE.match(line)
         if match is None:
@@ -534,12 +539,16 @@ def _source_check_diagnostics(
             )
             valid = False
             continue
+        code = match.group("code")
+        is_warning = code in SOURCE_CHECK_WARNING_CODES
+        errors_found |= not is_warning
         log(
             f"source-check case {case_name!r} diagnostic "
-            f"{match.group('code')} at byte span {start}..{end}: {match.group('message')}",
-            error=True,
+            f"{code} at byte span {start}..{end}: {match.group('message')}",
+            error=not is_warning,
         )
-    return found, valid
+    return found, valid, errors_found
+
 
 
 def check_source_check_parity(
@@ -607,10 +616,12 @@ def check_source_check_parity(
                 output = (result.stdout if result is not None else "") + (
                     result.stderr if result is not None else ""
                 )
-                diagnostics_found, diagnostics_valid = _source_check_diagnostics(
-                    output,
-                    case_name=fixture.name,
-                    source_length=len(source_bytes),
+                diagnostics_found, diagnostics_valid, error_diagnostics_found = (
+                    _source_check_diagnostics(
+                        output,
+                        case_name=fixture.name,
+                        source_length=len(source_bytes),
+                    )
                 )
                 if not diagnostics_valid:
                     log(
@@ -636,20 +647,27 @@ def check_source_check_parity(
                             error=True,
                         )
                     return False
-                if diagnostics_found:
+                if error_diagnostics_found:
                     log(
-                        f"source-check case {fixture.name!r} returned success with diagnostics",
+                        f"source-check case {fixture.name!r} returned success with "
+                        "error diagnostics",
                         error=True,
                     )
                     return False
-                log(
-                    f"source-check case {fixture.name!r} passed "
-                    f"({len(source_bytes)} source bytes)"
-                )
+                if diagnostics_found:
+                    log(
+                        f"source-check case {fixture.name!r} passed with warning diagnostics"
+                    )
+                else:
+                    log(
+                        f"source-check case {fixture.name!r} passed "
+                        f"({len(source_bytes)} source bytes)"
+                    )
     except OSError as exc:
         log(f"could not create source-check temporary directory: {exc}", error=True)
         return False
     return True
+
 
 
 
