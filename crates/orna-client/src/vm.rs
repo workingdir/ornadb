@@ -92,10 +92,11 @@ pub fn admit_client_function(
             field: "authorisation",
         });
     }
-    if host.is_cancelled() {
-        return Err(ClientVmAdmissionError::HostCancelled);
-    }
+    let resolved = super::resolve_client_function(active, target.function())
+        .ok_or(ClientVmAdmissionError::TupleMismatch { field: "revision" })?;
     let root_binding = ClientVmRootBinding {
+        function: target.function().to_bytes(),
+        function_revision: resolved.revision.id().to_bytes(),
         revision_pair: [
             active.pair().source().to_bytes(),
             active.pair().catalogue().to_bytes(),
@@ -103,14 +104,14 @@ pub fn admit_client_function(
         security_context_digest: authorisation.security_context_digest().to_bytes(),
     };
     host.check_root_binding(
+        root_binding.function,
+        root_binding.function_revision,
         root_binding.revision_pair,
         root_binding.security_context_digest,
     )
     .map_err(|_| ClientVmAdmissionError::TupleMismatch {
         field: "root_binding",
     })?;
-    let resolved = super::resolve_client_function(active, target.function())
-        .ok_or(ClientVmAdmissionError::TupleMismatch { field: "revision" })?;
     if resolved.definition.domain() != FunctionDomain::Client {
         return Err(ClientVmAdmissionError::WrongExecutionDomain);
     }
@@ -260,6 +261,9 @@ pub fn admit_client_function(
                         .requirements()
                         .iter()
                         .map(|requirement| {
+                            let name =
+                                super::capability::LocalCapabilityName::parse(requirement.name())
+                                    .map_err(|_| ClientVmAdmissionError::SemanticRejected)?;
                             if let CapabilityArgumentSource::Parameter(parameter) =
                                 requirement.argument()
                                 && !definition
@@ -277,10 +281,7 @@ pub fn admit_client_function(
                                     ClientVmCapabilityArgument::Parameter(value.clone())
                                 }
                             };
-                            Ok(ClientVmCapabilityDeclaration::new(
-                                requirement.name(),
-                                argument,
-                            ))
+                            Ok(ClientVmCapabilityDeclaration::new(name.as_str(), argument))
                         })
                         .collect::<Result<Vec<_>, ClientVmAdmissionError>>()?;
                     requirements.sort_unstable();
@@ -324,7 +325,14 @@ pub fn admit_client_function(
             Ok(())
         },
     )?;
+    // Structural, digest, decode, and semantic checks must win over
+    // cancellation; cancellation is the final pre-bind host fence.
+    if host.is_cancelled() {
+        return Err(ClientVmAdmissionError::HostCancelled);
+    }
     host.bind_root(
+        root_binding.function,
+        root_binding.function_revision,
         root_binding.revision_pair,
         root_binding.security_context_digest,
     )
@@ -769,12 +777,14 @@ fn statements_contain_external_contract(statements: &[ControlFlowStatement]) -> 
 }
 
 /// An error raised while advancing Stage 1 host-control epochs or binding a
-/// root to its first authorised revision and security context.
+/// root to its first authorised function, function revision, database revision,
+/// and security context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientVmHostContextError {
     /// The epoch reached the end of its checked integer range.
     EpochExhausted,
-    /// The root was already bound to a different revision or security digest.
+    /// The root was already bound to a different function, function revision,
+    /// revision pair, or security digest.
     RootBindingMismatch,
 }
 
@@ -793,6 +803,8 @@ impl std::error::Error for ClientVmHostContextError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClientVmRootBinding {
+    function: [u8; 16],
+    function_revision: [u8; 16],
     revision_pair: [[u8; 16]; 2],
     security_context_digest: [u8; 32],
 }
@@ -860,7 +872,8 @@ impl ClientVmHostContext {
             return Err(ClientVmIdentityError::InvalidParent);
         }
         let child = self.invocation_registry.allocate_child(parent)?;
-        debug_assert!(self.owned_invocations.insert(child));
+        let inserted = self.owned_invocations.insert(child);
+        debug_assert!(inserted);
         Ok(child)
     }
 
@@ -892,10 +905,14 @@ impl ClientVmHostContext {
 
     fn check_root_binding(
         &self,
+        function: [u8; 16],
+        function_revision: [u8; 16],
         revision_pair: [[u8; 16]; 2],
         security_context_digest: [u8; 32],
     ) -> Result<(), ClientVmHostContextError> {
         let binding = ClientVmRootBinding {
+            function,
+            function_revision,
             revision_pair,
             security_context_digest,
         };
@@ -907,11 +924,20 @@ impl ClientVmHostContext {
 
     fn bind_root(
         &mut self,
+        function: [u8; 16],
+        function_revision: [u8; 16],
         revision_pair: [[u8; 16]; 2],
         security_context_digest: [u8; 32],
     ) -> Result<(), ClientVmHostContextError> {
-        self.check_root_binding(revision_pair, security_context_digest)?;
+        self.check_root_binding(
+            function,
+            function_revision,
+            revision_pair,
+            security_context_digest,
+        )?;
         self.root_binding = Some(ClientVmRootBinding {
+            function,
+            function_revision,
             revision_pair,
             security_context_digest,
         });
@@ -920,6 +946,11 @@ impl ClientVmHostContext {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_root_binding(&self) -> bool {
+        self.root_binding.is_some()
     }
 
     /// Returns the immutable runtime-offer witness.
@@ -961,7 +992,9 @@ impl ClientVmHostContext {
             return false;
         };
         let host = admission.host();
-        binding.revision_pair == admission.identity().revision_pair()
+        binding.function == admission.identity().function()
+            && binding.function_revision == admission.identity().function_revision()
+            && binding.revision_pair == admission.identity().revision_pair()
             && binding.security_context_digest == host.security_context_digest()
             && host.policy_epoch() == self.policy_epoch
             && host.runtime_offer_digest() == self.runtime_offer.digest()
@@ -1030,10 +1063,10 @@ mod tests {
         let mut other =
             ClientVmHostContext::new(&registry, runtime_offer(), limits()).expect("other context");
         context
-            .bind_root([[1; 16], [2; 16]], [3; 32])
+            .bind_root([11; 16], [12; 16], [[1; 16], [2; 16]], [3; 32])
             .expect("context root binding");
         other
-            .bind_root([[1; 16], [2; 16]], [3; 32])
+            .bind_root([11; 16], [12; 16], [[1; 16], [2; 16]], [3; 32])
             .expect("other root binding");
         let root = context.root_invocation_id();
         let child = context.allocate_child(root).expect("child identity");
@@ -1073,12 +1106,32 @@ mod tests {
     }
 
     #[test]
+    fn host_context_retains_nested_children_for_release_leases() {
+        let registry = ClientVmInvocationRegistry::new();
+        let mut context =
+            ClientVmHostContext::new(&registry, runtime_offer(), limits()).expect("host context");
+        context
+            .bind_root([13; 16], [14; 16], [[8; 16], [9; 16]], [10; 32])
+            .expect("context root binding");
+        let root = context.root_invocation_id();
+        let child = context.allocate_child(root).expect("child identity");
+        let grandchild = context.allocate_child(child).expect("grandchild identity");
+        let child_lease = context.issue_ephemeral_lease(child).expect("child lease");
+        let grandchild_lease = context
+            .issue_ephemeral_lease(grandchild)
+            .expect("grandchild lease");
+
+        assert_eq!(child_lease.invocation_id(), child.get());
+        assert_eq!(grandchild_lease.invocation_id(), grandchild.get());
+    }
+
+    #[test]
     fn host_epochs_invalidate_leases_and_close_cancelled_roots() {
         let registry = ClientVmInvocationRegistry::new();
         let mut context =
             ClientVmHostContext::new(&registry, runtime_offer(), limits()).expect("host context");
         context
-            .bind_root([[5; 16], [6; 16]], [7; 32])
+            .bind_root([15; 16], [16; 16], [[5; 16], [6; 16]], [7; 32])
             .expect("context root binding");
         let root = context.root_invocation_id();
         let mut lease = context.issue_ephemeral_lease(root).expect("root lease");
@@ -1113,18 +1166,26 @@ mod tests {
     }
 
     #[test]
-    fn root_binding_is_immutable_after_first_bind() {
+    fn root_binding_requires_exact_function_and_revision_identity() {
         let registry = ClientVmInvocationRegistry::new();
         let mut context =
             ClientVmHostContext::new(&registry, runtime_offer(), limits()).expect("host context");
         context
-            .bind_root([[1; 16], [2; 16]], [3; 32])
+            .bind_root([17; 16], [18; 16], [[1; 16], [2; 16]], [3; 32])
             .expect("initial root binding");
         context
-            .check_root_binding([[1; 16], [2; 16]], [3; 32])
+            .check_root_binding([17; 16], [18; 16], [[1; 16], [2; 16]], [3; 32])
             .expect("same root binding");
         assert_eq!(
-            context.check_root_binding([[4; 16], [2; 16]], [3; 32]),
+            context.check_root_binding([19; 16], [18; 16], [[1; 16], [2; 16]], [3; 32]),
+            Err(ClientVmHostContextError::RootBindingMismatch)
+        );
+        assert_eq!(
+            context.check_root_binding([17; 16], [20; 16], [[1; 16], [2; 16]], [3; 32]),
+            Err(ClientVmHostContextError::RootBindingMismatch)
+        );
+        assert_eq!(
+            context.check_root_binding([17; 16], [18; 16], [[4; 16], [2; 16]], [3; 32]),
             Err(ClientVmHostContextError::RootBindingMismatch)
         );
     }

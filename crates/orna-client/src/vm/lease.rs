@@ -284,12 +284,33 @@ impl EphemeralCapabilityLease {
     /// Commits the effect (`EffectStarted` -> `Committed`).
     ///
     /// Both caller-supplied fences must match the immutable lease snapshot.
+    /// Once `EffectStarted` is reached, a later live fence advancement is a
+    /// post-start revocation and cannot make the known effect uncommittable:
+    /// the committed terminal outcome wins.
     /// A mismatch leaves the lease unchanged.
     pub fn commit(&mut self, policy_fence: u64, cancellation_fence: u64) -> Result<(), LeaseError> {
         self.require_state(LeaseState::EffectStarted, "commit")?;
-        self.require_fences(policy_fence, cancellation_fence)?;
+        self.require_snapshot_fences(policy_fence, cancellation_fence)?;
         self.snapshot.state = LeaseState::Committed;
         Ok(())
+    }
+
+    fn require_snapshot_fences(
+        &self,
+        policy_fence: u64,
+        cancellation_fence: u64,
+    ) -> Result<(), LeaseError> {
+        let expected = (self.snapshot.policy_fence, self.snapshot.cancellation_fence);
+        let supplied = (policy_fence, cancellation_fence);
+        if supplied == expected {
+            return Ok(());
+        }
+        Err(LeaseError::FenceMismatch {
+            expected_policy_fence: expected.0,
+            actual_policy_fence: supplied.0,
+            expected_cancellation_fence: expected.1,
+            actual_cancellation_fence: supplied.1,
+        })
     }
 
     /// Classifies the effect outcome as uncertain (`EffectStarted` ->
@@ -562,6 +583,40 @@ mod tests {
         assert!(matches!(mismatch, LeaseError::FenceMismatch { .. }));
         assert_eq!(lease.state(), LeaseState::EffectStarted);
         lease.commit(POLICY_FENCE, CANCELLATION_FENCE).unwrap();
+    }
+    #[test]
+    fn started_effect_commits_after_live_fence_advances() {
+        let fences = LeaseFences::new(POLICY_FENCE, CANCELLATION_FENCE);
+        let mut lease = EphemeralCapabilityLease::new_with_fences(
+            7,
+            POLICY_FENCE,
+            CANCELLATION_FENCE,
+            Arc::clone(&fences),
+        )
+        .unwrap();
+        lease.acquire().unwrap();
+        lease.effect_intent().unwrap();
+        lease
+            .effect_started(POLICY_FENCE, CANCELLATION_FENCE)
+            .unwrap();
+        fences.set_policy(POLICY_FENCE + 1);
+
+        let mismatch = lease
+            .commit(POLICY_FENCE, CANCELLATION_FENCE + 1)
+            .unwrap_err();
+        assert_eq!(
+            mismatch,
+            LeaseError::FenceMismatch {
+                expected_policy_fence: POLICY_FENCE,
+                actual_policy_fence: POLICY_FENCE,
+                expected_cancellation_fence: CANCELLATION_FENCE,
+                actual_cancellation_fence: CANCELLATION_FENCE + 1,
+            }
+        );
+        assert_eq!(lease.state(), LeaseState::EffectStarted);
+
+        lease.commit(POLICY_FENCE, CANCELLATION_FENCE).unwrap();
+        assert_eq!(lease.state(), LeaseState::Committed);
     }
 
     #[test]
