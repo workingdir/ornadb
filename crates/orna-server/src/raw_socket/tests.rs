@@ -450,6 +450,7 @@ fn resource_terminal_provenance_controls_cancellation_synthesis_and_late_frame_p
             .and_then(|completion| completion.actions.front()),
         Some(ResourceServerFrame::Cancelled(frame))
             if frame.request_id == request.request_id
+                && frame.target_revision == request.target_revision
                 && frame.reason == ResourceCancellationCode::ClientRequested
     ));
     assert!(cancelled.is_empty());
@@ -512,6 +513,7 @@ fn resource_terminal_provenance_controls_cancellation_synthesis_and_late_frame_p
             .and_then(|completion| completion.actions.back()),
         Some(ResourceServerFrame::Completed(frame))
             if frame.request_id == committed_request.request_id
+                && frame.target_revision == committed_request.target_revision
     ));
     assert!(cancelled.is_empty());
 }
