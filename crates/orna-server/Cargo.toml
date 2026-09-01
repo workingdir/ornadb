@@ -33,3 +33,4 @@ tokio-postgres = "0.7.18"
 
 [dev-dependencies]
 orna-postgres = { path = "../orna-postgres", features = ["test-hooks"] }
+turso = { version = "0.8.0-pre.7", default-features = false }

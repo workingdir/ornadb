@@ -22,8 +22,10 @@ use orna_protocol::{
     encode_catalogue_client_frame, encode_client_frame, encode_value,
 };
 use orna_server::{
-    InstalledUserStateChange, InstalledUserStateErrorKind, InstalledUserStateOperation,
-    InstalledUserStateRequest, run_sqlite_user_state,
+    InstalledSecurityAdminErrorKind, InstalledSecurityAdminOperation,
+    InstalledSecurityAdminRequest, InstalledUserStateChange, InstalledUserStateErrorKind,
+    InstalledUserStateOperation, InstalledUserStateRequest, run_sqlite_security_admin,
+    run_sqlite_security_grant_execute, run_sqlite_user_state,
 };
 use orna_sqlite::{SqliteConfig, SqliteRevisionStore};
 use orna_standard::INTEGER_TYPE_ID;
@@ -43,6 +45,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use turso::{Builder, Connection, Value as SqliteValue};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -302,6 +305,146 @@ fn sqlite_active(database: &Path) -> ActiveDatabaseRevision {
             .recover()
             .await
             .expect("recover SQLite active revision")
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SqliteSecurityRowCounts {
+    principals: i64,
+    memberships: i64,
+    execute_grants: i64,
+    local_peer_credentials: i64,
+    privilege_grants: i64,
+}
+
+fn apply_sqlite_fixture(directory: &Path, database: &Path) {
+    let source = directory.join("security-tamper.orna");
+    fs::write(&source, SERVER_FUNCTION_FIXTURE).expect("write SQLite tamper source fixture");
+    let applied = run_orna(
+        directory,
+        &source_arguments(database, "apply", &source),
+    )
+    .expect("apply SQLite tamper source fixture");
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "SQLite tamper source apply must succeed: {applied:?}"
+    );
+}
+
+fn tamper_sqlite_ledger_digest(database: &Path) {
+    let path = database
+        .to_str()
+        .expect("SQLite tamper database path is UTF-8");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite tamper runtime");
+    runtime.block_on(async {
+        let database = Builder::new_local(path)
+            .build()
+            .await
+            .expect("open SQLite tamper database");
+        let connection = database.connect().expect("connect SQLite tamper database");
+        let updated = connection
+            .execute(
+                "UPDATE orna_application_migrations
+                 SET digest = ?1
+                 WHERE ordinal = 0",
+                [SqliteValue::Blob(vec![0; 32])],
+            )
+            .await
+            .expect("tamper SQLite migration digest");
+        assert_eq!(
+            updated, 1,
+            "SQLite tamper ledger row must be updated exactly once"
+        );
+    });
+}
+
+fn tamper_sqlite_unknown_execute_grant(database: &Path) {
+    let path = database
+        .to_str()
+        .expect("SQLite tamper database path is UTF-8");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite security tamper runtime");
+    runtime.block_on(async {
+        let database = Builder::new_local(path)
+            .build()
+            .await
+            .expect("open SQLite security tamper database");
+        let connection = database
+            .connect()
+            .expect("connect SQLite security tamper database");
+        connection
+            .execute("PRAGMA foreign_keys = OFF", ())
+            .await
+            .expect("disable SQLite foreign keys for tamper fixture");
+        let inserted = connection
+            .execute(
+                "INSERT INTO orna_security_execute_grants
+                 (grantee_id, function_id)
+                 VALUES (?1, ?2)",
+                [
+                    SqliteValue::Blob(vec![0x91; 16]),
+                    SqliteValue::Blob(vec![0x92; 16]),
+                ],
+            )
+            .await
+            .expect("tamper SQLite execute grant");
+        assert_eq!(
+            inserted, 1,
+            "unknown SQLite execute grant must be inserted exactly once"
+        );
+    });
+}
+
+async fn sqlite_row_count(connection: &Connection, table: &str) -> i64 {
+    let mut rows = connection
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .expect("query SQLite security row count");
+    rows.next()
+        .await
+        .expect("read SQLite security row count")
+        .expect("SQLite security row count result")
+        .get::<i64>(0)
+        .expect("decode SQLite security row count")
+}
+
+fn sqlite_security_row_counts(database: &Path) -> SqliteSecurityRowCounts {
+    let path = database
+        .to_str()
+        .expect("SQLite security count database path is UTF-8");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("SQLite security count runtime");
+    runtime.block_on(async {
+        let database = Builder::new_local(path)
+            .build()
+            .await
+            .expect("open SQLite security count database");
+        let connection = database
+            .connect()
+            .expect("connect SQLite security count database");
+        SqliteSecurityRowCounts {
+            principals: sqlite_row_count(&connection, "orna_security_principals").await,
+            memberships: sqlite_row_count(&connection, "orna_security_role_memberships").await,
+            execute_grants: sqlite_row_count(&connection, "orna_security_execute_grants").await,
+            local_peer_credentials: sqlite_row_count(
+                &connection,
+                "orna_security_local_peer_credentials",
+            )
+            .await,
+            privilege_grants: sqlite_row_count(
+                &connection,
+                "orna_security_privilege_grants",
+            )
+            .await,
+        }
     })
 }
 
@@ -822,6 +965,111 @@ fn local_sqlite_user_state_rejects_uninstalled_schema() {
         .expect_err("uninstalled USER state schema must be rejected");
     assert_eq!(error.kind(), InstalledUserStateErrorKind::State);
     assert!(error.message().contains("not installed"));
+}
+
+fn assert_sqlite_security_admin_rejects_without_provisioning(database: &Path) {
+    let before = sqlite_security_row_counts(database);
+    let error = run_sqlite_security_admin(
+        database.to_owned(),
+        InstalledSecurityAdminRequest::new(InstalledSecurityAdminOperation::SessionPrincipal),
+        &mut Vec::new(),
+    )
+    .expect_err("tampered SQLite security-admin state must be rejected");
+    assert_eq!(
+        error.kind(),
+        InstalledSecurityAdminErrorKind::Internal,
+        "tampered security-admin state must remain an internal recovery failure"
+    );
+    assert_eq!(
+        sqlite_security_row_counts(database),
+        before,
+        "rejected security-admin operation must not provision durable security rows"
+    );
+}
+
+fn assert_sqlite_security_grant_rejects_without_provisioning(database: &Path) {
+    let before = sqlite_security_row_counts(database);
+    let error = run_sqlite_security_grant_execute(
+        database.to_owned(),
+        FunctionId::from_bytes([0xa3; 16]),
+    )
+    .expect_err("tampered SQLite grant-execute state must be rejected");
+    assert_eq!(
+        error.kind(),
+        InstalledSecurityAdminErrorKind::Internal,
+        "tampered grant-execute state must remain an internal recovery failure"
+    );
+    assert_eq!(
+        sqlite_security_row_counts(database),
+        before,
+        "rejected grant-execute operation must not provision durable security rows"
+    );
+}
+
+#[test]
+fn local_sqlite_security_admin_rejects_tampered_recovery_without_provisioning() {
+    let directory = TestDirectory::new("security-admin-recovery-tamper")
+        .expect("scratch directory");
+    let database = directory.path().join("security-admin-recovery-tamper.sqlite");
+    apply_sqlite_fixture(directory.path(), &database);
+    let before_tamper = sqlite_security_row_counts(&database);
+    tamper_sqlite_ledger_digest(&database);
+    assert_eq!(
+        sqlite_security_row_counts(&database),
+        before_tamper,
+        "migration-ledger tamper must not alter security rows"
+    );
+
+    assert_sqlite_security_admin_rejects_without_provisioning(&database);
+}
+
+#[test]
+fn local_sqlite_security_grant_rejects_tampered_recovery_without_provisioning() {
+    let directory = TestDirectory::new("security-grant-recovery-tamper")
+        .expect("scratch directory");
+    let database = directory.path().join("security-grant-recovery-tamper.sqlite");
+    apply_sqlite_fixture(directory.path(), &database);
+    let before_tamper = sqlite_security_row_counts(&database);
+    tamper_sqlite_ledger_digest(&database);
+    assert_eq!(
+        sqlite_security_row_counts(&database),
+        before_tamper,
+        "migration-ledger tamper must not alter security rows"
+    );
+
+    assert_sqlite_security_grant_rejects_without_provisioning(&database);
+}
+
+#[test]
+fn local_sqlite_security_admin_rejects_malformed_security_without_provisioning() {
+    let directory = TestDirectory::new("security-admin-security-tamper")
+        .expect("scratch directory");
+    let database = directory.path().join("security-admin-security-tamper.sqlite");
+    apply_sqlite_fixture(directory.path(), &database);
+    tamper_sqlite_unknown_execute_grant(&database);
+    let before = sqlite_security_row_counts(&database);
+    assert_eq!(
+        before.execute_grants, 1,
+        "security tamper fixture must contain one malformed execute grant"
+    );
+
+    assert_sqlite_security_admin_rejects_without_provisioning(&database);
+}
+
+#[test]
+fn local_sqlite_security_grant_rejects_malformed_security_without_provisioning() {
+    let directory = TestDirectory::new("security-grant-security-tamper")
+        .expect("scratch directory");
+    let database = directory.path().join("security-grant-security-tamper.sqlite");
+    apply_sqlite_fixture(directory.path(), &database);
+    tamper_sqlite_unknown_execute_grant(&database);
+    let before = sqlite_security_row_counts(&database);
+    assert_eq!(
+        before.execute_grants, 1,
+        "security tamper fixture must contain one malformed execute grant"
+    );
+
+    assert_sqlite_security_grant_rejects_without_provisioning(&database);
 }
 
 #[test]
