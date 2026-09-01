@@ -515,6 +515,7 @@ fn serve_two_scalar_test_requests(
 enum SocketTerminal {
     Completed,
     Failed(CallFailure),
+    Cancelled(ResourceCancellationCode),
 }
 
 fn serve_one_terminal_test_request(
@@ -565,6 +566,12 @@ fn serve_one_terminal_test_request(
             request_id: request.request_id,
             target_revision: active.pair(),
             failure,
+        }),
+        SocketTerminal::Cancelled(reason) => ResourceServerFrame::Cancelled(ResourceCancelled {
+            stream_id: request.stream_id,
+            request_id: request.request_id,
+            target_revision: request.target_revision,
+            reason,
         }),
     };
     let encoded = encode_resource_server_frame(&active, &registry, &terminal)
@@ -1503,6 +1510,75 @@ fn socket_transport_retains_nested_identity_for_terminal_failure() {
             nested_invocation_id: Some(actual),
         } if actual == nested_invocation_id
     ));
+    peer_thread.join().expect("resource peer");
+}
+
+#[test]
+fn socket_transport_retains_nested_identity_for_terminal_cancellation() {
+    let (active, registry) = transport_test_context();
+    let request = transport_test_request(active.pair(), 1);
+    let accepted_identity = (request.stream_id, request.request_id, request.target_revision);
+    let nested_invocation_id = InvocationId::from_bytes([0x53; 16]);
+    let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
+    let peer_thread = thread::spawn({
+        let peer_active = active.clone();
+        let peer_registry = registry.clone();
+        move || {
+            serve_one_terminal_test_request(
+                peer,
+                peer_active,
+                peer_registry,
+                ProtocolResourceKind::Single,
+                nested_invocation_id,
+                SocketTerminal::Cancelled(ResourceCancellationCode::ServerRequested),
+            );
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let (completion_sender, _completion_receiver) = mpsc::channel(1);
+    let (_control_sender, controls) = mpsc::unbounded_channel();
+    let result = runtime.block_on(run_resource_transport(
+        client,
+        false,
+        ResourceProtocolConnection::new(),
+        active.clone(),
+        registry.clone(),
+        request.clone(),
+        ResolvedType::Scalar(StandardScalar::Integer),
+        ProtocolResourceKind::Single,
+        None,
+        controls,
+        &completion_sender,
+    ));
+    let ResourceTransportRun {
+        stream: _stream,
+        mut protocol,
+        outcome,
+    } = result.expect("cancelled transport run");
+    assert!(matches!(
+        outcome,
+        ResourceTransportOutcome::Cancelled {
+            nested_invocation_id: Some(actual),
+        } if actual == nested_invocation_id
+    ));
+    assert_eq!(
+        protocol
+            .apply_constructed(
+                &active,
+                &registry,
+                ResourceServerFrame::Cancelled(ResourceCancelled {
+                    stream_id: accepted_identity.0,
+                    request_id: accepted_identity.1,
+                    target_revision: accepted_identity.2,
+                    reason: ResourceCancellationCode::ServerRequested,
+                }),
+            )
+            .expect("matching late cancellation identity"),
+        orna_protocol::ResourceFrameDisposition::DroppedLate
+    );
     peer_thread.join().expect("resource peer");
 }
 
