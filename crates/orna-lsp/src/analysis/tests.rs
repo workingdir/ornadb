@@ -798,6 +798,56 @@ fn qualified_type_navigation_consumes_line_comments_between_components() {
     );
 }
 
+#[test]
+fn quoted_top_level_references_do_not_include_same_path_fields() {
+    let text = concat!(
+        "CREATE SCHEMA \"b\";\n",
+        "CREATE TYPE \"b\".\"item\" AS OBJECT (\"item\" BOOLEAN);\n",
+        "CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS\n",
+        "SELECT \"b\".\"item\" FROM \"b\".\"item\" \"b\";\n",
+    );
+    let document = Document::new(
+        "file:///quoted-top-level-reference-scope.orna".parse().unwrap(),
+        text.to_owned(),
+        1,
+    );
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_type_declaration = text
+        .find("CREATE TYPE \"b\".\"item\"")
+        .expect("quoted b type declaration")
+        + "CREATE TYPE ".len();
+    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use")
+        + "FROM ".len();
+    let b_type_final = b_type_use + "\"b\".".len();
+
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+    )
+    .expect("quoted top-level type definition");
+    assert_eq!(definition.range.start, mapper.position(b_type_declaration));
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_type_declaration + "\"b\".".len()),
+            mapper.position(b_type_final),
+        ],
+        "same-path quoted field leaked into top-level references: {references:?}",
+    );
+}
+
 
 #[test]
 fn qualified_function_navigation_uses_full_path_for_hover_definition_and_references() {
