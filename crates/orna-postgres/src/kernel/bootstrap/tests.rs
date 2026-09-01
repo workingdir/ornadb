@@ -15,7 +15,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         validated_migration_registry()
             .expect("registry is valid")
             .len(),
-        47
+        48
     );
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[1].version, 2);
@@ -62,6 +62,9 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert_eq!(MIGRATIONS[42].version, 43);
     assert_eq!(MIGRATIONS[43].version, 44);
     assert_eq!(MIGRATIONS[44].version, 45);
+    assert_eq!(MIGRATIONS[45].version, 46);
+    assert_eq!(MIGRATIONS[46].version, 47);
+    assert_eq!(MIGRATIONS[47].version, 48);
     assert_eq!(MIGRATIONS[33].name, "resource request identity history");
     assert_eq!(MIGRATIONS[34].name, "resource audit target authorities");
     assert_eq!(MIGRATIONS[35].name, "sealed Inspector value types");
@@ -91,6 +94,10 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert_eq!(MIGRATIONS[44].name, "inspect snapshot observer context");
     assert_eq!(MIGRATIONS[45].name, "application_migrations");
     assert_eq!(MIGRATIONS[46].name, "application migration ledger baseline");
+    assert_eq!(
+        MIGRATIONS[47].name,
+        "security admin audit boundary repair"
+    );
     assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
     assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
     assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -160,6 +167,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert!(MIGRATIONS[44].data_step.is_none());
     assert!(MIGRATIONS[45].data_step.is_none());
     assert!(MIGRATIONS[46].data_step.is_some());
+    assert!(MIGRATIONS[47].data_step.is_none());
 }
 
 #[test]
@@ -265,7 +273,7 @@ fn anonymous_do_scanner_honors_standard_conforming_strings_mode() {
 }
 
 #[test]
-fn legacy_migration_checksums_are_scoped_to_versions_23_29_30_and_43() {
+fn legacy_migration_checksums_are_scoped_to_versions_23_28_29_30_and_43() {
     let expected_legacy_checksums = [
         (
             23_i64,
@@ -273,6 +281,14 @@ fn legacy_migration_checksums_are_scoped_to_versions_23_29_30_and_43() {
                 0x3c, 0xa6, 0x3b, 0x0c, 0xc4, 0xf2, 0x6d, 0x91, 0x30, 0x5d, 0xcc, 0xd7, 0xda, 0xdc,
                 0x50, 0x64, 0xfe, 0xfc, 0xfc, 0xf0, 0x7c, 0x5b, 0x2b, 0x22, 0x6e, 0x92, 0x0b, 0xbf,
                 0x88, 0xd0, 0xed, 0x89,
+            ],
+        ),
+        (
+            28_i64,
+            [
+                0x39, 0x79, 0x73, 0x8e, 0x96, 0x01, 0xfa, 0x26, 0x42, 0xe0, 0x1d, 0x84, 0x77, 0xa8,
+                0x9f, 0x4b, 0xa1, 0xfd, 0x13, 0x26, 0x8c, 0xd7, 0x97, 0x2a, 0x94, 0x04, 0x4c, 0x61,
+                0x4d, 0xaa, 0x6b, 0x51,
             ],
         ),
         (
@@ -320,7 +336,7 @@ fn legacy_migration_checksums_are_scoped_to_versions_23_29_30_and_43() {
 
     assert!(legacy_migration_checksum(22).is_none());
     assert!(legacy_migration_checksum(24).is_none());
-    assert!(legacy_migration_checksum(28).is_none());
+    assert!(legacy_migration_checksum(27).is_none());
     assert!(legacy_migration_checksum(31).is_none());
     assert!(legacy_migration_checksum(44).is_none());
 }
@@ -328,15 +344,14 @@ fn legacy_migration_checksums_are_scoped_to_versions_23_29_30_and_43() {
 #[test]
 fn unrelated_migration_checksum_drift_is_rejected() {
     for migration in MIGRATIONS {
-        if matches!(migration.version, 23 | 29 | 30 | 43) {
+        if matches!(migration.version, 23 | 28 | 29 | 30 | 43) {
             continue;
         }
-
         let mut drifted_checksum = migration_checksum(migration);
         drifted_checksum[0] ^= 0xff;
         assert!(!migration_checksum_matches(migration, &drifted_checksum));
     }
-    for version in [23_i64, 29, 30, 43] {
+    for version in [23_i64, 28, 29, 30, 43] {
         let migration = &MIGRATIONS[usize::try_from(version - 1).expect("valid version")];
         let mut drifted_current_checksum = migration_checksum(migration);
         drifted_current_checksum[0] ^= 0xff;
@@ -350,6 +365,11 @@ fn unrelated_migration_checksum_drift_is_rejected() {
     assert!(!migration_checksum_matches(
         &MIGRATIONS[28],
         legacy_23_checksum
+    ));
+    let legacy_28_checksum = legacy_migration_checksum(28).expect("version 28 compatibility");
+    assert!(!migration_checksum_matches(
+        &MIGRATIONS[22],
+        legacy_28_checksum
     ));
 }
 
@@ -765,6 +785,41 @@ fn security_admin_privilege_grants_is_the_registered_version_twenty_eight() {
             .sql
             .contains("DROP CONSTRAINT security_audit_events_denial_reason_check")
     );
+}
+
+#[test]
+fn security_admin_audit_boundary_repair_is_the_registered_version_forty_eight() {
+    let migration = &MIGRATIONS[47];
+
+    assert_eq!(migration.version, 48);
+    assert_eq!(migration.name, "security admin audit boundary repair");
+    assert!(migration.data_step.is_none());
+    assert!(migration.sql.contains(
+        "DROP CONSTRAINT IF EXISTS security_audit_events_security_admin_detail_check"
+    ));
+    assert!(migration.sql.contains(
+        "ADD CONSTRAINT security_audit_events_security_admin_detail_check CHECK"
+    ));
+
+    for (target, operation) in [
+        ("43", "create_principal"),
+        ("44", "disable_principal"),
+        ("45", "create_role"),
+        ("46", "grant_role"),
+        ("47", "revoke_role"),
+        ("48", "grant_privilege"),
+        ("49", "revoke_privilege"),
+    ] {
+        assert!(migration.sql.contains(&format!(
+            "function_id = decode('000000000000000000000000000000{target}', 'hex')"
+        )));
+        assert!(migration
+            .sql
+            .contains(&format!("denial_reason = 'security_admin:{operation}'")));
+        assert!(migration.sql.contains(&format!(
+            "denial_reason = 'security_admin:{operation}:missing-privilege'"
+        )));
+    }
 }
 
 #[tokio::test]
