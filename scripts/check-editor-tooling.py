@@ -51,6 +51,20 @@ QUALIFIED_NAME_HIGHLIGHT_FORBIDDEN = {
     "function": ("action_fixture",),
     "type": ("action_fixture",),
 }
+TYPE_REFERENCE_HIGHLIGHT_FIXTURE_NAME = "qualified_type_references.orna"
+TYPE_REFERENCE_HIGHLIGHT_EXPECTATIONS = {
+    "type": (
+        "product_test.direct",
+        "product_test.referenced",
+        "product_test.collection",
+        "product_test.optional_value",
+        "product_test.returned_type",
+    ),
+    "namespace": ("ordinary_namespace.member",),
+}
+TYPE_REFERENCE_HIGHLIGHT_FORBIDDEN = {
+    "type": ("ordinary_namespace.member", "ordinary_namespace"),
+}
 TEXTMATE_PARITY_COMPARABLE_KEYS = ("scopeName", "patterns", "repository")
 # Only editor metadata may differ; every other root and nested grammar rule is compared.
 TEXTMATE_PARITY_ALLOWED_ROOT_KEYS = frozenset({"$schema", "name"})
@@ -1006,6 +1020,99 @@ def check_alter_rename_highlights(
             14,
         )
     )
+
+
+def check_type_reference_highlights(
+    tree_sitter: str,
+    tree_sitter_directory: Path,
+    repository: Path,
+) -> bool:
+    """Check qualified type captures and namespace-only expression references."""
+    if not check_highlight_fixture(
+        tree_sitter,
+        tree_sitter_directory,
+        repository,
+        TYPE_REFERENCE_HIGHLIGHT_FIXTURE_NAME,
+        7,
+    ):
+        return False
+
+    highlights_path = tree_sitter_directory / "queries" / "highlights.scm"
+    fixture_path = (
+        tree_sitter_directory / "test" / "highlight" / TYPE_REFERENCE_HIGHLIGHT_FIXTURE_NAME
+    )
+    for path in (highlights_path, fixture_path):
+        if not path.is_file():
+            log(
+                f"required type-reference highlight input is missing: "
+                f"{display_path(path, repository)}",
+                error=True,
+            )
+            return False
+
+    result = run_command(
+        [
+            tree_sitter,
+            "query",
+            "--grammar-path",
+            str(tree_sitter_directory),
+            "--captures",
+            str(highlights_path),
+            str(fixture_path),
+        ],
+        cwd=tree_sitter_directory,
+        label="tree-sitter qualified type highlight query",
+    )
+    if result is None or result.returncode != 0:
+        status = "could not start" if result is None else f"exited with status {result.returncode}"
+        log(f"qualified type highlight query failed ({status})", error=True)
+        return False
+
+    capture_line = re.compile(
+        r"capture:\s+\d+\s+-\s+(?P<name>[^,]+),.*text: `(?P<text>[^`]*)`"
+    )
+    captures = [
+        (match.group("name"), match.group("text"))
+        for line in result.stdout.splitlines()
+        if (match := capture_line.search(line)) is not None
+    ]
+    for capture_name, expected_texts in TYPE_REFERENCE_HIGHLIGHT_EXPECTATIONS.items():
+        observed = [text for name, text in captures if name == capture_name]
+        if capture_name == "type":
+            if observed != list(expected_texts):
+                log(
+                    "qualified type highlight query did not capture type references in order: "
+                    f"expected {expected_texts!r}, observed {observed!r}",
+                    error=True,
+                )
+                return False
+        else:
+            missing = [text for text in expected_texts if text not in observed]
+            if missing:
+                log(
+                    "qualified type highlight query did not capture namespace references: "
+                    f"missing {missing!r}, observed {observed!r}",
+                    error=True,
+                )
+                return False
+
+    for capture_name, forbidden_texts in TYPE_REFERENCE_HIGHLIGHT_FORBIDDEN.items():
+        observed = [
+            text
+            for name, text in captures
+            if name == capture_name and text in forbidden_texts
+        ]
+        if observed:
+            log(
+                "qualified type highlight query over-captured ordinary namespace references: "
+                f"{capture_name} {observed!r}",
+                error=True,
+            )
+            return False
+
+    log("qualified type captures and namespace-only expression references passed")
+    return True
+
 
 def check_qualified_name_highlights(
     tree_sitter: str,
@@ -2465,6 +2572,10 @@ def main() -> int:
         return 1
 
     if not check_alter_rename_highlights(
+        tree_sitter, tree_sitter_directory, repository
+    ):
+        return 1
+    if not check_type_reference_highlights(
         tree_sitter, tree_sitter_directory, repository
     ):
         return 1
