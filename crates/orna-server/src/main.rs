@@ -331,13 +331,12 @@ fn main() -> ExitCode {
                 orna_client::endpoint::DatabaseEndpoint::LocalPath { path } => {
                     orna_server::run_sqlite_invoke(path, request, &mut stdout, &mut stderr)
                 }
-                _ if endpoint_explicit => orna_server::run_installed_invoke_at(
+                _ => orna_server::run_installed_invoke_at(
                     &endpoint,
                     request,
                     &mut stdout,
                     &mut stderr,
                 ),
-                _ => orna_server::run_installed_invoke(request, &mut stdout, &mut stderr),
             };
             match result {
                 Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
