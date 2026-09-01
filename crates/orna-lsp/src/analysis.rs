@@ -533,7 +533,9 @@ fn dotted_name_separator(text: &str, start: usize, end: usize) -> bool {
                 return false;
             }
             index += 2;
-        } else if bytes.get(index..index + 2) == Some(b"//") {
+        } else if bytes.get(index..index + 2) == Some(b"//")
+            || bytes.get(index..index + 2) == Some(b"--")
+        {
             index += 2;
             while index < end && bytes[index] != b'\n' {
                 index += 1;
@@ -2298,7 +2300,7 @@ fn declaration_span_for_kind(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TopLevelDeclarationKind {
     Schema,
     Type,
@@ -2323,7 +2325,10 @@ fn top_level_declaration_kind(declaration: DeclarationRef<'_>) -> TopLevelDeclar
 enum ReferenceScope {
     /// A resolved top-level name and its full source-qualified path.
     TopLevel {
+        /// The declaration category used to validate quoted SQL tokens.
         declaration_kind: TopLevelDeclarationKind,
+        /// The selected token's highlighter kind for ordinary tokens.
+        selected_kind: HighlightKind,
         path: Vec<IdentifierKey>,
     },
     /// A parameter, state, or local inside one function.
@@ -2501,6 +2506,7 @@ fn reference_scope(
             .unwrap_or_else(|| vec![identifier_key(name)]);
         return ReferenceScope::TopLevel {
             declaration_kind: top_level_declaration_kind(declaration),
+            selected_kind: kind,
             path,
         };
     }
@@ -2541,6 +2547,41 @@ fn variable_reference_declaration_span(
     None
 }
 
+/// Resolves a quoted token's top-level role before including it in references.
+///
+/// Unlike declaration tokens, SQL quoted identifiers have no semantic role in
+/// the highlighter. Reject known field, alias, local, and target paths first,
+/// then use the same declaration lookup to keep a quoted token in its
+/// resolved schema/type/function category.
+fn quoted_top_level_token_matches_category(
+    parse: &Parse,
+    text: &str,
+    highlighted: &[orna_syntax::HighlightToken],
+    token: &orna_syntax::HighlightToken,
+    declaration_kind: TopLevelDeclarationKind,
+) -> bool {
+    let token_span = SourceSpan {
+        start: token.range.start,
+        end: token.range.end,
+    };
+    if field_reference_declaration_span(parse, text, highlighted, &token_span).is_some()
+        || sql_unresolved_field_or_alias(parse, &token_span)
+        || client_expression_part_in_parse(parse, &token_span).is_some()
+    {
+        return false;
+    }
+    let name = text[token.range.clone()].to_owned();
+    declaration_at_span(
+        parse,
+        text,
+        highlighted,
+        &name,
+        HighlightKind::QuotedIdentifier,
+        &token_span,
+    )
+    .is_some_and(|declaration| top_level_declaration_kind(declaration) == declaration_kind)
+}
+
 fn reference_token_in_scope(
     parse: &Parse,
     text: &str,
@@ -2558,27 +2599,33 @@ fn reference_token_in_scope(
     match scope {
         ReferenceScope::TopLevel {
             declaration_kind,
+            selected_kind,
             path,
         } => {
-            let kind_matches = match declaration_kind {
-                TopLevelDeclarationKind::Schema => matches!(
-                    token.kind,
-                    HighlightKind::NamespaceName | HighlightKind::QuotedIdentifier
-                ),
-                TopLevelDeclarationKind::Type => matches!(
-                    token.kind,
-                    HighlightKind::TypeName | HighlightKind::QuotedIdentifier
-                ),
-                TopLevelDeclarationKind::Function => matches!(
-                    token.kind,
-                    HighlightKind::FunctionName | HighlightKind::QuotedIdentifier
-                ),
-            };
-            kind_matches
-                && qualified_name_keys_at(text, highlighted, &token_span)
-                    .unwrap_or_else(|| vec![identifier_key(&text[token.range.clone()])])
-                    .as_slice()
-                    == path.as_slice()
+            let candidate_path = qualified_name_keys_at(text, highlighted, &token_span)
+                .unwrap_or_else(|| vec![identifier_key(&text[token.range.clone()])]);
+            if candidate_path.as_slice() != path.as_slice() {
+                return false;
+            }
+            if token.kind == HighlightKind::QuotedIdentifier {
+                return *selected_kind == HighlightKind::QuotedIdentifier
+                    && quoted_top_level_token_matches_category(
+                        parse,
+                        text,
+                        highlighted,
+                        token,
+                        *declaration_kind,
+                    );
+            }
+            if *selected_kind == HighlightKind::QuotedIdentifier {
+                let declaration_token_kind = match declaration_kind {
+                    TopLevelDeclarationKind::Schema => HighlightKind::NamespaceName,
+                    TopLevelDeclarationKind::Type => HighlightKind::TypeName,
+                    TopLevelDeclarationKind::Function => HighlightKind::FunctionName,
+                };
+                return token.kind == declaration_token_kind;
+            }
+            token.kind == *selected_kind
         }
         ReferenceScope::None => false,
         ReferenceScope::Variable {
