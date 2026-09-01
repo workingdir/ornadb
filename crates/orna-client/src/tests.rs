@@ -2421,7 +2421,10 @@ fn collect_fixture_expression_call_targets(
         ClientExpressionNode::Unary { expression, .. } => {
             collect_fixture_expression_call_targets(expression, targets);
         }
-        ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => {}
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            collect_fixture_expression_call_targets(expression, targets);
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }

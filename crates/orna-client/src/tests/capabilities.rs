@@ -703,6 +703,55 @@ fn expression_calls_reject_targets_absent_from_the_active_reference_set() {
         } if context.function() == first.id()
     ));
 }
+#[test]
+fn expression_preflight_rejects_unresolved_calls_nested_in_evaluate() {
+    let (active, function, pair, function_revision) = version_one_active(true);
+    let context = super::super::ClientExecutionContext {
+        pair,
+        function,
+        function_revision,
+        parent_invocation_id: InvocationId::new(),
+        observer_lineage: None,
+    };
+    let expression = orna_artifact::client_plan::ClientExpressionNode::Evaluate {
+        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Call {
+            function: FunctionId::from_bytes([0x91; 16]),
+            arguments: Vec::new(),
+        }),
+    };
+
+    let error = super::super::preflight_client_expression_calls(&active, &expression, context)
+        .expect_err("preflight must inspect calls nested inside Evaluate");
+
+    assert!(matches!(
+        error,
+        super::super::ClientExecutionError::ExpressionEvaluation {
+            context,
+            source: super::super::ClientExpressionError::InvalidCall,
+        } if context.function() == function
+    ));
+}
+
+#[test]
+fn expression_preflight_accepts_valid_calls_nested_in_evaluate() {
+    let (active, function, pair, function_revision) = version_two_client_call_active();
+    let context = super::super::ClientExecutionContext {
+        pair,
+        function,
+        function_revision,
+        parent_invocation_id: InvocationId::new(),
+        observer_lineage: None,
+    };
+    let expression = orna_artifact::client_plan::ClientExpressionNode::Evaluate {
+        expression: Box::new(orna_artifact::client_plan::ClientExpressionNode::Call {
+            function,
+            arguments: Vec::new(),
+        }),
+    };
+
+    super::super::preflight_client_expression_calls(&active, &expression, context)
+        .expect("preflight must retain valid calls nested inside Evaluate");
+}
 
 #[test]
 fn client_expression_call_depth_is_bounded_by_artifact_limit() {

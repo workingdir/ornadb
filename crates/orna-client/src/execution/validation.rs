@@ -854,7 +854,10 @@ fn collect_client_expression_call_targets(
         ClientExpressionNode::Unary { expression, .. } => {
             collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
         }
-        ClientExpressionNode::Input | ClientExpressionNode::Evaluate { .. } => {}
+        ClientExpressionNode::Input => {}
+        ClientExpressionNode::Evaluate { expression } => {
+            collect_client_expression_call_targets(active, expression, context, decoded_targets)?;
+        }
         ClientExpressionNode::String { .. }
         | ClientExpressionNode::Integer { .. }
         | ClientExpressionNode::Boolean { .. }
