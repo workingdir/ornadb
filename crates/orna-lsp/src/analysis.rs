@@ -14,7 +14,7 @@ use orna_compiler::{
     CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
     SourceLocation, check_standard_library_source,
 };
-use orna_core::catalogue::ValueTypePersistence;
+use orna_core::catalogue::{QualifiedSemanticName, ValueTypePersistence};
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
 use orna_syntax::FunctionReturnType;
@@ -1322,11 +1322,11 @@ fn client_target_function_path_at<'a>(
             .client_functions()
             .iter()
             .any(|candidate| target_path_matches_name(path, &candidate.name));
-    // The retained standard library uses `std` as its target root. Application
-    // roots, including external `sys` functions, are present in this parse.
+    // A target root bound to a parameter or local is an ordinary field path,
+    // even when its spelling is `std`; only an unbound `std` root denotes
+    // the standard-library constructor namespace.
     if client_root_binding(declaration, root, ClientExpressionPart::FieldRoot(root)).is_some()
         && !target_is_declared
-        && !identifier_spelling_matches(&root.text, "std")
     {
         return None;
     }
@@ -1557,6 +1557,17 @@ fn qualified_names_match(left: &QualifiedName, right: &QualifiedName) -> bool {
             .iter()
             .zip(&right.parts)
             .all(|(left, right)| identifier_spelling_matches(&left.text, &right.text))
+}
+fn semantic_name_matches_source(
+    candidate: &QualifiedSemanticName,
+    source: &QualifiedName,
+) -> bool {
+    candidate.parts().len() == source.parts.len()
+        && candidate
+            .parts()
+            .iter()
+            .zip(&source.parts)
+            .all(|(candidate, source)| identifier_spelling_matches(candidate, &source.text))
 }
 
 fn type_owner_name(specification: &TypeSpecification) -> Option<QualifiedName> {
@@ -3498,7 +3509,11 @@ fn documentation_text(slice: Option<&SourceSlice>) -> Option<&str> {
 ///
 /// The parser retains complete dotted paths, so completion after a dot can
 /// inspect the member already present in the accepted source without adding
-/// proposal-only syntax to the language grammar.
+/// proposal-only syntax to the language grammar. A dotted path in the
+/// `target` argument of one of the accepted resource or action constructors
+/// is recognized separately: same-document SERVER and CLIENT declarations
+/// retain `FUNCTION` kind and receive target-specific details, while ordinary
+/// field paths only contribute their object/record fields.
 pub fn completion_at(
     parse: &Parse,
     standard: Option<&StandardLibrary>,
@@ -3617,7 +3632,7 @@ pub fn completion_at(
     }
     for declaration in parse.server_functions() {
         let detail = if target_completion.is_some_and(|constructor| {
-            server_target_is_eligible(declaration, constructor, standard)
+            server_target_is_eligible(parse, declaration, constructor, standard)
         }) {
             "server function target"
         } else {
@@ -3662,6 +3677,7 @@ fn client_target_completion_at_byte(parse: &Parse, byte: usize) -> Option<Client
 }
 
 fn server_target_is_eligible(
+    parse: &Parse,
     declaration: &ServerFunctionDeclaration,
     constructor: ClientTargetConstructor,
     standard: Option<&StandardLibrary>,
@@ -3674,8 +3690,94 @@ fn server_target_is_eligible(
             action_target_return_type_is_durable(&declaration.return_type, standard)
         }
         ClientTargetConstructor::StreamResource => {
-            matches!(&declaration.return_type, FunctionReturnType::Stream { .. })
+            matches!(
+                &declaration.return_type,
+                FunctionReturnType::Stream { element, .. }
+                    if stream_target_element_is_supported(parse, element, standard)
+            )
         }
+    }
+}
+
+fn stream_target_element_is_supported(
+    parse: &Parse,
+    element: &TypeSpecification,
+    standard: Option<&StandardLibrary>,
+) -> bool {
+    match element {
+        TypeSpecification::Named(name) => {
+            let closed_scalar = name.parts.len() == 1
+                && !name.parts[0].text.starts_with('"')
+                && [
+                    "BOOLEAN",
+                    "BOOL",
+                    "INTEGER",
+                    "INT",
+                    "BIGINT",
+                    "FLOAT",
+                    "TEXT",
+                    "BYTES",
+                ]
+                .iter()
+                .any(|scalar| identifier_spelling_matches(&name.parts[0].text, scalar));
+            let qualified_scalar = name.parts.len() == 2
+                && identifier_spelling_matches(&name.parts[0].text, "std")
+                && [
+                    "BOOLEAN",
+                    "INTEGER",
+                    "BIGINT",
+                    "FLOAT",
+                    "CHARACTER_LARGE_OBJECT",
+                    "BINARY_LARGE_OBJECT",
+                ]
+                .iter()
+                .any(|scalar| identifier_spelling_matches(&name.parts[1].text, scalar));
+            let local_named = parse
+                .enum_types()
+                .iter()
+                .any(|candidate| qualified_names_match(&candidate.name, name))
+                || parse
+                    .record_value_types()
+                    .iter()
+                    .any(|candidate| qualified_names_match(&candidate.name, name));
+            let standard_named = standard.is_some_and(|standard| {
+                let catalogue = standard.checked.verified_snapshot().catalogue();
+                catalogue
+                    .enum_types()
+                    .iter()
+                    .any(|candidate| semantic_name_matches_source(candidate.name(), name))
+                    || catalogue
+                        .record_value_types()
+                        .iter()
+                        .any(|candidate| semantic_name_matches_source(candidate.name(), name))
+            });
+            closed_scalar || qualified_scalar || local_named || standard_named
+        }
+        TypeSpecification::StandardLargeObject { .. } => true,
+        TypeSpecification::Reference { target, .. } => {
+            let TypeSpecification::Named(name) = target.as_ref() else {
+                return false;
+            };
+            let local_object = parse
+                .object_types()
+                .iter()
+                .any(|candidate| qualified_names_match(&candidate.name, name));
+            let standard_object = standard.is_some_and(|standard| {
+                standard
+                    .checked
+                    .verified_snapshot()
+                    .catalogue()
+                    .object_types()
+                    .iter()
+                    .any(|candidate| semantic_name_matches_source(candidate.name(), name))
+            });
+            local_object || standard_object
+        }
+        TypeSpecification::List { .. }
+        | TypeSpecification::Set { .. }
+        | TypeSpecification::Map { .. }
+        | TypeSpecification::Option { .. }
+        | TypeSpecification::Stream { .. } => false,
     }
 }
 
