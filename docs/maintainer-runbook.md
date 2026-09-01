@@ -18,13 +18,13 @@ Clippy, and tests. PostgreSQL starts only when a PostgreSQL recipe is selected.
 
 The normal toolchain is Rust 1.95 with `rustfmt` and `clippy`, `just`, Node 22,
 `tree-sitter-cli@0.26.5`, Python 3.11 or newer, and Docker with the Compose
-plugin. Commands that compile the embedded PostgreSQL engine require a Linux
-x86_64 host; use the Docker-backed engine gate when the host is not Linux
-x86_64. Runtime and ABI recipes additionally need CMake 3.21 or newer, CTest,
-Qt 6 Core and Widgets, and a C++17 compiler. `gcc` with C11 support is needed
-for the ABI-header/parity checks. Git, GNU `make`, `patch`, and the standard
-Unix file/archive tools are needed by the checked-in source and evidence
-recipes.
+Commands that compile the embedded PostgreSQL engine require a Linux x86_64
+host; use the Docker-backed engine gate when the host is not Linux x86_64.
+The ABI-header/parity checks require `gcc` with C11 support and the canonical
+`../spec/spec/orna_runtime_abi_v1.h`. Qt runtime recipes additionally require
+CMake 3.21 or newer, CTest, Qt 6 Core and Widgets, and a C++17 compiler. Git,
+GNU `make`, `patch`, and the standard Unix file/archive tools are needed by
+the checked-in source and evidence recipes.
 
 When using a prebuilt engine instead of the build script's Docker or source
 build, `ORNA_POSTGRES_ENGINE_OUTPUT` must be an **absolute** path to a complete
@@ -223,8 +223,10 @@ integration target. These recipes provide a dedicated SQLite adoption proof;
 the standalone adapter example remains a library smoke and does not exercise
 the socket by itself.
 
-The accepted standard-library revision chain is V1 through V9 only; there is no
-V10 revision.
+The accepted standard-library compatibility record currently covers V1 through
+V9. The implementation contains V10/V11 paths, but they have no accepted 1.0
+compatibility promise until the release evidence and product baseline are
+reconciled.
 
 ## PostgreSQL Compose lifecycle
 
@@ -341,11 +343,13 @@ just client-artifact-demo
 just client-capability-demo
 ```
 
-The CMake/CTest Qt build and ABI gates require CMake 3.21 or newer, CTest, a
-C++17 compiler, Qt 6.2+ Core and Widgets development files, and the canonical
-`../spec/spec/orna_runtime_abi_v1.h`. The Rust loader and Studio smoke
-commands only require an explicit compatible shared-library path. Build and
-test headlessly with:
+The ABI header/parity checks require a GCC-compatible C11 compiler, Linux
+x86_64 for the parity assertions, and the canonical
+`../spec/spec/orna_runtime_abi_v1.h`. The CMake/CTest Qt build additionally
+requires CMake 3.21 or newer, CTest, a C++17 compiler, and Qt 6.2+ Core and
+Widgets development files. The Rust loader and Studio smoke commands only
+require an explicit compatible shared-library path. Build and test headlessly
+with:
 
 ```text
 just runtime-qt-build
@@ -364,9 +368,10 @@ and Qt visual output remain under `target/runtime-qt/` (including the CTest
 visual PNG), while the TTY demo writes `target/runtime-tty-demo-output.bin`.
 The ABI-header check is GCC C11 syntax-only validation; ABI parity compiles the
 Linux x86_64 C assertions against the canonical header. Because this checkout
-has neither `./spec/` nor `../spec/`, the CMake/CTest and ABI commands above
-that consume the canonical header are currently unavailable; no Qt/ABI pass is
-claimed. The two Rust smoke commands remain path-dependent.
+has neither `./spec/` nor `../spec/`, the canonical-header-dependent ABI
+commands are currently unavailable. The CMake/CTest Qt commands also require
+their listed native dependencies; no Qt/ABI pass is claimed. The two Rust
+smoke commands remain path-dependent.
 
 Display-backed gates are separate and require a live `DISPLAY` or
 `WAYLAND_DISPLAY`:
@@ -439,7 +444,7 @@ security administration. Unsupported commands fail before selecting a backend.
 Its handshake recognises protocol versions v1 through v5. Versions v1 through
 v3 have typed handling in the bounded SQLite surface; v4 and v5 use the
 protocol fallback when their opaque codec registry is unavailable. The socket
-shares the public raw-call wire protocol, but only the bounded
+shares the private Orna raw-call wire protocol, but only the bounded
 server-plan/parameter-echo execution subset can produce a successful result.
 
 LocalPath inspection is deliberately narrower than PostgreSQL inspection:
@@ -450,10 +455,12 @@ peer principal and `SecurityAdmin` privilege; USER state is principal-scoped
 and uses canonical ORV5 values with optimistic revisions.
 
 For an explicit endpoint (`--db` or a positional endpoint), the CLI currently
-accepts `ManagedLocal` and `LocalPath`. Explicit Unix-socket and remote-TLS
-endpoints remain rejected until their route wiring is available. ManagedLocal
-routes installed commands to the fixed embedded PostgreSQL host; LocalPath
-routes the supported local surface to SQLite without a PostgreSQL fallback.
+accepts `ManagedLocal` and `LocalPath`. The bounded installed `invoke` route
+also accepts only the current managed Orna Unix socket; other explicit
+Unix-socket command routes and remote-TLS endpoints remain rejected until their
+route or transport wiring is available. ManagedLocal routes installed commands
+to the fixed embedded PostgreSQL host; LocalPath routes the supported local
+surface to SQLite without a PostgreSQL fallback.
 
 Run the complete local binary demo with:
 

@@ -42,7 +42,6 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
 | 0090 | Local principal and authenticated-session authority boundary for local invocation, resource, raw, and USER-state paths. | Credential/provider/secret enrollment, durable sessions, role selection, definer/effective-principal transitions, delegation, EXTERNAL principals, remote gateway auth, and production CLIENT VM trust features remain deferred. |
 | 0092 | Function-backed CLI sessions use one thin client/session path for local, daemon, and remote endpoints; the no-command form targets `std.cli.repl`, and `-d` is foreground daemon mode. | The endpoint transport, persistent action loop, native session frame wiring, remote TLS/auth, and production artifact trust remain implementation-gated. |
-| 0093 | Source-authored `std.math` CLIENT functions in the append-only V10 standard snapshot; the normal check, prepare, authorise, and evaluate path now runs `.orna` arithmetic. | SERVER procedural execution, collection/range `FOR`, exception tails, and unbounded host execution remain separate contracts. |
 
 ## Current work ADRs
 
@@ -211,5 +210,5 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Local Principal and Session Authority](0090-local-principal-session-authority.md)
 * **work ADR 0091 (proposed):**
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
-* **work ADR 0092 (proposed):**
+* **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
