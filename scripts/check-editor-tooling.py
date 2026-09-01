@@ -2002,6 +2002,18 @@ def check_zed_language_configuration(
         ("name", "Orna"),
         ("grammar", "orna"),
         ("path_suffixes", ["orna"]),
+        ("line_comments", ["--"]),
+        ("block_comment", ["/*", "*/"]),
+        (
+            "brackets",
+            [
+                {"start": "(", "end": ")", "close": True, "newline": False},
+                {"start": "[", "end": "]", "close": True, "newline": False},
+                {"start": "{", "end": "}", "close": True, "newline": False},
+                {"start": "'", "end": "'", "close": True, "newline": False},
+                {"start": '"', "end": '"', "close": True, "newline": False},
+            ],
+        ),
     )
     for key, expected in language_expectations:
         actual = language.get(key)
@@ -2017,6 +2029,7 @@ def check_zed_language_configuration(
         ("name", "orna-lsp"),
         ("language", "Orna"),
         ("command", "orna-lsp"),
+        ("args", []),
     )
     for key, expected in language_server_expectations:
         actual = language_server.get(key)
