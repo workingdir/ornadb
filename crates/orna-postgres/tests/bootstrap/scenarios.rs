@@ -36,9 +36,9 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
 #[test]
 fn legacy_migration_epoch_is_order_contiguous() -> TestResult<()> {
     require(
-        MIGRATIONS.len() == 47,
+        MIGRATIONS.len() == 48,
         format!(
-            "migration registry has {} entries; expected 47",
+            "migration registry has {} entries; expected 48",
             MIGRATIONS.len()
         ),
     )?;
@@ -545,6 +545,188 @@ async fn bootstrap_upgrades_the_registered_v3_empty_catalogue() -> TestResult<()
 
         kernel.bootstrap().await?;
         inspect_bootstrap_state(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_pre_9122_security_admin_v28() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let legacy_checksum = vec![
+            0x39, 0x79, 0x73, 0x8e, 0x96, 0x01, 0xfa, 0x26, 0x42, 0xe0, 0x1d, 0x84, 0x77, 0xa8,
+            0x9f, 0x4b, 0xa1, 0xfd, 0x13, 0x26, 0x8c, 0xd7, 0x97, 0x2a, 0x94, 0x04, 0x4c, 0x61,
+            0x4d, 0xaa, 0x6b, 0x51,
+        ];
+        let session = database.open().await?;
+        let seed_result = async {
+            seed_initial_catalogue_client(session.client()).await?;
+            apply_and_register_migrations(session.client(), &MIGRATIONS[1..28]).await?;
+            session
+                .client()
+                .batch_execute(
+                    "ALTER TABLE _orna_kernel.security_audit_events
+                     DROP CONSTRAINT security_audit_events_security_admin_detail_check",
+                )
+                .await?;
+            let updated = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.schema_migrations
+                     SET checksum = $1
+                     WHERE version = 28",
+                    &[&legacy_checksum],
+                )
+                .await?;
+            require(
+                updated == 1,
+                format!("historical v28 checksum update affected {updated} rows"),
+            )
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (seed_result, shutdown_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+            (Err(seed_error), Err(shutdown_error)) => {
+                return Err(failure(format!(
+                    "historical v28 setup failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+                )))
+            }
+        }
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+
+        let session = database.open().await?;
+        let verification_result = async {
+            let rows = session
+                .client()
+                .query(
+                    "SELECT version
+                     FROM _orna_kernel.schema_migrations
+                     ORDER BY version",
+                    &[],
+                )
+                .await?;
+            let versions = rows
+                .iter()
+                .map(|row| value::<i64>(row, 0))
+                .collect::<TestResult<Vec<_>>>()?;
+            require(
+                versions == (1_i64..=48).collect::<Vec<_>>(),
+                format!("historical v28 upgrade produced migration versions {versions:?}"),
+            )?;
+
+            let v28_checksum = session
+                .client()
+                .query_one(
+                    "SELECT checksum
+                     FROM _orna_kernel.schema_migrations
+                     WHERE version = 28",
+                    &[],
+                )
+                .await?;
+            require(
+                value::<Vec<u8>>(&v28_checksum, 0)? == legacy_checksum,
+                "historical v28 checksum was not preserved",
+            )?;
+
+            let v48 = session
+                .client()
+                .query_one(
+                    "SELECT name, checksum
+                     FROM _orna_kernel.schema_migrations
+                     WHERE version = 48",
+                    &[],
+                )
+                .await?;
+            require(
+                value::<String>(&v48, 0)? == "security admin audit boundary repair"
+                    && value::<Vec<u8>>(&v48, 1)?
+                        == expected_migration_checksum(48, MIGRATIONS[47].2),
+                "security-admin repair migration record is not exact",
+            )?;
+
+            for operation in [
+                "create_principal",
+                "disable_principal",
+                "create_role",
+                "grant_role",
+                "revoke_role",
+                "grant_privilege",
+                "revoke_privilege",
+            ] {
+                require_constraint(
+                    session.client(),
+                    "security_audit_events",
+                    "security_audit_events_security_admin_detail_check",
+                    &format!("security_admin:{operation}"),
+                )
+                .await?;
+            }
+
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.security_audit_events
+                         (event_id, event_kind, outcome, session_principal_id,
+                          function_id, denial_reason)
+                     VALUES
+                         (decode(repeat('a1', 16), 'hex'),
+                          'security_admin',
+                          'allowed',
+                          decode(repeat('11', 16), 'hex'),
+                          decode('00000000000000000000000000000043', 'hex'),
+                          'security_admin:create_principal')",
+                    &[],
+                )
+                .await?;
+
+            for (statement, description) in [
+                (
+                    "UPDATE _orna_kernel.security_audit_events
+                     SET denial_reason = 'security_admin:unsupported'
+                     WHERE event_id = decode(repeat('a1', 16), 'hex')",
+                    "forged security-admin operation detail",
+                ),
+                (
+                    "UPDATE _orna_kernel.security_audit_events
+                     SET function_id = decode('00000000000000000000000000000044', 'hex')
+                     WHERE event_id = decode(repeat('a1', 16), 'hex')",
+                    "mismatched security-admin target",
+                ),
+            ] {
+                let error = session
+                    .client()
+                    .execute(statement, &[])
+                    .await
+                    .expect_err(description);
+                let database_error = error
+                    .as_db_error()
+                    .ok_or_else(|| failure(format!("{description} returned a non-database error")))?;
+                require(
+                    database_error.code().code() == "23514"
+                        && database_error.constraint()
+                            == Some("security_audit_events_security_admin_detail_check"),
+                    format!(
+                        "{description} failed with SQLSTATE {} and constraint {:?}",
+                        database_error.code().code(),
+                        database_error.constraint(),
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (verification_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(verification_error), Err(shutdown_error)) => Err(failure(format!(
+                "historical v28 verification failed: {verification_error}; verification driver shutdown failed: {shutdown_error}"
+            ))),
+        }
     })
     .await
 }
