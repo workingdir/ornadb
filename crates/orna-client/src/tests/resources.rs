@@ -52,6 +52,85 @@ fn vm_admission_resolves_and_decodes_an_authorised_client_revision() {
 }
 
 #[test]
+fn vm_admission_reports_digest_error_before_cancelled_host() {
+    let (base, function, pair, _) = version_one_active(true);
+    let active = active_with_mismatched_function_artifact_payload_hash(&base);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    host.advance_cancellation_epoch()
+        .expect("cancellation epoch");
+
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &[],
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::DigestMismatch)
+    ));
+    assert!(!host.has_root_binding());
+}
+
+#[test]
+fn vm_admission_reports_cancellation_before_binding_a_valid_plan() {
+    let (active, function, pair, _) = version_one_active(true);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    host.advance_cancellation_epoch()
+        .expect("cancellation epoch");
+
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &active,
+            &authorisation,
+            &mut host,
+            limits,
+            &[],
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::HostCancelled)
+    ));
+    assert!(!host.has_root_binding());
+}
+
+#[test]
 fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters() {
     let capability_payload = |argument| {
         orna_artifact::client_plan::CapabilityClientPlan::new(
@@ -115,6 +194,44 @@ fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters()
         super::super::vm::ClientVmDecodedPlan::Capability(_)
     ));
 
+    let (unknown_active, unknown_function, unknown_pair, _) = version_two_active_with_artifact(
+        standard_v6(),
+        orna_standard::BOOLEAN_TYPE_ID,
+        DefinitionReferenceTarget::ValueType(orna_standard::BOOLEAN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+        orna_artifact::client_plan::CapabilityClientPlan::new(
+            orna_artifact::client_plan::InnerClientPlan::Boolean(
+                orna_artifact::client_plan::ClientPlan::return_boolean(true),
+            ),
+            vec![orna_artifact::client_plan::CapabilityRequirement::new(
+                "std.fs.unknown",
+                orna_artifact::client_plan::CapabilityArgumentSource::Text("scope".to_owned()),
+            )],
+        )
+        .encode()
+        .expect("unknown capability payload"),
+    );
+    let unknown_authorisation = authorise(unknown_pair, unknown_function);
+    let mut unknown_host =
+        super::super::vm::ClientVmHostContext::new(&registry, runtime_offer(), limits)
+            .expect("valid unknown-capability VM host");
+    let unknown_declarations = [super::super::vm::ClientVmCapabilityDeclaration::new(
+        "std.fs.unknown",
+        super::super::vm::ClientVmCapabilityArgument::Text("scope".to_owned()),
+    )];
+    assert!(matches!(
+        super::super::vm::admit_client_function(
+            &unknown_active,
+            &unknown_authorisation,
+            &mut unknown_host,
+            limits,
+            &unknown_declarations,
+            &[],
+        ),
+        Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
+    ));
+
     let (missing_active, _, missing_pair, _) = version_two_active_with_artifact(
         standard_v6(),
         orna_standard::BOOLEAN_TYPE_ID,
@@ -143,6 +260,65 @@ fn vm_admission_binds_full_capability_arguments_and_rejects_missing_parameters()
             &[],
         ),
         Err(super::super::vm::ClientVmAdmissionError::SemanticRejected)
+    ));
+}
+
+#[test]
+fn vm_admission_accepts_known_capability_parameter_declaration() {
+    use orna_artifact::client_plan::{
+        CapabilityArgumentSource, CapabilityClientPlan, CapabilityRequirement,
+        ClientExpressionNode, ExpressionClientPlan, InnerClientPlan,
+    };
+
+    let parameter = ParameterId::from_bytes([0xb1; 16]);
+    let payload = CapabilityClientPlan::new(
+        InnerClientPlan::Expression(ExpressionClientPlan::new(
+            ClientExpressionNode::ParameterRead { parameter },
+        )),
+        vec![CapabilityRequirement::new(
+            "std.fs.read",
+            CapabilityArgumentSource::Parameter("p_path".to_owned()),
+        )],
+    )
+    .encode()
+    .expect("parameter capability payload");
+    let (active, function, pair, _, _) = version_five_expression_active_with_parameter(payload);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let declarations = [super::super::vm::ClientVmCapabilityDeclaration::new(
+        "std.fs.read",
+        super::super::vm::ClientVmCapabilityArgument::Parameter("p_path".to_owned()),
+    )];
+
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &declarations,
+        &[],
+    )
+    .expect("declared capability parameter should be admitted");
+    assert!(matches!(
+        admission.plan(),
+        super::super::vm::ClientVmDecodedPlan::Capability(_)
     ));
 }
 
