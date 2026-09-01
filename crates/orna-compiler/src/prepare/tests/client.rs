@@ -504,6 +504,209 @@ fn standard_stream_resource_preparation_materialises_durable_operation_artifact(
     assert_ne!(artifact.call_site().to_bytes(), [0; 16]);
     assert!(artifact.arguments().is_empty());
 }
+#[test]
+fn standard_integer_stream_resource_preparation_materialises_durable_operation_artifact() {
+    let verified = crate::tests::verified_canonical_standard_source_fixture();
+    let integer_type_id = verified
+        .catalogue()
+        .value_type_by_name(&semantic_name(&["std", "types", "integer"]))
+        .unwrap()
+        .id();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let source = r#"CREATE SCHEMA stream_fixture;
+
+CREATE TYPE stream_fixture.probe AS OBJECT (
+    marker INTEGER NOT NULL
+);
+
+CREATE SERVER FUNCTION stream_fixture.events()
+RETURNS STREAM<INTEGER>
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT probe.marker FROM stream_fixture.probe probe;
+
+CREATE CLIENT FUNCTION stream_fixture.read() RETURNS STREAM<INTEGER> IS
+BEGIN
+    RETURN AWAIT std.data.stream_resource(
+        target => stream_fixture.events,
+        arguments => std.call.args()
+    );
+END;"#;
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "fixtures/stream_resource_integer.orna",
+        source,
+    )])
+    .unwrap();
+    let report = check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "integer stream resource fixture did not check: {:?}",
+        report.diagnostics()
+    );
+
+    let checked_call_site = {
+        let checked = report.preparation_view().unwrap().checked();
+        let client = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "read"])
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = client.body() else {
+            panic!("integer stream resource client must use an expression body");
+        };
+        let CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("integer stream resource client must await its resource");
+        };
+        let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("integer stream resource client must retain its resource operation");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Stream
+        );
+        assert_eq!(
+            operation.result_type(),
+            SemanticType::scalar(StandardScalar::Integer)
+        );
+        assert_eq!(operation.standard_result_type(), Some(integer_type_id));
+        operation.call_site()
+    };
+
+    let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+    let target = prepared
+        .candidate()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["stream_fixture", "events"])
+        .unwrap();
+    let target_revision = prepared
+        .new_function_revisions()
+        .iter()
+        .find(|revision| revision.function() == target.id())
+        .unwrap();
+    assert_eq!(target.current_revision(), target_revision.id());
+    assert_eq!(
+        target_revision.artifact().kind(),
+        ExecutableArtifactKind::Server
+    );
+    assert_eq!(target_revision.artifact().format(), SERVER_PLAN_FORMAT);
+    assert_eq!(target_revision.artifact().version(), SERVER_PLAN_VERSION);
+    assert_eq!(
+        target.return_type(),
+        &FunctionReturn::Stream(ResolvedType::Value(integer_type_id))
+    );
+    let target_plan = ServerPlan::decode(target_revision.artifact().payload()).unwrap();
+    let probe = prepared
+        .candidate()
+        .object_type_by_name(&semantic_name(&["stream_fixture", "probe"]))
+        .unwrap();
+    assert_eq!(target_plan.scan.object_type, probe.id());
+    assert_eq!(target_plan.projections.len(), 1);
+    assert_eq!(
+        target_plan.projections[0].value_type.resolved_type,
+        ResolvedType::scalar(StandardScalar::Integer)
+    );
+    let ExpressionKind::FieldPath { ref steps, .. } = target_plan.projections[0].kind else {
+        panic!("integer stream SERVER plan projection must be a field path");
+    };
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].owner, probe.id());
+    assert_eq!(steps[0].field, probe.field_by_name("marker").unwrap().id());
+
+    let client = prepared
+        .candidate()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["stream_fixture", "read"])
+        .unwrap();
+    let revision = prepared
+        .new_function_revisions()
+        .iter()
+        .find(|revision| revision.function() == client.id())
+        .unwrap();
+    assert_eq!(revision.artifact().version(), CLIENT_PLAN_RESOURCE_VERSION);
+    let plan = ResourceClientPlan::decode(revision.artifact().payload()).unwrap();
+    let ClientExpressionNode::Await { expression } = plan.expression() else {
+        panic!("prepared integer stream resource plan must keep AWAIT at the return expression");
+    };
+    let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+        panic!(
+            "prepared integer stream resource plan must contain a resource operation under AWAIT"
+        );
+    };
+    assert_eq!(
+        operation.kind(),
+        orna_artifact::client_plan::ResourceKind::Stream
+    );
+    assert_eq!(operation.target(), target.id());
+    assert_eq!(operation.target_revision(), prepared.candidate_pair());
+    assert_eq!(operation.result_type(), integer_type_id);
+    assert_eq!(operation.call_site(), checked_call_site);
+    assert_ne!(operation.call_site().to_bytes(), [0; 16]);
+    assert!(operation.arguments().is_empty());
+}
+
+#[test]
+fn rejects_opaque_standard_action_stream_resource_target() {
+    let verified = action_standard();
+    let action_type_id = verified
+        .catalogue()
+        .value_type_by_name(&semantic_name(&["std", "action", "action"]))
+        .unwrap()
+        .id();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let target = FunctionDefinition::new(
+        FunctionId::from_bytes([0xd1; 16]),
+        semantic_name(&["stream_fixture", "events"]),
+        FunctionDomain::Server,
+        Vec::new(),
+        FunctionReturn::Stream(ResolvedType::Named(action_type_id)),
+        FunctionRevisionId::from_bytes([0xd2; 16]),
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::from_bytes([0xd3; 16]),
+        vec![SchemaDefinition::new(
+            SchemaId::from_bytes([0xd4; 16]),
+            semantic_name(&["stream_fixture"]),
+        )],
+        Vec::new(),
+        vec![target],
+    )
+    .unwrap();
+    let context = StandardApplicationCheckContext::try_new(&catalogue, &standard).unwrap();
+    let source = r#"CREATE SCHEMA ui;
+
+CREATE CLIENT FUNCTION ui.read() RETURNS STREAM<TEXT> IS
+BEGIN
+    RETURN AWAIT std.data.stream_resource(
+        target => stream_fixture.events,
+        arguments => std.call.args()
+    );
+END;"#;
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "fixtures/stream_resource_opaque_action.orna",
+        source,
+    )])
+    .unwrap();
+    let report = check_standard_application(&bundle, &context);
+    assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+    assert_eq!(
+        report.diagnostics()[0].code(),
+        DiagnosticCode::UnknownQualifiedName
+    );
+    assert_eq!(
+        report.diagnostics()[0].message(),
+        "unknown SERVER resource target stream_fixture.events"
+    );
+    assert!(report.checked_bundle().is_none());
+}
 
 #[test]
 fn procedural_stream_resource_preparation_preserves_local_and_operation_identity() {
