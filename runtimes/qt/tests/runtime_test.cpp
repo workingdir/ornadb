@@ -124,6 +124,8 @@ int main() {
     REQUIRE(api->describe != nullptr);
     const auto *descriptor = api->describe();
     REQUIRE(descriptor != nullptr);
+    REQUIRE(descriptor->abi_major == ORNA_RUNTIME_ABI_V1_MAJOR);
+    REQUIRE(descriptor->abi_minor == ORNA_RUNTIME_ABI_V1_MINOR);
     REQUIRE(descriptor->thread_model == ORNA_THREAD_MODEL_CALLER_PUMPS);
     REQUIRE(descriptor->sink_count == 1);
     REQUIRE(descriptor->contract_count == 8);
@@ -135,6 +137,7 @@ int main() {
     REQUIRE(descriptor->sinks != nullptr);
     REQUIRE(string_value(descriptor->sinks[0].type_name) == "std.ui.UI");
     REQUIRE(descriptor->sinks[0].media_type_count == 0);
+    REQUIRE(descriptor->sinks[0].media_types == nullptr);
     REQUIRE(descriptor->sinks[0].supports_streaming == 0);
     REQUIRE(descriptor->sinks[0].preference_rank == 0);
     REQUIRE(descriptor->contracts != nullptr);
@@ -153,6 +156,7 @@ int main() {
         REQUIRE(descriptor->contracts[index].major == 1);
         REQUIRE(descriptor->contracts[index].minor == 0);
         REQUIRE(descriptor->contracts[index].feature_count == 0);
+        REQUIRE(descriptor->contracts[index].features == nullptr);
     }
 
     EventState events;
