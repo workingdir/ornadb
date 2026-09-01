@@ -2839,6 +2839,75 @@ fn resource_connection_rejects_stale_terminal_identity_without_mutating_state() 
 }
 
 #[test]
+fn resource_connection_rejects_stale_cancel_confirmation_identity_without_mutating_state() {
+    let request = resource_request_fixture();
+    let stream_id = request.stream_id;
+    let request_id = request.request_id;
+    let target_revision = request.target_revision;
+    let stale_request_id = InvocationId::from_bytes([0xa9; 16]);
+    let mut connection = ResourceProtocolConnection::new();
+
+    assert_eq!(
+        connection.open(request.clone()),
+        Ok(ResourceFrameDisposition::Applied)
+    );
+    assert_eq!(
+        connection.apply(ResourceServerFrame::Accepted(ResourceAccepted {
+            stream_id,
+            request_id,
+            nested_invocation_id: InvocationId::from_bytes([0xaa; 16]),
+            target_revision,
+            resource_kind: request.resource_kind,
+        })),
+        Ok(ResourceFrameDisposition::Applied)
+    );
+    assert_eq!(
+        connection.receive(ResourceClientFrame::Cancel(ResourceCancel {
+            stream_id,
+            request_id,
+            reason: ResourceCancellationCode::ClientRequested,
+        })),
+        Ok(ResourceFrameDisposition::Applied)
+    );
+
+    let before = connection.clone();
+    let credit_before = connection.resource_credit(stream_id, request_id);
+    let live_before = connection.live_resources();
+    assert_eq!(
+        credit_before,
+        Err(ResourceConnectionError::UnknownStream { stream_id })
+    );
+    assert_eq!(live_before, 0);
+
+    assert_eq!(
+        connection.apply_cancelled_after_client_cancel(ResourceCancelled {
+            stream_id,
+            request_id: stale_request_id,
+            target_revision,
+            reason: ResourceCancellationCode::ClientRequested,
+        }),
+        Err(ResourceConnectionError::MismatchedRequest { stream_id })
+    );
+    assert_eq!(connection, before);
+    assert_eq!(connection.resource_credit(stream_id, request_id), credit_before);
+    assert_eq!(connection.live_resources(), live_before);
+
+    assert_eq!(
+        connection.apply_cancelled_after_client_cancel(ResourceCancelled {
+            stream_id,
+            request_id,
+            target_revision,
+            reason: ResourceCancellationCode::ClientRequested,
+        }),
+        Ok(ResourceFrameDisposition::Applied)
+    );
+    assert_eq!(
+        connection.terminal.get(&stream_id),
+        Some(&(request_id, target_revision, ResourceTerminalKind::Cancelled))
+    );
+}
+
+#[test]
 fn resource_connection_drops_cancel_confirmation_after_committed_completion() {
     let mut request = resource_request_fixture();
     request.resource_kind = ResourceKind::Stream;
