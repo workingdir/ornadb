@@ -2984,9 +2984,7 @@ pub fn hover(
             if name.eq_ignore_ascii_case("IS") {
                 let is_procedural = parse.client_functions().iter().any(|function| {
                     function.body.as_state_block().is_some_and(|block| {
-                        block.span.start <= span.start
-                            && block.span.end >= span.end
-                            && document.text[span.end..].trim_start().starts_with("BEGIN")
+                        block.span.start <= span.start && block.span.end >= span.end
                     })
                 });
                 if !is_procedural
