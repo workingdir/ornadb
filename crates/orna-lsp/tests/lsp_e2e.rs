@@ -3943,6 +3943,9 @@ fn external_client_hover_preserves_runtime_and_capability_metadata() {
         "RETURNS std.ui.UI\n",
         "RUNTIME CONTRACT 'std.inspect.render@1'\n",
         "REQUIRES CAPABILITY sys.inspect.render('snapshot');\n",
+        "CREATE CLIENT FUNCTION inspector.local()\n",
+        "RETURNS BOOLEAN\n",
+        "AS TRUE;\n",
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -3968,6 +3971,33 @@ fn external_client_hover_preserves_runtime_and_capability_metadata() {
     assert!(
         value.contains("REQUIRES CAPABILITY sys.inspect.render('snapshot')"),
         "capability metadata: {value}"
+    );
+
+    let ordinary_hover = client.request(
+        "textDocument/hover",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(source, "CREATE CLIENT FUNCTION inspector.", "local"),
+        }),
+    );
+    let ordinary_value = ordinary_hover["contents"]["value"]
+        .as_str()
+        .expect("ordinary CLIENT hover value");
+    assert!(
+        ordinary_value.contains("CREATE CLIENT FUNCTION inspector.local()\nRETURNS BOOLEAN"),
+        "ordinary CLIENT signature: {ordinary_value}"
+    );
+    assert!(
+        !ordinary_value.contains("CREATE EXTERNAL CLIENT FUNCTION"),
+        "ordinary CLIENT hover must not use the external signature: {ordinary_value}"
+    );
+    assert!(
+        !ordinary_value.contains("RUNTIME CONTRACT"),
+        "ordinary CLIENT hover must not include runtime metadata: {ordinary_value}"
+    );
+    assert!(
+        !ordinary_value.contains("REQUIRES CAPABILITY"),
+        "ordinary CLIENT hover must not include capability metadata: {ordinary_value}"
     );
 
     client.shutdown();
