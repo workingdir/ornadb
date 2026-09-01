@@ -2,9 +2,9 @@
 
 OrnaDB ships three layers of editor support for `.orna` files:
 
-1. **`orna-lsp`** — a language server binary that works with any LSP
-   client. It reuses the offline Orna compiler, so it needs no running
-   database and never writes to disk.
+1. **`orna-lsp`** — a language server binary that works with any LSP client
+  that supports UTF-16 position encoding. It reuses the offline Orna compiler,
+  so it needs no running database and never writes to disk.
 2. **`tree-sitter-orna`** — a tree-sitter grammar with corpus tests and
    standard highlight captures, consumed natively by Neovim, Helix, and Zed.
    Emacs uses the package's font-lock fallback; its Eglot integration does
