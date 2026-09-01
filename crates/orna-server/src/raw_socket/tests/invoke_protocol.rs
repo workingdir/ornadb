@@ -809,6 +809,113 @@ async fn oversized_sealed_pull_waiting_value_fails_closed() {
 }
 
 #[tokio::test]
+async fn rejected_sealed_dispatch_flushes_terminal_frame() {
+    let (version, _revision) = constructed_test_version();
+    let (active, registry) = match &version {
+        RawProtocolVersion::Constructed(active, registry) => (active.as_ref(), registry.as_ref()),
+        _ => unreachable!("constructed test version"),
+    };
+    let mut connection = ProtocolConnection::new();
+    let request = test_invoke_request(active, registry);
+    version
+        .receive(
+            &mut connection,
+            ClientFrame::CallRawStart {
+                stream: 1,
+                function: SYS_INVOKE_FUNCTION_ID,
+            },
+        )
+        .expect("sealed call starts");
+    version
+        .receive(
+            &mut connection,
+            ClientFrame::CallInvokeRequest { stream: 1, request },
+        )
+        .expect("sealed request applies");
+    version
+        .receive(
+            &mut connection,
+            ClientFrame::CallArgumentsComplete { stream: 1 },
+        )
+        .expect("sealed call dispatches");
+    version
+        .receive(
+            &mut connection,
+            ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: MAX_FRAME_PAYLOAD_LENGTH as u64,
+            },
+        )
+        .expect("sealed call receives result credit");
+
+    let invocation = InvocationId::from_bytes([0x75; 16]);
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: None,
+        },
+    )
+    .expect("started event");
+    let started_events = InvocationEventBatch::new(vec![InvocationEventRecord::new(1, started)])
+        .expect("started event batch");
+    let StartedDispatch {
+        accepted,
+        started: Some(started),
+        future,
+        ..
+    } = rejected_sealed_dispatch(1, invocation, started_events)
+    else {
+        panic!("rejected sealed dispatch includes its start event");
+    };
+    version
+        .apply(&mut connection, accepted)
+        .expect("sealed call accepts");
+    version
+        .apply(&mut connection, started)
+        .expect("started event applies");
+
+    let mut pending = BTreeMap::from([(1, future.await)]);
+    let (server, mut client) = UnixStream::pair().expect("socket pair");
+    let (_reader, mut writer) = server.into_split();
+    let (_shutdown_sender, mut shutdown) = watch::channel(false);
+    let mut sealed_pull_tasks = JoinSet::new();
+    let mut sealed_pull_in_flight = BTreeSet::new();
+    let mut sealed_pull_waiting_bytes = BTreeMap::new();
+    let mut producer_shutdown = JoinSet::new();
+
+    assert!(
+        flush_pending(
+            &version,
+            &mut connection,
+            &mut pending,
+            &mut sealed_pull_tasks,
+            &mut sealed_pull_in_flight,
+            &mut sealed_pull_waiting_bytes,
+            &mut producer_shutdown,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        .expect("rejected sealed dispatch flushes")
+    );
+    assert!(matches!(
+        orna_protocol::decode_constructed_invocation_event_frame(
+            active,
+            registry,
+            &read_encoded_server_frame(&mut client, "sealed invocation failure frame").await,
+        )
+        .expect("constructed invocation failure frame decodes"),
+        ServerFrame::EventBatch { stream: 1, .. }
+    ));
+    assert_eq!(
+        read_constructed_server_frame(&mut client, active, registry).await,
+        ServerFrame::CallCompleted { stream: 1 }
+    );
+}
+
+#[tokio::test]
 async fn queued_value_and_completion_are_replaced_by_cancel_without_credit() {
     let dispatcher = TestDispatch::new(vec![
         ServerAction::Events {
