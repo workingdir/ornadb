@@ -685,6 +685,83 @@ fn sealed_test_active_revision(pair: RevisionPair) -> ActiveDatabaseRevision {
     )
     .expect("sealed invocation test active revision")
 }
+fn sealed_test_request(function: FunctionId) -> orna_core::invocation::InvokeRequest {
+    use orna_core::invocation::{
+        InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+        InvocationTracePolicy, InvokeRequest, InvokeRequestInput,
+    };
+
+    InvokeRequest::new(InvokeRequestInput {
+        target: orna_core::invocation::InvocationTarget::function_id(function),
+        arguments: Vec::new(),
+        caller_context: InvocationCallerContext::new(
+            InvocationCallerKind::TestRunner,
+            false,
+            false,
+            None,
+            None,
+            "en-GB",
+            "UTC",
+            None,
+        )
+        .expect("sealed invocation test caller context"),
+        client_offer: InvocationClientOffer::new(
+            5,
+            "en-GB",
+            "UTC",
+            Vec::new(),
+            Vec::new(),
+            1_024,
+            0,
+            None,
+            None,
+        )
+        .expect("sealed invocation test client offer"),
+        output_requirement: None,
+        state_profile: None,
+        trace_policy: InvocationTracePolicy::Off,
+        idempotency_key: None,
+        parent_invocation_id: None,
+        observer_context: None,
+    })
+    .expect("sealed invocation test request")
+}
+
+fn sealed_test_registry() -> OpaqueCodecRegistry {
+    let standard = orna_standard::verify_standard_library_v9_snapshot(
+        orna_standard::retained_standard_library_v9_snapshot()
+            .expect("sealed invocation test standard snapshot"),
+    )
+    .expect("sealed invocation test verified standard snapshot");
+    registered_opaque_codecs(&standard).expect("sealed invocation test codec registry")
+}
+
+fn sealed_test_operation(
+    active: &ActiveDatabaseRevision,
+    security: &SecuritySnapshot,
+    session: &AuthenticatedSession,
+    registry: &OpaqueCodecRegistry,
+    function: FunctionId,
+    invocation: InvocationId,
+    outcome: SealedInvocationPreparedOutcome,
+) -> SealedInvocationOperation {
+    let decoded = sealed_test_request(function);
+    let request = orna_protocol::encode_invoke_request(active, registry, &decoded)
+        .expect("sealed invocation test retained request");
+    let kernel = PostgresKernel::new(tokio_postgres::Config::new());
+    SealedInvocationOperation::new_for_test(
+        kernel,
+        session.clone(),
+        active.clone(),
+        security.clone(),
+        registry.clone(),
+        decoded,
+        request,
+        invocation,
+        outcome,
+    )
+    .expect("sealed invocation test operation")
+}
 
 #[test]
 fn sealed_invocation_security_guard_rejects_security_definer_targets() {
@@ -836,6 +913,315 @@ fn prepared_security_definer_is_rejected_before_audit_or_execution() {
     assert_eq!(invocation_audit.effective_principal, None);
     assert_eq!(invocation_audit.authorising_principal, None);
     assert!(invocation_audit.security_audit_event.is_some());
+}
+
+#[tokio::test]
+async fn sealed_invocation_execution_gate_blocks_definer_dispatch_and_preserves_invoker() {
+    use orna_core::{
+        catalogue::{
+            FunctionSecurity, FunctionTransaction, FunctionVolatility, QualifiedSemanticName,
+        },
+        types::{ResolvedType, StandardScalar},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let revision = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xa1; 16]),
+        CatalogueRevisionId::from_bytes([0xa2; 16]),
+    );
+    let principal = PrincipalId::from_bytes([0xa3; 16]);
+    let definition = |function, name, security, domain| {
+        FunctionDefinition::new(
+            function,
+            QualifiedSemanticName::new(["app", name]).expect("sealed execution test name"),
+            domain,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionRevisionId::from_bytes([0xa4; 16]),
+            security,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
+    };
+    let definer = definition(
+        FunctionId::from_bytes([0xa5; 16]),
+        "definer_boundary",
+        FunctionSecurity::Definer,
+        FunctionDomain::Server,
+    );
+    let invoker = definition(
+        FunctionId::from_bytes([0xa6; 16]),
+        "invoker_boundary",
+        FunctionSecurity::Invoker,
+        FunctionDomain::Client,
+    );
+    let security = SecuritySnapshot::new(
+        revision,
+        vec![definer.id(), invoker.id()],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![
+            ExecuteGrant::new(principal, definer.id()),
+            ExecuteGrant::new(principal, invoker.id()),
+        ],
+    )
+    .expect("sealed execution test security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("sealed execution test session");
+    let active = sealed_test_active_revision(revision);
+    let registry = sealed_test_registry();
+
+    let definer_target = InvocationTarget::new(definer.id(), revision);
+    let ExecuteDecision::Allowed(definer_authorisation) =
+        authorise_sealed_target(&security, &session, definer_target)
+    else {
+        panic!("sealed execution test definer grant must be allowed");
+    };
+    let definer_invocation = InvocationId::from_bytes([0xa7; 16]);
+    let definer_outcome = SealedInvocationPreparedOutcome::Allowed {
+        target: PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definer)),
+        security_target: definer_target,
+        authorisation: definer_authorisation,
+    };
+    let definer_audit_calls = Arc::new(AtomicUsize::new(0));
+    let definer_dispatch_calls = Arc::new(AtomicUsize::new(0));
+    let audit_calls = Arc::clone(&definer_audit_calls);
+    let audit_session = session.clone();
+    let audit_hook = move |outcome: &SealedInvocationPreparedOutcome| {
+        audit_calls.fetch_add(1, Ordering::SeqCst);
+        let SealedInvocationPreparedOutcome::TargetDenied {
+            security_target: Some(actual_target),
+            denial: Some(actual_denial),
+        } = outcome
+        else {
+            panic!("SECURITY DEFINER must be denied before dispatch");
+        };
+        assert_eq!(*actual_target, definer_target);
+        assert_eq!(*actual_denial, ExecuteDenial::UnsupportedSecurityDefiner);
+
+        let decision =
+            SecurityAuditDecision::execute_denied(&audit_session, *actual_target, *actual_denial);
+        assert_eq!(decision.kind(), SecurityAuditKind::Execute);
+        assert_eq!(decision.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(decision.session_principal(), Some(principal));
+        assert_eq!(decision.effective_principal(), None);
+        assert_eq!(decision.authorising_principal(), None);
+        assert_eq!(decision.target(), Some(definer_target));
+        assert_eq!(
+            decision.denial(),
+            Some(SecurityAuditDenial::Execute(
+                ExecuteDenial::UnsupportedSecurityDefiner,
+            ))
+        );
+        let event = SecurityAuditEvent::new(
+            SecurityAuditEventId::from_bytes([0xa8; 16]),
+            1,
+            UNIX_EPOCH,
+            decision,
+        );
+        let invocation_audit =
+            InvocationAuditDecision::from_execute_evidence(definer_invocation, &event)
+                .expect("denial audit must remain closed");
+        assert_eq!(invocation_audit.outcome, SecurityAuditOutcome::Denied);
+        assert_eq!(invocation_audit.target, Some(definer_target));
+        assert_eq!(invocation_audit.effective_principal, None);
+        assert_eq!(invocation_audit.authorising_principal, None);
+        assert!(invocation_audit.security_audit_event.is_some());
+        validate_invocation_audit_decision_shape(
+            &invocation_audit,
+            &definer_invocation.canonical(),
+        )
+        .expect("denial invocation audit must retain its closed shape");
+        Ok(())
+    };
+    let dispatch_calls = Arc::clone(&definer_dispatch_calls);
+    let dispatch_hook = move |_outcome: &SealedInvocationPreparedOutcome| {
+        dispatch_calls.fetch_add(1, Ordering::SeqCst);
+        panic!("SECURITY DEFINER dispatch side effect must not begin");
+    };
+    let mut definer_operation = sealed_test_operation(
+        &active,
+        &security,
+        &session,
+        &registry,
+        definer.id(),
+        definer_invocation,
+        definer_outcome,
+    )
+    .with_test_hooks(audit_hook, dispatch_hook);
+    let mut state = ClientStateStore::new();
+    let mut capability_audit_appended = false;
+    let cancellation = ResourceCancellation::new();
+    let definer_execution = definer_operation
+        .execute_after_started(
+            None,
+            &mut state,
+            &mut capability_audit_appended,
+            &cancellation,
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .expect("SECURITY DEFINER should produce a closed denial");
+    assert!(matches!(
+        definer_execution,
+        SealedInvocationExecution::Result(SealedInvocationResult::Denied { invocation })
+            if invocation == definer_invocation
+    ));
+    assert_eq!(definer_audit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        definer_dispatch_calls.load(Ordering::SeqCst),
+        0,
+        "the dispatch spy must not run for a denied SECURITY DEFINER"
+    );
+
+    let forged_target = InvocationTarget::new(FunctionId::from_bytes([0xa9; 16]), revision);
+    let ExecuteDecision::Allowed(definer_authorisation) =
+        authorise_sealed_target(&security, &session, definer_target)
+    else {
+        panic!("sealed execution test forged fixture grant must be allowed");
+    };
+    let forged_outcome = SealedInvocationPreparedOutcome::Allowed {
+        target: PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&definer)),
+        security_target: forged_target,
+        authorisation: definer_authorisation,
+    };
+    let forged_audit_calls = Arc::new(AtomicUsize::new(0));
+    let forged_dispatch_calls = Arc::new(AtomicUsize::new(0));
+    let forged_audit = Arc::clone(&forged_audit_calls);
+    let forged_dispatch = Arc::clone(&forged_dispatch_calls);
+    let mut forged_operation = sealed_test_operation(
+        &active,
+        &security,
+        &session,
+        &registry,
+        definer.id(),
+        InvocationId::from_bytes([0xaa; 16]),
+        forged_outcome,
+    )
+    .with_test_hooks(
+        move |_outcome| {
+            forged_audit.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+        move |_outcome| {
+            forged_dispatch.fetch_add(1, Ordering::SeqCst);
+            panic!("forged target must fail before dispatch");
+        },
+    );
+    let forged_error = forged_operation
+        .execute_after_started(
+            None,
+            &mut ClientStateStore::new(),
+            &mut false,
+            &ResourceCancellation::new(),
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .expect_err("forged target tuple must fail closed");
+    assert!(matches!(
+        forged_error,
+        PostgresKernelError::DurableInvariant {
+            relation: "active catalogue",
+            rule: "prepared sealed invocation security target must match its pinned target",
+            ..
+        }
+    ));
+    assert_eq!(forged_audit_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(forged_dispatch_calls.load(Ordering::SeqCst), 0);
+
+    let invoker_target = InvocationTarget::new(invoker.id(), revision);
+    let ExecuteDecision::Allowed(invoker_authorisation) =
+        authorise_sealed_target(&security, &session, invoker_target)
+    else {
+        panic!("sealed execution test invoker grant must be allowed");
+    };
+    let invoker_invocation = InvocationId::from_bytes([0xab; 16]);
+    let invoker_outcome = SealedInvocationPreparedOutcome::Allowed {
+        target: PreparedSealedTarget::from_resolved(SealedResolvedTarget::Application(&invoker)),
+        security_target: invoker_target,
+        authorisation: invoker_authorisation,
+    };
+    let invoker_audit_calls = Arc::new(AtomicUsize::new(0));
+    let invoker_dispatch_calls = Arc::new(AtomicUsize::new(0));
+    let invoker_audit_count = Arc::clone(&invoker_audit_calls);
+    let invoker_dispatch_count = Arc::clone(&invoker_dispatch_calls);
+    let invoker_audit_seen = Arc::clone(&invoker_audit_calls);
+    let invoker_function = invoker.id();
+    let invoker_audit = move |outcome: &SealedInvocationPreparedOutcome| {
+        invoker_audit_count.fetch_add(1, Ordering::SeqCst);
+        let SealedInvocationPreparedOutcome::Allowed {
+            security_target,
+            authorisation,
+            ..
+        } = outcome
+        else {
+            panic!("SECURITY INVOKER must retain the allowed prepared outcome");
+        };
+        assert_eq!(*security_target, invoker_target);
+        assert_eq!(authorisation.target(), invoker_target);
+        let decision = SecurityAuditDecision::execute_allowed(authorisation);
+        assert_eq!(decision.kind(), SecurityAuditKind::Execute);
+        assert_eq!(decision.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(decision.session_principal(), Some(principal));
+        assert_eq!(decision.target(), Some(invoker_target));
+        assert_eq!(decision.denial(), None);
+        Ok(())
+    };
+    let invoker_dispatch = move |outcome: &SealedInvocationPreparedOutcome| {
+        assert_eq!(invoker_audit_seen.load(Ordering::SeqCst), 1);
+        invoker_dispatch_count.fetch_add(1, Ordering::SeqCst);
+        assert!(matches!(
+            outcome,
+            SealedInvocationPreparedOutcome::Allowed {
+                target: PreparedSealedTarget::Application { definition },
+                security_target,
+                ..
+            } if definition.id() == invoker_function && *security_target == invoker_target
+        ));
+        let events =
+            sealed_completed_events(principal, invoker_invocation, RuntimeValue::Integer(1))?;
+        Ok(SealedInvocationExecution::Result(
+            SealedInvocationResult::Completed {
+                invocation: invoker_invocation,
+                events,
+            },
+        ))
+    };
+    let mut invoker_operation = sealed_test_operation(
+        &active,
+        &security,
+        &session,
+        &registry,
+        invoker.id(),
+        invoker_invocation,
+        invoker_outcome,
+    )
+    .with_test_hooks(invoker_audit, invoker_dispatch);
+    let invoker_execution = invoker_operation
+        .execute_after_started(
+            None,
+            &mut ClientStateStore::new(),
+            &mut false,
+            &ResourceCancellation::new(),
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .expect("SECURITY INVOKER should complete through dispatch");
+    assert!(matches!(
+        invoker_execution,
+        SealedInvocationExecution::Result(SealedInvocationResult::Completed { invocation, .. })
+            if invocation == invoker_invocation
+    ));
+    assert_eq!(invoker_audit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(invoker_dispatch_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
