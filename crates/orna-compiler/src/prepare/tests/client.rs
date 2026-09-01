@@ -649,6 +649,184 @@ END;"#;
     assert_ne!(operation.call_site().to_bytes(), [0; 16]);
     assert!(operation.arguments().is_empty());
 }
+#[test]
+fn named_record_stream_resource_preparation_preserves_nominal_result_identity() {
+    let verified = resource_standard();
+    let standard = check_standard_library_source(&verified).unwrap();
+    let active = empty_standard_application_active(&verified);
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+    let source = r#"CREATE SCHEMA stream_fixture;
+
+CREATE TYPE stream_fixture.event AS VALUE (
+    marker TEXT
+) IMMUTABLE PERSISTABLE;
+
+CREATE TYPE stream_fixture.other_event AS VALUE (
+    marker TEXT
+) IMMUTABLE PERSISTABLE;
+
+CREATE TYPE stream_fixture.probe AS OBJECT (
+    event stream_fixture.event NOT NULL
+);
+
+CREATE SERVER FUNCTION stream_fixture.events()
+RETURNS STREAM<stream_fixture.event>
+SECURITY INVOKER
+TRANSACTION READ ONLY
+VOLATILITY STABLE
+AS
+    SELECT probe.event FROM stream_fixture.probe probe;
+
+CREATE CLIENT FUNCTION stream_fixture.read() RETURNS STREAM<stream_fixture.event> IS
+BEGIN
+    RETURN AWAIT std.data.stream_resource(
+        target => stream_fixture.events,
+        arguments => std.call.args()
+    );
+END;"#;
+    let bundle = SourceBundle::new([SourceUnit::new(
+        "fixtures/stream_resource_record.orna",
+        source,
+    )])
+    .unwrap();
+    let report = check_standard_application(&bundle, &context);
+    assert!(
+        report.diagnostics().is_empty(),
+        "record stream resource fixture did not check: {:?}",
+        report.diagnostics()
+    );
+
+    let checked = report.preparation_view().unwrap().checked();
+    let checked_record = checked
+        .record_value_types()
+        .iter()
+        .find(|record| record.name().to_string() == "stream_fixture.event")
+        .unwrap();
+    let checked_record_id = checked_record.id();
+    let checked_call_site = {
+        let client = checked
+            .client_functions()
+            .iter()
+            .find(|function| function.name().parts() == ["stream_fixture", "read"])
+            .unwrap();
+        let CheckedClientFunctionBody::Expression { expression } = client.body() else {
+            panic!("record stream resource client must use an expression body");
+        };
+        let CheckedClientExpression::Await { expression, .. } = expression else {
+            panic!("record stream resource client must await its resource");
+        };
+        let CheckedClientExpression::Resource { operation } = expression.as_ref() else {
+            panic!("record stream resource client must retain its resource operation");
+        };
+        assert_eq!(
+            operation.kind(),
+            orna_artifact::client_plan::ResourceKind::Stream
+        );
+        assert_eq!(
+            operation.result_type(),
+            SemanticType::Named(checked_record_id)
+        );
+        assert_eq!(operation.standard_result_type(), None);
+        operation.call_site()
+    };
+
+    let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+    let record = prepared
+        .candidate()
+        .record_value_types()
+        .iter()
+        .find(|record| record.name().to_string() == "stream_fixture.event")
+        .unwrap();
+    let record_type_id = record.id();
+    let target = prepared
+        .candidate()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["stream_fixture", "events"])
+        .unwrap();
+    let target_revision = prepared
+        .new_function_revisions()
+        .iter()
+        .find(|revision| revision.function() == target.id())
+        .unwrap();
+    assert_eq!(target.current_revision(), target_revision.id());
+    assert_eq!(
+        target.return_type(),
+        &FunctionReturn::Stream(ResolvedType::Named(record_type_id))
+    );
+    let target_plan = ServerPlan::decode(target_revision.artifact().payload()).unwrap();
+    let probe = prepared
+        .candidate()
+        .object_type_by_name(&semantic_name(&["stream_fixture", "probe"]))
+        .unwrap();
+    assert_eq!(target_plan.scan.object_type, probe.id());
+    assert_eq!(target_plan.projections.len(), 1);
+    assert_eq!(
+        target_plan.projections[0].value_type.resolved_type,
+        ResolvedType::Named(record_type_id)
+    );
+    let ExpressionKind::FieldPath { ref steps, .. } = target_plan.projections[0].kind else {
+        panic!("record stream SERVER plan projection must be a field path");
+    };
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].owner, probe.id());
+    assert_eq!(
+        steps[0].field,
+        probe.field_by_name("event").unwrap().id()
+    );
+
+    let client = prepared
+        .candidate()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["stream_fixture", "read"])
+        .unwrap();
+    let revision = prepared
+        .new_function_revisions()
+        .iter()
+        .find(|revision| revision.function() == client.id())
+        .unwrap();
+    assert_eq!(revision.artifact().version(), CLIENT_PLAN_RESOURCE_VERSION);
+    let plan = ResourceClientPlan::decode(revision.artifact().payload()).unwrap();
+    let ClientExpressionNode::Await { expression } = plan.expression() else {
+        panic!("prepared record stream resource plan must keep AWAIT at the return expression");
+    };
+    let ClientExpressionNode::Resource { operation } = expression.as_ref() else {
+        panic!("prepared record stream resource plan must contain a resource operation");
+    };
+    assert_eq!(
+        operation.kind(),
+        orna_artifact::client_plan::ResourceKind::Stream
+    );
+    assert_eq!(operation.target(), target.id());
+    assert_eq!(operation.target_revision(), prepared.candidate_pair());
+    assert_eq!(operation.result_type(), record_type_id);
+    assert_eq!(operation.call_site(), checked_call_site);
+    assert_ne!(operation.call_site().to_bytes(), [0; 16]);
+    assert!(operation.arguments().is_empty());
+
+    let mismatched_source = source.replace(
+        "CREATE CLIENT FUNCTION stream_fixture.read() RETURNS STREAM<stream_fixture.event>",
+        "CREATE CLIENT FUNCTION stream_fixture.read() RETURNS STREAM<stream_fixture.other_event>",
+    );
+    let mismatch_report = check_standard_application(
+        &SourceBundle::new([SourceUnit::new(
+            "fixtures/stream_resource_record.orna",
+            mismatched_source,
+        )])
+        .unwrap(),
+        &context,
+    );
+    assert!(
+        mismatch_report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::TypeMismatch),
+        "same-shaped nominal record stream mismatch must be rejected: {:?}",
+        mismatch_report.diagnostics()
+    );
+    assert!(mismatch_report.checked_bundle().is_none());
+}
 
 #[test]
 fn rejects_opaque_standard_action_stream_resource_target() {
