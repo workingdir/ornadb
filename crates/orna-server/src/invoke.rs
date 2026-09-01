@@ -393,6 +393,9 @@ pub(crate) struct SharedInvokeBroker {
     resource_expectations: BrokerResourceExpectations,
     next_resource_stream_id: std::sync::Arc<std::sync::Mutex<u64>>,
     resource_terminal_provenance: BrokerResourceProvenance,
+    /// Session-only brokers carry the bridge/context for an authenticated
+    /// daemon connection but never route CLIENT resources through a broker.
+    resource_transport: bool,
 }
 
 #[derive(Clone)]
@@ -439,6 +442,20 @@ impl SharedInvokeBroker {
             .lock()
             .expect("dynamic invocation context lock")
             .remove(&root_invocation);
+    }
+
+    /// Creates a per-connection broker that only carries session state.
+    ///
+    /// It intentionally has no active broker transport. The daemon executor
+    /// uses its authenticated resource transport while reading this broker's
+    /// bridge and trusted dynamic context.
+    pub(crate) fn session_only() -> Self {
+        let (broker, _receiver) = Self::pending_with_resource_transport(false);
+        broker
+    }
+
+    fn resource_transport_enabled(&self) -> bool {
+        self.resource_transport
     }
 }
 pub(crate) struct SessionBridge {
@@ -1143,6 +1160,17 @@ impl InstalledClientResourceExecutor {
         broker: SharedInvokeBroker,
         cancellation: ResourceCancellation,
     ) -> Self {
+        let transport = if broker.resource_transport_enabled() {
+            None
+        } else {
+            Some(ResourceTransportSource::Authenticated(
+                AuthenticatedResourceTransport {
+                    kernel: kernel.clone(),
+                    session: session.clone(),
+                    transport: PersistentResourceTransport::empty(),
+                },
+            ))
+        };
         Self {
             active,
             inspect_kernel: Some(kernel),
@@ -1151,7 +1179,7 @@ impl InstalledClientResourceExecutor {
             next_stream_id: 1,
             broker: Some(broker),
             raw_resource_authorizer: None,
-            transport: None,
+            transport,
             pending: None,
             broker_pending: None,
             detached: Vec::new(),
@@ -1160,7 +1188,11 @@ impl InstalledClientResourceExecutor {
         }
     }
     fn allocate_stream_id(&mut self) -> Option<u64> {
-        if let Some(broker) = self.broker.as_ref() {
+        if let Some(broker) = self
+            .broker
+            .as_ref()
+            .filter(|broker| broker.resource_transport_enabled())
+        {
             return broker.allocate_resource_stream_id();
         }
         if let Some(authorizer) = self.raw_resource_authorizer.as_ref() {
@@ -1663,7 +1695,10 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
             item_window: MAX_RESOURCE_WINDOW,
             byte_window: MAX_RESOURCE_WINDOW,
         };
-        if let Some(broker) = self.broker.as_ref()
+        if let Some(broker) = self
+            .broker
+            .as_ref()
+            .filter(|broker| broker.resource_transport_enabled())
             && !broker.register_expected_resource_request(&protocol_request)
         {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
@@ -1672,7 +1707,11 @@ impl ClientResourceExecutor for InstalledClientResourceExecutor {
         {
             return request.failed(SERVER_RESOURCE_INTERNAL_CODE.to_owned());
         }
-        if let Some(broker) = self.broker.clone() {
+        if let Some(broker) = self
+            .broker
+            .clone()
+            .filter(|broker| broker.resource_transport_enabled())
+        {
             let (completion, receiver) = mpsc::channel(BROKER_RESOURCE_COMPLETION_CAPACITY);
             if broker
                 .commands
@@ -2306,6 +2345,12 @@ impl SharedInvokeBroker {
     }
 
     fn pending() -> (Self, UnboundedReceiver<BrokerCommand>) {
+        Self::pending_with_resource_transport(true)
+    }
+
+    fn pending_with_resource_transport(
+        resource_transport: bool,
+    ) -> (Self, UnboundedReceiver<BrokerCommand>) {
         let (commands, receiver) = mpsc::unbounded_channel();
         (
             Self {
@@ -2316,6 +2361,7 @@ impl SharedInvokeBroker {
                 resource_expectations: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
                 next_resource_stream_id: std::sync::Arc::new(std::sync::Mutex::new(1)),
                 resource_terminal_provenance: Arc::new(Mutex::new(BTreeMap::new())),
+                resource_transport,
             },
             receiver,
         )
@@ -4662,5 +4708,279 @@ mod trait_tests {
     #[test]
     fn trait_dispatches_dynamic_command_to_installed_executor() {
         let _ = <InstalledClientResourceExecutor as ClientResourceExecutor>::evaluate_command;
+    }
+}
+
+#[cfg(test)]
+mod daemon_session_tests {
+    use super::*;
+    use orna_core::{
+        CatalogueRevisionId, PrincipalId,
+        canonical_hash::{catalogue_digest_with_context, function_semantic_digest_with_version},
+        catalogue::CatalogueSnapshot,
+        revision::{
+            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
+        },
+        security::{
+            ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
+            SecurityFunctionTarget, SecuritySnapshot,
+        },
+        value::FunctionArgument,
+    };
+    use std::{str::FromStr, thread};
+
+    fn active_and_standard() -> (ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot) {
+        let standard = orna_standard::verify_standard_library_v11_snapshot(
+            orna_standard::retained_standard_library_v11_snapshot().expect("standard snapshot"),
+        )
+        .expect("verified standard snapshot");
+        let standard_function = standard
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().to_string() == "std.math.increment")
+            .expect("standard increment function")
+            .clone();
+        let function = FunctionDefinition::new(
+            standard_function.id(),
+            QualifiedSemanticName::new(["std", "math", "increment_app"])
+                .expect("application function name"),
+            standard_function.domain(),
+            standard_function.parameters().to_vec(),
+            standard_function.return_type().clone(),
+            standard_function.current_revision(),
+            standard_function.security(),
+            standard_function.transaction(),
+            standard_function.volatility(),
+        );
+        let schema = standard
+            .catalogue()
+            .schemas()
+            .iter()
+            .find(|schema| schema.name().to_string() == "std.math")
+            .expect("standard math schema")
+            .clone();
+        let schema_id = schema.id();
+        let source = standard.source().clone();
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x93; 16]),
+            vec![schema.clone()],
+            Vec::new(),
+            vec![function.clone()],
+        )
+        .expect("application catalogue");
+        let standard_function_revision = standard
+            .executables()
+            .iter()
+            .find(|executable| executable.function() == function.id())
+            .expect("standard increment executable")
+            .revision();
+        let semantic_hash = function_semantic_digest_with_version(
+            standard_function_revision.semantic_hash_version(),
+            &function,
+            standard_function_revision.language_version(),
+            standard_function_revision.artifact(),
+            &[],
+            &[],
+        )
+        .expect("increment semantic hash");
+        let function_revision = orna_core::revision::FunctionRevisionRecord::new(
+            function.id(),
+            standard_function_revision.id(),
+            standard_function_revision.revision_number(),
+            standard_function_revision.declaration_origin(),
+            standard_function_revision.declaration_content_hash(),
+            semantic_hash,
+            standard_function_revision.language_version(),
+            standard_function_revision.artifact().clone(),
+        )
+        .expect("increment function revision")
+        .with_semantic_hash_version(standard_function_revision.semantic_hash_version());
+        let origins = standard
+            .origins()
+            .iter()
+            .filter(|origin| {
+                matches!(
+                    origin.identity(),
+                    orna_core::revision::DefinitionIdentity::Schema(id) if id == schema_id
+                ) || matches!(
+                    origin.identity(),
+                    orna_core::revision::DefinitionIdentity::Function(owner)
+                        if owner == function.id()
+                ) || matches!(
+                    origin.identity(),
+                    orna_core::revision::DefinitionIdentity::Parameter { owner, .. }
+                        if owner == function.id()
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let function_revisions = vec![function_revision];
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            &function_revisions,
+            &[],
+            &origins,
+            &[],
+        )
+        .expect("catalogue digest");
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), function_revisions, origins, Vec::new()),
+            ),
+            context,
+        )
+        .expect("active revision");
+        (active, standard)
+    }
+
+    fn session_for(revision: RevisionPair, function: &FunctionDefinition) -> AuthenticatedSession {
+        let principal = PrincipalId::from_bytes([0x94; 16]);
+        let security = SecuritySnapshot::new_with_function_targets(
+            revision,
+            vec![SecurityFunctionTarget::application(function.id())],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![ExecuteGrant::new(principal, function.id())],
+        )
+        .expect("security snapshot");
+        security
+            .bind_authenticated_session(principal, Vec::new())
+            .expect("authenticated session")
+    }
+
+    fn client_context(
+        active: &ActiveDatabaseRevision,
+        standard: &VerifiedStandardLibrarySnapshot,
+    ) -> (
+        FunctionDefinition,
+        AuthenticatedSession,
+        SecuritySnapshot,
+        ClientExecutionContext,
+    ) {
+        let function = active
+            .catalogue()
+            .functions()
+            .first()
+            .expect("application increment function")
+            .clone();
+        let session = session_for(active.pair(), &function);
+        let principal = session.principal();
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![SecurityFunctionTarget::application(function.id())],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![ExecuteGrant::new(principal, function.id())],
+        )
+        .expect("security snapshot");
+        let auth = match security.authorise_execute(
+            &session,
+            InvocationTarget::new(function.id(), active.pair()),
+        ) {
+            orna_core::security::ExecuteDecision::Allowed(auth) => auth,
+            decision => panic!("increment must authorise: {decision:?}"),
+        };
+        let argument =
+            FunctionArgument::new(function.parameters()[0].id(), RuntimeValue::Integer(4))
+                .expect("increment argument");
+        let result = orna_client::evaluate_client_function_with_state_and_grants_and_arguments(
+            active,
+            &auth,
+            &[argument],
+            &[],
+            &orna_client::capability::LocalCapabilityGrantSet::new(),
+            &mut orna_client::ClientStateStore::new(),
+        )
+        .expect("standard increment evaluates");
+        (function, session, security, *result.context())
+    }
+    #[test]
+    fn session_only_executor_reads_input_over_its_bridge() {
+        let (active, standard) = active_and_standard();
+        let (_function, session, _security, context) = client_context(&active, &standard);
+        let root = InvocationId::from_bytes([0x95; 16]);
+        let broker = SharedInvokeBroker::session_only();
+        let bridge = broker
+            .install_session_bridge(root, 17)
+            .expect("session bridge installs");
+        let mut executor = InstalledClientResourceExecutor::new_with_broker(
+            PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent").expect("kernel config"),
+            session,
+            active,
+            broker,
+            ResourceCancellation::new(),
+        );
+        executor.bind_current_invocation(root);
+        assert!(matches!(
+            executor.transport,
+            Some(ResourceTransportSource::Authenticated(_))
+        ));
+        let waiter = thread::spawn(move || {
+            <InstalledClientResourceExecutor as ClientResourceExecutor>::read_input(
+                &mut executor,
+                context,
+            )
+        });
+        let request = loop {
+            if let Some(SessionServerFrame::InputRequested(request)) = bridge.try_take_outbound() {
+                break request;
+            }
+            thread::yield_now();
+        };
+        bridge
+            .accept_response(SessionClientFrame::InputLine {
+                root_invocation_id: root,
+                call_stream: 17,
+                request_invocation_id: request.request_invocation_id,
+                line: "daemon input".to_owned(),
+            })
+            .expect("input response accepted");
+        assert_eq!(
+            waiter
+                .join()
+                .expect("input waiter joins")
+                .expect("input succeeds"),
+            RuntimeValue::Text("daemon input".to_owned())
+        );
+    }
+
+    #[test]
+    fn session_only_executor_evaluates_against_trusted_context() {
+        let (active, standard) = active_and_standard();
+        let (function, session, security, context) = client_context(&active, &standard);
+        let root = context.parent_invocation_id();
+        let broker = SharedInvokeBroker::session_only();
+        broker.bind_dynamic_context(active.clone(), security, session.clone(), root);
+        let mut executor = InstalledClientResourceExecutor::new_with_broker(
+            PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent").expect("kernel config"),
+            session,
+            active,
+            broker,
+            ResourceCancellation::new(),
+        );
+        executor.bind_current_invocation(root);
+        let value = <InstalledClientResourceExecutor as ClientResourceExecutor>::evaluate_command(
+            &mut executor,
+            context,
+            "std.math.increment_app --p_value=4",
+        )
+        .expect("dynamic command evaluates");
+        assert_eq!(value, RuntimeValue::Integer(5));
+        assert_eq!(function.name().to_string(), "std.math.increment_app");
     }
 }
