@@ -695,6 +695,211 @@ fn declaration_lookup_folds_unquoted_identifier_case_but_preserves_quotes() {
     assert!(declaration_at(&quoted, "\"foo\"").is_none());
     assert!(declaration_at(&quoted, "foo").is_none());
 }
+#[test]
+fn qualified_type_navigation_uses_full_path_for_hover_definition_and_references() {
+    let text = concat!(
+        "CREATE SCHEMA a;\n",
+        "CREATE SCHEMA b;\n",
+        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
+        "CREATE TYPE b.item AS OBJECT (b_value TEXT);\n",
+        "CREATE SERVER FUNCTION use_b() RETURNS b.item AS SELECT TRUE;\n",
+        "CREATE SERVER FUNCTION use_a() RETURNS a.item AS SELECT TRUE;\n",
+    );
+    let document = Document::new("file:///qualified-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_type_declaration = text.find("CREATE TYPE b.item").expect("b type declaration")
+        + "CREATE TYPE ".len();
+    let b_type_use = text.find("RETURNS b.item").expect("b type use") + "RETURNS ".len();
+    let b_type_final = b_type_use + "b.".len();
+
+    let hover = hover_at(text, b_type_final + 1).expect("qualified b.item hover");
+    let hover_value = hover_markdown(&hover);
+    assert!(hover_value.contains("b_value"), "b.item hover: {hover_value}");
+    assert!(!hover_value.contains("a_value"), "cross-schema hover leak: {hover_value}");
+
+    let definition = super::definition(&document, &parse, mapper.position(b_type_final + 1), &mapper)
+        .expect("qualified b.item definition");
+    assert_eq!(definition.range.start, mapper.position(b_type_declaration));
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_type_declaration + "b.".len()),
+            mapper.position(b_type_use + "b.".len()),
+        ],
+        "qualified b.item references leaked across schemas: {references:?}",
+    );
+}
+
+#[test]
+fn qualified_function_navigation_uses_full_path_for_hover_definition_and_references() {
+    let text = concat!(
+        "CREATE SCHEMA a;\n",
+        "CREATE SCHEMA b;\n",
+        "CREATE CLIENT FUNCTION a.item() RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION b.item() RETURNS BOOLEAN AS TRUE;\n",
+        "CREATE CLIENT FUNCTION caller() RETURNS BOOLEAN AS b.item();\n",
+    );
+    let document = Document::new("file:///qualified-function-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_function_declaration = text.find("CREATE CLIENT FUNCTION b.item").expect("b function declaration")
+        + "CREATE CLIENT FUNCTION ".len();
+    let b_function_use = text.find("RETURNS BOOLEAN AS b.item").expect("b function use")
+        + "RETURNS BOOLEAN AS ".len();
+    let b_function_final = b_function_use + "b.".len();
+
+    let hover = hover_at(text, b_function_final + 1).expect("qualified b.item function hover");
+    let hover_value = hover_markdown(&hover);
+    assert!(hover_value.contains("b.item"), "b.item function hover: {hover_value}");
+    assert!(!hover_value.contains("a.item"), "cross-schema function hover leak: {hover_value}");
+
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_function_final + 1),
+        &mapper,
+    )
+    .expect("qualified b.item function definition");
+    assert_eq!(
+        definition.range.start,
+        mapper.position(b_function_declaration),
+    );
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_function_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_function_declaration + "b.".len()),
+            mapper.position(b_function_use + "b.".len()),
+        ],
+        "qualified b.item function references leaked across schemas: {references:?}",
+    );
+}
+
+
+#[test]
+fn qualified_quoted_type_navigation_preserves_identifier_semantics() {
+    let text = concat!(
+        "CREATE SCHEMA a;\n",
+        "CREATE SCHEMA \"b\";\n",
+        "CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);\n",
+        "CREATE TYPE \"b\".\"item\" AS OBJECT (b_value TEXT);\n",
+        "CREATE SERVER FUNCTION use_b() RETURNS \"b\".\"item\" AS SELECT TRUE;\n",
+    );
+    let document = Document::new("file:///qualified-quoted-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_type_declaration = text.find("CREATE TYPE \"b\".\"item\"").expect("quoted b type declaration")
+        + "CREATE TYPE ".len();
+    let b_type_use = text.find("RETURNS \"b\".\"item\"").expect("quoted b type use")
+        + "RETURNS ".len();
+    let b_type_final = b_type_use + "\"b\".".len();
+
+    let hover = hover_at(text, b_type_final + 1).expect("quoted b.item hover");
+    let hover_value = hover_markdown(&hover);
+    assert!(hover_value.contains("\"b\".\"item\""), "quoted b.item hover: {hover_value}");
+    assert!(!hover_value.contains("a_value"), "cross-schema quoted hover leak: {hover_value}");
+
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+    )
+    .expect("quoted b.item definition");
+    assert_eq!(
+        definition.range.start,
+        mapper.position(b_type_declaration),
+    );
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_type_declaration + "\"b\".".len()),
+            mapper.position(b_type_use + "\"b\".".len()),
+        ],
+        "quoted b.item references leaked across schemas: {references:?}",
+    );
+}
+
+#[test]
+fn qualified_quoted_sql_type_navigation_uses_full_path() {
+    let text = concat!(
+        "CREATE SCHEMA \"a\";\n",
+        "CREATE SCHEMA \"b\";\n",
+        "CREATE TYPE \"a\".\"item\" AS OBJECT (a_value BOOLEAN);\n",
+        "CREATE TYPE \"b\".\"item\" AS OBJECT (b_value TEXT);\n",
+        "CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS\n",
+        "SELECT probe.b_value FROM \"b\".\"item\" probe;\n",
+    );
+    let document = Document::new("file:///qualified-quoted-sql-navigation.orna".parse().unwrap(), text.to_owned(), 1);
+    let parse = orna_syntax::parse(text);
+    let mapper = PositionMapper::new(text);
+    let b_type_declaration = text.find("CREATE TYPE \"b\".\"item\"").expect("quoted b type declaration")
+        + "CREATE TYPE ".len();
+    let b_type_use = text.find("FROM \"b\".\"item\"").expect("quoted b type use")
+        + "FROM ".len();
+    let b_type_final = b_type_use + "\"b\".".len();
+
+    let hover = hover_at(text, b_type_final + 1).expect("quoted SQL b.item hover");
+    let hover_value = hover_markdown(&hover);
+    assert!(hover_value.contains("\"b\".\"item\""), "quoted SQL b.item hover: {hover_value}");
+    assert!(!hover_value.contains("a_value"), "cross-schema quoted SQL hover leak: {hover_value}");
+
+    let definition = super::definition(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+    )
+    .expect("quoted SQL b.item definition");
+    assert_eq!(
+        definition.range.start,
+        mapper.position(b_type_declaration),
+    );
+
+    let references = references(
+        &document,
+        &parse,
+        mapper.position(b_type_final + 1),
+        &mapper,
+        true,
+    );
+    let reference_starts: Vec<_> = references.iter().map(|reference| reference.range.start).collect();
+    assert_eq!(
+        reference_starts,
+        vec![
+            mapper.position(b_type_declaration + "\"b\".".len()),
+            mapper.position(b_type_use + "\"b\".".len()),
+        ],
+        "quoted SQL b.item references leaked across schemas: {references:?}",
+    );
+}
 
 #[test]
 fn references_fold_unquoted_case_and_exclude_qualified_declaration_component() {
