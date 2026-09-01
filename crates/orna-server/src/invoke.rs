@@ -4861,7 +4861,6 @@ mod daemon_session_tests {
 
     fn client_context(
         active: &ActiveDatabaseRevision,
-        standard: &VerifiedStandardLibrarySnapshot,
     ) -> (
         FunctionDefinition,
         AuthenticatedSession,
@@ -4911,8 +4910,8 @@ mod daemon_session_tests {
     }
     #[test]
     fn session_only_executor_reads_input_over_its_bridge() {
-        let (active, standard) = active_and_standard();
-        let (_function, session, _security, context) = client_context(&active, &standard);
+        let (active, _) = active_and_standard();
+        let (_function, session, _security, context) = client_context(&active);
         let root = InvocationId::from_bytes([0x95; 16]);
         let broker = SharedInvokeBroker::session_only();
         let bridge = broker
@@ -4961,8 +4960,8 @@ mod daemon_session_tests {
 
     #[test]
     fn session_only_executor_evaluates_against_trusted_context() {
-        let (active, standard) = active_and_standard();
-        let (function, session, security, context) = client_context(&active, &standard);
+        let (active, _) = active_and_standard();
+        let (function, session, security, context) = client_context(&active);
         let root = context.parent_invocation_id();
         let broker = SharedInvokeBroker::session_only();
         broker.bind_dynamic_context(active.clone(), security, session.clone(), root);
