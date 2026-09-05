@@ -602,7 +602,7 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
         ([32; 16], [42; 32], orna_protocol_v1::RequestState::Running),
         ([33; 16], [43; 32], orna_protocol_v1::RequestState::Terminal),
         ([34; 16], [44; 32], orna_protocol_v1::RequestState::Terminal),
-        ([35; 16], [45; 32], orna_protocol_v1::RequestState::Terminal),
+        ([35; 16], [45; 32], orna_protocol_v1::RequestState::Orphaned),
     ];
     for (target, fingerprint, _) in states {
         let identity = RequestIdentity {
@@ -783,6 +783,85 @@ fn durable_runtime_cancels_a_recovered_running_request_and_replays_cancellation(
         FrameOutcome::Cancelled
     ));
     assert_eq!(application.calls, 1);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [25; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [25; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request(identity, fingerprint)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [7; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let first =
+        block_on(host.dispatch_frame([7; 16], 2, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            fingerprint: returned_fingerprint,
+            diagnostic: None,
+        } if returned_fingerprint == fingerprint
+    ));
+    assert_eq!(application.calls, 0);
+
+    let status = block_on(open_durable_state(&repository).request_status_for_identity(identity))
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, orna_runtime_v1::RequestState::Orphaned);
+    assert_eq!(status.fingerprint, fingerprint);
+
+    let status_request = Envelope {
+        request: Some([26; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [25; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let status_outcome =
+        block_on(host.dispatch_frame([7; 16], 3, Frame::Binary(status_request), &mut application))
+            .unwrap();
+    assert!(matches!(
+        status_outcome.response.unwrap().message,
+        Message::RequestStatusResult {
+            target: returned_target,
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(returned_fingerprint),
+            result: None,
+        } if returned_target == [25; 16] && returned_fingerprint == fingerprint
+    ));
+
+    assert_eq!(
+        block_on(host.dispatch_frame([7; 16], 4, Frame::Binary(request), &mut application,)),
+        Ok(first)
+    );
+    assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
 }
