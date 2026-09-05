@@ -1370,7 +1370,8 @@ fn infer(
         } => {
             let mut locals = local.clone();
             let mut effects = EffectSummary::default();
-            for statement in statements {
+            let mut final_control = None;
+            for (index, statement) in statements.iter().enumerate() {
                 match statement {
                     Statement::Let {
                         pattern,
@@ -1392,6 +1393,13 @@ fn infer(
                         let x = infer(value, scope, &locals, diagnostics);
                         effects.join(&x.effects);
                     }
+                    Statement::Control { value, .. } => {
+                        let x = infer(value, scope, &locals, diagnostics);
+                        effects.join(&x.effects);
+                        if index + 1 == statements.len() && tail.is_none() {
+                            final_control = Some(x);
+                        }
+                    }
                     _ => diagnostics.push(diag(
                         DIAG_UNSUPPORTED,
                         "control or assignment statement is outside this semantic slice",
@@ -1401,6 +1409,7 @@ fn infer(
             let tail = tail
                 .as_ref()
                 .map(|x| infer(x, scope, &locals, diagnostics))
+                .or(final_control)
                 .unwrap_or(Inferred {
                     ty: Type::Null,
                     effects: EffectSummary::default(),
@@ -1411,6 +1420,24 @@ fn infer(
                 effects,
             }
         }
+        Expr::Control {
+            kind: ControlKind::If,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => infer_if(
+            binding.as_ref(),
+            condition.as_deref(),
+            body.as_deref(),
+            arms,
+            alternate.as_deref(),
+            scope,
+            local,
+            diagnostics,
+        ),
         Expr::Control {
             kind: ControlKind::Case,
             binding,
@@ -1439,6 +1466,69 @@ fn infer(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_if(
+    binding: Option<&Pattern>,
+    condition: Option<&Expr>,
+    body: Option<&Expr>,
+    arms: &[orna_syntax_v1::CaseArm],
+    alternate: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if binding.is_some() || !arms.is_empty() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "malformed if control shape is outside this semantic slice",
+        ));
+    }
+    let Some(condition) = condition else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a condition"));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let condition = infer(condition, scope, local, diagnostics);
+    require_same(&Type::Bool, &condition.ty, diagnostics);
+
+    let Some(body) = body else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a body"));
+        return Inferred {
+            ty: Type::Error,
+            effects: condition.effects,
+        };
+    };
+    let body = infer(body, scope, local, diagnostics);
+
+    let Some(alternate) = alternate else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "if expression requires an else branch in this semantic slice",
+        ));
+        let mut effects = condition.effects;
+        effects.join(&body.effects);
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let alternate = infer(alternate, scope, local, diagnostics);
+    let mut effects = condition.effects;
+    effects.join(&body.effects);
+    effects.join(&alternate.effects);
+    require_same(&body.ty, &alternate.ty, diagnostics);
+    Inferred {
+        ty: if body.ty == alternate.ty {
+            body.ty
+        } else {
+            Type::Error
+        },
+        effects,
     }
 }
 
