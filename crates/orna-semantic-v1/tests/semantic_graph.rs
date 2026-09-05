@@ -411,6 +411,15 @@ fn published_money_and_affine_diagnostics_are_preserved() {
     assert!(float_money.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
     }));
+
+    let float_constructor = analyze(&[ModuleInput::new(
+        "constructor.orna",
+        "pub fn bad(value: Float) = Money<GBP>(value);",
+    )]);
+    assert!(float_constructor.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "Money cannot be constructed from an inexact Float without explicit rounding"
+    }));
 }
 
 #[test]
