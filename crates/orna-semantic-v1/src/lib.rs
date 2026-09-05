@@ -31,6 +31,8 @@ pub const DIAG_ASSERTION: &str = "ORNA-A091-004";
 pub const DIAG_ASSERTION_ONE_TABLE: &str = "ORNA-A091-003";
 pub const DIAG_ASSERTION_SCOPE: &str = "ORNA-A091-012";
 pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
+pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
+pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -1234,6 +1236,26 @@ fn check_item(
                 }
             }
         }
+        Declaration::Type {
+            representation: TypeRepresentation::Nominal { members },
+            ..
+        } if members.iter().any(|member| {
+            matches!(
+                member,
+                TypeMember::Implementation { implementation, .. }
+                    if matches!(
+                        &implementation.protocol,
+                        TypeExpr::Name { path, arguments, .. }
+                            if path.as_slice() == ["TryFrom"] && arguments.len() == 1
+                    )
+            )
+        }) =>
+        {
+            diagnostics.push(diag(
+                DIAG_LEGACY_TRYFROM,
+                "use From<Source>; From may fail in Orna",
+            ))
+        }
         _ => {}
     }
 }
@@ -1564,6 +1586,19 @@ fn infer(
                 }
                 return resolve_qualified_module_member(&path, scope, diagnostics);
             }
+            if let Some(path) = qualified_path(expr)
+                && path.first() == Some(&"sys")
+                && path.get(1) == Some(&"runtime")
+            {
+                diagnostics.push(diag(
+                    DIAG_LEGACY_SYS_RUNTIME,
+                    "`sys.runtime` was renamed to `sys.rt`",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            }
             let base = infer(base, scope, local, diagnostics);
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_TYPE, message));
@@ -1661,6 +1696,29 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if matches!(
+                callee.as_ref(),
+                Expr::Name { text, .. } if matches!(text.as_str(), "Ok" | "Err")
+            ) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "Result/Ok/Err control plumbing was removed; return the success type directly",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            }
+            if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            }
             if let Some(currency) = money_constructor_currency(callee)
                 && arguments.len() == 1
                 && arguments[0].name.is_none()
