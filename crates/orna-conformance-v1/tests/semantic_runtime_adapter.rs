@@ -92,7 +92,10 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
     let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
     for fixture_id in [
         "invalid/affine-addition.orna",
+        "invalid/affine-sum.orna",
         "invalid/currency-addition.orna",
+        "invalid/currency-static-symbol.orna",
+        "invalid/float-money-implicit.orna",
         "invalid/float-key.orna",
         "invalid/incompatible-dimensions.orna",
     ] {
