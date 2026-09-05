@@ -121,6 +121,9 @@ fn table_assertion_rejects_authoritative_std_net_effect() {
     );
 
     assert!(has(&result, DIAG_ASSERTION_EFFECT));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "declaration assertion uses forbidden network effect"
+    }));
 }
 
 #[test]
