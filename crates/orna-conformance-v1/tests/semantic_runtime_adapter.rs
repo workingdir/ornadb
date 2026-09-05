@@ -3,7 +3,9 @@ use orna_conformance_v1::{
     ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator,
     Scenario, SemanticAdapter, SourceUnit, StageOutcome,
 };
+use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
+use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use std::collections::BTreeMap;
 
 #[test]
@@ -105,6 +107,262 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
         adapter.resolve_project(&project),
         StageOutcome::Passed
     ));
+}
+
+#[test]
+fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let project = ProjectUnit {
+        fixture_id: "project-rows".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "project-rows".into(),
+            source_id: "logical/project/inventory.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Item(id: Int) { name: Str, available: Bool, price: Decimal, description: Str = \"default\", }".into(),
+        }],
+        loose_rows: vec![SourceUnit {
+            fixture_id: "project-rows".into(),
+            source_id: "logical/project/inventory/Item/42.orna".into(),
+            parse_as: "row_unit".into(),
+            source: "{ name: \"Pencil\", available: true, price: 1.00 + 0.25 }".into(),
+        }],
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    assert_eq!(adapter.validate_rows(&project), StageOutcome::Passed);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "inventory.orna",
+            project.modules[0].source.clone(),
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    let rows = orna_conformance_v1::row_admission::admit_project_rows(
+        &project,
+        &analysis,
+        Limits::default(),
+    )
+    .expect("project-context row admission");
+    assert!(matches!(rows[0].key[0].raw(), OvbRaw::Int(value) if value == &42.into()));
+    assert!(matches!(rows[0].body["price"].raw(), OvbRaw::Tag(60000, _)));
+    assert!(!rows[0].body.contains_key("description"));
+}
+
+#[test]
+fn project_row_admission_rejects_unsupported_key_types_without_string_fallback() {
+    let project = ProjectUnit {
+        fixture_id: "project-rows-unsupported".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "project-rows-unsupported".into(),
+            source_id: "logical/project/calendar.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Event(id: Date) { name: Str, }".into(),
+        }],
+        loose_rows: vec![SourceUnit {
+            fixture_id: "project-rows-unsupported".into(),
+            source_id: "logical/project/calendar/Event/2026-09-05.orna".into(),
+            parse_as: "row_unit".into(),
+            source: "{ name: \"Review\" }".into(),
+        }],
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    let StageOutcome::Failed(diagnostic) =
+        RuntimeAdapter::new(BoundedEvaluator::default()).validate_rows(&project)
+    else {
+        panic!("unsupported key types must not pass row admission");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE");
+}
+
+#[test]
+fn project_row_admission_rejects_path_key_and_schema_failures() {
+    let module = SourceUnit {
+        fixture_id: "project-rows-negative".into(),
+        source_id: "logical/project/inventory.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub table Item(id: Int) { name: Str, }".into(),
+    };
+    for (source_id, source, code) in [
+        (
+            "logical/project/inventory/Item/not-an-int.orna",
+            "{ name: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-PATH",
+        ),
+        (
+            "logical/project/inventory/Item/042.orna",
+            "{ name: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-PATH",
+        ),
+        (
+            "logical/project/inventory/Item/+42.orna",
+            "{ name: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-PATH",
+        ),
+        (
+            "logical/project/inventory/Item/-0.orna",
+            "{ name: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-PATH",
+        ),
+        (
+            "logical/project/inventory/Item/42/extra.orna",
+            "{ name: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-PATH",
+        ),
+        (
+            "logical/project/inventory/Item/42.orna",
+            "{ id: 42, name: \"Pencil\" }",
+            "E3004",
+        ),
+        (
+            "logical/project/inventory/Item/42.orna",
+            "{}",
+            "ORNA-CONFORMANCE-ROW-MISSING",
+        ),
+        (
+            "logical/project/inventory/Item/42.orna",
+            "{ name: true }",
+            "ORNA-CONFORMANCE-ROW-TYPE",
+        ),
+        (
+            "logical/project/inventory/Item/42.orna",
+            "{ unknown: \"Pencil\" }",
+            "ORNA-CONFORMANCE-ROW-UNKNOWN",
+        ),
+    ] {
+        let project = ProjectUnit {
+            fixture_id: "project-rows-negative".into(),
+            project_id: "logical/project".into(),
+            environment_id: None,
+            modules: vec![module.clone()],
+            loose_rows: vec![SourceUnit {
+                fixture_id: "project-rows-negative".into(),
+                source_id: source_id.into(),
+                parse_as: "row_unit".into(),
+                source: source.into(),
+            }],
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        };
+        let StageOutcome::Failed(diagnostic) =
+            RuntimeAdapter::new(BoundedEvaluator::default()).validate_rows(&project)
+        else {
+            panic!("row admission should fail");
+        };
+        assert_eq!(diagnostic.code(), code);
+    }
+}
+
+#[test]
+fn project_row_admission_admits_automatic_and_composite_keys() {
+    let project = ProjectUnit {
+        fixture_id: "project-rows-key-shapes".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "project-rows-key-shapes".into(),
+            source_id: "logical/project/inventory.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Note { text: Str, } pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }".into(),
+        }],
+        loose_rows: vec![
+            SourceUnit {
+                fixture_id: "project-rows-key-shapes".into(),
+                source_id: "logical/project/inventory/Note/7.orna".into(),
+                parse_as: "row_unit".into(),
+                source: "{ text: \"memo\" }".into(),
+            },
+            SourceUnit {
+                fixture_id: "project-rows-key-shapes".into(),
+                source_id: "logical/project/inventory/Reading/greenhouse/2.orna".into(),
+                parse_as: "row_unit".into(),
+                source: "{ value: 18.50 }".into(),
+            },
+        ],
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    assert_eq!(
+        RuntimeAdapter::new(BoundedEvaluator::default()).validate_rows(&project),
+        StageOutcome::Passed
+    );
+}
+
+#[test]
+fn project_row_admission_rejects_computed_fields() {
+    let project = ProjectUnit {
+        fixture_id: "project-rows-computed".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "project-rows-computed".into(),
+            source_id: "logical/project/inventory.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Item(id: Int) { name: Str, label: Str => name, }".into(),
+        }],
+        loose_rows: vec![SourceUnit {
+            fixture_id: "project-rows-computed".into(),
+            source_id: "logical/project/inventory/Item/42.orna".into(),
+            parse_as: "row_unit".into(),
+            source: "{ name: \"Pencil\", label: \"Pencil\" }".into(),
+        }],
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    let StageOutcome::Failed(diagnostic) =
+        RuntimeAdapter::new(BoundedEvaluator::default()).validate_rows(&project)
+    else {
+        panic!("computed fields must not be admitted from a loose row");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-CONFORMANCE-ROW-COMPUTED");
 }
 
 #[test]
@@ -211,6 +469,50 @@ fn runtime_adapter_has_an_executable_seam_but_lazy_semantic_failures_precede_it(
     );
 }
 
+#[derive(Default)]
+struct ResolvedRowsRuntime {
+    fallback_rows: usize,
+    resolved_rows: usize,
+}
+
+impl RuntimeEvaluator for ResolvedRowsRuntime {
+    fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Passed
+    }
+    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Passed
+    }
+    fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        self.fallback_rows += 1;
+        StageOutcome::Skipped {
+            reason: "resolved row validation was not used".into(),
+        }
+    }
+    fn validate_resolved_rows(
+        &mut self,
+        _: &ProjectUnit,
+        analysis: &orna_semantic_v1::Analysis,
+    ) -> StageOutcome<Diagnostic> {
+        self.resolved_rows += analysis.modules.len();
+        StageOutcome::Passed
+    }
+    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Diagnostic> {
+        StageOutcome::Passed
+    }
+}
+
+#[test]
+fn runtime_adapter_preserves_custom_resolved_row_validation() {
+    let project = admission_project("pub table Item(id: Int) { name: Str, }", Vec::new());
+    let mut adapter = RuntimeAdapter::new(ResolvedRowsRuntime::default());
+
+    assert_eq!(adapter.validate_rows(&project), StageOutcome::Passed);
+
+    let runtime = adapter.into_runtime();
+    assert!(runtime.resolved_rows > 0);
+    assert_eq!(runtime.fallback_rows, 0);
+}
+
 #[test]
 fn bounded_row_evaluation_does_not_claim_schema_or_path_key_validation() {
     let mut evaluator = BoundedEvaluator::default();
@@ -231,7 +533,10 @@ fn bounded_row_evaluation_does_not_claim_schema_or_path_key_validation() {
             StageOutcome::Skipped { .. }
         ));
         let mut project = pure_project(Vec::new());
-        assert_eq!(evaluator.validate_rows(&project), StageOutcome::Passed);
+        assert!(matches!(
+            evaluator.validate_rows(&project),
+            StageOutcome::Skipped { .. }
+        ));
         project.loose_rows.push(row);
         assert!(matches!(
             evaluator.validate_rows(&project),
@@ -280,7 +585,7 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
 }
 
 #[test]
-fn bounded_adapter_keeps_the_reference_project_effects_skipped_but_validates_empty_rows() {
+fn reference_project_empty_row_discovery_passes_vacuously_through_project_admission() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let report = Harness::new(corpus).run(&mut RuntimeAdapter::new(BoundedEvaluator::default()));
     let project = report
@@ -369,6 +674,69 @@ fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
             steps: Vec::new(),
         },
     }
+}
+
+fn admission_project(module_source: &str, loose_rows: Vec<SourceUnit>) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "row-admission-limits".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "row-admission-limits".into(),
+            source_id: "logical/project/inventory.orna".into(),
+            parse_as: "module_unit".into(),
+            source: module_source.into(),
+        }],
+        loose_rows,
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn row_validation_preflights_source_items_and_steps_before_or_during_admission() {
+    let oversized = admission_project("invalid(", Vec::new());
+    let mut source_limited = RuntimeAdapter::new(BoundedEvaluator::new(Limits {
+        max_source_bytes: 2,
+        ..Default::default()
+    }));
+    let StageOutcome::Failed(diagnostic) = source_limited.validate_rows(&oversized) else {
+        panic!("source limit must fail before semantic module parsing");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+
+    let row = SourceUnit {
+        fixture_id: "row-admission-limits".into(),
+        source_id: "logical/project/inventory/Item/42.orna".into(),
+        parse_as: "row_unit".into(),
+        source: "{ name: \"Pencil\" }".into(),
+    };
+    let project = admission_project("pub table Item(id: Int) { name: Str, }", vec![row]);
+    let mut item_limited = RuntimeAdapter::new(BoundedEvaluator::new(Limits {
+        max_collection_items: 1,
+        ..Default::default()
+    }));
+    let StageOutcome::Failed(diagnostic) = item_limited.validate_rows(&project) else {
+        panic!("project unit capacity must fail before row admission allocation");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+
+    let mut step_limited = RuntimeAdapter::new(BoundedEvaluator::new(Limits {
+        max_steps: 1,
+        ..Default::default()
+    }));
+    let StageOutcome::Failed(diagnostic) = step_limited.validate_rows(&project) else {
+        panic!("row body evaluation must use the configured step limit");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
 }
 
 #[test]

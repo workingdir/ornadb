@@ -7,7 +7,10 @@
 //! evaluator below handles pure expression units, while the durable runtime
 //! still owns module execution, effects, and scenario lifecycles.
 
-use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
+use crate::{
+    ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter,
+    row_admission::{admit_project_rows, preflight_project_rows},
+};
 use orna_evaluator_v1::{
     Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction,
     evaluate_expression_with_functions, invoke_named,
@@ -82,6 +85,23 @@ impl Default for SemanticAdapter {
 }
 
 impl SemanticAdapter {
+    fn project_analysis(&self, project: &ProjectUnit) -> orna_semantic_v1::Analysis {
+        let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+        let inputs = project
+            .modules
+            .iter()
+            .map(|unit| {
+                let logical_path = unit
+                    .source_id
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&unit.source_id)
+                    .to_owned();
+                ModuleInput::new(logical_path, unit.source.clone())
+            })
+            .collect::<Vec<_>>();
+        analyze_with_catalogue(&inputs, &self.catalogue)
+    }
+
     fn analyze_units(
         &self,
         units: impl IntoIterator<Item = SourceUnit>,
@@ -107,19 +127,15 @@ impl SemanticAdapter {
         project: &ProjectUnit,
         phase: SemanticPhase,
     ) -> StageOutcome<Diagnostic> {
-        let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
-        let units = project.modules.iter().map(|unit| {
-            let logical_path = unit
-                .source_id
-                .strip_prefix(&prefix)
-                .unwrap_or(&unit.source_id)
-                .to_owned();
-            SourceUnit {
-                source_id: logical_path,
-                ..unit.clone()
-            }
-        });
-        self.analyze_units(units, phase)
+        let analysis = self.project_analysis(project);
+        match analysis
+            .diagnostics
+            .into_iter()
+            .find(|diagnostic| phase.accepts(diagnostic.code()))
+        {
+            Some(diagnostic) => StageOutcome::Failed(diagnostic.redacted()),
+            None => StageOutcome::Passed,
+        }
     }
     fn unsupported_runtime() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
@@ -223,6 +239,20 @@ pub trait RuntimeEvaluator {
     }
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic>;
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic>;
+    /// Preflight before semantic analysis so configured resource bounds apply
+    /// before any project module or loose row is parsed.
+    fn preflight_row_validation(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Passed
+    }
+    /// Receives the resolved project analysis without replacing a supplied
+    /// runtime's row-validation policy.
+    fn validate_resolved_rows(
+        &mut self,
+        project: &ProjectUnit,
+        _: &orna_semantic_v1::Analysis,
+    ) -> StageOutcome<Diagnostic> {
+        self.validate_rows(project)
+    }
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic>;
 }
 
@@ -574,12 +604,28 @@ impl RuntimeEvaluator for BoundedEvaluator {
     }
 
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        if project.loose_rows.is_empty() {
-            return StageOutcome::Passed;
+        let _ = project;
+        StageOutcome::Skipped {
+            reason: "row validation requires resolved table schemas and path-derived keys".into(),
         }
-        // A nonempty project needs the owning table and key context for every
-        // row. Do not turn successful expression execution into schema proof.
-        self.validate_row(&project.loose_rows[0])
+    }
+
+    fn preflight_row_validation(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        match preflight_project_rows(project, self.limits) {
+            Ok(()) => StageOutcome::Passed,
+            Err(diagnostic) => StageOutcome::Failed(*diagnostic),
+        }
+    }
+
+    fn validate_resolved_rows(
+        &mut self,
+        project: &ProjectUnit,
+        analysis: &orna_semantic_v1::Analysis,
+    ) -> StageOutcome<Diagnostic> {
+        match admit_project_rows(project, analysis, self.limits) {
+            Ok(_) => StageOutcome::Passed,
+            Err(diagnostic) => StageOutcome::Failed(*diagnostic),
+        }
     }
 
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
@@ -710,7 +756,15 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
         self.runtime.validate_row(unit)
     }
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        self.runtime.validate_rows(project)
+        match self.runtime.preflight_row_validation(project) {
+            StageOutcome::Passed => {}
+            outcome => return outcome,
+        }
+        let analysis = self.semantic.project_analysis(project);
+        if let Some(diagnostic) = analysis.diagnostics.first() {
+            return StageOutcome::Failed(diagnostic.clone().redacted());
+        }
+        self.runtime.validate_resolved_rows(project, &analysis)
     }
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
         self.runtime.run_scenario(scenario)
