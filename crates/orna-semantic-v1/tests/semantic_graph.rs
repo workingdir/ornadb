@@ -1,7 +1,7 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
-    DIAG_ASSERTION_SCOPE, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput,
-    Type, analyze, analyze_with_catalogue,
+    DIAG_ASSERTION_SCOPE, DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE,
+    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, Type, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -485,6 +485,50 @@ fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
     assert!(zero_table.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "module assertions must depend on at least two distinct tables"
     }));
+}
+
+#[test]
+fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
+    let runtime = analyze(&[ModuleInput::new(
+        "runtime.orna",
+        "fn active_streams() { sys.runtime.streams }",
+    )]);
+    assert!(has(&runtime, DIAG_LEGACY_SYS_RUNTIME));
+    assert!(
+        runtime
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "`sys.runtime` was renamed to `sys.rt`" })
+    );
+
+    let storage = analyze(&[ModuleInput::new(
+        "storage.orna",
+        "pub fn bad() = sys.storage(contacts.Contact);",
+    )]);
+    assert!(storage.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions"
+    }));
+
+    let result = analyze(&[ModuleInput::new(
+        "result.orna",
+        "pub fn bad(raw: Str): Result<Message, DecodeError> = Ok(decode(raw));",
+    )]);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "Result/Ok/Err control plumbing was removed; return the success type directly"
+    }));
+
+    let try_from = analyze(&[ModuleInput::new(
+        "try-from.orna",
+        "pub type Port { impl TryFrom<Int> { fn from(value) = Port { value: value }; } }",
+    )]);
+    assert!(has(&try_from, DIAG_LEGACY_TRYFROM));
+    assert!(
+        try_from.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message() == "use From<Source>; From may fail in Orna"
+        })
+    );
 }
 
 #[test]
