@@ -70,6 +70,31 @@ fn parsed_update_patches_only_stored_fields() {
 }
 
 #[test]
+fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&source(
+            r#"Note.upsert({ id: 7, text: "updated" }); Note.upsert({ id: 8, text: "new" });"#,
+        )),
+        StageOutcome::Passed
+    ));
+    let updated = runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .expect("updated row");
+    assert!(matches!(
+        updated.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("text".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("updated".into()))
+    ));
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
+}
+
+#[test]
 fn parsed_delete_removes_the_candidate_row() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(
