@@ -1564,6 +1564,13 @@ fn infer(
                 return resolve_qualified_module_member(&path, scope, diagnostics);
             }
             let base = infer(base, scope, local, diagnostics);
+            if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
+                diagnostics.push(diag(DIAG_TYPE, message));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: base.effects,
+                };
+            }
             if let Some(ty) = infer_numeric_member(&base.ty, name) {
                 return Inferred {
                     ty,
@@ -3424,6 +3431,27 @@ fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> 
     };
     let underlying = scope.refined_types.get(refined)?;
     (name == "from").then(|| function(vec![underlying.clone()], base.clone()))
+}
+
+fn legacy_sys_admin_message(base: &Type, member: &str) -> Option<&'static str> {
+    match (base, member) {
+        (Type::Named(name), "reset") if name == "sys.Checkpoint" => Some(
+            "system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments",
+        ),
+        (Type::Named(name), "replay") if name == "sys.Failure" => Some(
+            "system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`",
+        ),
+        (Type::Named(name), "resolve") if name == "sys.Failure" => Some(
+            "system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`",
+        ),
+        (Type::Named(name), "retry") if name == "sys.Stream" => {
+            Some("system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`")
+        }
+        (Type::Named(name), "skip") if name == "sys.Stream" => {
+            Some("system rows are read-only; use `sys.admin.skip_failure` on a `sys.FailureRef`")
+        }
+        _ => None,
+    }
 }
 
 fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
