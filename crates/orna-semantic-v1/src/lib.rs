@@ -164,6 +164,9 @@ pub struct TableSchema {
     pub fields: BTreeMap<String, Type>,
     pub required: BTreeSet<String>,
     pub computed: BTreeSet<String>,
+    /// Ordered explicit key columns, or the implicit automatic id column.
+    pub keys: Vec<(String, Type)>,
+    pub automatic_key: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleHeader {
@@ -4310,8 +4313,10 @@ fn infer_table_operation(
         return None;
     };
     let table = table_symbol(base, scope, local)?;
-    let automatic_key =
-        matches!(&table.ty, Type::Named(table_name) if scope.auto_key_tables.contains(table_name));
+    let automatic_key = table.table_schema.as_ref().map_or_else(
+        || matches!(&table.ty, Type::Named(table_name) if scope.auto_key_tables.contains(table_name)),
+        |schema| schema.automatic_key,
+    );
     if name == "rekey" && automatic_key {
         diagnostics.push(diag(
             DIAG_TYPE,
@@ -4358,32 +4363,63 @@ fn infer_table_operation(
             },
             _ => None,
         });
-    for argument in arguments {
-        let inferred = if matches!(name.as_str(), "insert" | "upsert") {
+    for (index, argument) in arguments.iter().enumerate() {
+        let insertion = matches!(name.as_str(), "insert" | "upsert");
+        let update = name == "update" && index == 1;
+        let key_argument =
+            matches!(name.as_str(), "update" | "delete") && index == 0 || name == "rekey";
+        let inferred = if insertion || update {
             row.map(|fields| {
                 let inferred =
                     infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
                 if let Some(schema) = &table.table_schema
                     && let Type::Record(supplied) = &inferred.ty
                 {
-                    for field in &schema.required {
-                        if !supplied.contains_key(field) {
-                            diagnostics
-                                .push(diag(DIAG_TYPE, "table insertion omits a required field"));
+                    if insertion {
+                        for field in &schema.required {
+                            if !supplied.contains_key(field) {
+                                diagnostics.push(diag(
+                                    DIAG_TYPE,
+                                    "table insertion omits a required field",
+                                ));
+                            }
                         }
                     }
                     for field in &schema.computed {
                         if supplied.contains_key(field) {
                             diagnostics.push(diag(
                                 DIAG_TYPE,
-                                "table insertion cannot supply a computed field",
+                                if insertion {
+                                    "table insertion cannot supply a computed field"
+                                } else {
+                                    "table update cannot change a computed field"
+                                },
                             ));
                         }
+                    }
+                    if update
+                        && schema
+                            .keys
+                            .iter()
+                            .any(|(field, _)| supplied.contains_key(field))
+                    {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "table update cannot change a primary key; use rekey",
+                        ));
                     }
                 }
                 inferred
             })
             .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
+        } else if key_argument && let Some(schema) = &table.table_schema {
+            let expected = match schema.keys.as_slice() {
+                [(_, ty)] => ty.clone(),
+                keys => Type::Tuple(keys.iter().map(|(_, ty)| ty.clone()).collect()),
+            };
+            let inferred = infer_contextual(&argument.value, &expected, scope, local, diagnostics);
+            require_same(&expected, &inferred.ty, diagnostics);
+            inferred
         } else {
             infer(&argument.value, scope, local, diagnostics)
         };
@@ -5394,6 +5430,20 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
         fields,
         required,
         computed,
+        keys: if keys.is_empty() {
+            vec![("id".into(), Type::Int)]
+        } else {
+            keys.iter()
+                .filter_map(|key| match &key.pattern {
+                    Pattern::Name(name, _) => Some((
+                        name.clone(),
+                        key.annotation.as_ref().map(type_of).unwrap_or(Type::Error),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        },
+        automatic_key: keys.is_empty(),
     })
 }
 
