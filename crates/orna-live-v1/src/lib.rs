@@ -597,7 +597,12 @@ impl LiveHost {
                     Message::Subscribe { .. } => {
                         let response =
                             application.subscribe(session, request, &envelope.message)?;
-                        let outcome = validate_snapshot_response(request, None, response)?;
+                        let outcome = validate_snapshot_response(
+                            request,
+                            None,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         let watch = outcome
                             .response
                             .as_ref()
@@ -611,7 +616,12 @@ impl LiveHost {
                         let revisions = self.serving.resync(session, 0).map_err(map_serving)?.len();
                         let response =
                             application.resync(session, request, watch, &envelope.message)?;
-                        let outcome = validate_snapshot_response(request, Some(watch), response)?;
+                        let outcome = validate_snapshot_response(
+                            request,
+                            Some(watch),
+                            response,
+                            self.limits.protocol,
+                        )?;
                         self.complete(
                             session,
                             request,
@@ -629,7 +639,12 @@ impl LiveHost {
                             fingerprint,
                             &envelope.message,
                         )?;
-                        let outcome = validate_control_response(request, fingerprint, response)?;
+                        let outcome = validate_control_response(
+                            request,
+                            fingerprint,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         self.serving
                             .close_watch(session, watch)
                             .map_err(map_serving)?;
@@ -638,17 +653,32 @@ impl LiveHost {
                     }
                     Message::Event { .. } => {
                         let response = application.event(session, request, &envelope.message)?;
-                        let outcome = validate_result_response(request, fingerprint, response)?;
+                        let outcome = validate_result_response(
+                            request,
+                            fingerprint,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         self.complete(session, request, outcome)
                     }
                     Message::Eval { .. } => {
                         let response = application.eval(session, request, &envelope.message)?;
-                        let outcome = validate_result_response(request, fingerprint, response)?;
+                        let outcome = validate_result_response(
+                            request,
+                            fingerprint,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         self.complete(session, request, outcome)
                     }
                     Message::Watch { .. } => {
                         let response = application.watch(session, request, &envelope.message)?;
-                        let outcome = validate_snapshot_response(request, None, response)?;
+                        let outcome = validate_snapshot_response(
+                            request,
+                            None,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         let watch = outcome
                             .response
                             .as_ref()
@@ -663,7 +693,12 @@ impl LiveHost {
                     } => {
                         let response =
                             application.cancel(session, request, fingerprint, &envelope.message)?;
-                        let outcome = validate_control_response(request, fingerprint, response)?;
+                        let outcome = validate_control_response(
+                            request,
+                            fingerprint,
+                            response,
+                            self.limits.protocol,
+                        )?;
                         match target_kind {
                             TargetKind::Request => self.serving.cancel_request(session, *target),
                             TargetKind::Watch => {
@@ -847,7 +882,11 @@ fn validate_result_response(
     request: [u8; 16],
     fingerprint: [u8; 32],
     response: Envelope,
+    limits: ProtocolLimits,
 ) -> Result<DispatchOutcome> {
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
     if response.request != Some(request) || response.watch.is_some() {
         return Err(Error::ApplicationRejected);
     }
@@ -871,7 +910,11 @@ fn validate_snapshot_response(
     request: [u8; 16],
     watch: Option<[u8; 16]>,
     response: Envelope,
+    limits: ProtocolLimits,
 ) -> Result<DispatchOutcome> {
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
     if response.request != Some(request)
         || response.watch.is_none()
         || watch.is_some_and(|expected| response.watch != Some(expected))
@@ -891,8 +934,9 @@ fn validate_control_response(
     request: [u8; 16],
     fingerprint: [u8; 32],
     response: Envelope,
+    limits: ProtocolLimits,
 ) -> Result<DispatchOutcome> {
-    let outcome = validate_result_response(request, fingerprint, response)?;
+    let outcome = validate_result_response(request, fingerprint, response, limits)?;
     let Some(Envelope {
         message:
             Message::Result {
@@ -1794,7 +1838,7 @@ mod tests {
     #[test]
     fn control_responses_reject_non_unit_results() {
         assert_eq!(
-            validate_control_response([1; 16], [2; 32], result(1, 2)),
+            validate_control_response([1; 16], [2; 32], result(1, 2), ProtocolLimits::default(),),
             Err(Error::ApplicationRejected)
         );
     }
@@ -1802,7 +1846,7 @@ mod tests {
     #[test]
     fn result_response_rejects_a_different_request_fingerprint() {
         assert_eq!(
-            validate_result_response([1; 16], [2; 32], result(1, 3)),
+            validate_result_response([1; 16], [2; 32], result(1, 3), ProtocolLimits::default(),),
             Err(Error::RequestMismatch)
         );
     }
