@@ -1529,6 +1529,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cli-v1"
+version = "0.1.0"
+
+[[package]]
 name = "orna-client"
 version = "1.0.0"
 dependencies = [
@@ -1577,6 +1581,13 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "uuid",
+]
+
+[[package]]
+name = "orna-evolution-v1"
+version = "1.0.0"
+dependencies = [
+ "orna-foundation-v1",
 ]
 
 [[package]]
@@ -1709,6 +1720,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-serving-v1"
+version = "1.0.0"
+dependencies = [
+ "orna-protocol-v1",
+]
+
+[[package]]
 name = "orna-sqlite"
 version = "1.0.0"
 dependencies = [
@@ -1738,6 +1756,17 @@ name = "orna-storage"
 version = "1.0.0"
 dependencies = [
  "orna-core",
+]
+
+[[package]]
+name = "orna-storage-v1"
+version = "1.0.0"
+dependencies = [
+ "orna-foundation-v1",
+ "orna-repository-v1",
+ "orna-runtime-v1",
+ "orna-value-v1",
+ "sha2 0.10.9",
 ]
 
 [[package]]
