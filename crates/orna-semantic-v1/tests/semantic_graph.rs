@@ -148,6 +148,29 @@ fn authoritative_core_catalogue_resolves_prelude_types_and_common_functions() {
 }
 
 #[test]
+fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
+    let profile = Catalogue::authoritative_core();
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std as core; fn document(rows: Rows): Document = core.terminal.present_table(rows); fn bytes(value: JsonValue): ByteStream = core.json.encode(value);",
+        )],
+        &profile,
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let missing = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std as core; fn f() = core.terminal.missing();",
+        )],
+        &profile,
+    );
+    assert!(has(&missing, DIAG_UNRESOLVED));
+}
+
+#[test]
 fn catalogue_is_closed_world_and_diagnostics_remain_redacted_and_stable() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
