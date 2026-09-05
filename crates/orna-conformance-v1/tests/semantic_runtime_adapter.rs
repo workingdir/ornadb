@@ -15,13 +15,9 @@ fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
         .iter()
         .find(|fixture| fixture.fixture == "valid/minimal-root.orna")
         .expect("minimal fixture");
-    // The analyzer really runs, and honestly exposes that its current v1
-    // contract has no `std` prelude/catalogue adapter for this corpus.
-    assert_eq!(fixture.stages[1].status, EvidenceStatus::Failed);
-    assert_eq!(
-        fixture.stages[1].diagnostic.as_ref().unwrap()["code"],
-        "ORNA-S012-UNRESOLVED"
-    );
+    // The analyzer really runs against the authoritative core catalogue.
+    assert_eq!(fixture.stages[1].status, EvidenceStatus::Passed);
+    assert_eq!(fixture.stages[2].status, EvidenceStatus::Passed);
     assert!(!report.semantic_evidence.is_empty());
     assert!(
         report
