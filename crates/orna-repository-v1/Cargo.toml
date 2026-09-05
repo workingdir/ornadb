@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Git-backed repository, CWD, index, and local runtime boundary for Orna"
 
-# This is intentionally a standalone workspace member until the integration
-# owner adds it to the top-level workspace.
-[workspace]
-
 [dependencies]
 fs2 = "0.4.3"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }

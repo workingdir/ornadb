@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Orna 1.0.0 lexer, syntax tree and parser"
 
-# This V1 boundary is intentionally standalone until the foundation owner
-# integrates it into the shared workspace.
-[workspace]
-
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 unicode-ident = "1.0.22"
