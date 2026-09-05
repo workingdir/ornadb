@@ -12,12 +12,14 @@ use crate::{
     row_admission::{admit_project_rows, preflight_project_rows},
 };
 use orna_evaluator_v1::{
-    Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction,
-    evaluate_expression_with_functions, invoke_named,
+    EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
+    PureFunction as RetainedFunction, evaluate_expression_with_functions, invoke_named,
+    invoke_named_with_effects,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Expr, parse_expression, parse_module};
+use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
+use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct SemanticAdapter {
@@ -641,6 +643,238 @@ impl RuntimeEvaluator for BoundedEvaluator {
         StageOutcome::Skipped {
             reason: "scenario has no implemented execution contract in the bounded runtime".into(),
         }
+    }
+}
+
+type TransactionDatabase = DatabaseRuntime<String, Vec<u8>, Value>;
+type TransactionActivation<'runtime> = DatabaseActivation<'runtime, String, Vec<u8>, Value>;
+
+/// A bounded source executor for the first real table-transaction slice.
+///
+/// It admits a module through the v1 syntax and semantic analyzer, retains its
+/// function bodies, and routes explicit-key `Table.insert` calls through one
+/// root activation. Other effects remain explicit skips until their own
+/// runtime contracts exist.
+pub struct TransactionalEvaluator {
+    entry: String,
+    limits: EvaluatorLimits,
+    database: TransactionDatabase,
+}
+
+impl TransactionalEvaluator {
+    #[must_use]
+    pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
+        Self {
+            entry: entry.into(),
+            limits,
+            database: TransactionDatabase::default(),
+        }
+    }
+
+    /// Returns a committed row by its canonical encoded key.
+    pub fn committed_row(&self, table: &str, key: &Value) -> Option<&Value> {
+        let encoded = key.encode().ok()?;
+        let table = table.to_owned();
+        self.database.committed(&table, &encoded)
+    }
+
+    /// Executes the configured entry function inside one root activation.
+    /// Errors escaping the function leave all table writes unpublished.
+    pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        if let Err(error) = self.limits.check_source(&unit.source) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
+        let mut syntax = SyntaxAdapter;
+        if let StageOutcome::Failed(diagnostic) = syntax.parse(unit) {
+            return StageOutcome::Failed(diagnostic);
+        }
+        let parsed = parse_module(&unit.source);
+        if let Err(error) = self.limits.check_items(parsed.value.items.len()) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
+        let analysis = analyze_with_catalogue(
+            &[ModuleInput::new(
+                unit.source_id.clone(),
+                unit.source.clone(),
+            )],
+            &Catalogue::authoritative_fixture(),
+        );
+        if let Some(diagnostic) = analysis.diagnostics.first() {
+            return StageOutcome::Failed(diagnostic.clone().redacted());
+        }
+        let (functions, key_fields) = match admitted_transaction_module(&parsed.value.items) {
+            Ok(value) => value,
+            Err(reason) => return StageOutcome::Skipped { reason },
+        };
+        if let Err(error) = self.limits.check_items(functions.len()) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
+        if !functions.contains_key(&self.entry) {
+            return StageOutcome::Skipped {
+                reason: "configured transaction entry function is not present".into(),
+            };
+        }
+        let entry = self.entry.clone();
+        let limits = self.limits;
+        let result = self.database.activate(|activation| {
+            let mut effects = TableEffectHandler {
+                activation,
+                key_fields: &key_fields,
+            };
+            invoke_named_with_effects(
+                &entry,
+                &functions,
+                &Environment::new(),
+                limits,
+                &mut effects,
+            )
+            .map(|_| ())
+        });
+        match result {
+            Ok(()) => StageOutcome::Passed,
+            Err(ActivationError::Operation(error)) => {
+                StageOutcome::Failed(error.diagnostic().clone())
+            }
+            Err(ActivationError::Commit(error)) => {
+                StageOutcome::Failed(transaction_error_diagnostic(error))
+            }
+        }
+    }
+}
+
+impl Default for TransactionalEvaluator {
+    fn default() -> Self {
+        Self::new("main", EvaluatorLimits::default())
+    }
+}
+
+impl RuntimeEvaluator for TransactionalEvaluator {
+    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        self.execute_source(unit)
+    }
+
+    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "transactional source execution does not replace schema-backed row admission"
+                .into(),
+        }
+    }
+
+    fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "transactional source execution does not replace schema-backed row admission"
+                .into(),
+        }
+    }
+
+    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "source transaction execution is exposed as an explicit module seam; no corpus scenario is claimed yet".into(),
+        }
+    }
+}
+
+struct TableEffectHandler<'activation, 'runtime> {
+    activation: &'activation mut TransactionActivation<'runtime>,
+    key_fields: &'activation BTreeMap<String, String>,
+}
+
+impl EffectHandler for TableEffectHandler<'_, '_> {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        let Expr::Field { base, name, .. } = callee else {
+            return Ok(None);
+        };
+        let Expr::Name { text: table, .. } = base.as_ref() else {
+            return Ok(None);
+        };
+        if name != "insert" {
+            return Ok(None);
+        }
+        let [row] = arguments else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+        };
+        let Some(key_field) = self.key_fields.get(table) else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        };
+        let Some(key) = record_field(row, key_field) else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        };
+        let key = key
+            .encode()
+            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?;
+        self.activation
+            .insert(table.clone(), key, row.clone())
+            .map_err(|error| transaction_error(table_error_code(error)))?;
+        Ok(Some(row.clone()))
+    }
+}
+
+fn admitted_transaction_module(
+    items: &[orna_syntax_v1::Item],
+) -> Result<(Functions, BTreeMap<String, String>), String> {
+    let mut functions = Functions::new();
+    let mut key_fields = BTreeMap::new();
+    for item in items {
+        match &item.declaration {
+            Declaration::Function { signature, body } => {
+                functions.insert(
+                    signature.name.clone(),
+                    RetainedFunction {
+                        parameters: signature.parameters.clone(),
+                        body: body.clone(),
+                        environment: Environment::new(),
+                    },
+                );
+            }
+            Declaration::Table { name, keys, .. } => {
+                let [key] = keys.as_slice() else {
+                    return Err("transactional source seam requires one explicit table key".into());
+                };
+                let Pattern::Name(field, _) = &key.pattern else {
+                    return Err("transactional source seam requires a named table key".into());
+                };
+                key_fields.insert(name.clone(), field.clone());
+            }
+            Declaration::Use { .. } => {
+                return Err("transactional source seam does not load module imports yet".into());
+            }
+            _ => return Err("transactional source seam admits only tables and functions".into()),
+        }
+    }
+    Ok((functions, key_fields))
+}
+
+fn record_field(row: &Value, field: &str) -> Option<Value> {
+    let OvbRaw::Map(entries) = row.raw() else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| match key {
+        OvbRaw::Text(name) if name == field => Value::new(value.clone()).ok(),
+        _ => None,
+    })
+}
+
+fn transaction_error(code: &'static str) -> EvaluationError {
+    EvaluationError::redacted(SafeText::new(code).expect("static transaction error code"))
+}
+
+fn transaction_error_diagnostic(error: TableError) -> Diagnostic {
+    transaction_error(table_error_code(error))
+        .diagnostic()
+        .clone()
+}
+
+fn table_error_code(error: TableError) -> &'static str {
+    match error {
+        TableError::DuplicateKey => "ORNA-EVAL-TABLE-DUPLICATE",
+        TableError::MissingRow => "ORNA-EVAL-TABLE-MISSING",
+        TableError::ChildCannotCommit => "ORNA-EVAL-TABLE-CHILD-COMMIT",
+        TableError::DoubleCommit => "ORNA-EVAL-TABLE-DOUBLE-COMMIT",
+        TableError::UseAfterClose => "ORNA-EVAL-TABLE-CLOSED",
     }
 }
 

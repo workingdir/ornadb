@@ -17,7 +17,9 @@ use std::{
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
-pub use semantic_adapter::{BoundedEvaluator, RuntimeAdapter, RuntimeEvaluator, SemanticAdapter};
+pub use semantic_adapter::{
+    BoundedEvaluator, RuntimeAdapter, RuntimeEvaluator, SemanticAdapter, TransactionalEvaluator,
+};
 pub use syntax_adapter::SyntaxAdapter;
 
 /// The only shared diagnostic carrier accepted by new Orna 1.0 integration.
