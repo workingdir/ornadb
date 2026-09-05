@@ -8,6 +8,7 @@ members = [
     "crates/orna-foundation-v1",
     "crates/orna-conformance-v1",
     "crates/orna-evolution-v1",
+    "crates/orna-evaluator-v1",
     "crates/orna-execution-v1",
     "crates/orna-lsp",
     "crates/orna-live-v1",
