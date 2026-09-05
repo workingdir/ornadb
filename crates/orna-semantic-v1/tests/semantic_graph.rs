@@ -953,6 +953,19 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                 "#,
             ),
         ),
+        (
+            "named attached row",
+            ModuleInput::new(
+                "named_row.orna",
+                r#"
+                    pub table Vehicle(id: Uuid) {
+                        registration: Str,
+                        owner: contacts.Contact,
+                    }
+                    pub fn owner_name(vehicle: Vehicle) = vehicle.owner.name;
+                "#,
+            ),
+        ),
     ];
     for (name, source) in sources {
         let result = analyze_with_catalogue(&[source], &Catalogue::authoritative_fixture());

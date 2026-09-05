@@ -532,7 +532,7 @@ impl Catalogue {
             fixture_table("Audit", audit),
             fixture_table("Contact", contact.clone()),
             fixture_type("Customer", customer),
-            fixture_type("Message", Type::Named("Message".into())),
+            fixture_table("Message", Type::Named("Message".into())),
             fixture_table("Note", note),
             fixture_table("Order", order),
             fixture_table("Payment", payment),
@@ -1303,6 +1303,34 @@ fn resolve_imports(
             .names
             .entry(name.clone())
             .or_insert_with(|| symbol.clone());
+        if symbol.kind == SymbolKind::Table
+            && let Type::Record(row) = &symbol.ty
+        {
+            scope
+                .table_rows
+                .entry(name.clone())
+                .or_insert_with(|| Type::Record(row.clone()));
+        }
+    }
+    for (namespace, module) in modules {
+        let prefix = namespace.display();
+        for (name, symbol) in &module.exports {
+            if symbol.kind != SymbolKind::Table {
+                continue;
+            }
+            let Type::Record(row) = &symbol.ty else {
+                continue;
+            };
+            let table_name = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            scope
+                .table_rows
+                .entry(table_name)
+                .or_insert_with(|| Type::Record(row.clone()));
+        }
     }
     if modules.contains_key(&Namespace(vec!["std".into()])) {
         scope
@@ -2015,6 +2043,7 @@ fn infer(
             }
             if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
+                && !local.contains_key(path[0])
             {
                 if let Some(table) = table_symbol(expr, scope, local) {
                     return Inferred {
