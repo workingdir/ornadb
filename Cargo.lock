@@ -1591,6 +1591,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-execution-v1"
+version = "1.0.0"
+dependencies = [
+ "orna-runtime-v1",
+ "orna-stream-v1",
+]
+
+[[package]]
 name = "orna-foundation-v1"
 version = "1.0.0"
 dependencies = [
@@ -1681,6 +1689,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "orna-security-v1"
+version = "0.1.0"
+dependencies = [
+ "subtle",
 ]
 
 [[package]]
