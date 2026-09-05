@@ -2405,15 +2405,14 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
     let (model, request) = session.start_model_request(surface);
     let runtime_snapshot = || {
         let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-        let runtime = guard.runtime.as_ref().expect("fixture runtime should exist");
+        let runtime = guard
+            .runtime
+            .as_ref()
+            .expect("fixture runtime should exist");
         (
             (runtime.handle, runtime.shutdown_requested, runtime.terminal),
             (
-                runtime
-                    .surfaces
-                    .keys()
-                    .copied()
-                    .collect::<HashSet<_>>(),
+                runtime.surfaces.keys().copied().collect::<HashSet<_>>(),
                 runtime
                     .requests
                     .iter()
@@ -2532,7 +2531,10 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
     );
     {
         let guard = global().lock().unwrap_or_else(|error| error.into_inner());
-        let runtime = guard.runtime.as_ref().expect("fixture runtime should exist");
+        let runtime = guard
+            .runtime
+            .as_ref()
+            .expect("fixture runtime should exist");
         assert!(runtime.surfaces.is_empty());
         assert!(runtime.requests.is_empty());
         assert!(runtime.pending_events.is_empty());
@@ -2598,11 +2600,7 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         };
         assert_eq!(
             unsafe {
-                (FIXTURE_API.capture_semantic_state)(
-                    session.runtime,
-                    surface,
-                    &mut semantic_state,
-                )
+                (FIXTURE_API.capture_semantic_state)(session.runtime, surface, &mut semantic_state)
             }
             .code,
             StatusCode::Failed
@@ -2610,7 +2608,10 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         assert!(semantic_state.data.is_null());
         assert_eq!(semantic_state.len, 0);
         assert!(semantic_state.owner.is_null());
-        assert_eq!(semantic_state.release as usize, release_owned as usize);
+        assert_eq!(
+            semantic_state.release as usize,
+            release_owned as *const () as usize
+        );
 
         let mut opaque_state = OwnedBytes {
             data: ptr::null_mut(),
@@ -2628,7 +2629,10 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         assert!(opaque_state.data.is_null());
         assert_eq!(opaque_state.len, 0);
         assert!(opaque_state.owner.is_null());
-        assert_eq!(opaque_state.release as usize, release_owned as usize);
+        assert_eq!(
+            opaque_state.release as usize,
+            release_owned as *const () as usize
+        );
         assert_eq!(
             unsafe { (FIXTURE_API.set_surface_visible)(session.runtime, surface, 0) }.code,
             StatusCode::Failed
@@ -2685,7 +2689,11 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         ] {
             assert_eq!(
                 unsafe {
-                    client_emit_runtime_event(context, session.runtime, event as *const RuntimeEvent)
+                    client_emit_runtime_event(
+                        context,
+                        session.runtime,
+                        event as *const RuntimeEvent,
+                    )
                 }
                 .code,
                 StatusCode::NotFound
@@ -2706,7 +2714,10 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         assert!(metadata.data.is_null());
         assert_eq!(metadata.len, 0);
         assert!(metadata.owner.is_null());
-        assert_eq!(metadata.release as usize, release_owned as usize);
+        assert_eq!(
+            metadata.release as usize,
+            release_owned as *const () as usize
+        );
     }
     assert_unchanged();
 
@@ -2737,7 +2748,11 @@ fn shutdown_live_surface_cancels_and_retires_every_handle_without_post_terminal_
         for event in [&stale_model_event, &stale_children_event] {
             assert_eq!(
                 unsafe {
-                    client_emit_runtime_event(context, session.runtime, event as *const RuntimeEvent)
+                    client_emit_runtime_event(
+                        context,
+                        session.runtime,
+                        event as *const RuntimeEvent,
+                    )
                 }
                 .code,
                 StatusCode::NotFound
