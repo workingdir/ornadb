@@ -4,7 +4,16 @@
 //! location only from [`orna_repository_v1::Repository::runtime_paths`].
 //! This crate does not publish, project, compact, or contact a remote.
 
-use std::{fmt, future::Future, path::Path, pin::Pin};
+use std::{
+    fmt,
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
@@ -312,16 +321,192 @@ pub enum StreamHandlerResult {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamSourceKind {
+    Finite,
+    Unbounded,
+}
+
+/// Stable connector capabilities used to interpret source closure and retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamSourceDescriptor {
+    pub kind: StreamSourceKind,
+    pub replayable: bool,
+}
+
 pub trait StreamSource {
     type NextFuture<'a>: Future<Output = Result<StreamSourcePoll, SafeDiagnostic>> + 'a
     where
         Self: 'a;
+    type WaitFuture<'a>: Future<Output = Result<(), SafeDiagnostic>> + 'a
+    where
+        Self: 'a;
 
+    fn descriptor(&self) -> StreamSourceDescriptor;
     fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a>;
+    /// Waits until the source can be polled again or the supplied control is
+    /// cancelled. Connectors must wake this future for either event.
+    fn wait<'a>(&'a mut self, control: &'a dyn StreamRunControl) -> Self::WaitFuture<'a>;
 }
 
 pub trait StreamHandler {
     fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult;
+}
+
+/// Lets a stream owner stop admission between delivery transactions.
+pub trait StreamRunControl {
+    fn cancelled(&self) -> bool;
+    /// Acquires the linearization point for a new delivery admission.
+    fn acquire_admission(&self) -> bool;
+    /// Releases the admission point after the durable acquire attempt returns.
+    fn release_admission(&self);
+}
+
+/// Control for a finite runner that has no external cancellation request.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NeverCancelled;
+
+impl StreamRunControl for NeverCancelled {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn acquire_admission(&self) -> bool {
+        true
+    }
+
+    fn release_admission(&self) {}
+}
+
+/// A cancellation gate which linearizes cancellation against one delivery
+/// admission. Cancellation after admission is retained for the next boundary.
+#[derive(Clone, Debug)]
+pub struct StreamRunGate {
+    state: Arc<AtomicU8>,
+}
+
+impl StreamRunGate {
+    const RUNNING: u8 = 0;
+    const ADMITTING: u8 = 1;
+    const CANCEL_REQUESTED: u8 = 2;
+    const CANCELLED: u8 = 3;
+
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(Self::RUNNING)),
+        }
+    }
+
+    /// Requests cancellation. `true` means this call first recorded it.
+    pub fn cancel(&self) -> bool {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+            match state {
+                Self::RUNNING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            Self::CANCELLED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                Self::ADMITTING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            Self::CANCEL_REQUESTED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                Self::CANCEL_REQUESTED | Self::CANCELLED => return false,
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl Default for StreamRunGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamRunControl for StreamRunGate {
+    fn cancelled(&self) -> bool {
+        self.state.load(Ordering::Acquire) >= Self::CANCEL_REQUESTED
+    }
+
+    fn acquire_admission(&self) -> bool {
+        self.state
+            .compare_exchange(
+                Self::RUNNING,
+                Self::ADMITTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn release_admission(&self) {
+        let _ = self.state.compare_exchange(
+            Self::ADMITTING,
+            Self::RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = self.state.compare_exchange(
+            Self::CANCEL_REQUESTED,
+            Self::CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+struct AdmissionPermit<'a, C: StreamRunControl>(&'a C);
+
+impl<C: StreamRunControl> Drop for AdmissionPermit<'_, C> {
+    fn drop(&mut self) {
+        self.0.release_admission();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamRunOutcome {
+    Exhausted {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+    },
+    Closed {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+    },
+    Failed {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+        failure: Box<FailureRecord>,
+    },
+    Cancelled {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+    },
+    Rejected {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+        reason: RejectReason,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -437,6 +622,23 @@ impl RuntimeState {
         S: StreamSource,
         H: StreamHandler,
     {
+        self.run_stream_once_controlled(writer, key, source, handler, &NeverCancelled)
+            .await
+    }
+
+    async fn run_stream_once_controlled<S, H, C>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        source: &mut S,
+        handler: &mut H,
+        control: &C,
+    ) -> Result<StreamStep, StreamStepError>
+    where
+        S: StreamSource,
+        H: StreamHandler,
+        C: StreamRunControl,
+    {
         let checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -458,8 +660,15 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        if control.cancelled() {
+            return Ok(StreamStep::Cancelled { checkpoint });
+        }
         let expected = CheckpointPrecondition::from(&checkpoint);
         let lease = {
+            if !control.acquire_admission() {
+                return Ok(StreamStep::Cancelled { checkpoint });
+            }
+            let _permit = AdmissionPermit(control);
             let mut stream = self.stream_backend(writer);
             match stream
                 .apply_async(CommitIntent::Acquire {
@@ -531,6 +740,87 @@ impl RuntimeState {
                     }
                     CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
                     _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
+        }
+    }
+
+    /// Runs delivery transactions until the source exhausts, fails, rejects
+    /// admission, or the owner requests cancellation. A provider `Waiting`
+    /// result is re-armed through its async wait hook, so an unbounded source
+    /// remains live without a runtime busy loop.
+    pub async fn run_stream<S, H, C>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        source: &mut S,
+        handler: &mut H,
+        control: &C,
+    ) -> Result<StreamRunOutcome, StreamStepError>
+    where
+        S: StreamSource,
+        H: StreamHandler,
+        C: StreamRunControl,
+    {
+        let mut checkpoint = self
+            .stream_backend(writer)
+            .checkpoint_async(key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        let source_descriptor = source.descriptor();
+        let mut delivered = 0;
+        loop {
+            if control.cancelled() {
+                return Ok(StreamRunOutcome::Cancelled {
+                    delivered,
+                    checkpoint,
+                });
+            }
+            match self
+                .run_stream_once_controlled(writer, key, source, handler, control)
+                .await?
+            {
+                StreamStep::Waiting => {
+                    source
+                        .wait(control as &dyn StreamRunControl)
+                        .await
+                        .map_err(StreamStepError::Provider)?;
+                }
+                StreamStep::Exhausted => {
+                    return Ok(match source_descriptor.kind {
+                        StreamSourceKind::Finite => StreamRunOutcome::Exhausted {
+                            delivered,
+                            checkpoint,
+                        },
+                        StreamSourceKind::Unbounded => StreamRunOutcome::Closed {
+                            delivered,
+                            checkpoint,
+                        },
+                    });
+                }
+                StreamStep::Committed { checkpoint: next } => {
+                    delivered += 1;
+                    checkpoint = next;
+                }
+                StreamStep::Failed { failure } => {
+                    return Ok(StreamRunOutcome::Failed {
+                        delivered,
+                        checkpoint,
+                        failure: Box::new(failure),
+                    });
+                }
+                StreamStep::Cancelled { checkpoint: next } => {
+                    return Ok(StreamRunOutcome::Cancelled {
+                        delivered,
+                        checkpoint: next,
+                    });
+                }
+                StreamStep::Rejected(reason) => {
+                    return Ok(StreamRunOutcome::Rejected {
+                        delivered,
+                        checkpoint,
+                        reason,
+                    });
                 }
             }
         }
@@ -2470,6 +2760,8 @@ fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
 mod tests {
     use super::*;
     use std::{
+        cell::Cell,
+        collections::VecDeque,
         future::{Ready, ready},
         path::Path,
         process::Command,
@@ -2574,6 +2866,17 @@ mod tests {
             = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
         where
             Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            }
+        }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
             self.polls += 1;
@@ -2583,6 +2886,10 @@ mod tests {
                 .map_or(StreamSourcePoll::Exhausted, |item| {
                     StreamSourcePoll::Item(Box::new(item))
                 })))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
         }
     }
 
@@ -2596,6 +2903,237 @@ mod tests {
             self.calls += 1;
             self.result.take().unwrap_or(StreamHandlerResult::Cancelled)
         }
+    }
+
+    struct SequenceSource {
+        descriptor: StreamSourceDescriptor,
+        polls: usize,
+        waits: usize,
+        steps: VecDeque<StreamSourcePoll>,
+    }
+
+    impl StreamSource for SequenceSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            self.descriptor
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            ready(Ok(self
+                .steps
+                .pop_front()
+                .unwrap_or(StreamSourcePoll::Exhausted)))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            self.waits += 1;
+            ready(Ok(()))
+        }
+    }
+
+    struct CommitHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for CommitHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: digest(3),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CancelImmediately;
+
+    impl StreamRunControl for CancelImmediately {
+        fn cancelled(&self) -> bool {
+            true
+        }
+
+        fn acquire_admission(&self) -> bool {
+            false
+        }
+
+        fn release_admission(&self) {}
+    }
+
+    struct CancelAfterPoll(Cell<usize>);
+
+    impl StreamRunControl for CancelAfterPoll {
+        fn cancelled(&self) -> bool {
+            let calls = self.0.get();
+            self.0.set(calls + 1);
+            calls > 0
+        }
+
+        fn acquire_admission(&self) -> bool {
+            !self.cancelled()
+        }
+
+        fn release_admission(&self) {}
+    }
+
+    #[test]
+    fn stream_run_gate_linearizes_cancellation_with_admission() {
+        let gate = StreamRunGate::new();
+        assert!(!gate.cancelled());
+        assert!(gate.acquire_admission());
+        assert!(gate.cancel());
+        assert!(gate.cancelled());
+        gate.release_admission();
+        assert!(!gate.acquire_admission());
+        assert!(!gate.cancel());
+    }
+
+    #[tokio::test]
+    async fn runtime_stream_runner_repeats_until_exhaustion_and_fences_cancellation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let first = stream_delivery("runner:one", "runner:two");
+        let second = stream_delivery("runner:two", "runner:three");
+        let key = first.checkpoint_key();
+        let mut source = SequenceSource {
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([
+                StreamSourcePoll::Waiting,
+                StreamSourcePoll::Item(Box::new(StreamItem {
+                    delivery: first,
+                    payload: vec![1],
+                })),
+                StreamSourcePoll::Item(Box::new(StreamItem {
+                    delivery: second,
+                    payload: vec![2],
+                })),
+            ]),
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        let outcome = state
+            .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            StreamRunOutcome::Exhausted {
+                delivered: 2,
+                checkpoint: StreamCheckpoint {
+                    version: 2,
+                    committed: Some(Position { .. }),
+                    ..
+                }
+            }
+        ));
+        assert_eq!(source.polls, 4);
+        assert_eq!(source.waits, 1);
+        assert_eq!(handler.calls, 2);
+
+        let mut closed_source = SequenceSource {
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Unbounded,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::new(),
+        };
+        let mut closed_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut closed_source,
+                    &mut closed_handler,
+                    &NeverCancelled,
+                )
+                .await
+                .unwrap(),
+            StreamRunOutcome::Closed {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 2, .. }
+            }
+        ));
+
+        let mut cancelled_source = SequenceSource {
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Item(Box::new(StreamItem {
+                delivery: stream_delivery("runner:three", "runner:four"),
+                payload: vec![3],
+            }))]),
+        };
+        let mut cancelled_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut cancelled_source,
+                    &mut cancelled_handler,
+                    &CancelImmediately,
+                )
+                .await
+                .unwrap(),
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 2, .. }
+            }
+        ));
+        assert_eq!(cancelled_source.polls, 0);
+        assert_eq!(cancelled_handler.calls, 0);
+
+        let mut raced_source = SequenceSource {
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Item(Box::new(StreamItem {
+                delivery: stream_delivery("runner:three", "runner:four"),
+                payload: vec![4],
+            }))]),
+        };
+        let mut raced_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut raced_source,
+                    &mut raced_handler,
+                    &CancelAfterPoll(Cell::new(0)),
+                )
+                .await
+                .unwrap(),
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 2, .. }
+            }
+        ));
+        assert_eq!(raced_source.polls, 1);
+        assert_eq!(raced_handler.calls, 0);
     }
 
     #[tokio::test]
