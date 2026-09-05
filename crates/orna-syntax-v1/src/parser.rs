@@ -459,11 +459,27 @@ pub enum Expr {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NameSegment { pub text: String, pub span: SourceSpan }
+pub struct NameSegment {
+    pub text: String,
+    pub span: SourceSpan,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LambdaParameter { pub pattern: Pattern, pub annotation: Option<TypeExpr>, pub span: SourceSpan }
+pub struct LambdaParameter {
+    pub pattern: Pattern,
+    pub annotation: Option<TypeExpr>,
+    pub span: SourceSpan,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiteralKind { Integer, Decimal, Float, Date, Instant, String, Boolean, Null }
+pub enum LiteralKind {
+    Integer,
+    Decimal,
+    Float,
+    Date,
+    Instant,
+    String,
+    Boolean,
+    Null,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StringSegment {
     Text { text: String, span: SourceSpan },
@@ -548,7 +564,11 @@ pub struct RecordField {
 pub enum Pattern {
     Name(String, SourceSpan),
     Wildcard(SourceSpan),
-    Literal { text: String, kind: LiteralKind, span: SourceSpan },
+    Literal {
+        text: String,
+        kind: LiteralKind,
+        span: SourceSpan,
+    },
     Tuple {
         elements: Vec<Pattern>,
         span: SourceSpan,
@@ -569,7 +589,11 @@ pub enum Pattern {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PatternField { pub name: String, pub pattern: Option<Pattern>, pub span: SourceSpan }
+pub struct PatternField {
+    pub name: String,
+    pub pattern: Option<Pattern>,
+    pub span: SourceSpan,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlKind {
     If,
@@ -907,7 +931,11 @@ fn annotate_pattern(pattern: &mut Pattern, source: &str, file: &str) {
         }
         Pattern::Tuple { elements, span }
         | Pattern::List { elements, span }
-        | Pattern::Constructor { arguments: elements, span, .. } => {
+        | Pattern::Constructor {
+            arguments: elements,
+            span,
+            ..
+        } => {
             for element in elements {
                 annotate_pattern(element, source, file)
             }
@@ -2004,11 +2032,17 @@ impl Parser {
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
                 self.bump();
                 if self.is_punct(".") || self.is_punct("{") || self.is_punct("(") {
-                    let mut path = vec![NameSegment { text: token.text.clone(), span: token.span.clone() }];
+                    let mut path = vec![NameSegment {
+                        text: token.text.clone(),
+                        span: token.span.clone(),
+                    }];
                     while self.is_punct(".") {
                         self.bump();
                         if self.contextual() {
-                            path.push(NameSegment { text: self.current().text.clone(), span: self.current().span.clone() });
+                            path.push(NameSegment {
+                                text: self.current().text.clone(),
+                                span: self.current().span.clone(),
+                            });
                             self.bump()
                         } else {
                             self.error_here("ORNA-PARSE-001", "expected qualified pattern segment");
@@ -2027,10 +2061,23 @@ impl Parser {
                                 );
                                 break;
                             }
-                            let field = self.current().clone(); self.bump();
-                            let pattern = if self.is_punct(":") { self.bump(); Some(self.parse_pattern()) } else { None };
-                            let end = pattern.as_ref().map(pattern_span).unwrap_or_else(|| field.span.clone());
-                            fields.push(PatternField { name: field.text, pattern, span: field.span.join(end) });
+                            let field = self.current().clone();
+                            self.bump();
+                            let pattern = if self.is_punct(":") {
+                                self.bump();
+                                Some(self.parse_pattern())
+                            } else {
+                                None
+                            };
+                            let end = pattern
+                                .as_ref()
+                                .map(pattern_span)
+                                .unwrap_or_else(|| field.span.clone());
+                            fields.push(PatternField {
+                                name: field.text,
+                                pattern,
+                                span: field.span.join(end),
+                            });
                             if self.is_punct(",") {
                                 self.bump()
                             } else {
@@ -2076,7 +2123,11 @@ impl Parser {
             | TokenKind::String
             | TokenKind::Keyword(Keyword::True | Keyword::False | Keyword::Null) => {
                 self.bump();
-                Pattern::Literal { kind: literal_kind(&token.kind), text: token.text, span: token.span }
+                Pattern::Literal {
+                    kind: literal_kind(&token.kind),
+                    text: token.text,
+                    span: token.span,
+                }
             }
             TokenKind::Punct("_") => {
                 self.bump();
