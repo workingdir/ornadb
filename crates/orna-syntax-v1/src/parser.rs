@@ -689,7 +689,7 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
     let result = if p.is_punct("{") {
         p.expr()
     } else {
-        p.error_here("E8001", "row input must be a record expression");
+        p.error_here("E8001", "row unit must contain one record expression");
         None
     };
     if p.is_punct(";") {
@@ -1293,12 +1293,25 @@ impl Parser {
             let TokenKind::Identifier { .. } = token.kind else {
                 continue;
             };
-            let code = match token.text.as_str() {
-                "var" => Some("ORNA091-E-VAR"),
-                "match" => Some("ORNA091-E-MATCH"),
-                "opaque" => Some("ORNA091-E-OPAQUE"),
-                "currency" => Some("ORNA091-E-CURRENCY"),
-                "ensure" | "fact" => Some("ORNA-A091-010"),
+            let diagnostic = match token.text.as_str() {
+                "var" => Some((
+                    "ORNA091-E-VAR",
+                    "use `let`; assignment may replace the local slot",
+                )),
+                "match" => Some(("ORNA091-E-MATCH", "use `case` with colon-delimited arms")),
+                "opaque" => Some(("ORNA091-E-OPAQUE", "use the unified `type` declaration")),
+                "currency" => Some((
+                    "ORNA091-E-CURRENCY",
+                    "declare an ordinary nominal type with a nested Currency implementation",
+                )),
+                "ensure" => Some((
+                    "ORNA-A091-010",
+                    "`ensure` is not an assertion alias; use `assert`",
+                )),
+                "fact" => Some((
+                    "ORNA-A091-010",
+                    "`fact` is not an assertion alias; use `assert`",
+                )),
                 "ingest"
                     if i == 0
                         || matches!(
@@ -1306,7 +1319,7 @@ impl Parser {
                             Some(TokenKind::Keyword(Keyword::Pub))
                         ) =>
                 {
-                    Some("E1004")
+                    Some(("E1004", "`ingest` is not a declaration"))
                 }
                 "log"
                     if i == 0
@@ -1315,7 +1328,7 @@ impl Parser {
                             Some(TokenKind::Keyword(Keyword::Pub))
                         ) =>
                 {
-                    Some("E1001")
+                    Some(("E1001", "`log` is not a declaration in Orna 1.0"))
                 }
                 "store"
                     if i == 0
@@ -1324,7 +1337,7 @@ impl Parser {
                             Some(TokenKind::Keyword(Keyword::Pub))
                         ) =>
                 {
-                    Some("E1003")
+                    Some(("E1003", "`store` is not a logical declaration"))
                 }
                 "view"
                     if i == 0
@@ -1333,46 +1346,67 @@ impl Parser {
                             Some(TokenKind::Keyword(Keyword::Pub))
                         ) =>
                 {
-                    Some("E1002")
+                    Some(("E1002", "`view` is replaced by an ordinary function"))
                 }
-                "transaction" if i == 0 => Some("E1007"),
-                "on" if i == 0 => Some("E1005"),
-                "check" | "unique" => Some("ORNA091-E-FIELD-CONSTRAINT"),
-                "where" => Some("ORNA-A091-001"),
-                "constraints" => Some("ORNA-A091-010"),
+                "transaction" if i == 0 => Some((
+                    "E1007",
+                    "database writes are transactional by activation; `transaction` is not syntax",
+                )),
+                "on" if i == 0 => Some(("E1005", "`on` is not a declaration")),
+                "check" => Some((
+                    "ORNA091-E-FIELD-CONSTRAINT",
+                    "field `check` syntax was removed; use a table assertion",
+                )),
+                "unique" => Some((
+                    "ORNA091-E-FIELD-CONSTRAINT",
+                    "field `unique` syntax was removed; use all_unique in the table body",
+                )),
+                "where" => Some((
+                    "ORNA-A091-001",
+                    "use a brace-delimited refined-type assertion block",
+                )),
+                "constraints" => Some((
+                    "ORNA-A091-010",
+                    "`constraints` is not a declaration; use owner-local `assert`",
+                )),
                 _ => None,
             };
-            if let Some(code) = code {
-                self.errors.push(Diagnostic::error(
-                    code,
-                    "legacy syntax is not part of Orna 1.0",
-                    token.span.clone(),
-                ));
+            if let Some((code, message)) = diagnostic {
+                self.errors
+                    .push(Diagnostic::error(code, message, token.span.clone()));
                 break;
             }
         }
         for i in 0..tokens.len().saturating_sub(1) {
-            let code = match (&tokens[i].kind, &tokens[i + 1].kind) {
-                (TokenKind::Keyword(Keyword::Static), TokenKind::Keyword(Keyword::Fn)) => {
-                    Some("ORNA091-E-STATIC-FN")
-                }
+            let diagnostic = match (&tokens[i].kind, &tokens[i + 1].kind) {
+                (TokenKind::Keyword(Keyword::Static), TokenKind::Keyword(Keyword::Fn)) => Some((
+                    "ORNA091-E-STATIC-FN",
+                    "protocols use instance functions and static properties, not static functions",
+                )),
                 (_, TokenKind::Punct("?"))
                     if matches!(
                         tokens[i].kind,
                         TokenKind::Integer | TokenKind::Punct(")" | "]")
                     ) =>
                 {
-                    Some("ORNA091-E-POSTFIX-QUESTION")
+                    Some((
+                        "ORNA091-E-POSTFIX-QUESTION",
+                        if matches!(tokens[i].kind, TokenKind::Integer) {
+                            "postfix propagation `?` was removed; failures propagate automatically"
+                        } else {
+                            "remove postfix `?`; failure propagation is automatic"
+                        },
+                    ))
                 }
-                (TokenKind::Punct("|"), TokenKind::Punct("!")) => Some("ORNA-A091-010"),
+                (TokenKind::Punct("|"), TokenKind::Punct("!")) => Some((
+                    "ORNA-A091-010",
+                    "`|!` is not assertion syntax; use `assert`",
+                )),
                 _ => None,
             };
-            if let Some(code) = code {
-                self.errors.push(Diagnostic::error(
-                    code,
-                    "invalid legacy token form",
-                    tokens[i].span.clone(),
-                ));
+            if let Some((code, message)) = diagnostic {
+                self.errors
+                    .push(Diagnostic::error(code, message, tokens[i].span.clone()));
                 break;
             }
         }
@@ -1384,7 +1418,7 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     "E1011",
-                    "pipeline stages cannot use legacy pipe lambdas",
+                    "pipe-delimited anonymous functions are not valid; use `=>`",
                     tokens[i + 3].span.clone(),
                 ));
                 break;
@@ -1394,7 +1428,7 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     "ORNA091-E-POSTFIX-QUESTION",
-                    "postfix `?` is not part of Orna 1.0",
+                    "standalone postfix `?` has no expression meaning in Orna 1.0",
                     tokens[i + 1].span.clone(),
                 ));
                 break;
@@ -1412,34 +1446,40 @@ impl Parser {
             }
             let next = tokens.get(i + 1);
             let next2 = tokens.get(i + 2);
-            let code = if braces == 0
+            let diagnostic = if braces == 0
                 && matches!(token.kind, TokenKind::Keyword(Keyword::Impl))
                 && (i == 0
                     || matches!(
                         tokens.get(i.saturating_sub(1)).map(|t| &t.kind),
                         Some(TokenKind::Keyword(Keyword::Pub))
                     )) {
-                Some("ORNA091-E-IMPL-FOR")
+                Some((
+                    "ORNA091-E-IMPL-FOR",
+                    "move the implementation inside its nominal target and omit `for Type`",
+                ))
             } else if matches!(token.kind, TokenKind::Punct("<"))
                 && matches!(next.map(|t| &t.kind), Some(TokenKind::Identifier { .. }))
                 && matches!(next2.map(|t| &t.kind), Some(TokenKind::Punct(":")))
             {
-                Some("ORNA091-E-BOUND-COLON")
+                Some((
+                    "ORNA091-E-BOUND-COLON",
+                    "protocol bounds use `<T impl Protocol>`",
+                ))
             } else if matches!(token.kind, TokenKind::Punct("||")) {
-                Some("E1012")
+                Some(("E1012", "`||` is logical OR, not an anonymous function"))
             } else if matches!(token.kind, TokenKind::Punct("-"))
                 && matches!(next.map(|t| &t.kind), Some(TokenKind::Punct(">")))
             {
-                Some("ORNA091-E-RETURN-ARROW")
+                Some((
+                    "ORNA091-E-RETURN-ARROW",
+                    "function return annotations use `: Type`",
+                ))
             } else {
                 None
             };
-            if let Some(code) = code {
-                self.errors.push(Diagnostic::error(
-                    code,
-                    "invalid legacy grammar form",
-                    token.span.clone(),
-                ));
+            if let Some((code, message)) = diagnostic {
+                self.errors
+                    .push(Diagnostic::error(code, message, token.span.clone()));
                 break;
             }
         }
@@ -1449,7 +1489,7 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     "ORNA-A091-011",
-                    "assert requires an expression",
+                    "assertion requires a proposition before `;`",
                     tokens[i + 1].span.clone(),
                 ));
             }
@@ -1465,7 +1505,7 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     "E1204",
-                    "a pipeline lambda stage must be parenthesized",
+                    "anonymous function must be parenthesized as a pipeline stage",
                     tokens[i + 1].span.clone(),
                 ));
             }
@@ -1518,7 +1558,7 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     "E1302",
-                    "comparison operators do not chain",
+                    "comparison operators do not chain; write an explicit conjunction",
                     tokens[i + 2].span.clone(),
                 ));
                 break;
@@ -1556,7 +1596,11 @@ impl Parser {
                     } else {
                         "ORNA-A091-005"
                     },
-                    "assertion statements require `;`",
+                    if legacy_else {
+                        "assert has no assertion-specific `else` arm"
+                    } else {
+                        "assertion clause must end with `;`"
+                    },
                     tokens[i].span.clone(),
                 ));
             }
@@ -1595,7 +1639,7 @@ impl Parser {
                     } else {
                         "ORNA-PARSE-001"
                     };
-                    self.error_here(code, "expected a top-level declaration")
+                    self.error_here(code, "module top level accepts declarations only")
                 } else {
                     self.error_here("ORNA-PARSE-001", "expected a REPL declaration")
                 };
@@ -3230,7 +3274,7 @@ impl Parser {
             let start = self.current().span.clone();
             self.bump();
             if !self.is_punct(":") {
-                self.error_here("E1013", "record fields require `:`");
+                self.error_here("E1013", "record fields require `name: expression`");
                 break;
             }
             self.bump();
