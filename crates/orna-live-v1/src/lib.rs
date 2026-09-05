@@ -1577,6 +1577,31 @@ pub trait LiveCredentialIssuer: CredentialIssuer {
     fn last_issued(&self) -> Option<[u8; 32]>;
 }
 
+/// Production credential issuer backed by the operating system CSPRNG.
+///
+/// Entropy failures are reduced to the existing denied boundary error; the
+/// transport never receives native provider details or a partially generated
+/// credential.
+#[derive(Debug, Default)]
+pub struct SystemCredentialIssuer {
+    last: Option<[u8; 32]>,
+}
+
+impl CredentialIssuer for SystemCredentialIssuer {
+    fn issue_credential(&mut self) -> std::result::Result<[u8; 32], BoundaryError> {
+        let mut token = [0; 32];
+        getrandom::fill(&mut token).map_err(|_| BoundaryError::Denied)?;
+        self.last = Some(token);
+        Ok(token)
+    }
+}
+
+impl LiveCredentialIssuer for SystemCredentialIssuer {
+    fn last_issued(&self) -> Option<[u8; 32]> {
+        self.last
+    }
+}
+
 fn session_id(value: [u8; 16]) -> SessionId {
     SessionId::new(value)
 }
@@ -2525,5 +2550,14 @@ mod tests {
         assert!(
             durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default(),).is_some()
         );
+    }
+
+    #[test]
+    fn system_credential_issuer_retains_only_the_last_csprng_result() {
+        let mut issuer = SystemCredentialIssuer::default();
+        assert_eq!(issuer.last_issued(), None);
+        let token = issuer.issue_credential().unwrap();
+        assert_ne!(token, [0; 32]);
+        assert_eq!(issuer.last_issued(), Some(token));
     }
 }
