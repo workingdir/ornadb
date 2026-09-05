@@ -15,6 +15,7 @@ use orna_stream_v1::{
     CheckpointKey, CheckpointPrecondition, CommitIntent, CommitResult, Component, ConsumerIdentity,
     DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
     FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
+    StreamState, StreamStatus,
 };
 use uuid::Uuid;
 
@@ -107,6 +108,10 @@ CREATE TABLE IF NOT EXISTS stream_lease (
     successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
     fence INTEGER NOT NULL CHECK (fence > 0),
     purpose INTEGER NOT NULL CHECK (purpose BETWEEN 1 AND 2)
+);
+CREATE TABLE IF NOT EXISTS stream_control (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    status INTEGER NOT NULL CHECK (status IN (1, 2))
 );
 "#;
 
@@ -915,6 +920,7 @@ impl RuntimeState {
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
         self.validate_checkpoint_anchors().await?;
+        self.validate_stream_controls().await?;
         let mut request_rows = self
             .connection
             .query(
@@ -1018,6 +1024,41 @@ impl RuntimeState {
             if generation == 0 || sequence == 0 || frozen != 1 || referenced.is_none() {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+        }
+        Ok(())
+    }
+
+    async fn validate_stream_controls(&self) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT stream_control.key_id, stream_control.status,
+                        stream_checkpoint.key_id
+                 FROM stream_control
+                 LEFT JOIN stream_checkpoint
+                   ON stream_checkpoint.key_id = stream_control.key_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key_id.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let referenced: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if referenced.as_deref() != Some(key_id.as_str()) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            decode_stream_status(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
         }
         Ok(())
     }
@@ -1208,6 +1249,21 @@ fn decode_purpose(value: i64) -> Result<LeasePurpose, RuntimeError> {
     }
 }
 
+fn encode_stream_status(status: StreamStatus) -> i64 {
+    match status {
+        StreamStatus::Running => 1,
+        StreamStatus::Paused => 2,
+    }
+}
+
+fn decode_stream_status(value: i64) -> Result<StreamStatus, RuntimeError> {
+    match value {
+        1 => Ok(StreamStatus::Running),
+        2 => Ok(StreamStatus::Paused),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
 fn decode_diagnostic(row: &libsql::Row, code_index: i32) -> Result<SafeDiagnostic, RuntimeError> {
     Ok(SafeDiagnostic {
         code: decode_code(
@@ -1296,6 +1352,68 @@ async fn load_stream_checkpoint(
     key: &CheckpointKey,
 ) -> Result<StreamCheckpoint, RuntimeError> {
     Ok(load_stream_checkpoint_state(connection, key).await?.0)
+}
+
+async fn load_stream_status(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<StreamStatus, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT status FROM stream_control WHERE key_id = ?1",
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(StreamStatus::Running);
+    };
+    decode_stream_status(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)
+}
+
+async fn store_stream_status(
+    connection: &Connection,
+    key: &CheckpointKey,
+    status: StreamStatus,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO stream_control (key_id, status) VALUES (?1, ?2)
+             ON CONFLICT(key_id) DO UPDATE SET status = excluded.status",
+            params![stream_key_id(key), encode_stream_status(status)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn has_blocking_stream_failure(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_failure
+             WHERE key_id = ?1 AND status IN (?2, ?3, ?4)
+             LIMIT 1",
+            params![
+                stream_key_id(key),
+                encode_status(FailureStatus::Failed),
+                encode_status(FailureStatus::Retrying),
+                encode_status(FailureStatus::Replaying),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some())
 }
 
 async fn load_stream_failure(
@@ -1426,6 +1544,77 @@ async fn apply_stream_intent_tx(
     intent: CommitIntent,
 ) -> Result<CommitResult, RuntimeError> {
     match intent {
+        CommitIntent::Pause { key } => {
+            ensure_stream_checkpoint(connection, &key).await?;
+            if load_stream_lease(connection, &key).await?.is_some() {
+                return Ok(CommitResult::Rejected(RejectReason::StreamBusy));
+            }
+            let changed = load_stream_status(connection, &key).await? != StreamStatus::Paused;
+            if changed {
+                store_stream_status(connection, &key, StreamStatus::Paused).await?;
+            }
+            Ok(CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    key,
+                    status: StreamStatus::Paused,
+                },
+                changed,
+            })
+        }
+        CommitIntent::Resume { key } => {
+            ensure_stream_checkpoint(connection, &key).await?;
+            if load_stream_status(connection, &key).await? == StreamStatus::Running {
+                return Ok(CommitResult::StreamStatusChanged {
+                    state: StreamState {
+                        key,
+                        status: StreamStatus::Running,
+                    },
+                    changed: false,
+                });
+            }
+            if load_stream_lease(connection, &key).await?.is_some() {
+                return Ok(CommitResult::Rejected(RejectReason::StreamBusy));
+            }
+            if has_blocking_stream_failure(connection, &key).await? {
+                return Ok(CommitResult::Rejected(RejectReason::BlockingFailure));
+            }
+            store_stream_status(connection, &key, StreamStatus::Running).await?;
+            Ok(CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    key,
+                    status: StreamStatus::Running,
+                },
+                changed: true,
+            })
+        }
+        CommitIntent::Reset { key, expected, to } => {
+            ensure_stream_checkpoint(connection, &key).await?;
+            if load_stream_status(connection, &key).await? != StreamStatus::Paused {
+                return Ok(CommitResult::Rejected(RejectReason::StreamNotPaused));
+            }
+            if load_stream_lease(connection, &key).await?.is_some() {
+                return Ok(CommitResult::Rejected(RejectReason::StreamBusy));
+            }
+            if has_blocking_stream_failure(connection, &key).await? {
+                return Ok(CommitResult::Rejected(RejectReason::BlockingFailure));
+            }
+            if !stream_checkpoint_matches(connection, &key, &expected).await? {
+                return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
+            }
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "UPDATE stream_checkpoint
+                     SET committed_position = ?2, version = version + 1
+                     WHERE key_id = ?1",
+                    params![key_id, to.token.as_str().to_owned()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::CheckpointReset {
+                checkpoint: load_stream_checkpoint(connection, &key).await?,
+            })
+        }
         CommitIntent::Acquire {
             delivery,
             expected,
@@ -1440,9 +1629,12 @@ async fn apply_stream_intent_tx(
                 return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
             }
             let identity = FailureIdentity(delivery.clone());
-            if let Some(failure) = load_stream_failure(connection, &identity).await? {
+            let failure_status = load_stream_failure(connection, &identity)
+                .await?
+                .map(|failure| failure.status);
+            if let Some(status) = failure_status {
                 let allowed = matches!(
-                    (purpose, failure.status),
+                    (purpose, status),
                     (LeasePurpose::Deliver, FailureStatus::Retrying)
                         | (LeasePurpose::Skip, FailureStatus::Failed)
                 );
@@ -1451,6 +1643,12 @@ async fn apply_stream_intent_tx(
                 }
             } else if purpose == LeasePurpose::Skip {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            }
+            if purpose == LeasePurpose::Deliver
+                && load_stream_status(connection, &key).await? == StreamStatus::Paused
+                && failure_status != Some(FailureStatus::Retrying)
+            {
+                return Ok(CommitResult::Rejected(RejectReason::StreamPaused));
             }
             let (_, next_fence) = load_stream_checkpoint_state(connection, &key).await?;
             let fence = next_fence
@@ -2247,6 +2445,110 @@ mod tests {
             .expect("durable failure");
         assert_eq!(failure.status, FailureStatus::Succeeded);
         assert_eq!(failure.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn durable_stream_control_reopens_paused_and_resets_opaque_position() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("receipt:zero", "resume:one");
+        let key = delivery.checkpoint_key();
+        {
+            let mut stream = state.stream_backend(writer);
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Pause { key: key.clone() })
+                    .await
+                    .unwrap(),
+                CommitResult::StreamStatusChanged {
+                    state: StreamState {
+                        status: StreamStatus::Paused,
+                        ..
+                    },
+                    changed: true,
+                }
+            ));
+        }
+        drop(state);
+
+        let reset_position = Position {
+            token: Component::new("provider/opaque-rewind").unwrap(),
+        };
+        {
+            let reopened = open_state(&repo).await;
+            let writer = reopened.acquire_lease(id(4)).await.unwrap();
+            let mut stream = reopened.stream_backend(writer);
+            let before = stream.checkpoint_async(&key).await.unwrap();
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Acquire {
+                        delivery: delivery.clone(),
+                        expected: CheckpointPrecondition::from(&before),
+                        purpose: LeasePurpose::Deliver,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StreamPaused)
+            );
+            let reset = match stream
+                .apply_async(CommitIntent::Reset {
+                    key: key.clone(),
+                    expected: CheckpointPrecondition::from(&before),
+                    to: reset_position.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointReset { checkpoint } => checkpoint,
+                other => panic!("unexpected checkpoint reset result: {other:?}"),
+            };
+            assert_eq!(reset.committed, Some(reset_position.clone()));
+            assert_eq!(reset.version, 1);
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Reset {
+                        key: key.clone(),
+                        expected: CheckpointPrecondition::from(&before),
+                        to: Position {
+                            token: Component::new("stale").unwrap(),
+                        },
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StaleCheckpoint)
+            );
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Resume { key: key.clone() })
+                    .await
+                    .unwrap(),
+                CommitResult::StreamStatusChanged {
+                    state: StreamState {
+                        status: StreamStatus::Running,
+                        ..
+                    },
+                    changed: true,
+                }
+            ));
+        }
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let mut stream = reopened.stream_backend(writer);
+        let current = stream.checkpoint_async(&key).await.unwrap();
+        assert_eq!(current.committed, Some(reset_position));
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: CheckpointPrecondition::from(&current),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
     }
 
     #[tokio::test]
