@@ -119,6 +119,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/rekey-auto-id.orna",
         "invalid/effectful-display.orna",
         "invalid/secret-display.orna",
+        "invalid/assert-effectful-table.orna",
     ] {
         let fixture = report
             .fixtures
