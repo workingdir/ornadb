@@ -8,7 +8,10 @@ use std::{
     collections::BTreeMap,
     fmt,
     marker::PhantomData,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -266,8 +269,49 @@ pub enum InvocationResult<T> {
     Orphaned(Option<Diagnostic>),
 }
 
+#[derive(Clone)]
+pub struct CancellationToken {
+    requested: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    fn new() -> Self {
+        Self {
+            requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+impl fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl PartialEq for CancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.requested, &other.requested)
+    }
+}
+
+impl Eq for CancellationToken {}
+
 pub trait InvocationExecutor {
     fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue>;
+
+    fn execute_controlled(
+        &mut self,
+        boundary: &ExecutionBoundary,
+        _: &CancellationToken,
+    ) -> InvocationResult<TypedValue> {
+        self.execute(boundary)
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -417,6 +461,7 @@ impl Runtime {
                 terminal: None,
                 cancellation_requested: false,
                 cancellation_reason: None,
+                cancellation: CancellationToken::new(),
             },
         );
         if let Some(key) = request.idempotency_key {
@@ -447,7 +492,11 @@ impl Runtime {
     {
         match self.admit(request)? {
             Admission::New { boundary, handle } => {
-                self.retain_terminal(&handle, executor.execute(&boundary))?;
+                let cancellation = self.cancellation_token(&handle)?;
+                self.retain_terminal(
+                    &handle,
+                    executor.execute_controlled(&boundary, &cancellation),
+                )?;
                 self.invocation_state(&handle)
             }
             Admission::Active { .. } => Ok(InvocationState::Active),
@@ -542,6 +591,10 @@ impl Runtime {
                     return Ok(true);
                 }
                 invocation.cancellation_requested = true;
+                invocation
+                    .cancellation
+                    .requested
+                    .store(true, Ordering::Release);
                 invocation.cancellation_reason = reason;
                 Ok(true)
             }
@@ -556,7 +609,20 @@ impl Runtime {
             .invocations
             .get(&handle.invocation)
             .expect("checked")
-            .cancellation_requested)
+            .cancellation
+            .is_cancelled())
+    }
+    fn cancellation_token<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<CancellationToken, AdmissionError> {
+        self.check_handle(handle)?;
+        Ok(self
+            .invocations
+            .get(&handle.invocation)
+            .expect("checked")
+            .cancellation
+            .clone())
     }
     fn store_terminal<T>(
         &mut self,
@@ -649,17 +715,18 @@ impl RuntimeSupervisor {
                 Admission::New { boundary, handle } => {
                     let worker_handle =
                         runtime.handle::<()>(&handle.invocation, handle.result_type.clone());
-                    (handle, Some((boundary, worker_handle)))
+                    let cancellation = runtime.cancellation_token(&worker_handle)?;
+                    (handle, Some((boundary, worker_handle, cancellation)))
                 }
                 Admission::Active { handle } | Admission::Terminal { handle, .. } => (handle, None),
             }
         };
 
-        if let Some((boundary, worker_handle)) = boundary {
+        if let Some((boundary, worker_handle, cancellation)) = boundary {
             let runtime = Arc::clone(&self.runtime);
             let _ = thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    executor.execute(&boundary)
+                    executor.execute_controlled(&boundary, &cancellation)
                 }))
                 .unwrap_or_else(|_| {
                     InvocationResult::Orphaned(Some(Diagnostic {
@@ -740,6 +807,7 @@ struct StoredInvocation {
     terminal: Option<RetainedInvocationResult>,
     cancellation_requested: bool,
     cancellation_reason: Option<Diagnostic>,
+    cancellation: CancellationToken,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdempotencyEntry {
@@ -1015,6 +1083,26 @@ mod tests {
                 open = wake.wait(open).unwrap();
             }
             self.result.clone()
+        }
+    }
+    struct CancellableExecutor {
+        observed: Arc<AtomicBool>,
+    }
+    impl InvocationExecutor for CancellableExecutor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            InvocationResult::Success(value("Str", "uncancelled"))
+        }
+
+        fn execute_controlled(
+            &mut self,
+            _: &ExecutionBoundary,
+            cancellation: &CancellationToken,
+        ) -> InvocationResult<TypedValue> {
+            while !cancellation.is_cancelled() {
+                thread::yield_now();
+            }
+            self.observed.store(true, Ordering::SeqCst);
+            InvocationResult::Cancelled(None)
         }
     }
     fn diagnostic(code: &'static str) -> Diagnostic {
@@ -1304,6 +1392,29 @@ mod tests {
             supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
             Ok(RetainedInvocationResult::Cancelled(Some(reason)))
         );
+    }
+    #[test]
+    fn supervised_cancellation_token_reaches_running_executor() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let observed = Arc::new(AtomicBool::new(false));
+        let handle = supervisor
+            .start(
+                request,
+                CancellableExecutor {
+                    observed: Arc::clone(&observed),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(supervisor.cancel(&handle, None), Ok(true));
+        assert_eq!(
+            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
+            Ok(RetainedInvocationResult::Cancelled(None))
+        );
+        assert!(observed.load(Ordering::SeqCst));
     }
     #[test]
     fn fences_foreign_and_stale_handles() {
