@@ -429,6 +429,18 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
 }
 
 #[test]
+fn table_keys_reject_ranges_with_the_published_primary_key_rule() {
+    let result = analyze(&[ModuleInput::new(
+        "range-key.orna",
+        "pub table Bad(period: Range<Date>) { value: Str, }",
+    )]);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "Range<T> is not a primary-key type in version 1.0"
+    }));
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
