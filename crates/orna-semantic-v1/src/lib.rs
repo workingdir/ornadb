@@ -1202,6 +1202,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let effect = match path.as_slice() {
         ["sys", "io", ..] => Some("filesystem"),
         ["sys", "net", ..] => Some("network"),
+        ["std", "net", ..] => Some("network"),
         ["sys", "process", ..] => Some("process"),
         ["sys", "ui", ..] => Some("ui"),
         ["sys", "clock", ..] => Some("clock"),
