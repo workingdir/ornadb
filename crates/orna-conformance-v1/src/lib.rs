@@ -14,6 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod syntax_adapter;
+pub use syntax_adapter::SyntaxAdapter;
+
 /// The only shared diagnostic carrier accepted by new Orna 1.0 integration.
 /// Existing generic adapters remain source-compatible during migration, but
 /// callers must use this helper rather than introduce a second harness shape.
@@ -647,14 +650,12 @@ impl Harness {
         Self {
             corpus,
             claim: ImplementationClaim {
-                implementation_id: "unintegrated".into(),
-                profile: "none".into(),
-                command:
-                    "cargo run --quiet --manifest-path work/crates/orna-conformance-v1/Cargo.toml"
-                        .into(),
+                implementation_id: "orna-conformance-v1".into(),
+                profile: "syntax-parse".into(),
+                command: "orna-conformance --profile syntax-parse".into(),
                 environment: BTreeMap::from([(
                     "adapter".into(),
-                    "SkippingAdapter unless supplied by caller".into(),
+                    "SyntaxAdapter (parse-only)".into(),
                 )]),
             },
         }
