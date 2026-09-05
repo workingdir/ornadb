@@ -14,7 +14,7 @@ use orna_evaluator_v1::{
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, parse_module};
+use orna_syntax_v1::{Declaration, Expr, parse_expression, parse_module};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct SemanticAdapter {
@@ -232,8 +232,8 @@ pub trait RuntimeEvaluator {
 /// environment or local bindings inside function bodies.
 ///
 /// Table access, mutations, external effects, and scenarios without an exact
-/// executable contract remain explicit skips. The let-rebinding scenario runs
-/// isolated pure evaluations with exact value and migration-diagnostic checks.
+/// executable contract remain explicit skips. Supported pure scenarios run
+/// isolated evaluations with exact value and syntax/diagnostic checks.
 #[derive(Clone, Default)]
 pub struct BoundedEvaluator {
     environment: Environment,
@@ -242,6 +242,66 @@ pub struct BoundedEvaluator {
 }
 
 impl BoundedEvaluator {
+    fn run_pipeline_insertion(&self) -> StageOutcome<Diagnostic> {
+        let mut runtime = Self::new(self.limits);
+        let module = SourceUnit {
+            fixture_id: "PIPE-001".into(),
+            source_id: "pipeline.orna".into(),
+            parse_as: "module_unit".into(),
+            // Returning every argument makes argument position observable; a
+            // boolean predicate alone could conceal a swapped argument.
+            source: "fn between(value: Int, low: Int, high: Int) = [value, low, high];".into(),
+        };
+        match runtime.evaluate_module(&module) {
+            StageOutcome::Passed => {}
+            outcome => return outcome,
+        }
+        let parsed = parse_expression("value | between(10, 20)");
+        let structure_matches = match &parsed.value {
+            Expr::Binary { lhs, op, rhs, .. }
+                if op == "|"
+                    && matches!(lhs.as_ref(), Expr::Name { text, .. } if text == "value") =>
+            {
+                matches!(rhs.as_ref(), Expr::Call { callee, arguments, .. }
+                    if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "between")
+                    && arguments.len() == 2 && arguments.iter().all(|argument| argument.name.is_none()))
+            }
+            _ => false,
+        };
+        if !parsed.is_ok() || !structure_matches {
+            return scenario_mismatch();
+        }
+        for number in [5, 15, 25] {
+            let environment = Environment::from([(
+                "value".into(),
+                Value::new(OvbRaw::Int(number.into())).expect("canonical argument"),
+            )]);
+            let expected = Value::new(OvbRaw::Array(vec![
+                OvbRaw::Int(number.into()),
+                OvbRaw::Int(10.into()),
+                OvbRaw::Int(20.into()),
+            ]))
+            .expect("canonical expectation");
+            for expression in [
+                "value | between(10, 20)",
+                "between(value, 10, 20)",
+                "value | between(low: 10, high: 20)",
+            ] {
+                match evaluate_expression_with_functions(
+                    expression,
+                    &environment,
+                    &runtime.functions,
+                    self.limits,
+                ) {
+                    Ok(actual) if actual == expected => {}
+                    Ok(_) => return scenario_mismatch(),
+                    Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+                }
+            }
+        }
+        StageOutcome::Passed
+    }
+
     fn run_let_rebinding(&self) -> StageOutcome<Diagnostic> {
         let expected = Value::new(OvbRaw::Array(vec![
             OvbRaw::Int(2.into()),
@@ -471,10 +531,26 @@ impl RuntimeEvaluator for BoundedEvaluator {
         if let_rebinding_contract(scenario) {
             return self.run_let_rebinding();
         }
+        if pipeline_insertion_contract(scenario) {
+            return self.run_pipeline_insertion();
+        }
         StageOutcome::Skipped {
             reason: "scenario has no implemented execution contract in the bounded runtime".into(),
         }
     }
+}
+
+fn pipeline_insertion_contract(scenario: &Scenario) -> bool {
+    scenario.id == "PIPE-001"
+        && scenario.title == "Pipeline inserts the left value as first argument"
+        && scenario.given == ["`value | between(10, 20)`"]
+        && scenario.when == ["lower pipeline application"]
+        && scenario.then
+            == [
+                "the call is exactly `between(value, 10, 20)`",
+                "no special pipe-function declaration is required",
+            ]
+        && scenario.requirements == ["ORNA-PIPE-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
 }
 
 fn let_rebinding_contract(scenario: &Scenario) -> bool {
