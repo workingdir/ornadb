@@ -124,7 +124,13 @@ pub trait RuntimeEvaluator {
 pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
-    functions: BTreeMap<String, Expr>,
+    functions: BTreeMap<String, RetainedFunction>,
+}
+
+#[derive(Clone)]
+struct RetainedFunction {
+    body: Expr,
+    environment: Environment,
 }
 
 impl BoundedEvaluator {
@@ -143,6 +149,20 @@ impl BoundedEvaluator {
             environment,
             limits,
             functions: BTreeMap::new(),
+        }
+    }
+
+    /// Explicitly invokes one zero-argument function retained during module
+    /// loading. Loading a module never evaluates a retained function body.
+    pub fn invoke(&self, function: &str) -> StageOutcome<Diagnostic> {
+        let Some(function) = self.functions.get(function) else {
+            return StageOutcome::Skipped {
+                reason: "function is not retained by the bounded evaluator".into(),
+            };
+        };
+        match evaluate_parsed(&function.body, &function.environment, self.limits) {
+            Ok(_) => StageOutcome::Passed,
+            Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
         }
     }
 
@@ -181,6 +201,7 @@ impl BoundedEvaluator {
             return Self::unsupported_module();
         }
         let mut environment = self.environment.clone();
+        let mut functions = self.functions.clone();
         for item in parsed.value.items {
             match item.declaration {
                 Declaration::Let {
@@ -194,14 +215,19 @@ impl BoundedEvaluator {
                     Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
                 },
                 Declaration::Function { signature, body } => {
-                    // The bounded evaluator has no function-invocation seam.
-                    // Loading therefore retains a supported declaration without
-                    // evaluating its body.
-                    self.functions.insert(signature.name, body);
+                    functions.insert(
+                        signature.name,
+                        RetainedFunction {
+                            body,
+                            environment: environment.clone(),
+                        },
+                    );
                 }
                 _ => return Self::unsupported_module(),
             }
         }
+        self.environment = environment;
+        self.functions = functions;
         StageOutcome::Passed
     }
 

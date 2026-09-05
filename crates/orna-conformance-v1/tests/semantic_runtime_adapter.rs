@@ -116,7 +116,7 @@ fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
 }
 
 #[test]
-fn bounded_evaluator_lazily_loads_zero_argument_functions_and_evaluates_lets() {
+fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() {
     let pure_module = SourceUnit {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
@@ -129,16 +129,22 @@ fn bounded_evaluator_lazily_loads_zero_argument_functions_and_evaluates_lets() {
         evaluator.evaluate_project(&pure_project(vec![pure_module])),
         StageOutcome::Passed
     );
-
-    let invalid_let = SourceUnit {
-        fixture_id: "test-module-failure".into(),
-        source_id: "logical/failure.orna".into(),
-        parse_as: "expression_unit".into(),
-        source: "if true { let answer = missing; answer } else { 0 }".into(),
-    };
-    let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid_let) else {
-        panic!("unknown immutable let binding must fail");
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("secret") else {
+        panic!("invalid retained function body must fail when invoked");
     };
     assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
     assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
+fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
+    let pure_module = SourceUnit {
+        fixture_id: "test-module".into(),
+        source_id: "logical/pure.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn incremented() = if true { let answer = 41; std.math.increment(answer) } else { 0 };".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("incremented"), StageOutcome::Passed);
 }
