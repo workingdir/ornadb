@@ -354,6 +354,23 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn retained_function_pipeline_executes_and_checks_its_result() {
+    let module = SourceUnit {
+        fixture_id: "function-pipeline".into(),
+        source_id: "logical/function-pipeline.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn add(value: Int, extra = 6) = value + extra; fn verify() = if (10 | add(extra: 6)) == 16 { 1 } else { 1 / 0 }; fn reject() = 10 | add(value: 3);".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("verify"), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("reject") else {
+        panic!("the pipe input occupies the first parameter");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-ARGUMENT");
+}
+
+#[test]
 fn retained_module_functions_call_helpers_in_defaults_and_bodies() {
     let module = SourceUnit {
         fixture_id: "nested-functions".into(),
