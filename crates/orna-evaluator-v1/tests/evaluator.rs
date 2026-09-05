@@ -141,6 +141,95 @@ fn evaluates_selection_indexing_named_calls_and_case_patterns() {
     );
 }
 
+fn object_id(byte: u8) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
+}
+
+fn enum_value(type_id: u8, variant_id: u8, payload: Option<Raw>) -> Value {
+    Value::new(Raw::Tag(
+        60008,
+        Box::new(Raw::Array(vec![
+            object_id(type_id),
+            object_id(variant_id),
+            payload.unwrap_or(Raw::Null),
+        ])),
+    ))
+    .unwrap()
+}
+
+fn record_payload(fields: Vec<(&str, Raw)>) -> Raw {
+    Raw::Tag(
+        60009,
+        Box::new(Raw::Array(vec![
+            Raw::Null,
+            Raw::Array(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Raw::Array(vec![Raw::Text(name.into()), value]))
+                    .collect(),
+            ),
+        ])),
+    )
+}
+
+#[test]
+fn matches_enum_labels_payload_fields_and_interpolates_bound_strings() {
+    let ready = enum_value(1, 2, None);
+    let waiting_label = enum_value(1, 3, None);
+    let waiting = enum_value(
+        1,
+        3,
+        Some(record_payload(vec![(
+            "reason",
+            Raw::Text("maintenance".into()),
+        )])),
+    );
+    let mut environment = Environment::from([
+        ("Availability.ready".into(), ready.clone()),
+        ("Availability.waiting".into(), waiting_label),
+        ("value".into(), waiting),
+    ]);
+    assert_eq!(
+        evaluate_expression(
+            "case value { Availability.ready: \"ready\", Availability.waiting { reason }: \"waiting: {reason}\" }",
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("waiting: maintenance".into())).unwrap()
+    );
+
+    environment.insert("value".into(), ready);
+    assert_eq!(
+        evaluate_expression(
+            "case value { Availability.ready: \"ready\", Availability.waiting { reason }: reason }",
+            &environment,
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::new(Raw::Text("ready".into())).unwrap()
+    );
+}
+
+#[test]
+fn matches_tagged_optional_some_and_null() {
+    let mut environment = Environment::from([(
+        "value".into(),
+        Value::option(Some(Value::new(Raw::Text("Kieran".into())).unwrap())).unwrap(),
+    )]);
+    let source = "case value { Some(name): name, null: \"anonymous\" }";
+    assert_eq!(
+        evaluate_expression(source, &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Text("Kieran".into())).unwrap()
+    );
+
+    environment.insert("value".into(), Value::option(None).unwrap());
+    assert_eq!(
+        evaluate_expression(source, &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Text("anonymous".into())).unwrap()
+    );
+}
+
 #[test]
 fn rejects_fail_closed_cases_with_redacted_stable_diagnostics() {
     for (source, expected) in [
@@ -155,6 +244,9 @@ fn rejects_fail_closed_cases_with_redacted_stable_diagnostics() {
         ("[1][2]", "ORNA-EVAL-INDEX"),
         ("[1][true]", "ORNA-EVAL-TYPE"),
         ("case 1 { 2: 2 }", "ORNA-EVAL-NO-MATCH"),
+        ("case 1 { Unknown.value: 1, _: 0 }", "ORNA-EVAL-UNSUPPORTED"),
+        ("case 1 { Other(inside): inside }", "ORNA-EVAL-UNSUPPORTED"),
+        ("\"value: {1}\"", "ORNA-EVAL-TYPE"),
         ("(value => value)(2)", "ORNA-EVAL-UNSUPPORTED"),
         ("{ let x = 1; x = 2; x }", "ORNA-EVAL-PARSE"),
         ("fn x() = 1", "ORNA-EVAL-PARSE"),
@@ -203,6 +295,22 @@ fn rejects_resource_limits_before_work_can_expand() {
             "case [1, 2] { [a, b]: a }",
             &Environment::new(),
             limits
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    let limits = Limits {
+        max_depth: 1,
+        ..Limits::default()
+    };
+    let environment = Environment::from([(
+        "value".into(),
+        Value::option(Some(Value::new(Raw::Text("nested".into())).unwrap())).unwrap(),
+    )]);
+    assert_eq!(
+        code(evaluate_expression(
+            "case value { Some(Some(name)): name, _: \"none\" }",
+            &environment,
+            limits,
         )),
         "ORNA-EVAL-LIMIT"
     );
