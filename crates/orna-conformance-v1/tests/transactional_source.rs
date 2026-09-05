@@ -95,6 +95,15 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
 }
 
 #[test]
+fn parsed_table_count_observes_nested_read_your_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&source("assert Note.count() == 1;")),
+        StageOutcome::Passed
+    ));
+}
+
+#[test]
 fn parsed_delete_removes_the_candidate_row() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(

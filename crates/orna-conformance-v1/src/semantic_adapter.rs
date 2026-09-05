@@ -11,6 +11,7 @@ use crate::{
     ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter,
     row_admission::{admit_project_rows, preflight_project_rows},
 };
+use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
     PureFunction as RetainedFunction, evaluate_expression_with_functions, invoke_named,
@@ -795,6 +796,17 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
         };
         match name.as_str() {
+            "count" => {
+                if !arguments.is_empty() {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                }
+                let count = self
+                    .activation
+                    .candidate_rows(table)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .len();
+                Ok(Some(Value::int(BigInt::from(count))))
+            }
             "insert" => {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
