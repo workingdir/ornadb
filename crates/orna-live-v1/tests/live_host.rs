@@ -42,6 +42,7 @@ impl SessionDeletionAdapter for Delete {
 #[derive(Default)]
 struct UnitApplication {
     calls: usize,
+    reject: bool,
 }
 
 fn unit_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
@@ -69,6 +70,9 @@ impl LiveApplication for UnitApplication {
             return Err(Error::ApplicationRejected);
         };
         self.calls += 1;
+        if self.reject {
+            return Err(Error::ApplicationRejected);
+        }
         Ok(unit_result(request, *fingerprint))
     }
 
@@ -379,6 +383,51 @@ fn dispatch_computes_fingerprints_and_replays_terminal_results() {
         ),
         Err(Error::RequestMismatch)
     );
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
+fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication {
+        reject: true,
+        ..UnitApplication::default()
+    };
+    let first = eval([1; 16], [21; 16], "1");
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(first.clone()), &mut application,)),
+        Err(Error::ApplicationRejected)
+    );
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            2,
+            Frame::Binary(eval([1; 16], [21; 16], "2")),
+            &mut application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    let replay =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(first), &mut application)).unwrap();
+    assert!(matches!(
+        replay.response.unwrap().message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            ..
+        }
+    ));
     assert_eq!(application.calls, 1);
 }
 
