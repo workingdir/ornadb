@@ -697,9 +697,12 @@ struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
     /// Direct `use module [as alias]` bindings. These are deliberately kept
-    /// apart from ordinary values so only `alias.public_export` receives
-    /// module-member lookup; nested paths and arbitrary nominal values do not.
-    modules: BTreeMap<String, ModuleHeader>,
+    /// apart from ordinary values so only explicitly imported module roots can
+    /// begin qualified module-member lookup.
+    modules: BTreeMap<String, Namespace>,
+    /// The closed source/catalogue module set used by qualified lookup. This
+    /// is data assembled by the caller, never a filesystem loader.
+    available_modules: BTreeMap<Namespace, ModuleHeader>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -712,6 +715,7 @@ fn resolve_imports(
         names: header.symbols.clone(),
         ambiguous: BTreeSet::new(),
         modules: BTreeMap::new(),
+        available_modules: modules.clone(),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -758,7 +762,7 @@ fn resolve_imports(
                 scope
                     .modules
                     .entry(name.clone())
-                    .or_insert_with(|| module.clone());
+                    .or_insert_with(|| target.clone());
                 insert_explicit(
                     &mut explicit,
                     name.clone(),
@@ -784,7 +788,7 @@ fn resolve_imports(
                 scope
                     .modules
                     .entry(name.clone())
-                    .or_insert_with(|| module.clone());
+                    .or_insert_with(|| target.clone());
                 insert_explicit(
                     &mut explicit,
                     name.clone(),
@@ -1059,22 +1063,10 @@ fn infer(
             }
         }
         Expr::Field { base, name, .. } => {
-            if let Expr::Name { text, .. } = base.as_ref()
-                && let Some(module) = scope.modules.get(text)
+            if let Some(path) = qualified_path(expr)
+                && scope.modules.contains_key(path[0])
             {
-                return match module.exports.get(name) {
-                    Some(symbol) => Inferred {
-                        ty: symbol.ty.clone(),
-                        effects: symbol.effects.clone(),
-                    },
-                    None => {
-                        diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
-                        Inferred {
-                            ty: Type::Error,
-                            effects: EffectSummary::default(),
-                        }
-                    }
-                };
+                return resolve_qualified_module_member(&path, scope, diagnostics);
             }
             let base = infer(base, scope, local, diagnostics);
             let ty = match &base.ty {
@@ -1225,6 +1217,46 @@ fn infer(
                 DIAG_UNSUPPORTED,
                 "expression form is outside this semantic slice",
             ));
+            Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            }
+        }
+    }
+}
+
+/// Resolves a member through one explicitly imported module root. A root may
+/// name a nested catalogue namespace (`core.json.encode`); intermediate path
+/// segments are namespaces, not values, so arbitrary nominal/record values
+/// remain governed by ordinary field inference.
+fn resolve_qualified_module_member(
+    path: &[&str],
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let root = scope.modules.get(path[0]).expect("checked imported root");
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(
+                path[1..path.len() - 1]
+                    .iter()
+                    .map(|part| (*part).to_owned()),
+            )
+            .collect(),
+    );
+    let symbol = scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(path[path.len() - 1]));
+    match symbol {
+        Some(symbol) => Inferred {
+            ty: symbol.ty.clone(),
+            effects: symbol.effects.clone(),
+        },
+        None => {
+            diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
             Inferred {
                 ty: Type::Error,
                 effects: EffectSummary::default(),
