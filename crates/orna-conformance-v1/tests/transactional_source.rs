@@ -50,3 +50,46 @@ fn parsed_duplicate_insert_rolls_back_the_complete_activation() {
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
 }
+
+#[test]
+fn parsed_update_patches_only_stored_fields() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&source(r#"Note.update(7, { text: "changed" });"#)),
+        StageOutcome::Passed
+    ));
+    let row = runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .expect("updated row");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("text".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("changed".into()))
+    ));
+}
+
+#[test]
+fn parsed_delete_removes_the_candidate_row() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&source("Note.delete(7);")),
+        StageOutcome::Passed
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+}
+
+#[test]
+fn parsed_rekey_moves_the_row_atomically() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        runtime.execute_source(&source("Note.rekey(7, 8);")),
+        StageOutcome::Passed
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
+}

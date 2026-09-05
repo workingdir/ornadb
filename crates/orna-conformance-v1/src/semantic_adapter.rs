@@ -652,9 +652,9 @@ type TransactionActivation<'runtime> = DatabaseActivation<'runtime, String, Vec<
 /// A bounded source executor for the first real table-transaction slice.
 ///
 /// It admits a module through the v1 syntax and semantic analyzer, retains its
-/// function bodies, and routes explicit-key `Table.insert` calls through one
-/// root activation. Other effects remain explicit skips until their own
-/// runtime contracts exist.
+/// function bodies, and routes explicit-key table mutations through one root
+/// activation. Other effects remain explicit skips until their own runtime
+/// contracts exist.
 pub struct TransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
@@ -791,25 +791,67 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         let Expr::Name { text: table, .. } = base.as_ref() else {
             return Ok(None);
         };
-        if name != "insert" {
-            return Ok(None);
-        }
-        let [row] = arguments else {
-            return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
-        };
         let Some(key_field) = self.key_fields.get(table) else {
             return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
         };
-        let Some(key) = record_field(row, key_field) else {
-            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
-        };
-        let key = key
-            .encode()
-            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?;
-        self.activation
-            .insert(table.clone(), key, row.clone())
-            .map_err(|error| transaction_error(table_error_code(error)))?;
-        Ok(Some(row.clone()))
+        match name.as_str() {
+            "insert" => {
+                let [row] = arguments else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let key = table_key(row, key_field)?;
+                self.activation
+                    .insert(table.clone(), key, row.clone())
+                    .map_err(|error| transaction_error(table_error_code(error)))?;
+                Ok(Some(row.clone()))
+            }
+            "update" => {
+                let [key, patch] = arguments else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let existing = self
+                    .activation
+                    .read(table, &encoded_key(key)?)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .cloned()
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
+                let row = merge_row(&existing, patch, key_field)?;
+                self.activation
+                    .update(table.clone(), encoded_key(key)?, row.clone())
+                    .map_err(|error| transaction_error(table_error_code(error)))?;
+                Ok(Some(row))
+            }
+            "delete" => {
+                let [key] = arguments else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let key = encoded_key(key)?;
+                self.activation
+                    .delete(table.clone(), key)
+                    .map_err(|error| transaction_error(table_error_code(error)))?;
+                Ok(Some(Value::unit()))
+            }
+            "rekey" => {
+                let [old_key, new_key] = arguments else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let old_key = encoded_key(old_key)?;
+                let new_key = encoded_key(new_key)?;
+                let existing = self
+                    .activation
+                    .read(table, &old_key)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .cloned()
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
+                let row = replace_record_field(&existing, key_field, new_key.clone())?;
+                self.activation
+                    .delete(table.clone(), old_key)
+                    .and_then(|()| self.activation.insert(table.clone(), new_key, row.clone()))
+                    .map_err(|error| transaction_error(table_error_code(error)))?;
+                Ok(Some(row))
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -856,6 +898,62 @@ fn record_field(row: &Value, field: &str) -> Option<Value> {
         OvbRaw::Text(name) if name == field => Value::new(value.clone()).ok(),
         _ => None,
     })
+}
+
+fn encoded_key(key: &Value) -> Result<Vec<u8>, EvaluationError> {
+    key.encode()
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))
+}
+
+fn table_key(row: &Value, field: &str) -> Result<Vec<u8>, EvaluationError> {
+    record_field(row, field)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
+        .and_then(|key| encoded_key(&key))
+}
+
+fn merge_row(existing: &Value, patch: &Value, key_field: &str) -> Result<Value, EvaluationError> {
+    let OvbRaw::Map(existing_fields) = existing.raw() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+    };
+    let OvbRaw::Map(patch_fields) = patch.raw() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+    };
+    let mut fields = existing_fields.clone();
+    for (patch_key, patch_value) in patch_fields {
+        let OvbRaw::Text(name) = patch_key else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        if name == key_field {
+            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        }
+        let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == patch_key) else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        *value = patch_value.clone();
+    }
+    Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
+}
+
+fn replace_record_field(
+    row: &Value,
+    field: &str,
+    replacement: Vec<u8>,
+) -> Result<Value, EvaluationError> {
+    let OvbRaw::Map(entries) = row.raw() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+    };
+    let mut fields = entries.clone();
+    let Some((_, value)) = fields
+        .iter_mut()
+        .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+    else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+    };
+    *value = Value::decode(&replacement)
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?
+        .raw()
+        .clone();
+    Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
 }
 
 fn transaction_error(code: &'static str) -> EvaluationError {
