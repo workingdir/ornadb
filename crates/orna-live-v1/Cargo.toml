@@ -8,6 +8,7 @@ description = "Transport-facing live-session adapter for orna.present.v1"
 
 [dependencies]
 futures = "0.3.31"
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-serving-v1 = { path = "../orna-serving-v1" }
