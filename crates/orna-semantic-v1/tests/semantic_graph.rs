@@ -973,6 +973,70 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                 "pub fn counts() = { cwd: contacts.Contact.as_of(CWD) | count, head: contacts.Contact.as_of(HEAD) | count, };",
             ),
         ),
+        (
+            "system failure replay",
+            ModuleInput::new(
+                "system_runtime.orna",
+                r#"
+                    pub fn replay_mail_failure(source_identity: Str, partition: Str?, position_format: Str, position) {
+                        let failure = sys.Failure | one(failure =>
+                            failure.consumer == mail.google.sync
+                            && failure.source_identity == source_identity
+                            && failure.partition == partition
+                            && failure.position_format == position_format
+                            && failure.position == position
+                        );
+                        sys.admin.replay_failure(failure.reference, expected_status: failure.status)
+                    }
+                "#,
+            ),
+        ),
+        (
+            "system failure skip",
+            ModuleInput::new(
+                "system_runtime_skip.orna",
+                r#"
+                    pub fn skip_blocked_mail(reason: Str) {
+                        let stream = sys.rt.streams | one(stream => stream.consumer == mail.google.sync);
+                        let failure = sys.Failure | one(failure => failure.reference == stream.last_failure);
+                        sys.admin.skip_failure(failure.reference, expected_status: failure.status, reason: reason)
+                    }
+                "#,
+            ),
+        ),
+        (
+            "system runtime presentation",
+            ModuleInput::new(
+                "system_runtime_presentation.orna",
+                "pub fn dashboard() = std.ui.Page(\"/\", _ => std.ui.Table(sys.rt.streams));",
+            ),
+        ),
+        (
+            "historical database view",
+            ModuleInput::new(
+                "system_database.orna",
+                r#"
+                    pub fn compare_old_and_current() {
+                        let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                        { old: old.energy.daily(), current: energy.daily(energy.Reading.as_of(sys.snapshot("HEAD~10"))) }
+                    }
+                "#,
+            ),
+        ),
+        (
+            "inferred relation parameter",
+            ModuleInput::new(
+                "inferred_relation.orna",
+                "pub fn recent(rows, duration = 7.days) = rows | filter(row => row.time >= now() - duration);",
+            ),
+        ),
+        (
+            "recovery lambda",
+            ModuleInput::new(
+                "recovery.orna",
+                "pub fn decode_or_default(raw: Str): Message = std.encoding.json.decode(raw, as: Message) |? (failure => Message.default());",
+            ),
+        ),
     ];
     for (name, source) in sources {
         let result = analyze_with_catalogue(&[source], &Catalogue::authoritative_fixture());

@@ -2154,9 +2154,9 @@ fn infer(
                     .map(type_of)
                     .unwrap_or_else(|| {
                         if let Pattern::Name(name, _) = &parameter.pattern
-                            && lambda_numeric_parameter_usage(body, name)
+                            && let Some(ty) = inferred_lambda_parameter_type(body, name)
                         {
-                            Type::Int
+                            ty
                         } else {
                             diagnostics.push(diag(
                                 DIAG_ANNOTATION,
@@ -2321,6 +2321,9 @@ fn infer(
         Expr::Binary { lhs, op, rhs, .. } => {
             if op == "|" {
                 return infer_success_pipeline(lhs, rhs, scope, local, diagnostics);
+            }
+            if op == "|?" {
+                return infer_recovery_pipeline(lhs, rhs, scope, local, diagnostics);
             }
             let left = infer(lhs, scope, local, diagnostics);
             let right = infer(rhs, scope, local, diagnostics);
@@ -2608,7 +2611,21 @@ fn lambda_numeric_parameter_usage(expression: &Expr, name: &str) -> bool {
                 fields.iter().any(|field| visit(&field.value, name))
             }
             Expr::Lambda { body, .. } => visit(body, name),
-            Expr::Block { tail, .. } => tail.as_deref().is_some_and(|tail| visit(tail, name)),
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                statements.iter().any(|statement| match statement {
+                    Statement::Let { value, .. }
+                    | Statement::Assert { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. }
+                    | Statement::Assignment { value, .. } => visit(value, name),
+                    Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                        value.as_ref().is_some_and(|value| visit(value, name))
+                    }
+                    Statement::Continue { .. } => false,
+                }) || tail.as_deref().is_some_and(|tail| visit(tail, name))
+            }
             Expr::Control {
                 condition,
                 body,
@@ -2638,7 +2655,225 @@ fn inferred_function_parameter_type(
     let Pattern::Name(name, _) = &parameter.pattern else {
         return None;
     };
-    lambda_numeric_parameter_usage(body, name).then_some(Type::Int)
+    if let Some(default) = &parameter.default {
+        let mut diagnostics = Vec::new();
+        let inferred = infer(
+            default,
+            &Scope::default(),
+            &BTreeMap::new(),
+            &mut diagnostics,
+        );
+        if diagnostics.is_empty() && inferred.ty != Type::Error {
+            return Some(inferred.ty);
+        }
+    }
+    if lambda_numeric_parameter_usage(body, name) {
+        return Some(Type::Int);
+    }
+    inferred_relation_parameter_type(body, name)
+        .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
+}
+
+fn inferred_lambda_parameter_type(body: &Expr, name: &str) -> Option<Type> {
+    if lambda_numeric_parameter_usage(body, name) {
+        return Some(Type::Int);
+    }
+    inferred_record_parameter_type(body, name)
+        .or_else(|| parameter_comparison_usage(body, name).then_some(Type::Error))
+}
+
+fn inferred_relation_parameter_type(body: &Expr, name: &str) -> Option<Type> {
+    let Expr::Binary { lhs, rhs, op, .. } = unwrap_group(body) else {
+        return None;
+    };
+    if op != "|" || !is_direct_name(lhs, name) {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = unwrap_group(rhs)
+    else {
+        return None;
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        return None;
+    };
+    if !matches!(text.as_str(), "filter" | "map") || arguments.len() != 1 {
+        return None;
+    }
+    let Expr::Lambda {
+        parameters, body, ..
+    } = unwrap_group(&arguments[0].value)
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(parameter, _) = &parameter.pattern else {
+        return None;
+    };
+    Some(Type::Relation(Box::new(inferred_record_type(
+        body, parameter,
+    ))))
+}
+
+fn inferred_record_parameter_type(body: &Expr, name: &str) -> Option<Type> {
+    let fields = inferred_record_fields(body, name);
+    (!fields.is_empty()).then_some(Type::Record(fields))
+}
+
+fn inferred_record_type(body: &Expr, name: &str) -> Type {
+    Type::Record(inferred_record_fields(body, name))
+}
+
+fn inferred_record_fields(body: &Expr, name: &str) -> BTreeMap<String, Type> {
+    fn visit(expression: &Expr, name: &str, fields: &mut BTreeMap<String, Type>) {
+        match expression {
+            Expr::Field {
+                base, name: field, ..
+            } if is_direct_name(base, name) => {
+                fields.entry(field.clone()).or_insert(Type::Error);
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name, fields),
+            Expr::Binary { lhs, rhs, .. } => {
+                visit(lhs, name, fields);
+                visit(rhs, name, fields);
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } => visit(base, name, fields),
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                visit(callee, name, fields);
+                for argument in arguments {
+                    visit(&argument.value, name, fields);
+                }
+            }
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for element in elements {
+                    visit(element, name, fields);
+                }
+            }
+            Expr::Record { fields: values, .. } | Expr::Nominal { fields: values, .. } => {
+                for field in values {
+                    visit(&field.value, name, fields);
+                }
+            }
+            Expr::Lambda { body, .. } => visit(body, name, fields),
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                for statement in statements {
+                    match statement {
+                        Statement::Let { value, .. }
+                        | Statement::Assert { value, .. }
+                        | Statement::Expression { value, .. }
+                        | Statement::Control { value, .. }
+                        | Statement::Assignment { value, .. } => visit(value, name, fields),
+                        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                            if let Some(value) = value {
+                                visit(value, name, fields);
+                            }
+                        }
+                        Statement::Continue { .. } => {}
+                    }
+                }
+                if let Some(tail) = tail {
+                    visit(tail, name, fields);
+                }
+            }
+            Expr::Control {
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    visit(condition, name, fields);
+                }
+                if let Some(body) = body {
+                    visit(body, name, fields);
+                }
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        visit(guard, name, fields);
+                    }
+                    visit(&arm.body, name, fields);
+                }
+                if let Some(alternate) = alternate {
+                    visit(alternate, name, fields);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut fields = BTreeMap::new();
+    visit(body, name, &mut fields);
+    fields
+}
+
+fn parameter_comparison_usage(expression: &Expr, name: &str) -> bool {
+    fn visit(expression: &Expr, name: &str) -> bool {
+        match expression {
+            Expr::Binary { lhs, op, rhs, .. } => {
+                (matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=")
+                    && (contains_direct_name(lhs, name) || contains_direct_name(rhs, name)))
+                    || visit(lhs, name)
+                    || visit(rhs, name)
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => visit(base, name),
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                visit(callee, name)
+                    || arguments
+                        .iter()
+                        .any(|argument| visit(&argument.value, name))
+            }
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                elements.iter().any(|element| visit(element, name))
+            }
+            Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+                fields.iter().any(|field| visit(&field.value, name))
+            }
+            Expr::Lambda { body, .. } => visit(body, name),
+            Expr::Block { tail, .. } => tail.as_deref().is_some_and(|tail| visit(tail, name)),
+            Expr::Control {
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                condition.as_deref().is_some_and(|value| visit(value, name))
+                    || body.as_deref().is_some_and(|value| visit(value, name))
+                    || arms.iter().any(|arm| visit(&arm.body, name))
+                    || alternate.as_deref().is_some_and(|value| visit(value, name))
+            }
+            _ => false,
+        }
+    }
+    visit(expression, name)
+}
+
+fn contains_direct_name(expression: &Expr, name: &str) -> bool {
+    match unwrap_group(expression) {
+        Expr::Name { text, .. } => text == name,
+        _ => false,
+    }
+}
+
+fn is_direct_name(expression: &Expr, name: &str) -> bool {
+    contains_direct_name(expression, name)
+}
+
+fn unwrap_group(expression: &Expr) -> &Expr {
+    match expression {
+        Expr::Group { inner, .. } => unwrap_group(inner),
+        expression => expression,
+    }
 }
 
 fn infer_assignment(
@@ -3630,6 +3865,69 @@ fn infer_success_pipeline(
     Inferred { ty, effects }
 }
 
+fn infer_recovery_pipeline(
+    lhs: &Expr,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let input = infer(lhs, scope, local, diagnostics);
+    let Some(expression) = pipeline_lambda(rhs) else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "recovery pipeline requires a one-parameter lambda",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = expression
+    else {
+        unreachable!("pipeline_lambda only returns lambda expressions");
+    };
+    let [parameter] = parameters.as_slice() else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "recovery pipeline callback must take one parameter",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    };
+    let Pattern::Name(name, _) = &parameter.pattern else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "recovery pipeline callback pattern is outside this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    };
+    let mut callback_locals = local.clone();
+    callback_locals.insert(
+        name.clone(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty: Type::Error,
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
+    let recovered = infer(body, scope, &callback_locals, diagnostics);
+    let mut effects = input.effects;
+    effects.join(&recovered.effects);
+    Inferred {
+        ty: recovered.ty,
+        effects,
+    }
+}
+
 fn pipeline_lambda(expression: &Expr) -> Option<&Expr> {
     match expression {
         Expr::Lambda { .. } => Some(expression),
@@ -4152,6 +4450,20 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
 
 fn infer_system_path(path: &[&str]) -> Option<Inferred> {
     let inferred = match path {
+        ["sys", "database"] => Inferred {
+            ty: Type::Named("sys.DatabaseView".into()),
+            effects: EffectSummary::default(),
+        },
+        ["sys", "database", "as_of"] => Inferred {
+            ty: function(
+                vec![Type::Named("sys.SnapshotRef".into())],
+                Type::Named("sys.DatabaseView".into()),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
         ["sys", "Checkpoint"] => Inferred {
             ty: Type::Named("sys.Checkpoint".into()),
             effects: EffectSummary::default(),
@@ -4174,6 +4486,21 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
         ["sys", "Object"] => Inferred {
             ty: Type::Named("sys.Object".into()),
             effects: EffectSummary::default(),
+        },
+        ["sys", "Failure"] => Inferred {
+            ty: Type::Relation(Box::new(Type::Named("sys.Failure".into()))),
+            effects: Inferred {
+                ty: Type::Named("sys.Failure".into()),
+                effects: EffectSummary::default(),
+            }
+            .effects,
+        },
+        ["sys", "rt", "streams"] => Inferred {
+            ty: Type::Relation(Box::new(Type::Named("sys.Stream".into()))),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
         },
         ["sys", "history"] => Inferred {
             ty: function(
@@ -4244,6 +4571,33 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 may_fail: true,
             },
         },
+        ["sys", "admin", "replay_failure"] => Inferred {
+            ty: named_function(
+                vec![
+                    ("failure", Type::Named("sys.FailureRef".into())),
+                    ("expected_status", Type::Named("sys.FailureStatus".into())),
+                ],
+                Type::Named("sys.InvocationHandle".into()),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database write".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "admin", "skip_failure"] => Inferred {
+            ty: named_function(
+                vec![
+                    ("failure", Type::Named("sys.FailureRef".into())),
+                    ("expected_status", Type::Named("sys.FailureStatus".into())),
+                    ("reason", Type::Text),
+                ],
+                Type::Named("sys.Checkpoint".into()),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database write".into()]),
+                may_fail: true,
+            },
+        },
         _ => return None,
     };
     Some(inferred)
@@ -4251,6 +4605,36 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
     match (base, name) {
+        (Type::Named(system_type), "energy") if system_type == "sys.DatabaseView" => {
+            Some(Type::Named("sys.EnergyView".into()))
+        }
+        (Type::Named(system_type), "daily") if system_type == "sys.EnergyView" => {
+            Some(function(Vec::new(), Type::Error))
+        }
+        (Type::Named(system_type), "consumer") if system_type == "sys.Stream" => Some(Type::Error),
+        (Type::Named(system_type), "last_failure") if system_type == "sys.Stream" => Some(
+            Type::Optional(Box::new(Type::Named("sys.FailureRef".into()))),
+        ),
+        (Type::Named(system_type), "reference") if system_type == "sys.Failure" => {
+            Some(Type::Named("sys.FailureRef".into()))
+        }
+        (Type::Named(system_type), "consumer") if system_type == "sys.Failure" => Some(Type::Error),
+        (Type::Named(system_type), "status") if system_type == "sys.Failure" => {
+            Some(Type::Named("sys.FailureStatus".into()))
+        }
+        (Type::Named(system_type), "source_identity") if system_type == "sys.Failure" => {
+            Some(Type::Text)
+        }
+        (Type::Named(system_type), "partition") if system_type == "sys.Failure" => {
+            Some(Type::Optional(Box::new(Type::Text)))
+        }
+        (Type::Named(system_type), "position_format") if system_type == "sys.Failure" => {
+            Some(Type::Text)
+        }
+        (Type::Named(system_type), "position") if system_type == "sys.Failure" => Some(Type::Error),
+        (Type::Named(system_type), "version") if system_type == "sys.Failure" => {
+            Some(Type::Named("sys.FailureVersion".into()))
+        }
         (Type::Named(system_type), "started") if system_type == "sys.Run" => Some(Type::Instant),
         (Type::Named(system_type), "pending_rows") if system_type == "sys.Storage" => {
             Some(Type::Int)
