@@ -212,6 +212,50 @@ fn runtime_adapter_has_an_executable_seam_but_lazy_semantic_failures_precede_it(
 }
 
 #[test]
+fn bounded_row_evaluation_does_not_claim_schema_or_path_key_validation() {
+    let mut evaluator = BoundedEvaluator::default();
+    for source in [
+        "{ name: \"Alice\" }",
+        "{ id: \"alice\", name: \"Alice\" }",
+        "42",
+    ] {
+        let row = SourceUnit {
+            fixture_id: "row-admission".into(),
+            source_id: "rows/alice.orna".into(),
+            parse_as: "row_unit".into(),
+            source: source.into(),
+        };
+        assert_eq!(evaluator.evaluate(&row), StageOutcome::Passed);
+        assert!(matches!(
+            evaluator.validate_row(&row),
+            StageOutcome::Skipped { .. }
+        ));
+        let mut project = pure_project(Vec::new());
+        assert_eq!(evaluator.validate_rows(&project), StageOutcome::Passed);
+        project.loose_rows.push(row);
+        assert!(matches!(
+            evaluator.validate_rows(&project),
+            StageOutcome::Skipped { .. }
+        ));
+    }
+    let report =
+        Harness::new(Corpus::load_default().unwrap()).run(&mut RuntimeAdapter::new(evaluator));
+    let fixture = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "invalid/unsafe-row-key-repeat.orna")
+        .unwrap();
+    assert!(!fixture.passed);
+    let validation = fixture
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Some(orna_conformance_v1::Stage::RowValidation))
+        .unwrap();
+    assert_eq!(validation.status, EvidenceStatus::Skipped);
+    assert_eq!(validation.class, EvidenceClass::Skipped);
+}
+
+#[test]
 fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
     let mut evaluator = BoundedEvaluator::default();
     let valid = SourceUnit {
