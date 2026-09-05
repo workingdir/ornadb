@@ -861,9 +861,9 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
                 }
                 let count = self
                     .activation
-                    .candidate_rows(table)
+                    .candidate_relation(table)
                     .map_err(|error| transaction_error(table_error_code(error)))?
-                    .len();
+                    .count();
                 Ok(Some(Value::int(BigInt::from(count))))
             }
             "insert" => {
