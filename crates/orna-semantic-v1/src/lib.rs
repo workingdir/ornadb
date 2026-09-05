@@ -3456,7 +3456,8 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
     else {
         return None;
     };
-    if left_parameters.len() != right_parameters.len()
+    if left_result != right_result
+        || left_parameters.len() != right_parameters.len()
         || left_parameters
             .iter()
             .zip(right_parameters)
@@ -3469,11 +3470,7 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
         parameter_names: (left_names == right_names)
             .then(|| left_names.clone())
             .flatten(),
-        result: Box::new(if left_result == right_result {
-            (**left_result).clone()
-        } else {
-            Type::Error
-        }),
+        result: left_result.clone(),
     })
 }
 
