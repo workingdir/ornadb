@@ -288,10 +288,34 @@ fn numeric_methods_and_relation_count_use_closed_intrinsic_shapes() {
                 scale: 6,
                 rounding: half_even,
             );
+            pub fn current(): Instant = now();
             pub fn count_call(): Int = Note | count();
             pub fn count_name(): Int = Note | count;
         "#,
     )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "standard.orna",
+            r#"
+                pub fn json(value: Contact) = std.encoding.json.encode(value);
+                pub fn canonical(value: Contact) = std.encoding.orna.encode(value);
+                pub fn read(value: ByteStream) = std.encoding.json.decode(value, as: Contact);
+                pub fn formats(duration: Duration) = {
+                    compact: std.time.duration.compact.format(duration),
+                    clock: std.time.duration.clock.format(duration),
+                    words: std.time.duration.words.format(duration),
+                    iso: std.time.duration.iso.format(duration),
+                };
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 }

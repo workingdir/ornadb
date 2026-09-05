@@ -282,6 +282,57 @@ impl Catalogue {
             ),
         );
         modules.insert(
+            Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "encoding".into(), "json".into()]),
+                [
+                    (
+                        "encode",
+                        named_function(vec![("value", Type::Error)], byte_stream.clone()),
+                    ),
+                    (
+                        "decode",
+                        named_function(
+                            vec![("value", Type::Error), ("as", Type::Error)],
+                            Type::Error,
+                        ),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "encoding".into(), "orna".into()]),
+                [(
+                    "encode",
+                    named_function(vec![("value", Type::Error)], byte_stream.clone()),
+                )],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        let duration = Type::Named("std.DURATION".into());
+        for segment in ["compact", "clock", "words", "iso"] {
+            let namespace = Namespace(vec![
+                "std".into(),
+                "time".into(),
+                "duration".into(),
+                segment.into(),
+            ]);
+            modules.insert(
+                namespace.clone(),
+                catalogue_module(
+                    namespace,
+                    [(
+                        "format",
+                        named_function(vec![("duration", duration.clone())], Type::Text),
+                    )],
+                    std::iter::empty::<&str>(),
+                ),
+            );
+        }
+        modules.insert(
             Namespace(vec!["std".into(), "terminal".into()]),
             catalogue_module(
                 Namespace(vec!["std".into(), "terminal".into()]),
@@ -375,6 +426,18 @@ fn function(parameters: Vec<Type>, result: Type) -> Type {
     Type::Function {
         parameters,
         parameter_names: None,
+        result: Box::new(result),
+    }
+}
+
+fn named_function(parameters: Vec<(&str, Type)>, result: Type) -> Type {
+    let parameter_names = parameters
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    Type::Function {
+        parameters: parameters.into_iter().map(|(_, ty)| ty).collect(),
+        parameter_names: Some(parameter_names),
         result: Box::new(result),
     }
 }
@@ -787,6 +850,7 @@ fn primitive(name: &str) -> Option<Type> {
         "TEXT" => Type::Text,
         "DATE" => Type::Date,
         "TIMESTAMP" => Type::Instant,
+        "Duration" => Type::Named("std.DURATION".into()),
         "VOID" => Type::Null,
         "UUID" => Type::Named("std.UUID".into()),
         "TIME" => Type::Named("std.TIME".into()),
@@ -850,6 +914,11 @@ fn resolve_imports(
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
     };
+    if modules.contains_key(&Namespace(vec!["std".into()])) {
+        scope
+            .modules
+            .insert("std".into(), Namespace(vec!["std".into()]));
+    }
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
     for item in &tree.items {
@@ -1397,7 +1466,12 @@ fn infer(
             let values = arguments
                 .iter()
                 .map(|a| {
-                    let x = infer(&a.value, scope, local, diagnostics);
+                    let x = if a.name.as_deref() == Some("as") {
+                        infer_type_argument(&a.value)
+                            .unwrap_or_else(|| infer(&a.value, scope, local, diagnostics))
+                    } else {
+                        infer(&a.value, scope, local, diagnostics)
+                    };
                     effects.join(&x.effects);
                     x.ty
                 })
@@ -2785,6 +2859,7 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 
 fn intrinsic_value_type(name: &str) -> Option<Type> {
     match name {
+        "now" => Some(function(Vec::new(), Type::Instant)),
         "half_even" => Some(Type::Named("std.Rounding".into())),
         _ => None,
     }
@@ -2884,6 +2959,15 @@ fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
         _ => None,
     }
 }
+
+fn infer_type_argument(expression: &Expr) -> Option<Inferred> {
+    let path = qualified_path(expression)?;
+    Some(Inferred {
+        ty: Type::Named(path.join(".")),
+        effects: EffectSummary::default(),
+    })
+}
+
 fn assertion(
     owner: AssertionOwner,
     value: &Expr,
