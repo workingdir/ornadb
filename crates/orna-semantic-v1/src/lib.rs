@@ -168,6 +168,7 @@ pub struct ModuleHeader {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Catalogue {
     modules: BTreeMap<Namespace, ModuleHeader>,
+    attached_symbols: BTreeMap<String, Symbol>,
 }
 impl Catalogue {
     pub fn empty() -> Self {
@@ -476,7 +477,10 @@ impl Catalogue {
                 std::iter::empty::<&str>(),
             ),
         );
-        Self { modules }
+        Self {
+            modules,
+            attached_symbols: BTreeMap::new(),
+        }
     }
 
     /// The explicit core catalogue plus the attached environment used by the
@@ -523,23 +527,18 @@ impl Catalogue {
             ("order".into(), Type::Named("Order".into())),
         ]));
 
-        catalogue.modules.insert(
-            Namespace(Vec::new()),
-            fixture_module(
-                Namespace(Vec::new()),
-                [
-                    fixture_type("Account", Type::Named("Account".into())),
-                    fixture_table("Audit", audit),
-                    fixture_table("Contact", contact.clone()),
-                    fixture_type("Customer", customer),
-                    fixture_type("Message", Type::Named("Message".into())),
-                    fixture_table("Note", note),
-                    fixture_table("Order", order),
-                    fixture_table("Payment", payment),
-                ],
-                false,
-            ),
-        );
+        catalogue.attached_symbols = [
+            fixture_type("Account", Type::Named("Account".into())),
+            fixture_table("Audit", audit),
+            fixture_table("Contact", contact.clone()),
+            fixture_type("Customer", customer),
+            fixture_type("Message", Type::Named("Message".into())),
+            fixture_table("Note", note),
+            fixture_table("Order", order),
+            fixture_table("Payment", payment),
+        ]
+        .into_iter()
+        .collect();
         catalogue.modules.insert(
             Namespace(vec!["Message".into()]),
             fixture_module(
@@ -882,7 +881,7 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
         result.modules.insert(namespace.clone(), header);
         parsed.push((namespace, parse.value));
     }
-    stabilize_function_summaries(&parsed, &mut result.modules);
+    stabilize_function_summaries(&parsed, &mut result.modules, &catalogue.attached_symbols);
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -892,6 +891,7 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
             tree,
             &header,
             &result.modules,
+            &catalogue.attached_symbols,
             &mut result.diagnostics,
         );
         let mut symbols = header.symbols.clone();
@@ -938,6 +938,7 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
 fn stabilize_function_summaries(
     parsed: &[(Namespace, SyntaxTree)],
     modules: &mut BTreeMap<Namespace, ModuleHeader>,
+    attached_symbols: &BTreeMap<String, Symbol>,
 ) {
     let pass_limit = parsed
         .iter()
@@ -956,7 +957,14 @@ fn stabilize_function_summaries(
                 continue;
             };
             let mut discarded = Vec::new();
-            let scope = resolve_imports(namespace, tree, &header, modules, &mut discarded);
+            let scope = resolve_imports(
+                namespace,
+                tree,
+                &header,
+                modules,
+                attached_symbols,
+                &mut discarded,
+            );
             let mut symbols = header.symbols;
             for item in &tree.items {
                 if matches!(item.declaration, Declaration::Function { .. }) {
@@ -1245,6 +1253,7 @@ fn resolve_imports(
     tree: &SyntaxTree,
     header: &ModuleHeader,
     modules: &BTreeMap<Namespace, ModuleHeader>,
+    attached_symbols: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
     let mut scope = Scope {
@@ -1289,13 +1298,11 @@ fn resolve_imports(
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
     };
-    if let Some(root) = modules.get(&Namespace(Vec::new())) {
-        for (name, symbol) in &root.exports {
-            scope
-                .names
-                .entry(name.clone())
-                .or_insert_with(|| symbol.clone());
-        }
+    for (name, symbol) in attached_symbols {
+        scope
+            .names
+            .entry(name.clone())
+            .or_insert_with(|| symbol.clone());
     }
     if modules.contains_key(&Namespace(vec!["std".into()])) {
         scope
