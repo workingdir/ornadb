@@ -1244,6 +1244,48 @@ fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_argume
 }
 
 #[test]
+fn direct_and_piped_calls_share_argument_validation() {
+    for (arguments, valid) in [
+        ("10, 20", true),
+        ("min: 10, max: 20", true),
+        ("max: 20, min: 10", true),
+        ("10, max: 20", true),
+        ("min: 10", false),
+        ("min: 10, min: 20", false),
+        ("min: 10, value: 20", false),
+        ("min: 10, unknown: 20", false),
+        ("true, 20", false),
+        ("10, 20, 30", false),
+        ("min: 10, 20", false),
+    ] {
+        for expression in [
+            format!("between(1, {arguments})"),
+            format!("1 | between({arguments})"),
+        ] {
+            let result = analyze(&[ModuleInput::new(
+                "arguments.orna",
+                format!(
+                    "fn between(value: Int, min: Int, max: Int) = value >= min && value <= max; fn test() = {expression};"
+                ),
+            )]);
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "{expression}: {:?}",
+                result.diagnostics
+            );
+            if !valid {
+                assert!(
+                    has(&result, DIAG_TYPE),
+                    "{expression}: {:?}",
+                    result.diagnostics
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn generic_and_table_pipeline_stages_remain_fail_closed() {
     let result = analyze(&[ModuleInput::new(
         "unsupported.orna",
