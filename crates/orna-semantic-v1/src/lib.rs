@@ -3812,10 +3812,24 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             ty: Type::Named("sys.File".into()),
             effects: EffectSummary::default(),
         },
+        ["sys", "Object"] => Inferred {
+            ty: Type::Named("sys.Object".into()),
+            effects: EffectSummary::default(),
+        },
         ["sys", "history"] => Inferred {
             ty: function(
                 vec![Type::Named("sys.FileRef".into())],
                 Type::Relation(Box::new(Type::Named("sys.FileVersion".into()))),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "dependents"] => Inferred {
+            ty: function(
+                vec![Type::Named("sys.ObjectRef".into())],
+                Type::Relation(Box::new(Type::Named("sys.Dependency".into()))),
             ),
             effects: EffectSummary {
                 effects: BTreeSet::from(["database read".into()]),
@@ -3889,6 +3903,9 @@ fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
         }
         (Type::Named(system_type), "kind") if system_type == "sys.Object" => {
             Some(Type::Named("sys.ObjectKind".into()))
+        }
+        (Type::Named(system_type), "reference") if system_type == "sys.Object" => {
+            Some(Type::Named("sys.ObjectRef".into()))
         }
         (Type::Named(system_type), "qualified_name") if system_type == "sys.Object" => {
             Some(Type::Text)
