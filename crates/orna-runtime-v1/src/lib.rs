@@ -19,12 +19,13 @@ use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot};
 use orna_repository_v1::Repository;
+pub use orna_stream_v1::StreamFailurePayload;
 use orna_stream_v1::{
-    AsyncCheckpointBackend, CancellationClassification, Checkpoint as StreamCheckpoint,
-    CheckpointKey, CheckpointPrecondition, CommitIntent, CommitResult, Component, ConsumerIdentity,
-    DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
-    FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
-    StreamState, StreamStatus,
+    AsyncCheckpointBackend, AsyncFailurePayloadBackend, CancellationClassification,
+    Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition, CommitIntent,
+    CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DeliveryLease, DiagnosticClass,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
+    RejectReason, SafeDiagnostic, StreamState, StreamStatus,
 };
 use uuid::Uuid;
 
@@ -38,6 +39,9 @@ CREATE TABLE IF NOT EXISTS runtime_meta (
     runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
     generation INTEGER NOT NULL CHECK (generation >= 0),
     generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
+);
+CREATE TABLE IF NOT EXISTS runtime_schema_migration (
+    migration TEXT PRIMARY KEY CHECK (length(migration) > 0)
 );
 CREATE TABLE IF NOT EXISTS writer_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -111,6 +115,32 @@ CREATE TABLE IF NOT EXISTS stream_failure (
     diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
     diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
 );
+CREATE TABLE IF NOT EXISTS stream_failure_payload (
+    identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
+    payload BLOB,
+    payload_reference TEXT,
+    payload_digest BLOB,
+    retention INTEGER NOT NULL CHECK (retention IN (1, 2)),
+    CHECK (payload_digest IS NULL OR length(payload_digest) = 32),
+    CHECK (
+        (
+            retention = 1
+            AND payload IS NOT NULL
+            AND payload_reference IS NULL
+            AND payload_digest IS NULL
+        )
+        OR (
+            retention = 2
+            AND payload IS NULL
+            AND payload_reference IS NOT NULL
+            AND length(payload_reference) > 0
+            AND payload_digest IS NOT NULL
+        )
+    )
+);
+CREATE TABLE IF NOT EXISTS stream_failure_payload_legacy (
+    identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0)
+);
 CREATE TABLE IF NOT EXISTS stream_provider_failure (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version >= 0),
@@ -125,6 +155,10 @@ CREATE TABLE IF NOT EXISTS stream_lease (
     successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
     fence INTEGER NOT NULL CHECK (fence > 0),
     purpose INTEGER NOT NULL CHECK (purpose BETWEEN 1 AND 2)
+);
+CREATE TABLE IF NOT EXISTS stream_retry_claim (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    identity_id TEXT NOT NULL CHECK (length(identity_id) > 0)
 );
 CREATE TABLE IF NOT EXISTS stream_control (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
@@ -320,6 +354,14 @@ pub struct StreamItem {
     pub payload: Vec<u8>,
 }
 
+/// Redacted public metadata for a retained failure payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamFailurePayloadMetadata {
+    pub plaintext_bytes: Option<u64>,
+    pub protected_reference: bool,
+    pub redacted: bool,
+}
+
 pub struct StreamMutationBatch {
     pub mutations: Vec<Mutation>,
     pub next_digest: [u8; 32],
@@ -373,6 +415,12 @@ pub trait StreamSource {
     /// their declaration does not match the requested durable stream.
     fn checkpoint_key(&self) -> Option<CheckpointKey> {
         None
+    }
+    /// Selects how a failed item can be preserved for administrative skip or
+    /// replay. The default fails closed; every connector that can fail a
+    /// delivery must explicitly select plaintext or a protected reference.
+    fn failure_payload(&self, _item: &StreamItem) -> StreamFailurePayload {
+        StreamFailurePayload::Unavailable
     }
     fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a>;
     /// Waits until the source can be polled again or the supplied control is
@@ -481,6 +529,10 @@ impl StreamSource for ListStreamSource {
 
     fn checkpoint_key(&self) -> Option<CheckpointKey> {
         Some(self.key.clone())
+    }
+
+    fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+        StreamFailurePayload::Plaintext(item.payload.clone())
     }
 
     fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -724,6 +776,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let state = Self { connection };
         state.initialize(identity, initial_digest).await?;
+        state.migrate_stream_failure_payloads().await?;
         state.validate_recovery().await?;
         Ok(state)
     }
@@ -851,6 +904,58 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn fail_stream_delivery(
+        &self,
+        writer: WriterLease,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Result<CommitResult, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        let (plaintext, reference, digest, retention) = match payload {
+            StreamFailurePayload::Unavailable => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            StreamFailurePayload::Plaintext(bytes) => (Some(bytes), None, None, 1_i64),
+            StreamFailurePayload::ProtectedReference { reference, digest } => {
+                if reference.is_empty() {
+                    return Err(RuntimeError::InvalidIdentity);
+                }
+                (None, Some(reference), Some(digest.to_vec()), 2_i64)
+            }
+        };
+        let result =
+            apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic }).await?;
+        if let CommitResult::Failed { failure } = &result {
+            transaction
+                .execute(
+                    "INSERT INTO stream_failure_payload
+                     (identity_id, payload, payload_reference, payload_digest, retention)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(identity_id) DO NOTHING",
+                    params![
+                        stream_identity_id(&failure.identity),
+                        plaintext,
+                        reference,
+                        digest,
+                        retention,
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
     }
 
     async fn release_stream_lease(
@@ -1003,11 +1108,25 @@ impl RuntimeState {
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => {
-                let result = self
-                    .stream_backend(writer)
-                    .apply_async(CommitIntent::Fail { lease, diagnostic })
+                self.require_owner(&self.connection, writer)
                     .await
                     .map_err(StreamStepError::Runtime)?;
+                let failure_payload = source.failure_payload(&item);
+                let lease_for_cleanup = lease.clone();
+                let mut stream = self.stream_backend(writer);
+                let result = stream
+                    .fail_with_payload_async(lease, diagnostic, failure_payload)
+                    .await;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(RuntimeError::OwnerLost) => {
+                        return Err(StreamStepError::Runtime(RuntimeError::OwnerLost));
+                    }
+                    Err(error) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        return Err(StreamStepError::Runtime(error));
+                    }
+                };
                 match result {
                     CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
                     CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
@@ -1155,6 +1274,40 @@ impl RuntimeState {
         Ok(())
     }
 
+    async fn migrate_stream_failure_payloads(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let applied = transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('stream-failure-payload-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if applied == 1 {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO stream_failure_payload_legacy (identity_id)
+                     SELECT failure.identity_id
+                     FROM stream_failure AS failure
+                     LEFT JOIN stream_failure_payload AS payload
+                       ON payload.identity_id = failure.identity_id
+                     WHERE payload.identity_id IS NULL",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     pub async fn identity(&self) -> Result<RuntimeIdentity, RuntimeError> {
         let mut rows = self
             .connection
@@ -1247,12 +1400,44 @@ impl RuntimeState {
     ) -> Result<WriterLease, RuntimeError> {
         validate_id(abandoned)?;
         validate_id(replacement)?;
-        let changed = self.connection.execute("UPDATE writer_lease SET owner_id = ?1, epoch = epoch + 1 WHERE singleton = 1 AND owner_id = ?2", params![replacement.to_vec(), abandoned.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let changed = transaction
+            .execute(
+                "UPDATE writer_lease
+                 SET owner_id = ?1, epoch = epoch + 1
+                 WHERE singleton = 1 AND owner_id = ?2",
+                params![replacement.to_vec(), abandoned.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         if changed != 1 {
             return Err(RuntimeError::OwnerLost);
         }
-        let mut rows = self
-            .connection
+        transaction
+            .execute("DELETE FROM stream_lease", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute("DELETE FROM stream_retry_claim", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute(
+                "UPDATE stream_failure
+                 SET version = version + 1, status = ?1
+                 WHERE status = ?2",
+                params![
+                    encode_status(FailureStatus::Failed),
+                    encode_status(FailureStatus::Retrying),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
             .query("SELECT epoch FROM writer_lease WHERE singleton = 1", ())
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -1263,6 +1448,10 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(WriterLease {
             owner_id: replacement,
             epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -1726,6 +1915,7 @@ impl RuntimeState {
         self.validate_checkpoint_anchors().await?;
         self.validate_stream_controls().await?;
         self.validate_stream_provider_failures().await?;
+        self.validate_stream_failure_payloads().await?;
         let mut request_rows = self
             .connection
             .query(
@@ -1927,6 +2117,75 @@ impl RuntimeState {
         Ok(())
     }
 
+    async fn validate_stream_failure_payloads(&self) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT failure.identity_id, payload.identity_id, payload.payload,
+                        payload.payload_reference, payload.payload_digest, payload.retention,
+                        legacy.identity_id
+                 FROM stream_failure AS failure
+                 LEFT JOIN stream_failure_payload AS payload
+                   ON payload.identity_id = failure.identity_id
+                 LEFT JOIN stream_failure_payload_legacy AS legacy
+                   ON legacy.identity_id = failure.identity_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let identity_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if identity_id.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let referenced: Option<String> =
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let legacy: Option<String> = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if referenced.is_none() {
+                if legacy.as_deref() != Some(identity_id.as_str()) {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+                continue;
+            }
+            if referenced.as_deref() != Some(identity_id.as_str()) || legacy.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let payload = StoredStreamFailurePayload {
+                payload: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                reference: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                digest: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                retention: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            };
+            validate_stream_failure_payload(&payload)?;
+        }
+
+        let mut orphans = self
+            .connection
+            .query(
+                "SELECT payload.identity_id
+                 FROM stream_failure_payload AS payload
+                 LEFT JOIN stream_failure AS failure
+                   ON failure.identity_id = payload.identity_id
+                 WHERE failure.identity_id IS NULL",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if orphans
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(())
+    }
+
     async fn require_owner(&self, tx: &Connection, lease: WriterLease) -> Result<(), RuntimeError> {
         let mut rows = tx
             .query(
@@ -1950,6 +2209,27 @@ impl RuntimeState {
 }
 
 impl RuntimeStreamBackend<'_> {
+    /// Records a handler failure and its connector-selected retention record
+    /// in one writer-fenced metadata transaction.
+    pub async fn fail_async(
+        &self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Result<CommitResult, RuntimeError> {
+        self.state
+            .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+            .await
+    }
+
+    /// Returns redacted metadata for a retained failure payload.
+    pub async fn failure_payload_metadata_async(
+        &self,
+        identity: &FailureIdentity,
+    ) -> Result<Option<StreamFailurePayloadMetadata>, RuntimeError> {
+        load_stream_failure_payload_metadata(&self.state.connection, identity).await
+    }
+
     /// Returns the durable provider failure for a stream checkpoint, if one is
     /// retained. The row is only valid when its checkpoint still matches the
     /// current stream position.
@@ -1989,6 +2269,23 @@ impl AsyncCheckpointBackend for RuntimeStreamBackend<'_> {
     }
 }
 
+impl AsyncFailurePayloadBackend for RuntimeStreamBackend<'_> {
+    type Error = RuntimeError;
+
+    fn fail_with_payload_async<'a>(
+        &'a mut self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Pin<Box<dyn Future<Output = Result<CommitResult, RuntimeError>> + 'a>> {
+        Box::pin(async move {
+            self.state
+                .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+                .await
+        })
+    }
+}
+
 const STREAM_CHECKPOINT_SELECT: &str =
     "SELECT version, committed_position, next_fence FROM stream_checkpoint WHERE key_id = ?1";
 const STREAM_FAILURE_SELECT: &str = "SELECT \
@@ -1997,6 +2294,9 @@ const STREAM_FAILURE_SELECT: &str = "SELECT \
     delivery_position, successor_position, version, attempts, status, \
     diagnostic_code, diagnostic_class \
     FROM stream_failure WHERE identity_id = ?1";
+const STREAM_FAILURE_PAYLOAD_SELECT: &str =
+    "SELECT payload, payload_reference, payload_digest, retention
+     FROM stream_failure_payload WHERE identity_id = ?1";
 const STREAM_PROVIDER_FAILURE_SELECT: &str = "SELECT \
     checkpoint_version, committed_position, attempts, diagnostic_code, diagnostic_class \
     FROM stream_provider_failure WHERE key_id = ?1";
@@ -2385,6 +2685,86 @@ async fn load_stream_failure(
     }))
 }
 
+struct StoredStreamFailurePayload {
+    payload: Option<Vec<u8>>,
+    reference: Option<String>,
+    digest: Option<Vec<u8>>,
+    retention: i64,
+}
+
+fn validate_stream_failure_payload(
+    payload: &StoredStreamFailurePayload,
+) -> Result<(), RuntimeError> {
+    if let Some(digest) = &payload.digest
+        && digest.len() != 32
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    match payload.retention {
+        1 if payload.payload.is_some()
+            && payload.reference.is_none()
+            && payload.digest.is_none() =>
+        {
+            Ok(())
+        }
+        2 if payload.payload.is_none()
+            && payload
+                .reference
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && payload.digest.is_some() =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+async fn load_stored_stream_failure_payload(
+    connection: &Connection,
+    identity: &FailureIdentity,
+) -> Result<Option<StoredStreamFailurePayload>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            STREAM_FAILURE_PAYLOAD_SELECT,
+            params![stream_identity_id(identity)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let payload = StoredStreamFailurePayload {
+        payload: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        reference: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        digest: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        retention: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    };
+    validate_stream_failure_payload(&payload)?;
+    Ok(Some(payload))
+}
+
+async fn load_stream_failure_payload_metadata(
+    connection: &Connection,
+    identity: &FailureIdentity,
+) -> Result<Option<StreamFailurePayloadMetadata>, RuntimeError> {
+    let Some(payload) = load_stored_stream_failure_payload(connection, identity).await? else {
+        return Ok(None);
+    };
+    Ok(Some(StreamFailurePayloadMetadata {
+        plaintext_bytes: payload
+            .payload
+            .as_ref()
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+        protected_reference: payload.retention == 2,
+        redacted: true,
+    }))
+}
+
 async fn load_stream_lease(
     connection: &Connection,
     key: &CheckpointKey,
@@ -2446,6 +2826,9 @@ async fn apply_stream_intent(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     state.require_owner(&transaction, lease).await?;
+    if matches!(intent, CommitIntent::Fail { .. }) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
@@ -2552,13 +2935,35 @@ async fn apply_stream_intent_tx(
             if !stream_checkpoint_matches(connection, &key, &expected).await? {
                 return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
             }
-            if load_stream_lease(connection, &key).await?.is_some() {
-                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
-            }
             let identity = FailureIdentity(delivery.clone());
             let failure_status = load_stream_failure(connection, &identity)
                 .await?
                 .map(|failure| failure.status);
+            if let Some(stored) = load_stream_lease(connection, &key).await? {
+                if purpose == LeasePurpose::Deliver
+                    && failure_status == Some(FailureStatus::Retrying)
+                    && stored.purpose == LeasePurpose::Deliver
+                {
+                    let claimed = connection
+                        .execute(
+                            "DELETE FROM stream_retry_claim
+                             WHERE key_id = ?1 AND identity_id = ?2",
+                            params![stream_key_id(&key), stream_identity_id(&identity)],
+                        )
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                    if claimed == 1 {
+                        return Ok(CommitResult::Acquired {
+                            lease: DeliveryLease {
+                                delivery,
+                                fence: stored.fence,
+                                purpose: stored.purpose,
+                            },
+                        });
+                    }
+                }
+                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
+            }
             if let Some(status) = failure_status {
                 let allowed = matches!(
                     (purpose, status),
@@ -2639,6 +3044,13 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_retry_claim WHERE key_id = ?1",
+                    params![key_id.clone()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             let identity = FailureIdentity(lease.delivery.clone());
             let identity_id = stream_identity_id(&identity);
             let delivery = lease.delivery;
@@ -2704,7 +3116,48 @@ async fn apply_stream_intent_tx(
             if record.status != FailureStatus::Failed {
                 return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
             }
+            if load_stream_lease(connection, &key).await?.is_some() {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
+            }
+            let (_, next_fence) = load_stream_checkpoint_state(connection, &key).await?;
+            let fence = next_fence
+                .checked_add(1)
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "UPDATE stream_checkpoint SET next_fence = ?2 WHERE key_id = ?1",
+                    params![
+                        key_id.clone(),
+                        i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "INSERT INTO stream_lease
+                     (key_id, delivery_position, successor_position, fence, purpose)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        key_id.clone(),
+                        failure.0.position.token.as_str().to_owned(),
+                        failure.0.successor.token.as_str().to_owned(),
+                        i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                        encode_purpose(LeasePurpose::Deliver),
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             let identity_id = stream_identity_id(&failure);
+            connection
+                .execute(
+                    "INSERT INTO stream_retry_claim (key_id, identity_id)
+                     VALUES (?1, ?2)",
+                    params![key_id, identity_id.clone()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             connection
                 .execute(
                     "UPDATE stream_failure SET version = version + 1, status = ?2
@@ -2748,6 +3201,13 @@ async fn apply_stream_intent_tx(
                 .execute(
                     "DELETE FROM stream_lease WHERE key_id = ?1",
                     params![key_id],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_retry_claim WHERE key_id = ?1",
+                    params![stream_key_id(&key)],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -2805,6 +3265,13 @@ async fn apply_stream_intent_tx(
                 .execute(
                     "DELETE FROM stream_lease WHERE key_id = ?1",
                     params![key_id],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_retry_claim WHERE key_id = ?1",
+                    params![stream_key_id(&key)],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -2972,6 +3439,13 @@ async fn apply_stream_intent_tx(
             connection
                 .execute(
                     "DELETE FROM stream_lease WHERE key_id = ?1",
+                    params![stream_key_id(&key)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_retry_claim WHERE key_id = ?1",
                     params![stream_key_id(&key)],
                 )
                 .await
@@ -3323,6 +3797,10 @@ mod tests {
 
         fn checkpoint_key(&self) -> Option<CheckpointKey> {
             Some(self.key.clone())
+        }
+
+        fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
+            StreamFailurePayload::Plaintext(item.payload.clone())
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -4148,13 +4626,14 @@ mod tests {
                 other => panic!("unexpected stream acquire result: {other:?}"),
             };
             let failed = match stream
-                .apply_async(CommitIntent::Fail {
+                .fail_async(
                     lease,
-                    diagnostic: SafeDiagnostic {
+                    SafeDiagnostic {
                         code: DiagnosticCode::ExecutionRejected,
                         class: DiagnosticClass::Permanent,
                     },
-                })
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
                 .await
                 .unwrap()
             {
@@ -4466,6 +4945,678 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_delivery_payload_survives_runtime_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("payload:one", "payload:two");
+        let key = delivery.checkpoint_key();
+        let payload = vec![9, 8, 7, 6];
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: payload.clone(),
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::Fail(diagnostic)),
+            calls: 0,
+        };
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("unexpected stream result: {other:?}"),
+        };
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_payload_metadata_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(StreamFailurePayloadMetadata {
+                plaintext_bytes: Some(payload.len() as u64),
+                protected_reference: false,
+                redacted: true,
+            })
+        );
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT payload FROM stream_failure_payload WHERE identity_id = ?1",
+                params![stream_identity_id(&failure.identity)],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("retained payload");
+        let retained: Vec<u8> = row.get(0).unwrap();
+        assert_eq!(retained, payload);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        assert_eq!(
+            reopened
+                .stream_backend(writer)
+                .failure_payload_metadata_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(StreamFailurePayloadMetadata {
+                plaintext_bytes: Some(payload.len() as u64),
+                protected_reference: false,
+                redacted: true,
+            })
+        );
+        let mut rows = reopened
+            .connection
+            .query(
+                "SELECT payload FROM stream_failure_payload WHERE identity_id = ?1",
+                params![stream_identity_id(&failure.identity)],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("retained payload");
+        let retained: Vec<u8> = row.get(0).unwrap();
+        assert_eq!(retained, payload);
+    }
+
+    #[tokio::test]
+    async fn legacy_failure_rows_are_migrated_without_retained_payload() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("legacy-payload", "legacy-next");
+        let failure = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: orna_stream_v1::CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![8, 8]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            }
+        };
+        state
+            .connection
+            .execute("DELETE FROM stream_failure_payload", ())
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute("DELETE FROM runtime_schema_migration", ())
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let stream = reopened.stream_backend(writer);
+        assert!(
+            stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            stream
+                .failure_payload_metadata_async(&failure.identity)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_keeps_the_first_retained_payload_for_a_stable_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("retry-payload", "retry-next");
+        let key = delivery.checkpoint_key();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![1, 2],
+            }),
+            polls: 0,
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::Fail(diagnostic)),
+            calls: 0,
+        };
+        let failure = match state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .unwrap()
+        {
+            StreamStep::Failed { failure } => failure,
+            other => panic!("unexpected stream result: {other:?}"),
+        };
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap();
+        let retrying = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: orna_stream_v1::CheckpointPrecondition {
+                    version: checkpoint.version,
+                    committed: checkpoint.committed.clone(),
+                },
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure, .. } => failure,
+            other => panic!("unexpected retry result: {other:?}"),
+        };
+        let retry_lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: retrying.identity.0.clone(),
+                expected: orna_stream_v1::CheckpointPrecondition {
+                    version: checkpoint.version,
+                    committed: checkpoint.committed.clone(),
+                },
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected retry acquire result: {other:?}"),
+        };
+        let retried_failure = match state
+            .stream_backend(writer)
+            .fail_async(
+                retry_lease,
+                diagnostic,
+                StreamFailurePayload::Plaintext(vec![9, 9, 9]),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected retry failure result: {other:?}"),
+        };
+        assert_eq!(retried_failure.attempts, 2);
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT payload FROM stream_failure_payload WHERE identity_id = ?1",
+                params![stream_identity_id(&retried_failure.identity)],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().expect("retained payload");
+        let retained: Vec<u8> = row.get(0).unwrap();
+        assert_eq!(retained, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn protected_failure_payload_is_redacted_and_raw_fail_intents_are_rejected() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("protected:one", "protected:two");
+        let key = delivery.checkpoint_key();
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected,
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            }
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let mut stream = state.stream_backend(writer);
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Fail {
+                    lease: lease.clone(),
+                    diagnostic,
+                })
+                .await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        let failure = match stream
+            .fail_async(
+                lease,
+                diagnostic,
+                StreamFailurePayload::ProtectedReference {
+                    reference: "protected-reference".to_owned(),
+                    digest: [7; 32],
+                },
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert_eq!(
+            stream
+                .failure_payload_metadata_async(&failure.identity)
+                .await
+                .unwrap(),
+            Some(StreamFailurePayloadMetadata {
+                plaintext_bytes: None,
+                protected_reference: true,
+                redacted: true,
+            })
+        );
+        assert!(
+            stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(stream.checkpoint_async(&key).await.unwrap().committed, None);
+    }
+
+    #[tokio::test]
+    async fn legacy_source_without_payload_policy_fails_closed_and_releases_lease() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("legacy:one", "legacy:two");
+        let key = delivery.checkpoint_key();
+        let mut source = LegacySource {
+            item: Some(StreamItem {
+                delivery: delivery.clone(),
+                payload: vec![1, 2, 3],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::Fail(SafeDiagnostic {
+                code: DiagnosticCode::DecodeRejected,
+                class: DiagnosticClass::Permanent,
+            })),
+            calls: 0,
+        };
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
+        );
+        let mut stream = state.stream_backend(writer);
+        assert!(
+            stream
+                .failure_async(&FailureIdentity(delivery.clone()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: orna_stream_v1::CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_failure_payload_is_owner_fenced_before_validation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let old = state.acquire_lease(id(4)).await.unwrap();
+        let mut old_backend = state.stream_backend(old);
+        let delivery = stream_delivery("invalid-owner", "invalid-next");
+        let lease = match old_backend
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: orna_stream_v1::CheckpointPrecondition {
+                    version: 0,
+                    committed: None,
+                },
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let replacement = state.recover_abandoned(id(4), id(5)).await.unwrap();
+        assert_eq!(
+            old_backend
+                .fail_async(
+                    lease.clone(),
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::ProtectedReference {
+                        reference: String::new(),
+                        digest: [3; 32],
+                    },
+                )
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        let mut replacement_backend = state.stream_backend(replacement);
+        assert!(matches!(
+            replacement_backend
+                .apply_async(CommitIntent::Acquire {
+                    delivery: lease.delivery,
+                    expected: orna_stream_v1::CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_reopens_an_interrupted_retry_after_releasing_its_lease() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("retry-recovery", "retry-recovery-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let retrying = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    diagnostic,
+                    StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity,
+                    expected_version: failed.version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure, .. } => failure,
+                other => panic!("unexpected stream retry result: {other:?}"),
+            }
+        };
+        assert_eq!(retrying.status, FailureStatus::Retrying);
+
+        let replacement = state.recover_abandoned(id(4), id(5)).await.unwrap();
+        let mut stream = state.stream_backend(replacement);
+        let recovered = stream
+            .failure_async(&retrying.identity)
+            .await
+            .unwrap()
+            .expect("recovered failure");
+        assert_eq!(recovered.status, FailureStatus::Failed);
+        assert_eq!(recovered.version, retrying.version + 1);
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: recovered.identity,
+                    expected_version: recovered.version,
+                    expected,
+                })
+                .await
+                .unwrap(),
+            CommitResult::RetryScheduled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_missing_orphaned_and_malformed_failure_payloads() {
+        {
+            let (_temp, repo) = repository();
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(4)).await.unwrap();
+            let delivery = stream_delivery("missing-payload", "missing-next");
+            let failure = {
+                let mut stream = state.stream_backend(writer);
+                let lease = match stream
+                    .apply_async(CommitIntent::Acquire {
+                        delivery: delivery.clone(),
+                        expected: orna_stream_v1::CheckpointPrecondition {
+                            version: 0,
+                            committed: None,
+                        },
+                        purpose: LeasePurpose::Deliver,
+                    })
+                    .await
+                    .unwrap()
+                {
+                    CommitResult::Acquired { lease } => lease,
+                    other => panic!("unexpected stream acquire result: {other:?}"),
+                };
+                match stream
+                    .fail_async(
+                        lease,
+                        SafeDiagnostic {
+                            code: DiagnosticCode::DecodeRejected,
+                            class: DiagnosticClass::Permanent,
+                        },
+                        StreamFailurePayload::Plaintext(vec![4]),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    CommitResult::Failed { failure } => failure,
+                    other => panic!("unexpected stream failure result: {other:?}"),
+                }
+            };
+            state
+                .connection
+                .execute(
+                    "DELETE FROM stream_failure_payload WHERE identity_id = ?1",
+                    params![stream_identity_id(&failure.identity)],
+                )
+                .await
+                .unwrap();
+            drop(state);
+            assert!(matches!(
+                RuntimeState::open(
+                    &repo,
+                    RuntimeIdentity {
+                        database_id: id(1),
+                        repository_id: id(2),
+                    },
+                    digest(3),
+                )
+                .await,
+                Err(RuntimeError::RecoveryInvalid)
+            ));
+        }
+
+        {
+            let (_temp, repo) = repository();
+            let state = open_state(&repo).await;
+            state
+                .connection
+                .execute(
+                    "INSERT INTO stream_failure_payload
+                     (identity_id, payload, payload_reference, payload_digest, retention)
+                     VALUES (?1, ?2, NULL, NULL, 1)",
+                    params!["orphan", vec![8_u8]],
+                )
+                .await
+                .unwrap();
+            drop(state);
+            assert!(matches!(
+                RuntimeState::open(
+                    &repo,
+                    RuntimeIdentity {
+                        database_id: id(1),
+                        repository_id: id(2),
+                    },
+                    digest(3),
+                )
+                .await,
+                Err(RuntimeError::RecoveryInvalid)
+            ));
+        }
+
+        {
+            let (_temp, repo) = repository();
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(4)).await.unwrap();
+            let delivery = stream_delivery("malformed-payload", "malformed-next");
+            let failure = {
+                let mut stream = state.stream_backend(writer);
+                let lease = match stream
+                    .apply_async(CommitIntent::Acquire {
+                        delivery,
+                        expected: orna_stream_v1::CheckpointPrecondition {
+                            version: 0,
+                            committed: None,
+                        },
+                        purpose: LeasePurpose::Deliver,
+                    })
+                    .await
+                    .unwrap()
+                {
+                    CommitResult::Acquired { lease } => lease,
+                    other => panic!("unexpected stream acquire result: {other:?}"),
+                };
+                match stream
+                    .fail_async(
+                        lease,
+                        SafeDiagnostic {
+                            code: DiagnosticCode::DecodeRejected,
+                            class: DiagnosticClass::Permanent,
+                        },
+                        StreamFailurePayload::Plaintext(vec![9]),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    CommitResult::Failed { failure } => failure,
+                    other => panic!("unexpected stream failure result: {other:?}"),
+                }
+            };
+            state
+                .connection
+                .execute("PRAGMA ignore_check_constraints = ON", ())
+                .await
+                .unwrap();
+            state
+                .connection
+                .execute(
+                    "UPDATE stream_failure_payload
+                     SET payload_digest = ?2 WHERE identity_id = ?1",
+                    params![stream_identity_id(&failure.identity), vec![0_u8; 32]],
+                )
+                .await
+                .unwrap();
+            state
+                .connection
+                .execute("PRAGMA ignore_check_constraints = OFF", ())
+                .await
+                .unwrap();
+            drop(state);
+            assert!(matches!(
+                RuntimeState::open(
+                    &repo,
+                    RuntimeIdentity {
+                        database_id: id(1),
+                        repository_id: id(2),
+                    },
+                    digest(3),
+                )
+                .await,
+                Err(RuntimeError::RecoveryInvalid)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn owner_fenced_stream_backend_rejects_stale_writer_without_mutation() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -4577,13 +5728,14 @@ mod tests {
             assert!(second.fence > first.fence);
             assert_eq!(
                 stream
-                    .apply_async(CommitIntent::Fail {
-                        lease: first,
-                        diagnostic: SafeDiagnostic {
+                    .fail_async(
+                        first,
+                        SafeDiagnostic {
                             code: DiagnosticCode::ExecutionRejected,
                             class: DiagnosticClass::Permanent,
                         },
-                    })
+                        StreamFailurePayload::Plaintext(Vec::new()),
+                    )
                     .await
                     .unwrap(),
                 CommitResult::Rejected(RejectReason::LeaseFenced)
@@ -4638,13 +5790,14 @@ mod tests {
                 other => panic!("unexpected stream acquire result: {other:?}"),
             };
             let failed = match stream
-                .apply_async(CommitIntent::Fail {
+                .fail_async(
                     lease,
-                    diagnostic: SafeDiagnostic {
+                    SafeDiagnostic {
                         code: DiagnosticCode::ProviderUnavailable,
                         class: DiagnosticClass::Transient,
                     },
-                })
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
                 .await
                 .unwrap()
             {
@@ -4762,13 +5915,14 @@ mod tests {
                 other => panic!("unexpected stale acquire result: {other:?}"),
             };
             let stale_failure = match stream
-                .apply_async(CommitIntent::Fail {
-                    lease: stale_lease,
-                    diagnostic: SafeDiagnostic {
+                .fail_async(
+                    stale_lease,
+                    SafeDiagnostic {
                         code: DiagnosticCode::ExecutionRejected,
                         class: DiagnosticClass::Permanent,
                     },
-                })
+                    StreamFailurePayload::Plaintext(Vec::new()),
+                )
                 .await
                 .unwrap()
             {
