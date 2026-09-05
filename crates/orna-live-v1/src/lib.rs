@@ -615,7 +615,7 @@ impl LiveHost {
                 }
                 if self.runtime.is_some() {
                     match self
-                        .admit_durable_request(session, request, fingerprint, &envelope.message)
+                        .admit_durable_request(session, request, fingerprint, &envelope)
                         .await?
                     {
                         DurableAdmission::Execute => {}
@@ -771,30 +771,32 @@ impl LiveHost {
                         } => {
                             let target_active = match target_kind {
                                 TargetKind::Request => {
-                                    match self.serving.request_state(session, *target) {
-                                        Ok(
-                                            orna_serving_v1::RequestState::Reserved
-                                            | orna_serving_v1::RequestState::Running,
-                                        ) => true,
-                                        Ok(
-                                            orna_serving_v1::RequestState::Cancelled
-                                            | orna_serving_v1::RequestState::Completed,
-                                        ) => false,
-                                        Err(ServingError::RequestUnknown) => {
-                                            return Err(Error::Denied);
-                                        }
-                                        Err(error) => return Err(map_serving(error)),
-                                    }
+                                    self.request_target_active(session, *target).await?
                                 }
                                 TargetKind::Watch => self.watches.contains(&(session, *target)),
                             };
-                            let response = if target_active {
-                                application.cancel(
+                            let target_cancelled =
+                                if target_active && *target_kind == TargetKind::Request {
+                                    self.cancel_target_request(session, *target).await?
+                                } else {
+                                    false
+                                };
+                            let response = if target_active
+                                && (target_cancelled || *target_kind == TargetKind::Watch)
+                            {
+                                let response = application.cancel(
                                     session,
                                     request,
                                     fingerprint,
                                     &envelope.message,
-                                )?
+                                )?;
+                                if *target_kind == TargetKind::Watch {
+                                    self.serving
+                                        .close_watch(session, *target)
+                                        .map_err(map_serving)?;
+                                    self.watches.remove(&(session, *target));
+                                }
+                                response
                             } else {
                                 unit_result_response(request, fingerprint)
                             };
@@ -804,19 +806,6 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            if target_active {
-                                match target_kind {
-                                    TargetKind::Request => {
-                                        self.cancel_target_request(session, *target).await?;
-                                    }
-                                    TargetKind::Watch => {
-                                        self.serving
-                                            .close_watch(session, *target)
-                                            .map_err(map_serving)?;
-                                        self.watches.remove(&(session, *target));
-                                    }
-                                }
-                            }
                             self.complete(
                                 session,
                                 request,
@@ -884,7 +873,7 @@ impl LiveHost {
         session: [u8; 16],
         request: [u8; 16],
         fingerprint: [u8; 32],
-        message: &Message,
+        envelope: &Envelope,
     ) -> Result<DurableAdmission> {
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         let identity = RequestIdentity {
@@ -896,7 +885,21 @@ impl LiveHost {
             .await
             .map_err(|error| map_runtime(&error))?;
         if !inserted {
-            return self.durable_admission(reserved, message);
+            if reserved.state == DurableRequestState::Reserved {
+                match runtime.start_request(identity, fingerprint).await {
+                    Ok(_) => return Ok(DurableAdmission::Execute),
+                    Err(RuntimeError::RequestStateConflict) => {
+                        let current = runtime
+                            .request_status_for_identity(identity)
+                            .await
+                            .map_err(|error| map_runtime(&error))?
+                            .ok_or(Error::RuntimeUnavailable)?;
+                        return self.durable_admission(current, envelope);
+                    }
+                    Err(error) => return Err(map_runtime(&error)),
+                }
+            }
+            return self.durable_admission(reserved, envelope);
         }
         match reserved.state {
             DurableRequestState::Reserved => {
@@ -904,10 +907,11 @@ impl LiveHost {
                     Ok(_) => Ok(DurableAdmission::Execute),
                     Err(RuntimeError::RequestStateConflict) => {
                         let current = runtime
-                            .reserve_request(identity, fingerprint)
+                            .request_status_for_identity(identity)
                             .await
-                            .map_err(|error| map_runtime(&error))?;
-                        self.durable_admission(current, message)
+                            .map_err(|error| map_runtime(&error))?
+                            .ok_or(Error::RuntimeUnavailable)?;
+                        self.durable_admission(current, envelope)
                     }
                     Err(error) => Err(map_runtime(&error)),
                 }
@@ -915,14 +919,40 @@ impl LiveHost {
             DurableRequestState::Running => Ok(DurableAdmission::Active),
             DurableRequestState::Completed
             | DurableRequestState::Cancelled
-            | DurableRequestState::Orphaned => self.durable_admission(reserved, message),
+            | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope),
+        }
+    }
+
+    async fn request_target_active(&self, session: [u8; 16], request: [u8; 16]) -> Result<bool> {
+        match self.serving.request_state(session, request) {
+            Ok(
+                orna_serving_v1::RequestState::Reserved | orna_serving_v1::RequestState::Running,
+            ) => Ok(true),
+            Ok(
+                orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
+            ) => Ok(false),
+            Err(ServingError::RequestUnknown) => {
+                let Some(runtime) = &self.runtime else {
+                    return Err(Error::Denied);
+                };
+                let status = runtime
+                    .request_status_for_identity(RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    })
+                    .await
+                    .map_err(|error| map_runtime(&error))?
+                    .ok_or(Error::Denied)?;
+                Ok(!status.state.is_terminal())
+            }
+            Err(error) => Err(map_serving(error)),
         }
     }
 
     fn durable_admission(
         &self,
         status: DurableRequestStatus,
-        message: &Message,
+        envelope: &Envelope,
     ) -> Result<DurableAdmission> {
         if !status.state.is_terminal() {
             return Ok(DurableAdmission::Active);
@@ -933,18 +963,8 @@ impl LiveHost {
             .into_bytes();
         let response = Envelope::decode(&bytes, self.limits.protocol)
             .map_err(|_| Error::RuntimeUnavailable)?;
-        if response.request != Some(status.identity.request_id) {
-            return Err(Error::RuntimeUnavailable);
-        }
-        if let Message::Result {
-            fingerprint: retained,
-            ..
-        } = &response.message
-            && *retained != status.fingerprint
-        {
-            return Err(Error::RuntimeUnavailable);
-        }
-        let outcome = if matches!(message, Message::Cancel { .. })
+        self.validate_retained_response(status.fingerprint, envelope, &response)?;
+        let outcome = if matches!(envelope.message, Message::Cancel { .. })
             || matches!(
                 response.message,
                 Message::Result {
@@ -953,7 +973,7 @@ impl LiveHost {
                 }
             ) {
             FrameOutcome::Cancelled
-        } else if matches!(message, Message::Resync) {
+        } else if matches!(envelope.message, Message::Resync) {
             // The canonical response is durable, while the count of revisions
             // served during a resync belongs to the process-local watch state.
             FrameOutcome::Resync { revisions: 0 }
@@ -964,6 +984,54 @@ impl LiveHost {
             outcome,
             response: Some(response),
         })))
+    }
+
+    fn validate_retained_response(
+        &self,
+        fingerprint: [u8; 32],
+        envelope: &Envelope,
+        response: &Envelope,
+    ) -> Result<()> {
+        let request = envelope.request.ok_or(Error::RuntimeUnavailable)?;
+        let valid = match &envelope.message {
+            Message::Subscribe { .. } | Message::Watch { .. } => {
+                validate_snapshot_response(request, None, response.clone(), self.limits.protocol)
+                    .is_ok()
+            }
+            Message::Resync => {
+                let watch = envelope.watch.ok_or(Error::RuntimeUnavailable)?;
+                validate_snapshot_response(
+                    request,
+                    Some(watch),
+                    response.clone(),
+                    self.limits.protocol,
+                )
+                .is_ok()
+            }
+            Message::Unsubscribe | Message::Cancel { .. } => validate_control_response(
+                request,
+                fingerprint,
+                response.clone(),
+                self.limits.protocol,
+            )
+            .is_ok(),
+            Message::Event { .. } | Message::Eval { .. } => validate_result_response(
+                request,
+                fingerprint,
+                response.clone(),
+                self.limits.protocol,
+            )
+            .is_ok(),
+            Message::RequestStatus { target, .. } => {
+                validate_status_response(request, *target, response, self.limits.protocol).is_ok()
+            }
+            Message::Snapshot { .. }
+            | Message::Delta { .. }
+            | Message::Result { .. }
+            | Message::Diagnostic { .. }
+            | Message::RequestStatusResult { .. } => false,
+        };
+        valid.then_some(()).ok_or(Error::RuntimeUnavailable)
     }
 
     fn reserve_and_start(
@@ -1076,17 +1144,32 @@ impl LiveHost {
         Ok(())
     }
 
-    async fn cancel_target_request(&mut self, session: [u8; 16], request: [u8; 16]) -> Result<()> {
-        let Some(record) = self.requests.get(&(session, request)).cloned() else {
-            if self.runtime.is_some() {
-                return Err(Error::RuntimeUnavailable);
+    async fn cancel_target_request(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+    ) -> Result<bool> {
+        let fingerprint = if let Some(record) = self.requests.get(&(session, request)) {
+            record.fingerprint
+        } else if let Some(runtime) = &self.runtime {
+            let status = runtime
+                .request_status_for_identity(RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                })
+                .await
+                .map_err(|error| map_runtime(&error))?
+                .ok_or(Error::Denied)?;
+            if status.state.is_terminal() {
+                return Ok(false);
             }
+            status.fingerprint
+        } else {
             self.serving
                 .cancel_request(session, request)
                 .map_err(map_serving)?;
-            return Ok(());
+            return Ok(true);
         };
-        let fingerprint = record.fingerprint;
         let outcome = DispatchOutcome {
             outcome: FrameOutcome::Cancelled,
             response: Some(Envelope {
@@ -1102,7 +1185,7 @@ impl LiveHost {
             }),
         };
         if let Some(runtime) = &self.runtime {
-            runtime
+            match runtime
                 .cancel_request(
                     RequestIdentity {
                         session_id: session,
@@ -1112,15 +1195,34 @@ impl LiveHost {
                     self.terminal_outcome(&outcome)?,
                 )
                 .await
-                .map_err(|error| map_runtime(&error))?;
+            {
+                Ok(_) => {}
+                Err(RuntimeError::RequestStateConflict) => {
+                    let status = runtime
+                        .request_status_for_identity(RequestIdentity {
+                            session_id: session,
+                            request_id: request,
+                        })
+                        .await
+                        .map_err(|error| map_runtime(&error))?
+                        .ok_or(Error::RuntimeUnavailable)?;
+                    if status.state.is_terminal() {
+                        return Ok(false);
+                    }
+                    return Err(Error::RuntimeUnavailable);
+                }
+                Err(error) => return Err(map_runtime(&error)),
+            }
         }
-        self.serving
-            .cancel_request(session, request)
-            .map_err(map_serving)?;
+        match self.serving.cancel_request(session, request) {
+            Ok(()) => {}
+            Err(ServingError::RequestUnknown) if self.runtime.is_some() => {}
+            Err(error) => return Err(map_serving(error)),
+        }
         if let Some(record) = self.requests.get_mut(&(session, request)) {
             record.terminal = Some(outcome);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn request_fingerprint(&self, session: [u8; 16], request: [u8; 16]) -> Result<[u8; 32]> {
@@ -1266,6 +1368,26 @@ fn validate_control_response(
     matches!(value.raw(), OvbRaw::Tag(60_014, unit) if matches!(unit.as_ref(), OvbRaw::Array(items) if items.is_empty()))
         .then_some(outcome)
         .ok_or(Error::ApplicationRejected)
+}
+
+fn validate_status_response(
+    request: [u8; 16],
+    target: [u8; 16],
+    response: &Envelope,
+    limits: ProtocolLimits,
+) -> Result<()> {
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
+    if response.request != Some(request) || response.watch.is_some() {
+        return Err(Error::ApplicationRejected);
+    }
+    match &response.message {
+        Message::RequestStatusResult {
+            target: returned, ..
+        } if *returned == target => Ok(()),
+        _ => Err(Error::ApplicationRejected),
+    }
 }
 
 fn unit_result_response(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
