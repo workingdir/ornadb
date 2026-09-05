@@ -856,10 +856,10 @@ fn declaration_at_span<'a>(
     kind: HighlightKind,
     selected_span: &SourceSpan,
 ) -> Option<DeclarationRef<'a>> {
-    if kind == HighlightKind::QuotedIdentifier {
-        if let Some(declaration) = top_level_declaration_at_span(parse, selected_span) {
-            return Some(declaration);
-        }
+    if kind == HighlightKind::QuotedIdentifier
+        && let Some(declaration) = top_level_declaration_at_span(parse, selected_span)
+    {
+        return Some(declaration);
     }
     if let Some(keys) = qualified_name_keys_at(text, highlighted, selected_span) {
         if let Some(declaration) = declaration_for_keys(parse, &keys, kind) {
@@ -2453,12 +2453,11 @@ fn declaration_span_for_kind(
     {
         return None;
     }
-    if kind == HighlightKind::QuotedIdentifier {
-        if let Some(declaration) =
+    if kind == HighlightKind::QuotedIdentifier
+        && let Some(declaration) =
             sql_object_type_declaration_at(parse, text, highlighted, selected_span)
-        {
-            return Some(declaration.name_span().clone());
-        }
+    {
+        return Some(declaration.name_span().clone());
     }
     if let Some((declaration, part)) = client_expression_part_in_parse(parse, selected_span) {
         match part {
@@ -2678,19 +2677,18 @@ fn reference_scope(
     }
     let qualified_path = qualified_name_keys_at(text, highlighted, selected_span)
         .or_else(|| Some(vec![identifier_key(name)]));
-    if kind == HighlightKind::QuotedIdentifier {
-        if let Some(declaration) =
+    if kind == HighlightKind::QuotedIdentifier
+        && let Some(declaration) =
             sql_object_type_declaration_at(parse, text, highlighted, selected_span)
-        {
-            let path = qualified_path
-                .as_ref()
-                .expect("SQL object declaration requires a qualified path");
-            return ReferenceScope::TopLevel {
-                declaration_kind: top_level_declaration_kind(declaration),
-                selected_kind: kind,
-                path: path.clone(),
-            };
-        }
+    {
+        let path = qualified_path
+            .as_ref()
+            .expect("SQL object declaration requires a qualified path");
+        return ReferenceScope::TopLevel {
+            declaration_kind: top_level_declaration_kind(declaration),
+            selected_kind: kind,
+            path: path.clone(),
+        };
     }
     let has_qualified_path = qualified_path.as_ref().is_some_and(|path| path.len() > 1);
     if matches!(
