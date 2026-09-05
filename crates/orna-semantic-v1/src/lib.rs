@@ -2333,6 +2333,18 @@ fn infer(
             let right = infer(rhs, scope, local, diagnostics);
             let mut effects = left.effects;
             effects.join(&right.effects);
+            if matches!(op.as_str(), "==" | "!=")
+                && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
+            }
             if matches!(op.as_str(), ".." | "..=") {
                 let ty = if left.ty == right.ty && is_numeric_range_bound(&left.ty) {
                     Type::Range(Box::new(left.ty))
