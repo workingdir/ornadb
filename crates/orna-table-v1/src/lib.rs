@@ -9,9 +9,17 @@
 use std::collections::BTreeMap;
 
 /// The committed relation for one table.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableRuntime<Key, Row> {
     committed: BTreeMap<Key, Row>,
+}
+
+impl<Key, Row> Default for TableRuntime<Key, Row> {
+    fn default() -> Self {
+        Self {
+            committed: BTreeMap::new(),
+        }
+    }
 }
 
 impl<Key, Row> TableRuntime<Key, Row>
@@ -254,9 +262,17 @@ where
 /// A [`DatabaseActivation`] owns a single private overlay spanning every
 /// relation it changes. Consequently no relation becomes visible before the
 /// root publishes the complete overlay.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseRuntime<Table, Key, Row> {
     committed: BTreeMap<Table, BTreeMap<Key, Row>>,
+}
+
+impl<Table, Key, Row> Default for DatabaseRuntime<Table, Key, Row> {
+    fn default() -> Self {
+        Self {
+            committed: BTreeMap::new(),
+        }
+    }
 }
 
 impl<Table, Key, Row> DatabaseRuntime<Table, Key, Row>
