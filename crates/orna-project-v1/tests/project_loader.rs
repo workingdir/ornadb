@@ -188,13 +188,15 @@ fn rejects_unreferenced_file_and_directory_module_ownership_conflicts() {
 }
 
 #[test]
-fn rejects_source_modules_that_shadow_sys() {
-    let (_directory, repository) =
-        repository(&[("main.orna", "pub fn run() {}"), ("sys.orna", "not parsed")]);
-    assert!(matches!(
-        ProjectLoader::default().load(&repository),
-        Err(ProjectLoadError::ReservedNamespace)
-    ));
+fn rejects_source_modules_that_shadow_reserved_namespaces() {
+    for module in ["sys.orna", "std.orna"] {
+        let (_directory, repository) =
+            repository(&[("main.orna", "pub fn run() {}"), (module, "not parsed")]);
+        assert!(matches!(
+            ProjectLoader::default().load(&repository),
+            Err(ProjectLoadError::ReservedNamespace)
+        ));
+    }
 }
 
 #[test]
