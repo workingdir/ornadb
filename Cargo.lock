@@ -1629,6 +1629,7 @@ name = "orna-live-v1"
 version = "1.0.0"
 dependencies = [
  "futures",
+ "orna-foundation-v1",
  "orna-protocol-v1",
  "orna-security-v1",
  "orna-serving-v1",
@@ -1682,6 +1683,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "orna-foundation-v1",
+ "sha2 0.10.9",
 ]
 
 [[package]]
