@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
     Declaration, Expr, FieldInitializer, Item, LiteralKind, Pattern, Statement, SyntaxTree,
-    TypeExpr, UseTail, Visibility, parse_module_with_file,
+    TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -446,6 +446,7 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
         result.modules.insert(namespace.clone(), header);
         parsed.push((namespace, parse.value));
     }
+    stabilize_function_summaries(&parsed, &mut result.modules);
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -492,6 +493,54 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
     result
+}
+
+/// Function bodies may depend on inferred summaries declared later in their
+/// module or exported by a later project input. Iterate the finite declaration
+/// graph before emitting diagnostics so public result and effect summaries are
+/// independent of manifest order.
+fn stabilize_function_summaries(
+    parsed: &[(Namespace, SyntaxTree)],
+    modules: &mut BTreeMap<Namespace, ModuleHeader>,
+) {
+    let pass_limit = parsed
+        .iter()
+        .map(|(_, tree)| {
+            tree.items
+                .iter()
+                .filter(|item| matches!(item.declaration, Declaration::Function { .. }))
+                .count()
+        })
+        .sum::<usize>()
+        .saturating_add(1);
+    for _ in 0..pass_limit {
+        let before = modules.clone();
+        for (namespace, tree) in parsed {
+            let Some(header) = modules.get(namespace).cloned() else {
+                continue;
+            };
+            let mut discarded = Vec::new();
+            let scope = resolve_imports(namespace, tree, &header, modules, &mut discarded);
+            let mut symbols = header.symbols;
+            for item in &tree.items {
+                if matches!(item.declaration, Declaration::Function { .. }) {
+                    check_function(item, &mut symbols, &scope, &mut discarded);
+                }
+            }
+            if let Some(module) = modules.get_mut(namespace) {
+                module.symbols = symbols;
+                module.exports = module
+                    .symbols
+                    .iter()
+                    .filter(|(_, symbol)| symbol.public)
+                    .map(|(name, symbol)| (name.clone(), symbol.clone()))
+                    .collect();
+            }
+        }
+        if *modules == before {
+            break;
+        }
+    }
 }
 
 /// Host-independent NFKC case fold key used for sibling collision checking.
@@ -672,7 +721,7 @@ fn primitive(name: &str) -> Option<Type> {
         "Float" => Type::Float,
         "Date" => Type::Date,
         "Instant" => Type::Instant,
-        "Text" | "String" => Type::Text,
+        "Str" | "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
         "Null" => Type::Null,
         "BOOLEAN" | "BOOL" => Type::Bool,
@@ -712,6 +761,9 @@ struct Scope {
     /// expression produces its relation row shape, while table operations
     /// retain the declared nominal table result.
     table_rows: BTreeMap<String, Type>,
+    /// Local nominal record constructors elaborate to their declared row shape
+    /// so field access remains structural inside inferred stream pipelines.
+    nominal_rows: BTreeMap<String, Type>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -733,6 +785,7 @@ fn resolve_imports(
                 _ => None,
             })
             .collect(),
+        nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -887,33 +940,7 @@ fn check_item(
             }
             bind_pattern(pattern, inferred.ty, symbols, diagnostics);
         }
-        Declaration::Function { signature, body } => {
-            let mut local = BTreeMap::new();
-            for parameter in &signature.parameters {
-                bind_pattern(
-                    &parameter.pattern,
-                    parameter
-                        .annotation
-                        .as_ref()
-                        .map(type_of)
-                        .unwrap_or(Type::Error),
-                    &mut local,
-                    diagnostics,
-                );
-            }
-            let inferred = infer(body, scope, &local, diagnostics);
-            if let Some(expected) = signature.result.as_ref().map(type_of) {
-                require_same(&expected, &inferred.ty, diagnostics);
-            }
-            if let Some(symbol) = symbols.get_mut(&signature.name) {
-                symbol.effects = inferred.effects;
-                if signature.result.is_none()
-                    && let Type::Function { result, .. } = &mut symbol.ty
-                {
-                    **result = inferred.ty;
-                }
-            }
-        }
+        Declaration::Function { .. } => check_function(item, symbols, scope, diagnostics),
         Declaration::Assertion { value } => {
             let inferred = infer_module_assertion(value, table_rows, scope, diagnostics);
             assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
@@ -950,6 +977,42 @@ fn check_item(
             }
         }
         _ => {}
+    }
+}
+
+fn check_function(
+    item: &Item,
+    symbols: &mut BTreeMap<String, Symbol>,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Declaration::Function { signature, body } = &item.declaration else {
+        unreachable!("function checker called for a non-function declaration");
+    };
+    let mut local = BTreeMap::new();
+    for parameter in &signature.parameters {
+        bind_pattern(
+            &parameter.pattern,
+            parameter
+                .annotation
+                .as_ref()
+                .map(type_of)
+                .unwrap_or(Type::Error),
+            &mut local,
+            diagnostics,
+        );
+    }
+    let inferred = infer(body, scope, &local, diagnostics);
+    if let Some(expected) = signature.result.as_ref().map(type_of) {
+        require_same(&expected, &inferred.ty, diagnostics);
+    }
+    if let Some(symbol) = symbols.get_mut(&signature.name) {
+        symbol.effects = inferred.effects;
+        if signature.result.is_none()
+            && let Type::Function { result, .. } = &mut symbol.ty
+        {
+            **result = inferred.ty;
+        }
     }
 }
 fn bind_pattern(
@@ -1053,6 +1116,9 @@ fn infer(
                 ty: Type::Record(values),
                 effects,
             }
+        }
+        Expr::Nominal { path, fields, .. } => {
+            infer_nominal(path, fields, scope, local, diagnostics)
         }
         Expr::List { elements, .. } => {
             let mut ty = None;
@@ -1283,6 +1349,62 @@ fn infer(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+fn infer_nominal(
+    path: &[orna_syntax_v1::NameSegment],
+    fields: &[orna_syntax_v1::RecordField],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut actual = BTreeMap::new();
+    let mut effects = EffectSummary::default();
+    for field in fields {
+        let value = infer(&field.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        actual.insert(field.name.clone(), value.ty);
+    }
+    let [name] = path else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "qualified nominal constructors are outside this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let declared = scope
+        .names
+        .get(&name.text)
+        .filter(|symbol| symbol.kind == SymbolKind::Type)
+        .and_then(|_| scope.nominal_rows.get(&name.text));
+    let Some(Type::Record(expected)) = declared else {
+        diagnostics.push(diag(
+            DIAG_UNRESOLVED,
+            "nominal record type cannot be resolved",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if expected.keys().ne(actual.keys()) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "nominal constructor fields do not match the declared row",
+        ));
+    }
+    for (name, expected) in expected {
+        if let Some(actual) = actual.get(name) {
+            require_same(expected, actual, diagnostics);
+        }
+    }
+    Inferred {
+        ty: Type::Record(expected.clone()),
+        effects,
     }
 }
 
@@ -1891,6 +2013,26 @@ fn table_row_type(item: &Item) -> Type {
     }
     Type::Record(fields)
 }
+
+fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
+    let Declaration::Type {
+        name,
+        representation: TypeRepresentation::Nominal { members },
+        ..
+    } = &item.declaration
+    else {
+        return None;
+    };
+    let fields = members
+        .iter()
+        .filter_map(|member| match member {
+            TypeMember::Field { name, ty, .. } => Some((name.clone(), type_of(ty))),
+            TypeMember::Assertion { .. } | TypeMember::Implementation { .. } => None,
+        })
+        .collect();
+    Some((name.clone(), Type::Record(fields)))
+}
+
 fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     fn visit(e: &Expr, names: &mut BTreeSet<String>) {
