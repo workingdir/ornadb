@@ -594,6 +594,108 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
 }
 
 #[test]
+fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let states = [
+        ([31; 16], [41; 32], orna_protocol_v1::RequestState::Reserved),
+        ([32; 16], [42; 32], orna_protocol_v1::RequestState::Running),
+        ([33; 16], [43; 32], orna_protocol_v1::RequestState::Terminal),
+        ([34; 16], [44; 32], orna_protocol_v1::RequestState::Terminal),
+        ([35; 16], [45; 32], orna_protocol_v1::RequestState::Terminal),
+    ];
+    for (target, fingerprint, _) in states {
+        let identity = RequestIdentity {
+            session_id: [1; 16],
+            request_id: target,
+        };
+        block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+        if target != [31; 16] {
+            block_on(runtime.start_request(identity, fingerprint)).unwrap();
+        }
+        let terminal = TerminalOutcome::new(Vec::new()).unwrap();
+        match target[0] {
+            33 => {
+                block_on(runtime.complete_request(identity, fingerprint, terminal)).unwrap();
+            }
+            34 => {
+                block_on(runtime.cancel_request(identity, fingerprint, terminal)).unwrap();
+            }
+            35 => {
+                block_on(runtime.orphan_request(identity, fingerprint, terminal)).unwrap();
+            }
+            _ => {}
+        }
+    }
+    drop(runtime);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    for (request, (target, fingerprint, state)) in
+        [[51; 16], [52; 16], [53; 16], [54; 16], [55; 16]]
+            .into_iter()
+            .zip(states)
+    {
+        let status_request = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatus {
+                target,
+                fingerprint,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let outcome = block_on(host.dispatch_frame(
+            [6; 16],
+            2,
+            Frame::Binary(status_request),
+            &mut application,
+        ))
+        .unwrap();
+        assert!(matches!(
+            outcome.response.unwrap().message,
+            Message::RequestStatusResult {
+                target: returned_target,
+                state: returned_state,
+                fingerprint: Some(returned_fingerprint),
+                result: None,
+            } if returned_target == target
+                && returned_state == state
+                && returned_fingerprint == fingerprint
+        ));
+    }
+    let mismatch = Envelope {
+        request: Some([61; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [31; 16],
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    assert_eq!(
+        block_on(host.dispatch_frame([6; 16], 2, Frame::Binary(mismatch), &mut application,)),
+        Err(Error::RequestMismatch)
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_reclaims_a_reserved_request_after_host_reconstruction() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [24; 16], "1");
