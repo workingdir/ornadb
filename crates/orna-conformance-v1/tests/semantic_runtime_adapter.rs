@@ -102,6 +102,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/legacy-failure-resolve-method.orna",
         "invalid/legacy-stream-retry-method.orna",
         "invalid/legacy-stream-skip-method.orna",
+        "invalid/implicit-conversion-chain.orna",
         "invalid/incompatible-dimensions.orna",
     ] {
         let fixture = report
