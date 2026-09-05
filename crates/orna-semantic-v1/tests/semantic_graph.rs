@@ -12,6 +12,22 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn closure_lists_do_not_erase_incompatible_return_types() {
+    for source in [
+        "pub fn values() = [() => 1, () => true];",
+        "pub fn values() = [() => ({}), () => {}];",
+    ] {
+        let result = analyze(&[ModuleInput::new("closures.orna", source)]);
+        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+    }
+    let compatible = analyze(&[ModuleInput::new(
+        "closures.orna",
+        "pub fn values() = [(x: Int) => x + 1, (y: Int) => y + 2];",
+    )]);
+    assert!(compatible.is_ok(), "{:?}", compatible.diagnostics);
+}
+
+#[test]
 fn unicode_nfkc_casefold_sibling_collision_is_rejected() {
     let result = analyze(&[
         ModuleInput::new("ff/left.orna", ""),
