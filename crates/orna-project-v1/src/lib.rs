@@ -24,6 +24,9 @@ mod unicode16;
 pub struct ProjectLimits {
     pub max_modules: usize,
     pub max_source_bytes: usize,
+    /// Maximum non-administrative directory entries inspected while enforcing
+    /// portable repository ownership rules.
+    pub max_repository_entries: usize,
 }
 
 impl Default for ProjectLimits {
@@ -31,6 +34,7 @@ impl Default for ProjectLimits {
         Self {
             max_modules: 256,
             max_source_bytes: 4 * 1024 * 1024,
+            max_repository_entries: 4_096,
         }
     }
 }
@@ -86,7 +90,7 @@ impl ProjectLoader {
 
     pub fn load(&self, repository: &Repository) -> Result<LoadedProject, ProjectLoadError> {
         let root = canonical_worktree(repository)?;
-        validate_repository_paths(&root)?;
+        validate_repository_paths(&root, self.limits)?;
         let mut pending = VecDeque::from([String::from("main.orna")]);
         let mut loaded = BTreeMap::<String, LoadedModule>::new();
         let mut namespaces = BTreeMap::<Vec<String>, String>::new();
@@ -156,6 +160,7 @@ pub enum ProjectLoadError {
     Symlink,
     SourceUnavailable,
     SourceTooLarge,
+    RepositoryLimit,
     ModuleLimit,
     InvalidModule,
     UnsupportedImport,
@@ -177,6 +182,7 @@ impl fmt::Display for ProjectLoadError {
             Self::Symlink => "project module path contains a symbolic link",
             Self::SourceUnavailable => "reachable source module is unavailable",
             Self::SourceTooLarge => "project source exceeds the configured limit",
+            Self::RepositoryLimit => "project exceeds the configured repository-entry limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
             Self::InvalidModule => "reachable source module is not a valid module unit",
             Self::UnsupportedImport => "source import cannot be resolved by this loader",
@@ -213,9 +219,10 @@ fn canonical_worktree(repository: &Repository) -> Result<PathBuf, ProjectLoadErr
 
 /// Validates path portability without reading or parsing repository file bodies.
 /// Git administrative directories are outside repository content and are skipped.
-fn validate_repository_paths(root: &Path) -> Result<(), ProjectLoadError> {
+fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), ProjectLoadError> {
     let mut pending = VecDeque::from([root.to_path_buf()]);
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
+    let mut entries_seen = 0usize;
     while let Some(directory) = pending.pop_front() {
         let mut entries = fs::read_dir(&directory)
             .map_err(|_| ProjectLoadError::SourceUnavailable)?
@@ -232,6 +239,10 @@ fn validate_repository_paths(root: &Path) -> Result<(), ProjectLoadError> {
             if name == ".git" {
                 continue;
             }
+            if entries_seen == limits.max_repository_entries {
+                return Err(ProjectLoadError::RepositoryLimit);
+            }
+            entries_seen += 1;
             if !portable_component(&name) {
                 return Err(ProjectLoadError::NonPortablePath);
             }
