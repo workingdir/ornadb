@@ -321,6 +321,22 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
 }
 
 #[test]
+fn qualified_kwh_units_share_the_closed_cross_database_identity() {
+    let result = analyze(&[ModuleInput::new(
+        "units.orna",
+        "pub fn compatible(a: Float<std.units.si.kWh>, b: Float<work.units.kWh>) = a + b;",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let incompatible = analyze(&[ModuleInput::new(
+        "units.orna",
+        "pub fn incompatible(a: Float<std.units.si.kWh>, b: Float<work.units.hour>) = a + b;",
+    )]);
+    assert!(has(&incompatible, DIAG_TYPE));
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
