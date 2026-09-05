@@ -1,0 +1,10 @@
+[package]
+name = "orna-evolution-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded, fail-closed Orna 1.0 schema-evolution planning"
+
+[dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
