@@ -618,26 +618,13 @@ impl PostgresKernel {
                         } => {
                             let arguments =
                                 bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let value = match definition.id() {
-                                STD_INVOKE_ECHO_FUNCTION_ID => execute_standard_parameter_echo(
-                                    definition,
-                                    executable.revision(),
-                                    &arguments,
-                                )?,
-                                STD_JSON_ENCODE_FUNCTION_ID => execute_standard_json_encode(
-                                    definition,
-                                    executable.revision(),
-                                    &arguments,
-                                    &active,
-                                    &registry,
-                                )?,
-                                _ => {
-                                    return Err(sealed_target_invariant(
-                                        &active,
-                                        "verified standard invocation target has no execution engine",
-                                    ));
-                                }
-                            };
+                            let value = execute_checked_standard_artifact(
+                                &active,
+                                &registry,
+                                definition,
+                                executable.revision(),
+                                &arguments,
+                            )?;
                             (vec![value], security_target)
                         }
                     };
@@ -813,5 +800,54 @@ impl PostgresKernel {
         }
         .await;
         finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CheckedStandardArtifactExecutor {
+    ParameterEcho,
+    JsonEncode,
+}
+
+pub(super) fn select_checked_standard_artifact_executor(
+    active: &ActiveDatabaseRevision,
+    revision: &orna_core::revision::FunctionRevisionRecord,
+) -> Result<CheckedStandardArtifactExecutor, PostgresKernelError> {
+    match (
+        revision.artifact().kind(),
+        revision.artifact().format(),
+        revision.artifact().version(),
+    ) {
+        (
+            orna_core::revision::ExecutableArtifactKind::Server,
+            orna_artifact::server_parameter_echo::FORMAT_IDENTITY,
+            orna_artifact::server_parameter_echo::FORMAT_VERSION,
+        ) => Ok(CheckedStandardArtifactExecutor::ParameterEcho),
+        (
+            orna_core::revision::ExecutableArtifactKind::Server,
+            orna_artifact::server_json_encode::FORMAT_IDENTITY,
+            orna_artifact::server_json_encode::FORMAT_VERSION,
+        ) => Ok(CheckedStandardArtifactExecutor::JsonEncode),
+        _ => Err(sealed_target_invariant(
+            active,
+            "verified standard executable artifact is unsupported",
+        )),
+    }
+}
+
+pub(super) fn execute_checked_standard_artifact(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    definition: &FunctionDefinition,
+    revision: &orna_core::revision::FunctionRevisionRecord,
+    arguments: &[FunctionArgument],
+) -> Result<RuntimeValue, PostgresKernelError> {
+    match select_checked_standard_artifact_executor(active, revision)? {
+        CheckedStandardArtifactExecutor::ParameterEcho => {
+            execute_standard_parameter_echo(definition, revision, arguments)
+        }
+        CheckedStandardArtifactExecutor::JsonEncode => {
+            execute_standard_json_encode(definition, revision, arguments, active, registry)
+        }
     }
 }
