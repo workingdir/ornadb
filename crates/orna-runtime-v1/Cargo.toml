@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Private, single-writer local runtime state for Orna 1.0"
 
-# This deliberately stays outside the parent workspace until its owner elects
-# to integrate it. It has an independent lockfile and no workspace mutation.
-[workspace]
-
 [dependencies]
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 num-bigint = "0.4.6"

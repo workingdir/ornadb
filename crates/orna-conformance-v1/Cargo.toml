@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 publish = false
 
-# This nested workspace deliberately keeps the harness independently runnable
-# until the main workspace adopts it as a member.
-[workspace]
-
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
