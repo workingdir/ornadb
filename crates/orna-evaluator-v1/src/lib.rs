@@ -729,6 +729,11 @@ impl Context {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match op {
+            "??" => match self.evaluate(lhs, scope, depth + 1)? {
+                Value::Option(Some(value)) => Ok(*value),
+                Value::Option(None) | Value::Null => self.evaluate(rhs, scope, depth + 1),
+                _ => Err(error("ORNA-EVAL-TYPE")),
+            },
             "&&" => match self.evaluate(lhs, scope, depth + 1)? {
                 Value::Bool(false) => Ok(Value::Bool(false)),
                 Value::Bool(true) => match self.evaluate(rhs, scope, depth + 1)? {
