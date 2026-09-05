@@ -2852,8 +2852,40 @@ fn resolve_qualified_module_member(
     }
 }
 fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic>) {
-    if expected != actual && !matches!(expected, Type::Error) && !matches!(actual, Type::Error) {
+    if !types_match(expected, actual)
+        && !matches!(expected, Type::Error)
+        && !matches!(actual, Type::Error)
+    {
         diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+    }
+}
+
+fn types_match(expected: &Type, actual: &Type) -> bool {
+    if expected == actual {
+        return true;
+    }
+    match (expected, actual) {
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == actual_base
+            && expected_arguments.len() == 1
+            && actual_arguments.len() == 1 =>
+        {
+            matches!(
+                (expected_arguments.first(), actual_arguments.first()),
+                (Some(Type::Named(expected_unit)), Some(Type::Named(actual_unit)))
+                    if expected_unit.rsplit('.').next() == Some("kWh")
+                        && actual_unit.rsplit('.').next() == Some("kWh")
+            )
+        }
+        _ => false,
     }
 }
 
