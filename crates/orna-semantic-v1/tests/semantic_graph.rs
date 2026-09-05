@@ -138,6 +138,27 @@ fn table_assertion_rejects_owner_type_mismatch() {
 }
 
 #[test]
+fn legacy_table_assertion_owner_pipes_keep_published_diagnostics() {
+    let owner = analyze(&[ModuleInput::new(
+        "owner-pipe.orna",
+        "pub table User(id: Uuid) { username: Str, assert User | all_unique(user => user.username); }",
+    )]);
+    assert!(!has(&owner, DIAG_UNRESOLVED));
+    assert!(owner.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "remove the repeated table owner before the assertion predicate"
+    }));
+
+    let self_pipe = analyze(&[ModuleInput::new(
+        "self-pipe.orna",
+        "pub table User(id: Uuid) { username: Str, assert self | all_unique(user => user.username); }",
+    )]);
+    assert!(!has(&self_pipe, DIAG_UNRESOLVED));
+    assert!(self_pipe.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "remove `self |`; the table already supplies its candidate relation"
+    }));
+}
+
+#[test]
 fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator() {
     let result = analyze(&[ModuleInput::new(
         "library.orna",
