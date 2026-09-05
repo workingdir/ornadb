@@ -166,6 +166,103 @@ fn source_call_arguments_evaluate_in_source_order() {
 }
 
 #[test]
+fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
+    let source =
+        "fn add(value: Int, extra = 6) = value + extra; fn double(value: Int) = value * 2;";
+    for expression in [
+        "10 | add",
+        "10 | add()",
+        "10 | add(extra: 6)",
+        "10 | add(6)",
+        "5 | double | add",
+    ] {
+        assert_eq!(
+            call_module(source, expression, Limits::default()).unwrap(),
+            Value::int(16.into()),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "10 | add(value: 1)",
+        "10 | add(extra: 1, extra: 2)",
+        "10 | add(1, 2)",
+    ] {
+        assert_eq!(
+            code(call_module(source, expression, Limits::default())),
+            "ORNA-EVAL-ARGUMENT",
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(call_module(
+            "fn no_input() = 1;",
+            "10 | no_input",
+            Limits::default()
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+}
+
+#[test]
+fn pipeline_input_runs_once_and_before_stage_arguments() {
+    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; (if true { counter += 1; counter } else { 0 }) | encode(b: if true { counter += 1; counter } else { 0 }) }";
+    assert_eq!(
+        call_module(source, "caller()", Limits::default()).unwrap(),
+        Value::int(12.into())
+    );
+    assert_eq!(
+        code(call_module(
+            "fn add(a: Int, b: Int) = a + b;",
+            "(1 / 0) | add(missing)",
+            Limits::default()
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    assert_eq!(
+        code(call_module(
+            "fn recurse(n: Int) = n | recurse;",
+            "1 | recurse",
+            Limits {
+                max_steps: 12,
+                ..Limits::default()
+            }
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
+    for (expression, expected) in [
+        ("41 | std.math.increment", 42),
+        ("41 | std.math.increment()", 42),
+        ("3 | std.math.max(right: 7)", 7),
+        ("std.math.max(3, right: 7)", 7),
+        ("10 | std.math.clamp(min: 1, max: 5)", 5),
+    ] {
+        assert_eq!(
+            evaluate(expression),
+            Value::int(expected.into()),
+            "{expression}"
+        );
+    }
+    for expression in [
+        "3 | std.math.max(left: 7)",
+        "std.math.max(left: 3, 7)",
+        "std.math.max(left: 3, left: 7)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-UNSUPPORTED"
+        );
+    }
+}
+
+#[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
     let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
     assert_eq!(
