@@ -12,6 +12,72 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() {
+    for (body, expected) in [
+        ("Reading | bucket_by(1.day, zone: Europe.London)", None),
+        (
+            "Reading | map(Reading.time) | bucket_by(1.day, zone: Europe.London)",
+            None,
+        ),
+        ("Reading | map(Reading.time) | bucket_by(period)", None),
+        ("Reading | bucket_by(period)", None),
+        ("Reading | bucket_by(period, zone: Europe.London)", None),
+        (
+            "Reading | bucket_by(1.day)",
+            Some("calendar bucketing of Instant requires a time zone"),
+        ),
+        (
+            "Reading | bucket_by(1.day, zone: 42)",
+            Some("bucket_by requires a named TimeZone argument"),
+        ),
+        (
+            "Reading | bucket_by(1.day, Europe.London)",
+            Some("bucket_by requires a named TimeZone argument"),
+        ),
+        (
+            "Reading | bucket_by(1.day, zone: Europe.London, extra: true)",
+            Some("bucket_by requires a named TimeZone argument"),
+        ),
+        (
+            "Reading | bucket_by(42, zone: Europe.London)",
+            Some("bucket_by requires an elapsed Duration or calendar-day period"),
+        ),
+        (
+            "Reading | bucket_by(1.kWh, zone: Europe.London)",
+            Some("bucket_by requires an elapsed Duration or calendar-day period"),
+        ),
+        (
+            "Reading | bucket_by(zone: Europe.London)",
+            Some("bucket_by requires an elapsed Duration or calendar-day period"),
+        ),
+        (
+            "Other | bucket_by(1.day, zone: Europe.London)",
+            Some("bucket_by requires Instant values or rows with an Instant time field"),
+        ),
+    ] {
+        let source = format!(
+            "table Reading(id: Int) {{ time: Instant, }} table Other(id: Int) {{ time: Str, }} fn bucket(period: Duration) = {body};"
+        );
+        let result = analyze_with_catalogue(
+            &[ModuleInput::new("buckets.orna", source)],
+            &Catalogue::authoritative_fixture(),
+        );
+        if let Some(expected) = expected {
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message() == expected),
+                "{body}: {:?}",
+                result.diagnostics
+            );
+        } else {
+            assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
+        }
+    }
+}
+
+#[test]
 fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
     let declaration = "table Person(id: Str) { name: Str, } table Team(id: Str) { name: Str, }";
     for (body, valid) in [
