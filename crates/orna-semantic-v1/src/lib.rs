@@ -1724,6 +1724,10 @@ fn infer(
                         effects,
                     }
                 }
+                Type::Error => Inferred {
+                    ty: Type::Error,
+                    effects,
+                },
                 _ => {
                     diagnostics.push(diag(DIAG_TYPE, "call requires a statically known function"));
                     Inferred {
