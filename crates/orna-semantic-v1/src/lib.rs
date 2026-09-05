@@ -1261,24 +1261,105 @@ fn check_item(
         Declaration::Type {
             representation: TypeRepresentation::Nominal { members },
             ..
-        } if members.iter().any(|member| {
-            matches!(
-                member,
-                TypeMember::Implementation { implementation, .. }
-                    if matches!(
-                        &implementation.protocol,
-                        TypeExpr::Name { path, arguments, .. }
-                            if path.as_slice() == ["TryFrom"] && arguments.len() == 1
-                    )
-            )
-        }) =>
-        {
-            diagnostics.push(diag(
-                DIAG_LEGACY_TRYFROM,
-                "use From<Source>; From may fail in Orna",
-            ))
+        } => {
+            for member in members {
+                let TypeMember::Implementation { implementation, .. } = member else {
+                    continue;
+                };
+                match &implementation.protocol {
+                    TypeExpr::Name {
+                        path, arguments, ..
+                    } if path.as_slice() == ["TryFrom"] && arguments.len() == 1 => {
+                        diagnostics.push(diag(
+                            DIAG_LEGACY_TRYFROM,
+                            "use From<Source>; From may fail in Orna",
+                        ));
+                    }
+                    TypeExpr::Name { path, .. }
+                        if matches!(path.as_slice(), [protocol] if protocol == "Display" || protocol == "Present")
+                            && implementation_has_write(implementation) =>
+                    {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "Display and Present implementations must be read-only",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         }
         _ => {}
+    }
+}
+
+fn implementation_has_write(implementation: &orna_syntax_v1::Implementation) -> bool {
+    implementation.members.iter().any(|member| match member {
+        orna_syntax_v1::ImplMember::Function { body, .. }
+        | orna_syntax_v1::ImplMember::Static { value: body, .. } => expr_has_write(body),
+    })
+}
+
+fn expr_has_write(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            qualified_path(callee)
+                .and_then(|path| path.last().copied())
+                .is_some_and(|name| {
+                    matches!(name, "insert" | "upsert" | "update" | "delete" | "rekey")
+                })
+                || expr_has_write(callee)
+                || arguments
+                    .iter()
+                    .any(|argument| expr_has_write(&argument.value))
+        }
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => expr_has_write(rhs),
+        Expr::Binary { lhs, rhs, .. } => expr_has_write(lhs) || expr_has_write(rhs),
+        Expr::Index { base, index, .. } => expr_has_write(base) || expr_has_write(index),
+        Expr::Field { base, .. } => expr_has_write(base),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            elements.iter().any(expr_has_write)
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            fields.iter().any(|field| expr_has_write(&field.value))
+        }
+        Expr::Lambda { body, .. } => expr_has_write(body),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            statements.iter().any(statement_has_write)
+                || tail.as_deref().is_some_and(expr_has_write)
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            condition.as_deref().is_some_and(expr_has_write)
+                || body.as_deref().is_some_and(expr_has_write)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(expr_has_write) || expr_has_write(&arm.body)
+                })
+                || alternate.as_deref().is_some_and(expr_has_write)
+        }
+        _ => false,
+    }
+}
+
+fn statement_has_write(statement: &Statement) -> bool {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. }
+        | Statement::Assignment { value, .. } => expr_has_write(value),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            value.as_ref().is_some_and(expr_has_write)
+        }
+        Statement::Continue { .. } => false,
     }
 }
 

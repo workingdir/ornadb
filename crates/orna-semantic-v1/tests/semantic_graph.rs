@@ -453,6 +453,28 @@ fn automatic_key_tables_reject_explicit_rekey_operations() {
 }
 
 #[test]
+fn display_implementations_reject_database_writes() {
+    let result = analyze(&[ModuleInput::new(
+        "display.orna",
+        r#"
+            pub type Contact {
+                pub name: Str,
+                impl Display {
+                    fn display(self, context: DisplayContext): Str {
+                        Audit.insert({ message: "displayed contact" });
+                        self.name
+                    }
+                }
+            }
+        "#,
+    )]);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "Display and Present implementations must be read-only"
+    }));
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
