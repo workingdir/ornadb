@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS stream_failure (
     diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
     diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
 );
+CREATE TABLE IF NOT EXISTS stream_provider_failure (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version >= 0),
+    committed_position TEXT,
+    attempts INTEGER NOT NULL CHECK (attempts > 0),
+    diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+    diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
+);
 CREATE TABLE IF NOT EXISTS stream_lease (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
@@ -244,6 +252,7 @@ pub enum RuntimeError {
     InvalidIdentity,
     InvalidDigest,
     StreamIdentityMismatch,
+    StreamCheckpointStale,
     LeaseHeld,
     OwnerLost,
     StaleCapture { current: Box<CwdCapture> },
@@ -265,6 +274,7 @@ impl fmt::Display for RuntimeError {
             Self::InvalidIdentity => "invalid runtime identity",
             Self::InvalidDigest => "invalid durable digest",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
+            Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::LeaseHeld => "runtime writer is held",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -319,6 +329,20 @@ pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
     Fail(SafeDiagnostic),
     Cancelled,
+}
+
+/// A provider failure retained against the exact checkpoint that was being
+/// polled. It has no delivery identity because no item was admitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamProviderFailure {
+    pub checkpoint: StreamCheckpoint,
+    pub attempts: u32,
+    pub diagnostic: SafeDiagnostic,
+}
+
+fn is_cancellation_diagnostic(diagnostic: SafeDiagnostic) -> bool {
+    diagnostic.code == DiagnosticCode::Cancelled
+        || diagnostic.class == DiagnosticClass::Cancellation
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -590,6 +614,126 @@ impl RuntimeState {
         RuntimeStreamBackend { state: self, lease }
     }
 
+    async fn record_stream_provider_failure(
+        &self,
+        writer: WriterLease,
+        expected: &StreamCheckpoint,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<StreamProviderFailure, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        ensure_stream_checkpoint(&transaction, &expected.key).await?;
+        let current = load_stream_checkpoint(&transaction, &expected.key).await?;
+        if current != *expected {
+            return Err(RuntimeError::StreamCheckpointStale);
+        }
+        let key_id = stream_key_id(&expected.key);
+        let mut rows = transaction
+            .query(
+                "SELECT checkpoint_version, committed_position, attempts
+                 FROM stream_provider_failure WHERE key_id = ?1",
+                params![key_id.clone()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let previous = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .map(|row| {
+                let version = decode_u64(
+                    row.get::<i64>(0)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?;
+                let committed: Option<String> =
+                    row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                let attempts = decode_u32(
+                    row.get::<i64>(2)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?;
+                Ok::<_, RuntimeError>((version, committed, attempts))
+            })
+            .transpose()?;
+        let attempts = match previous {
+            Some((version, committed, attempts))
+                if version == expected.version
+                    && committed.as_deref()
+                        == expected
+                            .committed
+                            .as_ref()
+                            .map(|position| position.token.as_str()) =>
+            {
+                attempts
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+            }
+            _ => 1,
+        };
+        transaction
+            .execute(
+                "INSERT INTO stream_provider_failure
+                 (key_id, checkpoint_version, committed_position, attempts,
+                  diagnostic_code, diagnostic_class)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(key_id) DO UPDATE SET
+                    checkpoint_version = excluded.checkpoint_version,
+                    committed_position = excluded.committed_position,
+                    attempts = excluded.attempts,
+                    diagnostic_code = excluded.diagnostic_code,
+                    diagnostic_class = excluded.diagnostic_class",
+                params![
+                    key_id,
+                    i64::try_from(expected.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    expected
+                        .committed
+                        .as_ref()
+                        .map(|position| position.token.as_str().to_owned()),
+                    i64::from(attempts),
+                    encode_code(diagnostic.code),
+                    encode_class(diagnostic.class),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(StreamProviderFailure {
+            checkpoint: expected.clone(),
+            attempts,
+            diagnostic,
+        })
+    }
+
+    async fn clear_stream_provider_failure(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+    ) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        transaction
+            .execute(
+                "DELETE FROM stream_provider_failure WHERE key_id = ?1",
+                params![stream_key_id(key)],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     async fn release_stream_lease(
         &self,
         writer: WriterLease,
@@ -644,10 +788,24 @@ impl RuntimeState {
             .checkpoint_async(key)
             .await
             .map_err(StreamStepError::Runtime)?;
-        let poll = source
-            .next(&checkpoint)
-            .await
-            .map_err(StreamStepError::Provider)?;
+        let poll = match source.next(&checkpoint).await {
+            Ok(poll) => poll,
+            Err(diagnostic) => {
+                if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
+                    return Ok(StreamStep::Cancelled { checkpoint });
+                }
+                self.record_stream_provider_failure(writer, &checkpoint, diagnostic)
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
+                if control.cancelled() {
+                    self.clear_stream_provider_failure(writer, key)
+                        .await
+                        .map_err(StreamStepError::Runtime)?;
+                    return Ok(StreamStep::Cancelled { checkpoint });
+                }
+                return Err(StreamStepError::Provider(diagnostic));
+            }
+        };
         let StreamSourcePoll::Item(item) = poll else {
             return Ok(match poll {
                 StreamSourcePoll::Waiting => StreamStep::Waiting,
@@ -781,10 +939,27 @@ impl RuntimeState {
                 .await?
             {
                 StreamStep::Waiting => {
-                    source
-                        .wait(control as &dyn StreamRunControl)
-                        .await
-                        .map_err(StreamStepError::Provider)?;
+                    if let Err(diagnostic) = source.wait(control as &dyn StreamRunControl).await {
+                        if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
+                            return Ok(StreamRunOutcome::Cancelled {
+                                delivered,
+                                checkpoint,
+                            });
+                        }
+                        self.record_stream_provider_failure(writer, &checkpoint, diagnostic)
+                            .await
+                            .map_err(StreamStepError::Runtime)?;
+                        if control.cancelled() {
+                            self.clear_stream_provider_failure(writer, key)
+                                .await
+                                .map_err(StreamStepError::Runtime)?;
+                            return Ok(StreamRunOutcome::Cancelled {
+                                delivered,
+                                checkpoint,
+                            });
+                        }
+                        return Err(StreamStepError::Provider(diagnostic));
+                    }
                 }
                 StreamStep::Exhausted => {
                     return Ok(match source_descriptor.kind {
@@ -1413,6 +1588,7 @@ impl RuntimeState {
         }
         self.validate_checkpoint_anchors().await?;
         self.validate_stream_controls().await?;
+        self.validate_stream_provider_failures().await?;
         let mut request_rows = self
             .connection
             .query(
@@ -1555,6 +1731,65 @@ impl RuntimeState {
         Ok(())
     }
 
+    async fn validate_stream_provider_failures(&self) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT failure.key_id, failure.checkpoint_version,
+                        failure.committed_position, failure.attempts,
+                        failure.diagnostic_code, failure.diagnostic_class,
+                        checkpoint.version, checkpoint.committed_position
+                 FROM stream_provider_failure AS failure
+                 LEFT JOIN stream_checkpoint AS checkpoint
+                   ON checkpoint.key_id = failure.key_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key_id.is_empty() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let failure_version = decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let failure_position: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let attempts = decode_u32(
+                row.get::<i64>(3)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if attempts == 0 {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            decode_code(
+                row.get::<i64>(4)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            decode_class(
+                row.get::<i64>(5)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let checkpoint_version = row
+                .get::<Option<i64>>(6)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                .ok_or(RuntimeError::RecoveryInvalid)
+                .and_then(decode_u64)?;
+            let checkpoint_position: Option<String> =
+                row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if failure_version != checkpoint_version || failure_position != checkpoint_position {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+        Ok(())
+    }
+
     async fn require_owner(&self, tx: &Connection, lease: WriterLease) -> Result<(), RuntimeError> {
         let mut rows = tx
             .query(
@@ -1574,6 +1809,18 @@ impl RuntimeState {
             return Err(RuntimeError::OwnerLost);
         }
         Ok(())
+    }
+}
+
+impl RuntimeStreamBackend<'_> {
+    /// Returns the durable provider failure for a stream checkpoint, if one is
+    /// retained. The row is only valid when its checkpoint still matches the
+    /// current stream position.
+    pub async fn provider_failure_async(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<Option<StreamProviderFailure>, RuntimeError> {
+        load_stream_provider_failure(&self.state.connection, key).await
     }
 }
 
@@ -1613,6 +1860,9 @@ const STREAM_FAILURE_SELECT: &str = "SELECT \
     delivery_position, successor_position, version, attempts, status, \
     diagnostic_code, diagnostic_class \
     FROM stream_failure WHERE identity_id = ?1";
+const STREAM_PROVIDER_FAILURE_SELECT: &str = "SELECT \
+    checkpoint_version, committed_position, attempts, diagnostic_code, diagnostic_class \
+    FROM stream_provider_failure WHERE key_id = ?1";
 
 #[derive(Clone, Debug)]
 struct StoredStreamLease {
@@ -1639,6 +1889,47 @@ fn stream_key_id(key: &CheckpointKey) -> String {
 
 fn stream_identity_id(identity: &FailureIdentity) -> String {
     identity.0.canonical()
+}
+
+async fn load_stream_provider_failure(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<Option<StreamProviderFailure>, RuntimeError> {
+    let key_id = stream_key_id(key);
+    let mut rows = connection
+        .query(STREAM_PROVIDER_FAILURE_SELECT, params![key_id])
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = load_stream_checkpoint(connection, key).await?;
+    let version = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let committed: Option<String> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if version != checkpoint.version
+        || committed.as_deref()
+            != checkpoint
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str())
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(Some(StreamProviderFailure {
+        checkpoint,
+        attempts: decode_u32(
+            row.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        diagnostic: decode_diagnostic(&row, 3)?,
+    }))
 }
 
 fn row_text(row: &libsql::Row, index: i32) -> Result<String, RuntimeError> {
@@ -2103,6 +2394,13 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_provider_failure WHERE key_id = ?1",
+                    params![stream_key_id(&key)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
             Ok(CommitResult::CheckpointReset {
                 checkpoint: load_stream_checkpoint(connection, &key).await?,
             })
@@ -2163,12 +2461,19 @@ async fn apply_stream_intent_tx(
                      (key_id, delivery_position, successor_position, fence, purpose)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
-                        key_id,
+                        key_id.clone(),
                         delivery.position.token.as_str().to_owned(),
                         delivery.successor.token.as_str().to_owned(),
                         i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
                         encode_purpose(purpose),
                     ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_provider_failure WHERE key_id = ?1",
+                    params![key_id],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -2940,6 +3245,70 @@ mod tests {
         }
     }
 
+    struct FailingSource {
+        diagnostic: Option<SafeDiagnostic>,
+    }
+
+    impl StreamSource for FailingSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Unbounded,
+                replayable: true,
+            }
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            ready(
+                self.diagnostic
+                    .take()
+                    .map_or(Ok(StreamSourcePoll::Exhausted), Err),
+            )
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
+        }
+    }
+
+    struct WaitingFailureSource {
+        diagnostic: Option<SafeDiagnostic>,
+    }
+
+    impl StreamSource for WaitingFailureSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Unbounded,
+                replayable: true,
+            }
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            ready(Ok(StreamSourcePoll::Waiting))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(self.diagnostic.take().map_or(Ok(()), Err))
+        }
+    }
+
     struct CommitHandler {
         calls: usize,
     }
@@ -2980,6 +3349,37 @@ mod tests {
 
         fn acquire_admission(&self) -> bool {
             !self.cancelled()
+        }
+
+        fn release_admission(&self) {}
+    }
+
+    #[derive(Clone, Copy)]
+    struct CancelledBeforeProviderFailure;
+
+    impl StreamRunControl for CancelledBeforeProviderFailure {
+        fn cancelled(&self) -> bool {
+            true
+        }
+
+        fn acquire_admission(&self) -> bool {
+            false
+        }
+
+        fn release_admission(&self) {}
+    }
+
+    struct CancelAfterWait(Cell<usize>);
+
+    impl StreamRunControl for CancelAfterWait {
+        fn cancelled(&self) -> bool {
+            let calls = self.0.get();
+            self.0.set(calls + 1);
+            calls > 0
+        }
+
+        fn acquire_admission(&self) -> bool {
+            false
         }
 
         fn release_admission(&self) {}
@@ -3134,6 +3534,241 @@ mod tests {
         ));
         assert_eq!(raced_source.polls, 1);
         assert_eq!(raced_handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn provider_failures_are_durable_until_the_checkpoint_is_admitted() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("provider:one", "provider:two");
+        let key = delivery.checkpoint_key();
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ProviderUnavailable,
+            class: DiagnosticClass::Transient,
+        };
+
+        for expected_attempts in 1..=2 {
+            let mut source = FailingSource {
+                diagnostic: Some(diagnostic),
+            };
+            let mut handler = TestHandler {
+                result: None,
+                calls: 0,
+            };
+            assert_eq!(
+                state
+                    .run_stream_once(writer, &key, &mut source, &mut handler)
+                    .await,
+                Err(StreamStepError::Provider(diagnostic))
+            );
+            let failure = state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(failure.attempts, expected_attempts);
+            assert_eq!(failure.checkpoint.version, 0);
+            assert_eq!(failure.diagnostic, diagnostic);
+        }
+
+        drop(state);
+        let state = open_state(&repo).await;
+        let mut source = TestSource {
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![1],
+            }),
+            polls: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Ok(StreamStep::Committed { .. })
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_become_a_durable_provider_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("cancel:one", "cancel:two");
+        let key = delivery.checkpoint_key();
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ProviderUnavailable,
+            class: DiagnosticClass::Transient,
+        };
+        let mut source = FailingSource {
+            diagnostic: Some(diagnostic),
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .run_stream_once_controlled(
+                    writer,
+                    &key,
+                    &mut source,
+                    &mut handler,
+                    &CancelledBeforeProviderFailure,
+                )
+                .await,
+            Ok(StreamStep::Cancelled { .. })
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let cancellation = SafeDiagnostic {
+            code: DiagnosticCode::Cancelled,
+            class: DiagnosticClass::Cancellation,
+        };
+        let mut source = FailingSource {
+            diagnostic: Some(cancellation),
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Ok(StreamStep::Cancelled { .. })
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let mut source = WaitingFailureSource {
+            diagnostic: Some(cancellation),
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled,)
+                .await,
+            Ok(StreamRunOutcome::Cancelled { delivered: 0, .. })
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let mut source = WaitingFailureSource {
+            diagnostic: Some(diagnostic),
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        let outcome = state
+            .run_stream(
+                writer,
+                &key,
+                &mut source,
+                &mut handler,
+                &CancelAfterWait(Cell::new(0)),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 0, .. },
+            }
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_provider_failure_with_oversized_attempts() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("corrupt:one", "corrupt:two");
+        let key = delivery.checkpoint_key();
+        let mut source = FailingSource {
+            diagnostic: Some(SafeDiagnostic {
+                code: DiagnosticCode::ProviderUnavailable,
+                class: DiagnosticClass::Transient,
+            }),
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await,
+            Err(StreamStepError::Provider(_))
+        ));
+        state
+            .connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE stream_provider_failure SET attempts = 4294967296;
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        drop(state);
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
 
     #[tokio::test]
