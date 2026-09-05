@@ -1,4 +1,7 @@
-use orna_semantic_v1::{DIAG_AMBIGUOUS, DIAG_ASSERTION_SCOPE, ModuleInput, analyze};
+use orna_semantic_v1::{
+    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION_SCOPE, DIAG_RESERVED, DIAG_UNRESOLVED, ModuleInput,
+    analyze, analyze_with_catalogue,
+};
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
     result
@@ -34,4 +37,52 @@ fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_asserti
 
     assert!(!has(&result, DIAG_AMBIGUOUS));
     assert!(has(&result, DIAG_ASSERTION_SCOPE));
+}
+
+#[test]
+fn authoritative_core_catalogue_resolves_prelude_types_and_common_functions() {
+    let profile = Catalogue::authoritative_core();
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std as _; use std.math.{increment, is_zero}; use std.ui.{text}; use std.json.{encode}; fn next(value: INTEGER): INTEGER = increment(value); fn zero(): BOOLEAN = is_zero(0); fn view(): UI = text(\"hello\"); fn bytes(value: JsonValue): ByteStream = encode(value);",
+        )],
+        &profile,
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
+fn catalogue_is_closed_world_and_diagnostics_remain_redacted_and_stable() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "secret.orna",
+            "use std as _; fn f() = definitely_not_in_the_catalogue;",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(has(&result, DIAG_UNRESOLVED));
+    let json = serde_json::to_string(&result.diagnostics).unwrap();
+    assert!(!json.contains("secret.orna"));
+    assert!(!json.contains("definitely_not_in_the_catalogue"));
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.code())
+            .collect::<Vec<_>>(),
+        vec![DIAG_UNRESOLVED]
+    );
+}
+
+#[test]
+fn catalogue_does_not_relax_reserved_source_roots() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("std/main.orna", "")],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(has(&result, DIAG_RESERVED));
 }

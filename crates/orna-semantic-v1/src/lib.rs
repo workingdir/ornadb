@@ -127,6 +127,228 @@ pub struct ModuleHeader {
     pub symbols: BTreeMap<String, Symbol>,
     pub prelude_exports: BTreeSet<String>,
 }
+
+/// Explicit, caller-provided declarations available in addition to source
+/// modules.  A catalogue is data, not a loader: this crate never reads a
+/// standard-library directory or treats an absent name as a standard name.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Catalogue {
+    modules: BTreeMap<Namespace, ModuleHeader>,
+}
+impl Catalogue {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// The stable core surface represented by the authoritative `stdlib/std`
+    /// corpus.  It is intentionally a small declaration catalogue rather than
+    /// executable standard-library source.
+    pub fn authoritative_core() -> Self {
+        let mut modules = BTreeMap::new();
+        let primitive_types = [
+            ("BOOLEAN", Type::Bool),
+            ("BOOL", Type::Bool),
+            ("INTEGER", Type::Int),
+            ("INT", Type::Int),
+            ("BIGINT", Type::Int),
+            ("FLOAT", Type::Float),
+            ("DECIMAL", Type::Decimal),
+            ("TEXT", Type::Text),
+            ("DATE", Type::Date),
+            ("TIMESTAMP", Type::Instant),
+            ("VOID", Type::Null),
+        ];
+        let root_types = [
+            ("UUID", Type::Named("std.UUID".into())),
+            ("TIME", Type::Named("std.TIME".into())),
+            ("DURATION", Type::Named("std.DURATION".into())),
+            ("BYTES", Type::Named("std.BINARY_LARGE_OBJECT".into())),
+            ("Action", Type::Named("std.Action".into())),
+            ("Rows", Type::Named("std.Rows".into())),
+            ("JsonValue", Type::Named("std.JsonValue".into())),
+            ("Document", Type::Named("std.Document".into())),
+            ("ByteStream", Type::Named("std.ByteStream".into())),
+            ("UI", Type::Named("std.UI".into())),
+        ];
+        let mut root = Vec::new();
+        root.extend(primitive_types.iter().cloned());
+        root.extend(root_types.iter().cloned());
+        modules.insert(
+            Namespace(vec!["std".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into()]),
+                root,
+                primitive_types
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .chain(root_types.iter().map(|(name, _)| *name)),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "types".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "types".into()]),
+                primitive_types
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.clone()))
+                    .chain(root_types.iter().map(|(name, ty)| (*name, ty.clone()))),
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "math".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "math".into()]),
+                [
+                    ("increment", function(vec![Type::Int], Type::Int)),
+                    ("decrement", function(vec![Type::Int], Type::Int)),
+                    ("is_zero", function(vec![Type::Int], Type::Bool)),
+                    ("min", function(vec![Type::Int, Type::Int], Type::Int)),
+                    ("max", function(vec![Type::Int, Type::Int], Type::Int)),
+                    (
+                        "clamp",
+                        function(vec![Type::Int, Type::Int, Type::Int], Type::Int),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "invoke".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "invoke".into()]),
+                [("echo", function(vec![Type::Int], Type::Int))],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        let action = Type::Named("std.Action".into());
+        let rows = Type::Named("std.Rows".into());
+        let json = Type::Named("std.JsonValue".into());
+        let document = Type::Named("std.Document".into());
+        let byte_stream = Type::Named("std.ByteStream".into());
+        modules.insert(
+            Namespace(vec!["std".into(), "action".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "action".into()]),
+                [("Action", action)],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "data".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "data".into()]),
+                [("Rows", rows.clone())],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "json".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "json".into()]),
+                [
+                    ("Value", json.clone()),
+                    ("encode", function(vec![json], byte_stream.clone())),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "terminal".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "terminal".into()]),
+                [
+                    ("Document", document.clone()),
+                    ("present_table", function(vec![rows], document)),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "io".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "io".into()]),
+                [("ByteStream", byte_stream)],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        let ui = Type::Named("std.UI".into());
+        modules.insert(
+            Namespace(vec!["std".into(), "ui".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "ui".into()]),
+                [
+                    ("UI", ui.clone()),
+                    ("text", function(vec![Type::Text], ui.clone())),
+                    ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
+                    ("panel", function(vec![ui.clone()], ui.clone())),
+                    ("row", function(vec![ui.clone()], ui.clone())),
+                    ("column", function(vec![ui.clone()], ui.clone())),
+                    (
+                        "text_input",
+                        function(vec![Type::Text, Type::Text, Type::Bool], ui.clone()),
+                    ),
+                    ("tabs", function(vec![ui.clone()], ui.clone())),
+                    ("window", function(vec![Type::Text, ui.clone()], ui)),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "cli".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "cli".into()]),
+                [("repl", function(vec![], Type::Named("std.UI".into())))],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        Self { modules }
+    }
+}
+
+fn catalogue_module<I, N, P, Q>(
+    namespace: Namespace,
+    symbols: I,
+    prelude_exports: P,
+) -> ModuleHeader
+where
+    I: IntoIterator<Item = (N, Type)>,
+    N: Into<String>,
+    P: IntoIterator<Item = Q>,
+    Q: Into<String>,
+{
+    let symbols = symbols
+        .into_iter()
+        .map(|(name, ty)| {
+            (
+                name.into(),
+                Symbol {
+                    kind: if matches!(ty, Type::Function { .. }) {
+                        SymbolKind::Function
+                    } else {
+                        SymbolKind::Type
+                    },
+                    public: true,
+                    effects: EffectSummary::default(),
+                    ty,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    ModuleHeader {
+        namespace,
+        exports: symbols.clone(),
+        symbols,
+        prelude_exports: prelude_exports.into_iter().map(Into::into).collect(),
+    }
+}
+
+fn function(parameters: Vec<Type>, result: Type) -> Type {
+    Type::Function {
+        parameters,
+        result: Box::new(result),
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssertionOwner {
     Module,
@@ -155,7 +377,17 @@ impl Analysis {
 /// while `std` remains absent unless an adapter supplies it separately; source
 /// modules may not define either reserved root.
 pub fn analyze(inputs: &[ModuleInput]) -> Analysis {
-    let mut result = Analysis::default();
+    analyze_with_catalogue(inputs, &Catalogue::empty())
+}
+
+/// Load source modules with an explicit declaration catalogue.  Names not in
+/// source or this catalogue remain unresolved; no profile is installed by
+/// default.
+pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> Analysis {
+    let mut result = Analysis {
+        modules: catalogue.modules.clone(),
+        ..Analysis::default()
+    };
     let mut parsed = Vec::new();
     let mut siblings: BTreeMap<Vec<String>, BTreeMap<String, String>> = BTreeMap::new();
     for input in inputs {
@@ -429,6 +661,24 @@ fn primitive(name: &str) -> Option<Type> {
         "Text" | "String" => Type::Text,
         "Bool" => Type::Bool,
         "Null" => Type::Null,
+        "BOOLEAN" | "BOOL" => Type::Bool,
+        "INTEGER" | "INT" | "BIGINT" => Type::Int,
+        "FLOAT" => Type::Float,
+        "DECIMAL" => Type::Decimal,
+        "TEXT" => Type::Text,
+        "DATE" => Type::Date,
+        "TIMESTAMP" => Type::Instant,
+        "VOID" => Type::Null,
+        "UUID" => Type::Named("std.UUID".into()),
+        "TIME" => Type::Named("std.TIME".into()),
+        "DURATION" => Type::Named("std.DURATION".into()),
+        "BYTES" => Type::Named("std.BINARY_LARGE_OBJECT".into()),
+        "Action" => Type::Named("std.Action".into()),
+        "Rows" => Type::Named("std.Rows".into()),
+        "JsonValue" => Type::Named("std.JsonValue".into()),
+        "Document" => Type::Named("std.Document".into()),
+        "ByteStream" => Type::Named("std.ByteStream".into()),
+        "UI" => Type::Named("std.UI".into()),
         _ => return None,
     })
 }
