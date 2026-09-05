@@ -164,6 +164,17 @@ impl<'a, Item: 'a> Relation<'a, Item> {
     pub fn drop(self, count: usize) -> Self {
         Self::new(self.source.skip(count))
     }
+
+    /// Establishes a stable order by the derived key.
+    pub fn sort_by_key<Key, F>(self, mut key: F) -> Self
+    where
+        Key: Ord,
+        F: FnMut(&Item) -> Key + 'a,
+    {
+        let mut items = self.source.collect::<Vec<_>>();
+        items.sort_by_key(&mut key);
+        Self::new(items.into_iter())
+    }
 }
 
 impl<Item> Iterator for Relation<'_, Item> {
@@ -1166,6 +1177,14 @@ mod tests {
                 .take(2)
                 .collect::<Vec<_>>(),
             vec![(3, "THREE".into()), (4, "FOUR".into())]
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .sort_by_key(|(_, row)| *row)
+                .map(|(key, row)| (key, row))
+                .collect::<Vec<_>>(),
+            vec![(4, "four"), (1, "one"), (3, "three"), (2, "two")]
         );
 
         let mut activation = database.begin();
