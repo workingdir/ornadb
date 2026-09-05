@@ -1,0 +1,12 @@
+[package]
+name = "orna-execution-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded, fenced activation and stream commit coordination for Orna 1.0"
+publish = false
+
+[dependencies]
+orna-runtime-v1 = { path = "../orna-runtime-v1" }
+orna-stream-v1 = { path = "../orna-stream-v1" }
