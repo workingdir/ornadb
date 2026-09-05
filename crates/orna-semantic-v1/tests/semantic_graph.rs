@@ -282,6 +282,28 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
 }
 
 #[test]
+fn affine_collection_aggregates_preserve_absolute_values_and_reject_sum() {
+    let valid = analyze(&[
+        ModuleInput::new(
+            "maximum.orna",
+            "pub fn hottest(values: [Float<C>]) = values | max;",
+        ),
+        ModuleInput::new(
+            "average.orna",
+            "pub fn average_temperature(values: [Float<C>]) = values | mean;",
+        ),
+    ]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let invalid = analyze(&[ModuleInput::new(
+        "sum.orna",
+        "pub fn bad(values: [Float<C>]) = values | sum;",
+    )]);
+    assert!(has(&invalid, DIAG_TYPE));
+    assert!(!has(&invalid, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn inferred_function_summaries_propagate_through_project_calls_independent_of_input_order() {
     let result = analyze(&[
         ModuleInput::new(
