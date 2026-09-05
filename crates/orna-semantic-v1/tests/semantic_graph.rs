@@ -12,6 +12,37 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn stored_email_provider_is_typed_without_changing_connector_messages() {
+    let catalogue = Catalogue::authoritative_fixture();
+    for (source, expected) in [
+        (
+            "pub fn store() = mail.Email.insert({ provider: \"google\", id: \"message-1\" });",
+            None,
+        ),
+        (
+            "pub fn store() = mail.Email.insert({ provider: 42 });",
+            Some(DIAG_TYPE),
+        ),
+        (
+            "pub fn store() = mail.Email.insert({ unknown: \"google\" });",
+            Some(DIAG_TYPE),
+        ),
+        (
+            "pub fn read() = google.mail(credential: std.secret.ref(\"google.personal\")) | for_each(message => message.provider);",
+            Some(DIAG_UNRESOLVED),
+        ),
+    ] {
+        let result =
+            analyze_with_catalogue(&[ModuleInput::new("mail-client.orna", source)], &catalogue);
+        if let Some(expected) = expected {
+            assert!(has(&result, expected), "{:?}", result.diagnostics);
+        } else {
+            assert!(result.is_ok(), "{:?}", result.diagnostics);
+        }
+    }
+}
+
+#[test]
 fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
     let declaration = r#"pub table Person(id: Str) {
         name: Str,
