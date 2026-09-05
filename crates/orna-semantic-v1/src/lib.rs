@@ -2892,6 +2892,7 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
 fn intrinsic_value_type(name: &str) -> Option<Type> {
     match name {
         "now" => Some(function(Vec::new(), Type::Instant)),
+        "log" => Some(function(vec![Type::Text], Type::Null)),
         "half_even" => Some(Type::Named("std.Rounding".into())),
         _ => None,
     }
