@@ -4023,21 +4023,44 @@ fn infer_success_pipeline(
     };
     let mut effects = input.effects;
     if text == "bucket_by" && !is_stream {
-        let mut valid = arguments.len() == 2
-            && arguments[0].name.is_none()
-            && arguments[1].name.as_deref() == Some("zone");
+        let mut values = Vec::new();
         for argument in arguments {
             let value = infer(&argument.value, scope, local, diagnostics);
             effects.join(&value.effects);
-            if matches!(value.ty, Type::Error) {
-                valid = false;
-            }
+            values.push(value.ty);
         }
-        if !valid {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "bucket_by requires a duration and named zone",
-            ));
+        let row = match &element {
+            Type::Named(name) => scope.table_rows.get(name).unwrap_or(&element),
+            _ => &element,
+        };
+        let instant = row == &Type::Instant
+            || matches!(row, Type::Record(fields) if fields.get("time") == Some(&Type::Instant));
+        let positional_period = arguments
+            .first()
+            .is_some_and(|argument| argument.name.is_none());
+        let calendar = values
+            .first()
+            .and_then(numeric_unit)
+            .is_some_and(|unit| matches!(unit, "day" | "days"));
+        let elapsed = values
+            .first()
+            .is_some_and(|ty| ty == &Type::Named("std.DURATION".into()));
+        let zone = arguments.len() == 2
+            && arguments[1].name.as_deref() == Some("zone")
+            && values[1] == Type::Named("std.TimeZone".into());
+        let message = if !instant {
+            Some("bucket_by requires Instant values or rows with an Instant time field")
+        } else if !positional_period || !(calendar || elapsed) {
+            Some("bucket_by requires an elapsed Duration or calendar-day period")
+        } else if calendar && arguments.len() == 1 {
+            Some("calendar bucketing of Instant requires a time zone")
+        } else if !(zone || elapsed && arguments.len() == 1) {
+            Some("bucket_by requires a named TimeZone argument")
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            diagnostics.push(diag(DIAG_TYPE, message));
             return Inferred {
                 ty: Type::Error,
                 effects,
