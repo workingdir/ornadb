@@ -1173,6 +1173,11 @@ fn check_item(
             members,
             ..
         } => {
+            if name == "std" {
+                diagnostics.push(diag(DIAG_TYPE, "`std` is reserved"));
+            } else if name == "sys" {
+                diagnostics.push(diag(DIAG_TYPE, "`sys` is reserved"));
+            }
             for key in keys {
                 let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
                 if matches!(ty, Type::Float)
