@@ -169,6 +169,11 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         Relation::new(self.source.flat_map(mapper))
     }
 
+    /// Concatenates two relations, retaining the complete left sequence first.
+    pub fn union(self, other: Relation<'a, Item>) -> Self {
+        Self::new(self.source.chain(other.source))
+    }
+
     /// Takes a bounded prefix without enumerating later items.
     pub fn take(self, limit: usize) -> Self {
         Self::new(self.source.take(limit))
@@ -1287,6 +1292,15 @@ mod tests {
                 .flat_map(|(_, row)| row.chars())
                 .collect::<String>(),
             "onetwothreefour"
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .take(2)
+                .union(database.relation(&"notes").take(1))
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 1]
         );
 
         let mut activation = database.begin();
