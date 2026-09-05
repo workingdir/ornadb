@@ -815,6 +815,19 @@ impl Diagnostic {
     }
 }
 impl ResultBody {
+    /// Extracts the validated canonical body from a terminal `Result` envelope.
+    ///
+    /// This preserves the wire representation used by `RequestStatusResult`
+    /// without allowing callers to manufacture an unchecked body.
+    pub fn from_result(response: &Envelope, limits: Limits) -> Result<Self> {
+        let _ = response.encode(limits)?;
+        let Message::Result { .. } = &response.message else {
+            return Err(Error::InvalidMessage);
+        };
+        let body = response.message.body(&BTreeMap::new())?;
+        Self::decode(&body)
+    }
+
     fn decode(node: &Node) -> Result<Self> {
         let body = map(node).ok_or(Error::InvalidValue)?;
         let _ = Message::decode(18, Some([0; 16]), None, body)?;
@@ -1492,6 +1505,35 @@ mod tests {
             assert_eq!(message.encode(Limits::default()).unwrap(), bytes);
             assert!(canonical_request_fingerprint(id(9), &message, Limits::default()).is_ok());
         }
+    }
+
+    #[test]
+    fn result_body_extracts_only_a_bounded_canonical_result() {
+        let result = messages().into_iter().nth(10).unwrap();
+        let body = ResultBody::from_result(&result, Limits::default()).unwrap();
+        let status = Envelope {
+            request: Some(id(4)),
+            watch: None,
+            message: Message::RequestStatusResult {
+                target: id(1),
+                state: RequestState::Terminal,
+                fingerprint: Some(digest(1)),
+                result: Some(body),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_eq!(
+            Envelope::decode(
+                &status.encode(Limits::default()).unwrap(),
+                Limits::default()
+            )
+            .unwrap(),
+            status
+        );
+        assert_eq!(
+            ResultBody::from_result(&messages()[0], Limits::default()),
+            Err(Error::InvalidMessage)
+        );
     }
     #[test]
     fn request_fingerprint_omits_event_and_eval_redundant_fields() {
