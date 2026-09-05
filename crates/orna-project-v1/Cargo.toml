@@ -1,0 +1,16 @@
+[package]
+name = "orna-project-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded Git-worktree source loader for Orna 1.0 projects"
+
+[dependencies]
+orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-semantic-v1 = { path = "../orna-semantic-v1" }
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
+unicode-normalization = "=0.1.24"
+
+[dev-dependencies]
+tempfile = "3.23.0"
