@@ -40,11 +40,11 @@ fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_asserti
 }
 
 #[test]
-fn declaration_assertion_rejects_authoritative_std_net_effect() {
+fn table_assertion_rejects_authoritative_std_net_effect() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "consumer.orna",
-            "use std as std; assert std.net.connect(\"db.internal\") == true;",
+            "pub table User(id: Uuid) { name: Str, assert std.net.http.get(\"https://example.com\") == \"ok\"; }",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -56,7 +56,7 @@ fn declaration_assertion_rejects_authoritative_std_net_effect() {
 fn table_assertion_rejects_owner_type_mismatch() {
     let result = analyze(&[ModuleInput::new(
         "books.orna",
-        "table Book(id: Int) { assert 1; }",
+        "pub table User(id: Uuid) { name: Str, assert >= 0; }",
     )]);
 
     assert!(has(&result, DIAG_ASSERTION));
