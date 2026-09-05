@@ -166,6 +166,104 @@ fn source_call_arguments_evaluate_in_source_order() {
 }
 
 #[test]
+fn closures_capture_immutable_snapshots_and_support_nested_calls() {
+    for (source, expression, expected) in [
+        (
+            "fn make(seed: Int) = value => seed + value;",
+            "make(10)(5)",
+            15,
+        ),
+        (
+            "fn run() { let seed = 1; let read = () => seed; seed = 9; read() }",
+            "run()",
+            1,
+        ),
+        (
+            "fn run() { let seed = 1; let replace = seed => seed + 1; replace(10) }",
+            "run()",
+            11,
+        ),
+        ("fn make(a: Int) = b => c => a + b + c;", "make(1)(2)(3)", 6),
+        (
+            "fn run() { let seed = 1; let local = () => { let seed = 10; seed += 1; seed }; local() }",
+            "run()",
+            11,
+        ),
+        (
+            "fn run() { let seed = 1; let local = seed => { seed += 1; seed }; local(10) }",
+            "run()",
+            11,
+        ),
+    ] {
+        assert_eq!(
+            call_module(source, expression, Limits::default()).unwrap(),
+            Value::int(expected.into())
+        );
+    }
+    let source = "fn run() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }";
+    assert_eq!(
+        code(call_module(source, "run()", Limits::default())),
+        "ORNA-EVAL-IMMUTABLE-CAPTURE"
+    );
+}
+
+#[test]
+fn function_values_pass_through_locals_arguments_and_collections() {
+    let source = "fn increment(value: Int) = value + 1; fn apply(operation, value: Int) = operation(value); fn run() { let choices = [increment, value => value * 2]; apply(choices[0], 20) + apply(choices[1], 10) }";
+    assert_eq!(
+        call_module(source, "run()", Limits::default()).unwrap(),
+        Value::int(41.into())
+    );
+    assert_eq!(evaluate("(value => value)(2)"), Value::int(2.into()));
+    assert_eq!(evaluate("((a, b) => a + b)(1, 2)"), Value::int(3.into()));
+}
+
+#[test]
+fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
+    assert_eq!(evaluate("10 | (value => value + 2)"), Value::int(12.into()));
+    assert_eq!(
+        evaluate("(10 | (value => value + 2)) | (value => value * 2)"),
+        Value::int(24.into())
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "((value => value)(1))",
+            &Environment::new(),
+            Limits {
+                max_steps: 2,
+                ..Limits::default()
+            }
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    for expression in ["(a => a)(1, 2)", "(() => 1)(2)"] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-ARGUMENT"
+        );
+    }
+    for expression in [
+        "value => value",
+        "[value => value]",
+        "{ callback: value => value }",
+        "(value => value) == (value => value)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-UNSUPPORTED"
+        );
+    }
+}
+
+#[test]
 fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
     let source =
         "fn add(value: Int, extra = 6) = value + extra; fn double(value: Int) = value * 2;";
@@ -659,7 +757,7 @@ fn rejects_fail_closed_cases_with_redacted_stable_diagnostics() {
         ("case 1 { Unknown.value: 1, _: 0 }", "ORNA-EVAL-UNSUPPORTED"),
         ("case 1 { Other(inside): inside }", "ORNA-EVAL-UNSUPPORTED"),
         ("\"value: {1}\"", "ORNA-EVAL-TYPE"),
-        ("(value => value)(2)", "ORNA-EVAL-UNSUPPORTED"),
+        ("(value => value)", "ORNA-EVAL-UNSUPPORTED"),
         ("{ let x = 1; x = 2; x }", "ORNA-EVAL-PARSE"),
         ("fn x() = 1", "ORNA-EVAL-PARSE"),
         ("2026-09-05", "ORNA-EVAL-UNSUPPORTED"),
