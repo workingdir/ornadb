@@ -6,8 +6,3 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "In-memory transactional table primitive for Orna 1.0"
 publish = false
-
-# This crate is deliberately standalone until a later integration slice adds it
-# to the parent workspace.  Keeping that integration out of this change makes
-# the transaction primitive independently testable without changing manifests.
-[workspace]
