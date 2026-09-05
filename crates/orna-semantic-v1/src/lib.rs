@@ -158,10 +158,28 @@ pub struct Symbol {
     pub table_schema: Option<TableSchema>,
 }
 
+impl Symbol {
+    fn table_fields(&self) -> Option<&BTreeMap<String, Type>> {
+        self.table_schema
+            .as_ref()
+            .map(|schema| &schema.fields)
+            .or(match &self.ty {
+                Type::Record(fields) => Some(fields),
+                _ => None,
+            })
+    }
+}
+
 /// Static field shape and insertion rules; defaults are not evaluated here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableSchema {
     pub fields: BTreeMap<String, Type>,
+    /// None preserves a shape-only catalogue without inventing declaration rules.
+    pub admission: Option<TableAdmission>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableAdmission {
     pub required: BTreeSet<String>,
     pub computed: BTreeSet<String>,
     /// Ordered explicit key columns, or the implicit automatic id column.
@@ -770,7 +788,20 @@ fn fixture_module<I>(namespace: Namespace, symbols: I, implicit: bool) -> Module
 where
     I: IntoIterator<Item = (String, Symbol)>,
 {
-    let symbols = symbols.into_iter().collect::<BTreeMap<_, _>>();
+    let symbols = symbols
+        .into_iter()
+        .map(|(name, mut symbol)| {
+            if symbol.kind == SymbolKind::Table {
+                let prefix = namespace.display();
+                symbol.ty = Type::Named(if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}.{name}")
+                });
+            }
+            (name, symbol)
+        })
+        .collect::<BTreeMap<_, _>>();
     ModuleHeader {
         namespace,
         exports: symbols.clone(),
@@ -795,7 +826,14 @@ fn fixture_function(name: &str, ty: Type) -> (String, Symbol) {
 }
 
 fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
-    (name.into(), fixture_symbol(SymbolKind::Table, row))
+    let mut symbol = fixture_symbol(SymbolKind::Table, Type::Named(name.into()));
+    if let Type::Record(fields) = row {
+        symbol.table_schema = Some(TableSchema {
+            fields,
+            admission: None,
+        });
+    }
+    (name.into(), symbol)
 }
 
 fn fixture_type(name: &str, ty: Type) -> (String, Symbol) {
@@ -1350,7 +1388,7 @@ fn resolve_imports(
             .entry(name.clone())
             .or_insert_with(|| symbol.clone());
         if symbol.kind == SymbolKind::Table
-            && let Type::Record(row) = &symbol.ty
+            && let Some(row) = symbol.table_fields()
         {
             scope
                 .table_rows
@@ -1364,7 +1402,7 @@ fn resolve_imports(
             if symbol.kind != SymbolKind::Table {
                 continue;
             }
-            let Type::Record(row) = &symbol.ty else {
+            let Some(row) = symbol.table_fields() else {
                 continue;
             };
             let table_name = if prefix.is_empty() {
@@ -4323,7 +4361,11 @@ fn infer_table_operation(
         return None;
     };
     let table = table_symbol(base, scope, local)?;
-    let automatic_key = table.table_schema.as_ref().map_or_else(
+    let admission = table
+        .table_schema
+        .as_ref()
+        .and_then(|schema| schema.admission.as_ref());
+    let automatic_key = admission.map_or_else(
         || matches!(&table.ty, Type::Named(table_name) if scope.auto_key_tables.contains(table_name)),
         |schema| schema.automatic_key,
     );
@@ -4361,18 +4403,14 @@ fn infer_table_operation(
         effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
         may_fail: true,
     };
-    let row = table
-        .table_schema
-        .as_ref()
-        .map(|schema| &schema.fields)
-        .or_else(|| match &table.ty {
-            Type::Record(fields) => Some(fields),
-            Type::Named(table_name) => match scope.table_rows.get(table_name) {
-                Some(Type::Record(fields)) => Some(fields),
-                _ => None,
-            },
+    let row = table.table_fields().or_else(|| match &table.ty {
+        Type::Record(fields) => Some(fields),
+        Type::Named(table_name) => match scope.table_rows.get(table_name) {
+            Some(Type::Record(fields)) => Some(fields),
             _ => None,
-        });
+        },
+        _ => None,
+    });
     for (index, argument) in arguments.iter().enumerate() {
         let insertion = matches!(name.as_str(), "insert" | "upsert");
         let update = name == "update" && index == 1;
@@ -4382,7 +4420,7 @@ fn infer_table_operation(
             row.map(|fields| {
                 let inferred =
                     infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
-                if let Some(schema) = &table.table_schema
+                if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
                     if insertion {
@@ -4422,7 +4460,7 @@ fn infer_table_operation(
                 inferred
             })
             .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
-        } else if key_argument && let Some(schema) = &table.table_schema {
+        } else if key_argument && let Some(schema) = admission {
             let expected = match schema.keys.as_slice() {
                 [(_, ty)] => ty.clone(),
                 keys => Type::Tuple(keys.iter().map(|(_, ty)| ty.clone()).collect()),
@@ -4584,14 +4622,14 @@ fn infer_table_projection(
         return None;
     };
     let table = table_symbol(base, scope, local)?;
-    let fields = match &table.ty {
-        Type::Record(fields) => fields,
+    let fields = table.table_fields().or_else(|| match &table.ty {
+        Type::Record(fields) => Some(fields),
         Type::Named(table_name) => match scope.table_rows.get(table_name)? {
-            Type::Record(fields) => fields,
-            _ => return None,
+            Type::Record(fields) => Some(fields),
+            _ => None,
         },
-        _ => return None,
-    };
+        _ => None,
+    })?;
     let field = fields.get(name)?.clone();
     Some(Inferred {
         ty: function(vec![table.ty.clone()], field),
@@ -5438,22 +5476,24 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
     }
     Some(TableSchema {
         fields,
-        required,
-        computed,
-        keys: if keys.is_empty() {
-            vec![("id".into(), Type::Int)]
-        } else {
-            keys.iter()
-                .filter_map(|key| match &key.pattern {
-                    Pattern::Name(name, _) => Some((
-                        name.clone(),
-                        key.annotation.as_ref().map(type_of).unwrap_or(Type::Error),
-                    )),
-                    _ => None,
-                })
-                .collect()
-        },
-        automatic_key: keys.is_empty(),
+        admission: Some(TableAdmission {
+            required,
+            computed,
+            keys: if keys.is_empty() {
+                vec![("id".into(), Type::Int)]
+            } else {
+                keys.iter()
+                    .filter_map(|key| match &key.pattern {
+                        Pattern::Name(name, _) => Some((
+                            name.clone(),
+                            key.annotation.as_ref().map(type_of).unwrap_or(Type::Error),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            },
+            automatic_key: keys.is_empty(),
+        }),
     })
 }
 
@@ -5760,6 +5800,19 @@ mod tests {
         let json = serde_json::to_string(&a.diagnostics[0]).unwrap();
         assert!(!json.contains("secret.orna"));
         assert!(!json.contains("missing"));
+    }
+
+    #[test]
+    fn shape_only_catalogue_does_not_invent_table_admission_rules() {
+        let catalogue = Catalogue::authoritative_fixture();
+        let order = &catalogue.attached_symbols["Order"];
+        assert_eq!(order.ty, Type::Named("Order".into()));
+        let schema = order.table_schema.as_ref().unwrap();
+        assert!(schema.fields.contains_key("customer"));
+        assert!(schema.admission.is_none());
+        let contact = &catalogue.modules[&Namespace(vec!["contacts".into()])].exports["Contact"];
+        assert_eq!(contact.ty, Type::Named("contacts.Contact".into()));
+        assert!(contact.table_schema.as_ref().unwrap().admission.is_none());
     }
 
     #[test]
