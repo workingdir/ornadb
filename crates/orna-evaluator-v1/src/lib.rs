@@ -94,12 +94,23 @@ pub fn evaluate_expression(
     environment: &Environment,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_expression_with_functions(source, environment, &Functions::new(), limits)
+}
+
+/// Evaluate source against explicit values and pure functions, checking source
+/// limits before parsing. No module or host lookup is performed.
+pub fn evaluate_expression_with_functions(
+    source: &str,
+    environment: &Environment,
+    functions: &Functions,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
     check_limits(source, limits)?;
     let parsed = parse_expression(source);
     if !parsed.is_ok() {
         return Err(error("ORNA-EVAL-PARSE"));
     }
-    evaluate_parsed(&parsed.value, environment, limits)
+    evaluate_with_functions(&parsed.value, environment, functions, limits)
 }
 
 /// Evaluate a REPL expression using [`parse_repl`]. REPL declarations are

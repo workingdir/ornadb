@@ -68,6 +68,43 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
 }
 
 #[test]
+fn source_namespace_entry_checks_values_and_limits_before_parsing() {
+    let functions = functions_from_source("fn increment(value: Int) = value + 1;");
+    let environment = Environment::from([("input".into(), Value::int(41.into()))]);
+    assert_eq!(
+        orna_evaluator_v1::evaluate_expression_with_functions(
+            "input | increment",
+            &environment,
+            &functions,
+            Limits::default()
+        )
+        .unwrap(),
+        Value::int(42.into())
+    );
+    let failure = orna_evaluator_v1::evaluate_expression_with_functions(
+        "invalid(",
+        &environment,
+        &functions,
+        Limits {
+            max_source_bytes: 2,
+            ..Limits::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
+    assert_eq!(failure.diagnostic().message(), "<redacted>");
+    assert_eq!(
+        code(orna_evaluator_v1::evaluate_expression_with_functions(
+            "invalid(",
+            &environment,
+            &functions,
+            Limits::default()
+        )),
+        "ORNA-EVAL-PARSE"
+    );
+}
+
+#[test]
 fn host_invocation_uses_the_same_named_function_namespace() {
     let functions = functions_from_source(
         "fn helper(value: Int) = value + 1; fn entry(value = helper(40)) = helper(value);",
