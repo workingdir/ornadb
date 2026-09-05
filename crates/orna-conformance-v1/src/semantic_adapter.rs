@@ -242,6 +242,74 @@ pub struct BoundedEvaluator {
 }
 
 impl BoundedEvaluator {
+    fn check_scenario_expression(
+        &self,
+        source: &str,
+        environment: &Environment,
+        expected: &Value,
+    ) -> StageOutcome<Diagnostic> {
+        match evaluate_expression_with_functions(source, environment, &self.functions, self.limits)
+        {
+            Ok(actual) if &actual == expected => StageOutcome::Passed,
+            Ok(_) => scenario_mismatch(),
+            Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
+        }
+    }
+
+    fn run_pipeline_precedence(&self) -> StageOutcome<Diagnostic> {
+        let mut runtime = Self::new(self.limits);
+        let module = SourceUnit {
+            fixture_id: "PIPE-002".into(), source_id: "precedence.orna".into(), parse_as: "module_unit".into(),
+            // Ordinary helper definitions isolate precedence from a claim of
+            // integrated standard-library execution.
+            source: "fn square(value: Int) = value * value; fn count(values: [Int]) { let total = 0; for item in values { total += 1; }; total }".into(),
+        };
+        match runtime.evaluate_module(&module) {
+            StageOutcome::Passed => {}
+            outcome => return outcome,
+        }
+        for length in [0, 3] {
+            let environment = Environment::from([(
+                "values".into(),
+                Value::new(OvbRaw::Array(
+                    (0..length).map(|value| OvbRaw::Int(value.into())).collect(),
+                ))
+                .expect("canonical values"),
+            )]);
+            for (source, outer, left_operator, expected) in [
+                ("1 + 2 | square", "|", "+", OvbRaw::Int(9.into())),
+                ("values | count > 0", ">", "|", OvbRaw::Bool(length > 0)),
+                (
+                    "(values | count) + 1",
+                    "+",
+                    "|",
+                    OvbRaw::Int((length + 1).into()),
+                ),
+            ] {
+                let parsed = parse_expression(source);
+                let shape = match &parsed.value {
+                    Expr::Binary { lhs, op, .. } if op == outer => {
+                        let lhs = match lhs.as_ref() {
+                            Expr::Group { inner, .. } => inner.as_ref(),
+                            lhs => lhs,
+                        };
+                        matches!(lhs, Expr::Binary { op, .. } if op == left_operator)
+                    }
+                    _ => false,
+                };
+                if !parsed.is_ok() || !shape {
+                    return scenario_mismatch();
+                }
+                let expected = Value::new(expected).expect("canonical expected result");
+                match runtime.check_scenario_expression(source, &environment, &expected) {
+                    StageOutcome::Passed => {}
+                    outcome => return outcome,
+                }
+            }
+        }
+        StageOutcome::Passed
+    }
+
     fn run_pipeline_insertion(&self) -> StageOutcome<Diagnostic> {
         let mut runtime = Self::new(self.limits);
         let module = SourceUnit {
@@ -287,15 +355,9 @@ impl BoundedEvaluator {
                 "between(value, 10, 20)",
                 "value | between(low: 10, high: 20)",
             ] {
-                match evaluate_expression_with_functions(
-                    expression,
-                    &environment,
-                    &runtime.functions,
-                    self.limits,
-                ) {
-                    Ok(actual) if actual == expected => {}
-                    Ok(_) => return scenario_mismatch(),
-                    Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+                match runtime.check_scenario_expression(expression, &environment, &expected) {
+                    StageOutcome::Passed => {}
+                    outcome => return outcome,
                 }
             }
         }
@@ -303,6 +365,7 @@ impl BoundedEvaluator {
     }
 
     fn run_let_rebinding(&self) -> StageOutcome<Diagnostic> {
+        let runtime = Self::new(self.limits);
         let expected = Value::new(OvbRaw::Array(vec![
             OvbRaw::Int(2.into()),
             OvbRaw::Int(1.into()),
@@ -316,15 +379,9 @@ impl BoundedEvaluator {
             "if true { let slot = { value: 1 }; let captured = slot; let snapshot = () => slot; slot = { value: 2 }; [slot.value, captured.value, snapshot().value] } else { [0, 0, 0] }",
             "if true { let slot = [1]; let captured = slot; let snapshot = () => slot; slot = [2]; [slot[0], captured[0], snapshot()[0]] } else { [0, 0, 0] }",
         ] {
-            match evaluate_expression_with_functions(
-                source,
-                &Environment::new(),
-                &BTreeMap::new(),
-                self.limits,
-            ) {
-                Ok(actual) if actual == expected => {}
-                Ok(_) => return scenario_mismatch(),
-                Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+            match runtime.check_scenario_expression(source, &Environment::new(), &expected) {
+                StageOutcome::Passed => {}
+                outcome => return outcome,
             }
         }
         let parsed = parse_module("fn sample() { var slot = 1; slot }");
@@ -534,10 +591,27 @@ impl RuntimeEvaluator for BoundedEvaluator {
         if pipeline_insertion_contract(scenario) {
             return self.run_pipeline_insertion();
         }
+        if pipeline_precedence_contract(scenario) {
+            return self.run_pipeline_precedence();
+        }
         StageOutcome::Skipped {
             reason: "scenario has no implemented execution contract in the bounded runtime".into(),
         }
     }
+}
+
+fn pipeline_precedence_contract(scenario: &Scenario) -> bool {
+    scenario.id == "PIPE-002"
+        && scenario.title == "Pipeline precedence is stable"
+        && scenario.given == ["`1 + 2 | square`, `values | count > 0`, and `(values | count) + 1`"]
+        && scenario.when == ["parse and evaluate"]
+        && scenario.then
+            == [
+                "arithmetic binds above the pipe",
+                "comparison binds below the pipe",
+                "parentheses allow arithmetic on a pipeline result",
+            ]
+        && scenario.requirements == ["ORNA-OP-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
 }
 
 fn pipeline_insertion_contract(scenario: &Scenario) -> bool {
