@@ -1,7 +1,7 @@
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE,
-    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, Type, analyze,
-    analyze_with_catalogue,
+    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
+    DIAG_ASSERTION_SCOPE, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput,
+    Type, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -466,6 +466,24 @@ fn distinct_nominal_types_require_named_conversions() {
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
             == "implicit conversion chains are not searched; name each conversion explicitly"
+    }));
+}
+
+#[test]
+fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
+    let one_table = analyze(&[ModuleInput::new(
+        "one.orna",
+        "pub table User(id: Uuid) { name: Str, } assert every(User, user => user.name != \"\");",
+    )]);
+    assert!(has(&one_table, DIAG_ASSERTION_ONE_TABLE));
+    assert!(one_table.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "a one-table invariant belongs inside that table"
+    }));
+
+    let zero_table = analyze(&[ModuleInput::new("zero.orna", "assert 1 + 1 == 2;")]);
+    assert!(has(&zero_table, DIAG_ASSERTION_SCOPE));
+    assert!(zero_table.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "module assertions must depend on at least two distinct tables"
     }));
 }
 

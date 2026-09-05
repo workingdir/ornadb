@@ -28,6 +28,7 @@ pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
 pub const DIAG_UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 pub const DIAG_ASSERTION: &str = "ORNA-A091-004";
+pub const DIAG_ASSERTION_ONE_TABLE: &str = "ORNA-A091-003";
 pub const DIAG_ASSERTION_SCOPE: &str = "ORNA-A091-012";
 pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 
@@ -3691,11 +3692,18 @@ fn assertion(
             "assertion has forbidden effects or failure",
         ));
     }
-    if matches!(owner, AssertionOwner::Module) && dependencies.len() < 2 {
-        diagnostics.push(diag(
-            DIAG_ASSERTION_SCOPE,
-            "module assertion needs at least two table dependencies",
-        ));
+    if matches!(owner, AssertionOwner::Module) {
+        match dependencies.len() {
+            0 => diagnostics.push(diag(
+                DIAG_ASSERTION_SCOPE,
+                "module assertions must depend on at least two distinct tables",
+            )),
+            1 => diagnostics.push(diag(
+                DIAG_ASSERTION_ONE_TABLE,
+                "a one-table invariant belongs inside that table",
+            )),
+            _ => {}
+        }
     }
     plans.push(AssertionPlan {
         owner,
