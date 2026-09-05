@@ -242,6 +242,26 @@ impl Catalogue {
             ),
         );
         modules.insert(
+            Namespace(vec!["std".into(), "text".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "text".into()]),
+                [
+                    (
+                        "slug",
+                        named_function(vec![("value", Type::Text)], Type::Text),
+                    ),
+                    (
+                        "disambiguate",
+                        named_function(
+                            vec![("value", Type::Text), ("keys", Type::Error)],
+                            Type::Text,
+                        ),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
             Namespace(vec!["std".into(), "invoke".into()]),
             catalogue_module(
                 Namespace(vec!["std".into(), "invoke".into()]),
