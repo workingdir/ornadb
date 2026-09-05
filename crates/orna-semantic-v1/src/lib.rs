@@ -500,7 +500,13 @@ impl Catalogue {
         ]));
         let reading = Type::Record(BTreeMap::from([
             ("rpm".into(), Type::Int),
-            ("speed".into(), Type::Float),
+            (
+                "speed".into(),
+                Type::Applied {
+                    base: "Float".into(),
+                    arguments: vec![Type::Named("mph".into())],
+                },
+            ),
             ("time".into(), Type::Instant),
         ]));
         let message = Type::Record(BTreeMap::from([
@@ -4376,11 +4382,25 @@ fn infer_table_row_input(
     if let Type::Record(actual) = &inferred.ty {
         for (name, actual) in actual {
             match fields.get(name) {
-                None => diagnostics.push(diag(DIAG_TYPE, "table write contains an unknown field")),
+                None => diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!(
+                        "table write contains an unknown field `{}`",
+                        if diagnostic_identifier(name) {
+                            name.as_str()
+                        } else {
+                            "<field>"
+                        }
+                    ),
+                )),
                 Some(expected) if !types_match(expected, actual) => {
                     diagnostics.push(diag(
                         DIAG_TYPE,
-                        "table write field has an incompatible type",
+                        format!(
+                            "table write field has an incompatible type: expected {}, found {}",
+                            diagnostic_type_name(expected),
+                            diagnostic_type_name(actual),
+                        ),
                     ));
                 }
                 _ => {}
@@ -4390,6 +4410,42 @@ fn infer_table_row_input(
         diagnostics.push(diag(DIAG_TYPE, "table write requires a record"));
     }
     inferred
+}
+
+/// Describe static types without serializing values or caller-supplied paths.
+fn diagnostic_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Decimal => "Decimal".into(),
+        Type::Float => "Float".into(),
+        Type::Date => "Date".into(),
+        Type::Instant => "Instant".into(),
+        Type::Text => "Str".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::List(element) => format!("[{}]", diagnostic_type_name(element)),
+        Type::Optional(element) => format!("{}?", diagnostic_type_name(element)),
+        Type::Named(name) if diagnostic_identifier(name) => name.clone(),
+        Type::Applied { base, arguments } if diagnostic_identifier(base) => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(diagnostic_type_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => "<type>".into(),
+    }
+}
+
+fn diagnostic_identifier(name: &str) -> bool {
+    name.split('.').all(|part| {
+        let mut chars = part.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 fn table_symbol<'a>(
@@ -5556,5 +5612,20 @@ mod tests {
         let json = serde_json::to_string(&a.diagnostics[0]).unwrap();
         assert!(!json.contains("secret.orna"));
         assert!(!json.contains("missing"));
+    }
+
+    #[test]
+    fn type_diagnostics_do_not_serialize_non_identifier_catalogue_names() {
+        assert_eq!(
+            diagnostic_type_name(&Type::Named("bad/type".into())),
+            "<type>"
+        );
+        assert_eq!(
+            diagnostic_type_name(&Type::Applied {
+                base: "Float".into(),
+                arguments: vec![Type::Named("bad/type".into())],
+            }),
+            "Float<<type>>"
+        );
     }
 }
