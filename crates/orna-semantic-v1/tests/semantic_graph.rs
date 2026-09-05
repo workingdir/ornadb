@@ -187,6 +187,19 @@ fn authoritative_core_catalogue_resolves_prelude_types_and_common_functions() {
 }
 
 #[test]
+fn authoritative_core_resolves_text_key_helpers() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "keys.orna",
+            "use std.text.{slug, disambiguate}; fn key(name: Str, keys: JsonValue): Str = disambiguate(slug(name), keys);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
     let profile = Catalogue::authoritative_core();
     let result = analyze_with_catalogue(
