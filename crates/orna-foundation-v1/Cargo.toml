@@ -1,0 +1,22 @@
+[package]
+name = "orna-foundation-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Shared Orna 1.0 source, diagnostic, value, and repository contracts"
+
+# This integration boundary remains independently buildable until the owning
+# integration work adopts it into the top-level workspace.
+[workspace]
+
+[dependencies]
+num-bigint = "0.4.6"
+orna-value-v1 = { path = "../orna-value-v1" }
+serde = "1.0"
+
+[dev-dependencies]
+orna-conformance-v1 = { path = "../orna-conformance-v1" }
+orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
+serde_json = "1.0"
