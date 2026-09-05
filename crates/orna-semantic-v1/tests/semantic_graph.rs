@@ -12,6 +12,80 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn table_insert_and_upsert_validate_provided_fields() {
+    let attached = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "rows.orna",
+            "pub fn bad() = Contact.insert({ name: \"Alice\", banana: 42 });",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(!attached.is_ok());
+    assert!(
+        attached
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message() == "table write contains an unknown field"),
+        "{:?}",
+        attached.diagnostics
+    );
+    for operation in ["insert", "upsert"] {
+        for (value, expected) in [
+            (r#"{ id: "a", speed: 1.5, tags: [] }"#, None),
+            (
+                r#"{ id: "a", banana: 42 }"#,
+                Some("table write contains an unknown field"),
+            ),
+            (
+                r#"{ id: "a", speed: "fast" }"#,
+                Some("table write field has an incompatible type"),
+            ),
+            (
+                r#"{ id: 42 }"#,
+                Some("table write field has an incompatible type"),
+            ),
+            ("42", Some("table write requires a record")),
+        ] {
+            let result = analyze(&[ModuleInput::new(
+                "rows.orna",
+                format!(
+                    "table Reading(id: Str) {{ speed: Float, tags: [Str], }} fn write() = Reading.{operation}({value});"
+                ),
+            )]);
+            if let Some(expected) = expected {
+                assert!(
+                    result
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.message() == expected),
+                    "{operation} {value}: {:?}",
+                    result.diagnostics
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "{operation} {value}: {:?}",
+                    result.diagnostics
+                );
+            }
+        }
+    }
+    for value in [
+        r#"{ id: "a", banana: 42 }"#,
+        r#"{ id: "a", speed: "fast" }"#,
+        r#"{ tags: [42] }"#,
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "rows.orna",
+            format!(
+                "table Reading(id: Str) {{ speed: Float, tags: [Str], }} fn write() {{ let row = {value}; Reading.insert(row); }}"
+            ),
+        )]);
+        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+    }
+}
+
+#[test]
 fn closure_lists_do_not_erase_incompatible_return_types() {
     for source in [
         "pub fn values() = [() => 1, () => true];",
