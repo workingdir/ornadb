@@ -4003,6 +4003,13 @@ fn infer_success_pipeline(
         ("one", false, [_]) => (element.clone(), Some(Type::Bool)),
         ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
         ("count", false, []) => (Type::Int, None),
+        ("pairs", false, []) => (
+            Type::Relation(Box::new(Type::Tuple(vec![
+                element.clone(),
+                element.clone(),
+            ]))),
+            None,
+        ),
         ("for_each", true, [_]) => (Type::Null, Some(Type::Error)),
         ("bucket_by", false, _) => (Type::Relation(Box::new(element.clone())), None),
         _ => {
