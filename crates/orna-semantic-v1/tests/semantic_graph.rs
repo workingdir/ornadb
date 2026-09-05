@@ -286,7 +286,7 @@ fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_argume
         pub fn square_sum(a: Int, b: Int) = a + b | square;
         pub fn increment_count(values: [Int]) = (values | count) + 1;
     "#;
-    let precedence_source = format!("pub fn count(values: [Int]): Int = 0;\n{pipeline_precedence}");
+    let precedence_source = pipeline_precedence.to_owned();
 
     let result = analyze(&[
         ModuleInput::new("pipe-first-argument.orna", pipe_first_argument),
