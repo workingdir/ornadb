@@ -61,6 +61,25 @@ fn uses_environment_and_short_circuiting_deterministically() {
 }
 
 #[test]
+fn coalesces_present_and_missing_optional_values_without_evaluating_dead_rhs() {
+    let mut environment = Environment::from([(
+        "present".into(),
+        Value::option(Some(Value::int(7.into()))).unwrap(),
+    )]);
+    assert_eq!(
+        evaluate_expression("present ?? missing", &environment, Limits::default()).unwrap(),
+        Value::int(7.into())
+    );
+
+    environment.insert("missing".into(), Value::option(None).unwrap());
+    assert_eq!(
+        evaluate_expression("missing ?? 9", &environment, Limits::default()).unwrap(),
+        Value::int(9.into())
+    );
+    assert_eq!(evaluate("null ?? 11"), Value::int(11.into()));
+}
+
+#[test]
 fn supports_comparison_boolean_and_allowlisted_math() {
     assert_eq!(
         evaluate(
