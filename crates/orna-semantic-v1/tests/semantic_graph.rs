@@ -1,6 +1,6 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE,
-    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, analyze, analyze_with_catalogue,
+    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -278,4 +278,68 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
     )]);
 
     assert!(has(&result, DIAG_TYPE));
+}
+
+#[test]
+fn inferred_function_summaries_propagate_through_project_calls_independent_of_input_order() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use sensors; pub fn run() { sensors.ingest(); }",
+        ),
+        ModuleInput::new(
+            "sensors.orna",
+            r#"
+                pub type Sample {
+                    pub sensor: Str,
+                    pub sequence: Int,
+                    pub value: Decimal,
+                }
+                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+                pub fn input() = Stream.from_list([
+                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+                ], source_identity: "example:sensors:v1");
+                pub fn ingest() {
+                    input() | for_each(sample => {
+                        Reading.insert({
+                            sensor: sample.sensor,
+                            sequence: sample.sequence,
+                            value: sample.value,
+                        });
+                    });
+                }
+            "#,
+        ),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let sensors = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "sensors")
+        .unwrap();
+    assert!(matches!(
+        &sensors.symbols["input"].ty,
+        Type::Function { result, .. } if matches!(result.as_ref(), Type::Stream(_))
+    ));
+    assert!(
+        sensors.symbols["ingest"]
+            .effects
+            .effects
+            .contains("database write")
+    );
+    assert!(sensors.symbols["ingest"].effects.may_fail);
+
+    let main = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display().is_empty())
+        .unwrap();
+    assert!(
+        main.symbols["run"]
+            .effects
+            .effects
+            .contains("database write")
+    );
+    assert!(main.symbols["run"].effects.may_fail);
 }
