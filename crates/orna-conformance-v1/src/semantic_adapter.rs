@@ -31,6 +31,9 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
             "ORNA091-E-CURRENCY-SYMBOL".into()
         }
         "binary Float cannot enter an exact Money calculation implicitly" => "E5103".into(),
+        message if message.starts_with("system rows are read-only; use `sys.admin.") => {
+            "ORNA100-E-SYS-ADMIN-METHOD".into()
+        }
         "Float is not a valid primary-key type" => "E3003".into(),
         _ => diagnostic.code().into(),
     }
