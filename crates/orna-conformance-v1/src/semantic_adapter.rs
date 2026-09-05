@@ -34,19 +34,28 @@ impl SemanticAdapter {
     fn analyze_units(
         &self,
         units: impl IntoIterator<Item = SourceUnit>,
+        phase: SemanticPhase,
     ) -> StageOutcome<Diagnostic> {
         let inputs = units
             .into_iter()
             .map(|unit| ModuleInput::new(unit.source_id, unit.source))
             .collect::<Vec<_>>();
         let analysis = analyze_with_catalogue(&inputs, &self.catalogue);
-        match analysis.diagnostics.into_iter().next() {
+        match analysis
+            .diagnostics
+            .into_iter()
+            .find(|diagnostic| phase.accepts(diagnostic.code()))
+        {
             Some(diagnostic) => StageOutcome::Failed(diagnostic.redacted()),
             None => StageOutcome::Passed,
         }
     }
 
-    fn analyze_project(&self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+    fn analyze_project(
+        &self,
+        project: &ProjectUnit,
+        phase: SemanticPhase,
+    ) -> StageOutcome<Diagnostic> {
         let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
         let units = project.modules.iter().map(|unit| {
             let logical_path = unit
@@ -59,11 +68,43 @@ impl SemanticAdapter {
                 ..unit.clone()
             }
         });
-        self.analyze_units(units)
+        self.analyze_units(units, phase)
     }
     fn unsupported_runtime() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
             reason: "orna-runtime-v1 supplies durable runtime state only; it has no source evaluator or scenario invocation contract".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SemanticPhase {
+    Resolve,
+    Typecheck,
+}
+
+impl SemanticPhase {
+    fn accepts(self, code: &str) -> bool {
+        match self {
+            Self::Resolve => matches!(
+                code,
+                "ORNA-S001-PATH"
+                    | "ORNA-S002-NAMESPACE"
+                    | "ORNA-S003-RESERVED"
+                    | "ORNA-S010-IMPORT"
+                    | "ORNA-S011-AMBIGUOUS"
+                    | "ORNA-S012-UNRESOLVED"
+                    | "ORNA-S013-DUPLICATE"
+            ),
+            Self::Typecheck => matches!(
+                code,
+                "ORNA-S020-ANNOTATION"
+                    | "ORNA-S021-TYPE"
+                    | "ORNA-S022-UNSUPPORTED"
+                    | "ORNA-A091-004"
+                    | "ORNA-A091-007"
+                    | "ORNA-A091-012"
+            ),
         }
     }
 }
@@ -80,10 +121,10 @@ impl ConformanceAdapter for SemanticAdapter {
         self.syntax.parse(unit)
     }
     fn resolve(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_units([unit.clone()])
+        self.analyze_units([unit.clone()], SemanticPhase::Resolve)
     }
     fn typecheck(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_units([unit.clone()])
+        self.analyze_units([unit.clone()], SemanticPhase::Typecheck)
     }
     fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
@@ -98,10 +139,10 @@ impl ConformanceAdapter for SemanticAdapter {
         StageOutcome::Passed
     }
     fn resolve_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_project(project)
+        self.analyze_project(project, SemanticPhase::Resolve)
     }
     fn typecheck_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_project(project)
+        self.analyze_project(project, SemanticPhase::Typecheck)
     }
     fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
