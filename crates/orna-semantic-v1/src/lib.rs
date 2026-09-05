@@ -3836,6 +3836,13 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 may_fail: true,
             },
         },
+        ["sys", "snapshot"] => Inferred {
+            ty: function(vec![Type::Text], Type::Named("sys.SnapshotRef".into())),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
         ["sys", "catalog", "definitions"] => Inferred {
             ty: Type::Relation(Box::new(Type::Named("sys.Definition".into()))),
             effects: EffectSummary {

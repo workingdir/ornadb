@@ -172,6 +172,16 @@ fn system_dependency_queries_use_object_references() {
 }
 
 #[test]
+fn system_snapshot_selectors_accept_revision_strings() {
+    let result = analyze(&[ModuleInput::new(
+        "historical-query.orna",
+        "pub fn before_change() = sys.snapshot(\"HEAD~3\");",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
