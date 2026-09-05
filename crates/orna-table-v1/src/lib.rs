@@ -28,6 +28,26 @@ where
         }
     }
 
+    /// Runs one activation and publishes its overlay only when the operation
+    /// succeeds. Returned errors roll the overlay back; a panic also leaves
+    /// the committed relation untouched because publication happens last.
+    pub fn activate<T, E, F>(&mut self, operation: F) -> Result<T, ActivationError<E>>
+    where
+        F: FnOnce(&mut Activation<'_, Key, Row>) -> Result<T, E>,
+    {
+        let mut activation = self.begin();
+        match operation(&mut activation) {
+            Ok(value) => activation
+                .commit()
+                .map(|()| value)
+                .map_err(ActivationError::Commit),
+            Err(error) => {
+                activation.rollback();
+                Err(ActivationError::Operation(error))
+            }
+        }
+    }
+
     /// Returns the currently committed row for a key.
     pub fn committed(&self, key: &Key) -> Option<&Row> {
         self.committed.get(key)
@@ -52,6 +72,13 @@ pub enum TableError {
     DoubleCommit,
     /// A mutation or read was attempted after the activation closed.
     UseAfterClose,
+}
+
+/// The result of an activation closure or its root publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActivationError<E> {
+    Operation(E),
+    Commit(TableError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,7 +251,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{TableError, TableRuntime};
+    use super::{ActivationError, TableError, TableRuntime};
+    use std::panic::AssertUnwindSafe;
 
     #[test]
     fn nested_insert_then_root_rollback_leaves_committed_relation_empty() {
@@ -280,5 +308,40 @@ mod tests {
 
         assert_eq!(root.commit(), Err(TableError::DoubleCommit));
         assert_eq!(root.read(&1), Err(TableError::UseAfterClose));
+    }
+
+    #[test]
+    fn activation_helper_commits_success_and_rolls_back_operation_error() {
+        let mut table = TableRuntime::<u64, String>::default();
+        assert_eq!(
+            table.activate(|root| {
+                root.insert(1, "committed".into())?;
+                Ok::<_, TableError>(())
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            table.activate(|root| {
+                root.insert(2, "discarded".into())?;
+                Err::<(), _>(TableError::UseAfterClose)
+            }),
+            Err(ActivationError::Operation(TableError::UseAfterClose))
+        );
+        assert_eq!(table.committed(&1).map(String::as_str), Some("committed"));
+        assert_eq!(table.committed(&2), None);
+    }
+
+    #[test]
+    fn activation_helper_does_not_publish_when_operation_panics() {
+        let mut table = TableRuntime::<u64, String>::default();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _: Result<(), ActivationError<()>> = table.activate(|root| {
+                root.insert(1, "unpublished".into()).unwrap();
+                panic!("activation failed");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(table.committed(&1), None);
     }
 }
