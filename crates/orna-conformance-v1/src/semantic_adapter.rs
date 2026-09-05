@@ -40,6 +40,12 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "implicit conversion chains are not searched; name each conversion explicitly" => {
             "ORNA091-E-CONVERSION-CHAIN".into()
         }
+        "Result/Ok/Err control plumbing was removed; return the success type directly" => {
+            "ORNA091-E-RESULT".into()
+        }
+        "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions" => {
+            "ORNA100-E-SYS-STORAGE-CALL".into()
+        }
         "Float is not a valid primary-key type" => "E3003".into(),
         _ => diagnostic.code().into(),
     }
@@ -112,7 +118,9 @@ impl SemanticPhase {
         match self {
             Self::Resolve => matches!(
                 code,
-                "ORNA-S001-PATH"
+                "ORNA100-E-SYS-RUNTIME"
+                    | "ORNA091-E-TRYFROM"
+                    | "ORNA-S001-PATH"
                     | "ORNA-S002-NAMESPACE"
                     | "ORNA-S003-RESERVED"
                     | "ORNA-S010-IMPORT"
