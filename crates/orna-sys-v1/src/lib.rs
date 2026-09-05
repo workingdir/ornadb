@@ -8,6 +8,8 @@ use std::{collections::BTreeMap, fmt, marker::PhantomData};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
+
 macro_rules! identity {
     ($name:ident) => {
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
@@ -237,6 +239,7 @@ pub enum Admission<T> {
     Terminal {
         handle: InvocationHandle<T>,
         outcome: TerminalClass,
+        result: RetainedInvocationResult,
     },
 }
 
@@ -253,6 +256,77 @@ pub enum InvocationResult<T> {
     OrdinaryFailure(Diagnostic),
     Cancelled(Option<Diagnostic>),
     Orphaned(Option<Diagnostic>),
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct RetainedValue {
+    static_type: TypeId,
+    codec_version: String,
+    canonical: Option<Vec<u8>>,
+    redacted: bool,
+}
+impl fmt::Debug for RetainedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedValue")
+            .field("static_type", &self.static_type)
+            .field("codec_version", &self.codec_version)
+            .field("redacted", &self.redacted)
+            .field("canonical", &"<withheld>")
+            .finish()
+    }
+}
+impl RetainedValue {
+    fn new(value: TypedValue) -> Self {
+        let TypedValue {
+            static_type,
+            canonical,
+            redacted,
+        } = value;
+        Self {
+            static_type,
+            codec_version: CANONICAL_VALUE_CODEC_V1.into(),
+            canonical: (!redacted).then_some(canonical),
+            redacted,
+        }
+    }
+    pub fn static_type(&self) -> &TypeId {
+        &self.static_type
+    }
+    pub fn codec_version(&self) -> &str {
+        &self.codec_version
+    }
+    pub fn canonical(&self) -> Option<&[u8]> {
+        self.canonical.as_deref()
+    }
+    pub fn is_redacted(&self) -> bool {
+        self.redacted
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetainedInvocationResult {
+    Success(RetainedValue),
+    OrdinaryFailure(Diagnostic),
+    Cancelled(Option<Diagnostic>),
+    Orphaned(Option<Diagnostic>),
+    ClassificationOnly(TerminalClass),
+}
+impl RetainedInvocationResult {
+    pub fn terminal_class(&self) -> TerminalClass {
+        match self {
+            Self::Success(_) => TerminalClass::Succeeded,
+            Self::OrdinaryFailure(_) => TerminalClass::Failed,
+            Self::Cancelled(_) => TerminalClass::Cancelled,
+            Self::Orphaned(_) => TerminalClass::Orphaned,
+            Self::ClassificationOnly(outcome) => outcome.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvocationState {
+    Active,
+    Terminal(RetainedInvocationResult),
 }
 impl<T> InvocationResult<T> {
     pub fn ordinary_failure(&self) -> Option<&Diagnostic> {
@@ -305,7 +379,11 @@ impl Runtime {
             }
             let handle = self.handle::<T>(&entry.invocation, request.witness.static_type().clone());
             return Ok(match entry.terminal.clone() {
-                Some(outcome) => Admission::Terminal { handle, outcome },
+                Some(result) => Admission::Terminal {
+                    outcome: result.terminal_class(),
+                    handle,
+                    result,
+                },
                 None => Admission::Active { handle },
             });
         }
@@ -347,6 +425,68 @@ impl Runtime {
         handle: &InvocationHandle<T>,
         outcome: TerminalClass,
     ) -> Result<(), AdmissionError> {
+        self.store_terminal(
+            handle,
+            RetainedInvocationResult::ClassificationOnly(outcome),
+        )
+    }
+    pub fn retain_terminal<T>(
+        &mut self,
+        handle: &InvocationHandle<T>,
+        result: InvocationResult<TypedValue>,
+    ) -> Result<(), AdmissionError> {
+        self.check_handle(handle)?;
+        if self
+            .invocations
+            .get(&handle.invocation)
+            .expect("checked")
+            .terminal
+            .is_some()
+        {
+            return Ok(());
+        }
+        let result = match result {
+            InvocationResult::Success(value) => {
+                if value.static_type() != handle.result_type() {
+                    return Err(AdmissionError::ReturnType);
+                }
+                RetainedInvocationResult::Success(RetainedValue::new(value))
+            }
+            InvocationResult::OrdinaryFailure(diagnostic) => {
+                RetainedInvocationResult::OrdinaryFailure(diagnostic)
+            }
+            InvocationResult::Cancelled(diagnostic) => {
+                RetainedInvocationResult::Cancelled(diagnostic)
+            }
+            InvocationResult::Orphaned(diagnostic) => {
+                RetainedInvocationResult::Orphaned(diagnostic)
+            }
+        };
+        self.store_terminal(handle, result)
+    }
+    pub fn invocation_state<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<InvocationState, AdmissionError> {
+        self.check_handle(handle)?;
+        Ok(
+            match self
+                .invocations
+                .get(&handle.invocation)
+                .expect("checked")
+                .terminal
+                .clone()
+            {
+                Some(result) => InvocationState::Terminal(result),
+                None => InvocationState::Active,
+            },
+        )
+    }
+    fn store_terminal<T>(
+        &mut self,
+        handle: &InvocationHandle<T>,
+        result: RetainedInvocationResult,
+    ) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
         let stored = self
             .invocations
@@ -355,13 +495,13 @@ impl Runtime {
         if stored.terminal.is_some() {
             return Ok(());
         }
-        stored.terminal = Some(outcome.clone());
+        stored.terminal = Some(result.clone());
         for entry in self
             .idempotency
             .values_mut()
             .filter(|entry| entry.invocation == handle.invocation)
         {
-            entry.terminal = Some(outcome.clone());
+            entry.terminal = Some(result.clone());
         }
         Ok(())
     }
@@ -396,13 +536,13 @@ impl Runtime {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredInvocation {
     result_type: TypeId,
-    terminal: Option<TerminalClass>,
+    terminal: Option<RetainedInvocationResult>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdempotencyEntry {
     identity: InvocationIdentity,
     invocation: InvocationId,
-    terminal: Option<TerminalClass>,
+    terminal: Option<RetainedInvocationResult>,
 }
 
 fn bind(
@@ -619,6 +759,18 @@ mod tests {
     fn args(entries: Vec<Argument>) -> ArgumentMap {
         ArgumentMap::new(entries).unwrap()
     }
+    fn diagnostic(code: &'static str) -> Diagnostic {
+        Diagnostic {
+            code,
+            message: "invocation terminated",
+            fields: BTreeMap::from([(
+                "detail".into(),
+                DiagnosticField::Redacted {
+                    static_type: ty("sys.Secret"),
+                },
+            )]),
+        }
+    }
     #[test]
     fn canonical_order_and_type_retention() {
         let map = args(vec![
@@ -725,12 +877,36 @@ mod tests {
             Admission::Active { .. }
         ));
         runtime
-            .classify_terminal(&handle, TerminalClass::Succeeded)
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
             .unwrap();
+        let replayed = runtime.admit(first.clone()).unwrap();
+        let Admission::Terminal {
+            handle: replayed_handle,
+            outcome,
+            result,
+        } = replayed
+        else {
+            panic!("expected retained terminal replay");
+        };
+        assert_eq!(replayed_handle.invocation(), handle.invocation());
+        assert_eq!(outcome, TerminalClass::Succeeded);
+        let RetainedInvocationResult::Success(retained) = result else {
+            panic!("expected retained success");
+        };
+        assert_eq!(retained.static_type(), &ty("Str"));
+        assert_eq!(retained.codec_version(), CANONICAL_VALUE_CODEC_V1);
+        assert_eq!(retained.canonical(), Some(b"answer".as_slice()));
+        assert_eq!(
+            runtime.invocation_state(&handle),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(retained)
+            ))
+        );
         assert!(matches!(
             runtime.admit(first.clone()).unwrap(),
             Admission::Terminal {
                 outcome: TerminalClass::Succeeded,
+                result: RetainedInvocationResult::Success(_),
                 ..
             }
         ));
@@ -751,14 +927,36 @@ mod tests {
             Admission::New { handle, .. } => handle,
             _ => unreachable!(),
         };
-        let right = Runtime::new(RuntimeId::new("right"));
+        let mut right = Runtime::new(RuntimeId::new("right"));
         assert_eq!(
             right.check_handle(&handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        assert_eq!(
+            right.invocation_state(&handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        assert_eq!(
+            right.retain_terminal(
+                &handle,
+                InvocationResult::OrdinaryFailure(diagnostic("failed")),
+            ),
             Err(AdmissionError::ForeignRuntime)
         );
         left.expire(&handle).unwrap();
         assert_eq!(
             left.check_handle(&handle),
+            Err(AdmissionError::ExpiredHandle)
+        );
+        assert_eq!(
+            left.invocation_state(&handle),
+            Err(AdmissionError::ExpiredHandle)
+        );
+        assert_eq!(
+            left.retain_terminal(
+                &handle,
+                InvocationResult::OrdinaryFailure(diagnostic("failed")),
+            ),
             Err(AdmissionError::ExpiredHandle)
         );
     }
@@ -793,9 +991,136 @@ mod tests {
             runtime.admit(first).unwrap(),
             Admission::Terminal {
                 outcome: TerminalClass::Succeeded,
+                result: RetainedInvocationResult::ClassificationOnly(TerminalClass::Succeeded),
                 ..
             }
         ));
+    }
+    #[test]
+    fn retained_terminal_result_is_absorbing() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut first = request(Some(value("Int", "1")), ArgumentMap::default());
+        first.idempotency_key = Some("key".into());
+        let handle = match runtime.admit(first.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime
+            .retain_terminal(&handle, InvocationResult::Success(value("Str", "answer")))
+            .unwrap();
+        runtime
+            .retain_terminal(
+                &handle,
+                InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            runtime.admit(first).unwrap(),
+            Admission::Terminal {
+                outcome: TerminalClass::Succeeded,
+                result: RetainedInvocationResult::Success(ref value),
+                ..
+            } if value.canonical() == Some(b"answer".as_slice())
+        ));
+    }
+    #[test]
+    fn terminal_result_type_is_validated_before_retention() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            runtime.retain_terminal(
+                &handle,
+                InvocationResult::Success(value("Int", "not-a-string")),
+            ),
+            Err(AdmissionError::ReturnType)
+        );
+        assert_eq!(
+            runtime.invocation_state(&handle),
+            Ok(InvocationState::Active)
+        );
+    }
+    #[test]
+    fn failure_cancellation_and_orphan_are_complete_terminal_results() {
+        let outcomes = [
+            InvocationResult::OrdinaryFailure(diagnostic("failed")),
+            InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+            InvocationResult::Orphaned(Some(diagnostic("orphaned"))),
+        ];
+        let expected = [
+            TerminalClass::Failed,
+            TerminalClass::Cancelled,
+            TerminalClass::Orphaned,
+        ];
+        let retained_outcomes = [
+            RetainedInvocationResult::OrdinaryFailure(diagnostic("failed")),
+            RetainedInvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+            RetainedInvocationResult::Orphaned(Some(diagnostic("orphaned"))),
+        ];
+
+        for (index, ((result, terminal_class), expected_result)) in outcomes
+            .into_iter()
+            .zip(expected)
+            .zip(retained_outcomes)
+            .enumerate()
+        {
+            let mut runtime = Runtime::new(RuntimeId::new(format!("r-{index}")));
+            let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+            request.idempotency_key = Some(format!("key-{index}"));
+            let handle = match runtime.admit(request.clone()).unwrap() {
+                Admission::New { handle, .. } => handle,
+                _ => unreachable!(),
+            };
+            runtime.retain_terminal(&handle, result).unwrap();
+
+            let InvocationState::Terminal(retained) = runtime.invocation_state(&handle).unwrap()
+            else {
+                panic!("expected terminal state");
+            };
+            assert_eq!(retained.terminal_class(), terminal_class);
+            assert_eq!(retained, expected_result);
+            assert!(matches!(
+                runtime.admit(request).unwrap(),
+                Admission::Terminal {
+                    outcome,
+                    result,
+                    ..
+                } if outcome == terminal_class && result == expected_result
+            ));
+        }
+    }
+    #[test]
+    fn protected_success_discards_canonical_bytes_before_retention() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime
+            .retain_terminal(
+                &handle,
+                InvocationResult::Success(TypedValue::protected(ty("Str"), "super-secret")),
+            )
+            .unwrap();
+        let state = runtime.invocation_state(&handle).unwrap();
+        let InvocationState::Terminal(RetainedInvocationResult::Success(value)) = &state else {
+            panic!("expected retained success");
+        };
+        assert!(value.is_redacted());
+        assert_eq!(value.canonical(), None);
+        assert!(!format!("{state:?}").contains("super-secret"));
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {
