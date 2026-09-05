@@ -190,6 +190,31 @@ where
         Ok(candidate)
     }
 
+    /// Scans at most `limit` candidate rows in canonical key order.
+    ///
+    /// Rows are owned so callers cannot retain references to an unpublished
+    /// overlay after the activation closes.
+    pub fn candidate_scan_window(
+        &self,
+        limit: usize,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
+        Ok(self.candidate_rows()?.into_iter().take(limit))
+    }
+
+    /// Scans candidate rows in a canonical key range.
+    pub fn candidate_scan_range<R>(
+        &self,
+        range: R,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    where
+        R: RangeBounds<Key>,
+    {
+        Ok(self
+            .candidate_rows()?
+            .into_iter()
+            .filter(move |(key, _)| range.contains(key)))
+    }
+
     /// Publishes every staged change together. Nested scopes cannot call this.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -269,6 +294,23 @@ where
 
     pub fn read(&self, key: &Key) -> Result<Option<&Row>, TableError> {
         self.activation.read(key)
+    }
+
+    pub fn candidate_scan_window(
+        &self,
+        limit: usize,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
+        self.activation.candidate_scan_window(limit)
+    }
+
+    pub fn candidate_scan_range<R>(
+        &self,
+        range: R,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    where
+        R: RangeBounds<Key>,
+    {
+        self.activation.candidate_scan_range(range)
     }
 
     /// Nested calls have no publication capability.
@@ -459,6 +501,30 @@ where
         Ok(candidate)
     }
 
+    /// Scans at most `limit` candidate rows in one relation.
+    pub fn candidate_scan_window(
+        &self,
+        table: &Table,
+        limit: usize,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
+        Ok(self.candidate_rows(table)?.into_iter().take(limit))
+    }
+
+    /// Scans one candidate relation in a canonical key range.
+    pub fn candidate_scan_range<R>(
+        &self,
+        table: &Table,
+        range: R,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    where
+        R: RangeBounds<Key>,
+    {
+        Ok(self
+            .candidate_rows(table)?
+            .into_iter()
+            .filter(move |(key, _)| range.contains(key)))
+    }
+
     /// Publishes the overlays of every changed relation together.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -544,6 +610,25 @@ where
 
     pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
         self.activation.read(table, key)
+    }
+
+    pub fn candidate_scan_window(
+        &self,
+        table: &Table,
+        limit: usize,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
+        self.activation.candidate_scan_window(table, limit)
+    }
+
+    pub fn candidate_scan_range<R>(
+        &self,
+        table: &Table,
+        range: R,
+    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    where
+        R: RangeBounds<Key>,
+    {
+        self.activation.candidate_scan_range(table, range)
     }
 
     /// Nested calls cannot independently publish the root's overlays.
@@ -787,5 +872,83 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 3]
         );
+    }
+
+    #[test]
+    fn candidate_scans_include_staged_mutations_but_rollback_keeps_committed_rows() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        table
+            .activate(|activation| {
+                for (key, row) in [(1, "one"), (2, "two"), (3, "three")] {
+                    activation.insert(key, row)?;
+                }
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let mut activation = table.begin();
+        activation.update(2, "updated").unwrap();
+        activation.delete(1).unwrap();
+        activation.insert(4, "four").unwrap();
+
+        assert_eq!(
+            activation
+                .candidate_scan_window(2)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![(2, "updated"), (3, "three")]
+        );
+        assert_eq!(
+            activation
+                .candidate_scan_range(2..=4)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![(2, "updated"), (3, "three"), (4, "four")]
+        );
+
+        activation.rollback();
+        assert_eq!(
+            table
+                .scan()
+                .map(|(key, row)| (*key, *row))
+                .collect::<Vec<_>>(),
+            vec![(1, "one"), (2, "two"), (3, "three")]
+        );
+    }
+
+    #[test]
+    fn database_candidate_scans_are_relation_local_and_private() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                activation.insert("orders", 1, "old")?;
+                activation.insert("orders", 3, "three")?;
+                activation.insert("audits", 2, "audit")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let mut activation = database.begin();
+        activation.update("orders", 1, "new").unwrap();
+        activation.insert("orders", 2, "two").unwrap();
+
+        assert_eq!(
+            activation
+                .candidate_scan_range(&"orders", 1..=2)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![(1, "new"), (2, "two")]
+        );
+        assert_eq!(
+            activation
+                .candidate_scan_window(&"audits", 10)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![(2, "audit")]
+        );
+
+        activation.rollback();
+        assert_eq!(database.committed(&"orders", &2), None);
+        assert_eq!(database.committed(&"orders", &1).copied(), Some("old"));
     }
 }
