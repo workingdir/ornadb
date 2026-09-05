@@ -51,6 +51,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "Range<T> is not a primary-key type in version 1.0" => "E3010".into(),
         "an automatic-key table cannot be explicitly re-keyed" => "E3013".into(),
         "Display and Present implementations must be read-only" => "E7201".into(),
+        "secret values cannot be displayed" => "E7002".into(),
         "remove `self |`; the table already supplies its candidate relation"
         | "remove the repeated table owner before the assertion predicate" => {
             "ORNA-A091-002".into()

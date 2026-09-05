@@ -118,6 +118,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/range-key-overlap-magic.orna",
         "invalid/rekey-auto-id.orna",
         "invalid/effectful-display.orna",
+        "invalid/secret-display.orna",
     ] {
         let fixture = report
             .fixtures
