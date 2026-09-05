@@ -397,6 +397,14 @@ impl Catalogue {
                 std::iter::empty::<&str>(),
             ),
         );
+        modules.insert(
+            Namespace(vec!["std".into(), "net".into(), "http".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "net".into(), "http".into()]),
+                [("get", named_function(vec![("url", Type::Text)], Type::Text))],
+                std::iter::empty::<&str>(),
+            ),
+        );
         let secret_ref = Type::Named("std.SecretRef".into());
         modules.insert(
             Namespace(vec!["std".into(), "secret".into()]),
@@ -3889,10 +3897,12 @@ fn assertion(
         diagnostics.push(diag(DIAG_ASSERTION, message));
     }
     if inferred.effects.forbidden_for_assertion() {
-        diagnostics.push(diag(
-            DIAG_ASSERTION_EFFECT,
-            "assertion has forbidden effects or failure",
-        ));
+        let message = if inferred.effects.effects.contains("network") {
+            "declaration assertion uses forbidden network effect"
+        } else {
+            "assertion has forbidden effects or failure"
+        };
+        diagnostics.push(diag(DIAG_ASSERTION_EFFECT, message));
     }
     if matches!(owner, AssertionOwner::Module) {
         match dependencies.len() {
