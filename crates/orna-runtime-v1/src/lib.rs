@@ -110,6 +110,7 @@ pub enum RuntimeError {
     OwnerLost,
     StaleCapture { current: Box<CwdCapture> },
     InvalidCapture,
+    EmptyMutationBatch,
     ConflictingPublicationIntent,
     RecoveryInvalid,
     FaultInjected(FaultPoint),
@@ -125,6 +126,7 @@ impl fmt::Display for RuntimeError {
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::StaleCapture { .. } => "runtime capture is stale",
             Self::InvalidCapture => "invalid runtime capture",
+            Self::EmptyMutationBatch => "empty runtime mutation batch",
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::RecoveryInvalid => "runtime recovery validation failed",
             Self::FaultInjected(_) => "runtime fault injected",
@@ -320,9 +322,35 @@ impl RuntimeState {
         next_digest: [u8; 32],
         faults: &dyn FaultInjector,
     ) -> Result<CwdCapture, RuntimeError> {
+        self.commit_batch(
+            lease,
+            expected,
+            std::slice::from_ref(mutation),
+            next_digest,
+            faults,
+        )
+        .await
+    }
+
+    /// Atomically append a non-empty activation batch, its one corresponding
+    /// checkpoint, and the next CWD capture. A fault or validation failure
+    /// rolls back the complete batch rather than exposing a partial prefix.
+    pub async fn commit_batch(
+        &self,
+        lease: WriterLease,
+        expected: &CwdCapture,
+        mutations: &[Mutation],
+        next_digest: [u8; 32],
+        faults: &dyn FaultInjector,
+    ) -> Result<CwdCapture, RuntimeError> {
         validate_id(lease.owner_id)?;
-        validate_id(mutation.id)?;
-        validate_digest(mutation.digest)?;
+        if mutations.is_empty() {
+            return Err(RuntimeError::EmptyMutationBatch);
+        }
+        for mutation in mutations {
+            validate_id(mutation.id)?;
+            validate_digest(mutation.digest)?;
+        }
         validate_digest(next_digest)?;
         let current = self.capture().await?;
         if &current != expected {
@@ -342,28 +370,33 @@ impl RuntimeState {
                 current: Box::new(current),
             });
         }
-        tx.execute(
-            "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
-            params![
-                mutation.id.to_vec(),
-                mutation.payload.clone(),
-                mutation.digest.to_vec()
-            ],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        faults.check(FaultPoint::AfterMutation)?;
-        let mut rows = tx
-            .query("SELECT last_insert_rowid()", ())
+        let mut sequence: Option<i64> = None;
+        for mutation in mutations {
+            tx.execute(
+                "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
+                params![
+                    mutation.id.to_vec(),
+                    mutation.payload.clone(),
+                    mutation.digest.to_vec()
+                ],
+            )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let sequence: i64 = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?
-            .get(0)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let mut rows = tx
+                .query("SELECT last_insert_rowid()", ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            sequence = Some(
+                rows.next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .get(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            );
+        }
+        faults.check(FaultPoint::AfterMutation)?;
+        let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
         let generation = current
             .generation()
             .to_u64_digits()
@@ -701,6 +734,37 @@ mod tests {
             assert_eq!(state.capture().await.unwrap(), capture);
         }
     }
+
+    #[tokio::test]
+    async fn batch_commit_publishes_all_mutations_under_one_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let batch = vec![mutation(5), mutation(6)];
+        let next = state
+            .commit_batch(lease, &capture, &batch, digest(9), &NoFault)
+            .await
+            .unwrap();
+
+        assert_eq!(state.pending().await.unwrap(), batch);
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap(),
+            Some(Checkpoint {
+                generation: 1,
+                digest: digest(9),
+                mutation_sequence: 2,
+            })
+        );
+        assert_eq!(next.generation_digest(), digest(9));
+        assert_eq!(
+            state
+                .commit_batch(lease, &next, &[], digest(10), &NoFault)
+                .await,
+            Err(RuntimeError::EmptyMutationBatch)
+        );
+    }
+
     #[tokio::test]
     async fn stale_capture_and_competing_owner_are_distinct() {
         let (_temp, repo) = repository();
