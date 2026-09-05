@@ -1,9 +1,17 @@
 //! Bounded, pre-effect admission for Orna 1.0 reflective invocation.
 //!
-//! Resolution, target execution, await scheduling, transaction ownership, and
-//! schema generation stay with the evaluator/runtime that owns those concerns.
+//! Resolution, durable transaction ownership, and schema generation stay with
+//! the evaluator/runtime that owns those concerns. The local supervisor below
+//! only provides a bounded execution and await seam for admitted work.
 
-use std::{collections::BTreeMap, fmt, marker::PhantomData};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -603,6 +611,129 @@ impl Runtime {
     }
 }
 
+/// A small shared owner for independently awaitable local invocations. The
+/// worker owns only execution; admission, cancellation and terminal retention
+/// remain serialized through the runtime ledger.
+#[derive(Clone, Debug)]
+pub struct RuntimeSupervisor {
+    runtime: Arc<Mutex<Runtime>>,
+}
+
+impl RuntimeSupervisor {
+    pub fn new(id: RuntimeId) -> Self {
+        Self {
+            runtime: Arc::new(Mutex::new(Runtime::new(id))),
+        }
+    }
+
+    /// Admits a separate invocation and schedules exactly one worker for a new
+    /// idempotency identity. Existing active or terminal identities reuse the
+    /// original handle and never spawn another worker.
+    pub fn start<T, E>(
+        &self,
+        request: AdmissionRequest<T>,
+        mut executor: E,
+    ) -> Result<InvocationHandle<T>, AdmissionError>
+    where
+        E: InvocationExecutor + Send + 'static,
+    {
+        if request.mode != InvocationMode::Start {
+            return Err(AdmissionError::StartMode);
+        }
+        let (handle, boundary) = {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+            match runtime.admit(request)? {
+                Admission::New { boundary, handle } => {
+                    let worker_handle =
+                        runtime.handle::<()>(&handle.invocation, handle.result_type.clone());
+                    (handle, Some((boundary, worker_handle)))
+                }
+                Admission::Active { handle } | Admission::Terminal { handle, .. } => (handle, None),
+            }
+        };
+
+        if let Some((boundary, worker_handle)) = boundary {
+            let runtime = Arc::clone(&self.runtime);
+            let _ = thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    executor.execute(&boundary)
+                }))
+                .unwrap_or_else(|_| {
+                    InvocationResult::Orphaned(Some(Diagnostic {
+                        code: "sys.invoke.orphaned",
+                        message: "invocation executor panicked",
+                        fields: BTreeMap::new(),
+                    }))
+                });
+                let Ok(mut runtime) = runtime.lock() else {
+                    return;
+                };
+                if runtime.retain_terminal(&worker_handle, result).is_err() {
+                    let _ = runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned);
+                }
+            });
+        }
+        Ok(handle)
+    }
+
+    /// Waits for one retained terminal outcome. A timeout is only an
+    /// observation failure: the target remains active and independently
+    /// cancellable.
+    pub fn await_invocation<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+        timeout: Option<Duration>,
+    ) -> Result<RetainedInvocationResult, AwaitError> {
+        let deadline = timeout.map(|duration| {
+            Instant::now()
+                .checked_add(duration)
+                .unwrap_or_else(Instant::now)
+        });
+        loop {
+            let state = {
+                let runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?;
+                runtime
+                    .invocation_state(handle)
+                    .map_err(AwaitError::Admission)?
+            };
+            if let InvocationState::Terminal(result) = state {
+                return Ok(result);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(AwaitError::Timeout);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    pub fn cancel<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+        reason: Option<Diagnostic>,
+    ) -> Result<bool, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .cancel(handle, reason)
+    }
+
+    pub fn state<T>(
+        &self,
+        handle: &InvocationHandle<T>,
+    ) -> Result<InvocationState, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .invocation_state(handle)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredInvocation {
     result_type: TypeId,
@@ -743,8 +874,10 @@ pub enum AdmissionError {
     ReturnType,
     TransactionMode,
     IdempotencyMismatch,
+    StartMode,
     ForeignRuntime,
     ExpiredHandle,
+    RuntimeUnavailable,
 }
 impl AdmissionError {
     pub fn code(&self) -> &'static str {
@@ -757,8 +890,10 @@ impl AdmissionError {
             Self::ReturnType => "sys.invoke.return_type",
             Self::TransactionMode => "sys.invoke.transaction_mode",
             Self::IdempotencyMismatch => "sys.invoke.idempotency_mismatch",
+            Self::StartMode => "sys.invoke.start_mode",
             Self::ForeignRuntime => "sys.handle.foreign_runtime",
             Self::ExpiredHandle => "sys.handle.expired",
+            Self::RuntimeUnavailable => "sys.runtime.unavailable",
         }
     }
     pub fn diagnostic(&self) -> Diagnostic {
@@ -776,6 +911,26 @@ impl fmt::Display for AdmissionError {
 }
 impl std::error::Error for AdmissionError {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AwaitError {
+    Timeout,
+    Admission(AdmissionError),
+}
+impl AwaitError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Timeout => "sys.invoke.await_timeout",
+            Self::Admission(error) => error.code(),
+        }
+    }
+}
+impl fmt::Display for AwaitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for AwaitError {}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Diagnostic {
     pub code: &'static str,
@@ -792,6 +947,11 @@ pub enum DiagnosticField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
     fn ty(name: &str) -> TypeId {
         TypeId::new(name)
     }
@@ -838,6 +998,22 @@ mod tests {
     impl InvocationExecutor for Executor {
         fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
             self.calls += 1;
+            self.result.clone()
+        }
+    }
+    struct BlockingExecutor {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        calls: Arc<AtomicUsize>,
+        result: InvocationResult<TypedValue>,
+    }
+    impl InvocationExecutor for BlockingExecutor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (open, wake) = &*self.gate;
+            let mut open = open.lock().unwrap();
+            while !*open {
+                open = wake.wait(open).unwrap();
+            }
             self.result.clone()
         }
     }
@@ -1046,6 +1222,88 @@ mod tests {
             ))
         ));
         assert_eq!(executor.calls, 1);
+    }
+    #[test]
+    fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        request.idempotency_key = Some("key".into());
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = supervisor
+            .start(
+                request.clone(),
+                BlockingExecutor {
+                    gate: Arc::clone(&gate),
+                    calls: Arc::clone(&calls),
+                    result: InvocationResult::Success(value("Str", "answer")),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            supervisor.await_invocation(&handle, Some(Duration::ZERO)),
+            Err(AwaitError::Timeout)
+        );
+        assert_eq!(supervisor.state(&handle), Ok(InvocationState::Active));
+        assert_eq!(
+            supervisor.cancel(&handle, Some(diagnostic("cancelled"))),
+            Ok(true)
+        );
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+
+        assert!(matches!(
+            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
+            Ok(RetainedInvocationResult::Success(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(supervisor.cancel(&handle, None), Ok(false));
+
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let replay = supervisor
+            .start(
+                request,
+                BlockingExecutor {
+                    gate,
+                    calls: Arc::clone(&replay_calls),
+                    result: InvocationResult::Success(value("Str", "wrong")),
+                },
+            )
+            .unwrap();
+        assert_eq!(replay.invocation(), handle.invocation());
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn supervised_start_retains_explicit_cancellation() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let handle = supervisor
+            .start(
+                request,
+                BlockingExecutor {
+                    gate: Arc::clone(&gate),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    result: InvocationResult::Cancelled(None),
+                },
+            )
+            .unwrap();
+        let reason = diagnostic("cancelled");
+        assert_eq!(supervisor.cancel(&handle, Some(reason.clone())), Ok(true));
+        let (open, wake) = &*gate;
+        *open.lock().unwrap() = true;
+        wake.notify_one();
+
+        assert_eq!(
+            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
+            Ok(RetainedInvocationResult::Cancelled(Some(reason)))
+        );
     }
     #[test]
     fn fences_foreign_and_stale_handles() {
