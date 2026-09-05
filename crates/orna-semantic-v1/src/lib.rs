@@ -1249,14 +1249,14 @@ fn check_item(
                         );
                     }
                     orna_syntax_v1::TableMember::Field {
-                        initializer:
-                            Some(
-                                FieldInitializer::Default(value)
-                                | FieldInitializer::Computed(value),
-                            ),
+                        initializer: Some(initializer),
                         ty,
                         ..
                     } => {
+                        let value = match initializer {
+                            FieldInitializer::Default(value)
+                            | FieldInitializer::Computed(value) => value,
+                        };
                         let expected = type_of(ty);
                         let inferred = infer_contextual(
                             value,
@@ -1265,6 +1265,14 @@ fn check_item(
                             &BTreeMap::new(),
                             diagnostics,
                         );
+                        if matches!(initializer, FieldInitializer::Computed(_))
+                            && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
+                        {
+                            diagnostics.push(diag(
+                                DIAG_TYPE,
+                                "computed field must be deterministic and row-local",
+                            ));
+                        }
                         require_same(&expected, &inferred.ty, diagnostics);
                     }
                     _ => {}
