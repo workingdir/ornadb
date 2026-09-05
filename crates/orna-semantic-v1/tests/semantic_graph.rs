@@ -103,6 +103,16 @@ fn system_storage_relation_filters_typed_status_fields() {
 }
 
 #[test]
+fn system_file_history_uses_the_file_reference_overload() {
+    let result = analyze(&[ModuleInput::new(
+        "sys-file-history.orna",
+        "pub fn history(file: sys.File) = sys.history(file.reference);",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
