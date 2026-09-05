@@ -1,6 +1,6 @@
 use orna_conformance_v1::{
-    BoundedEvaluator, Corpus, EvidenceStatus, Harness, RuntimeAdapter, RuntimeEvaluator, Scenario,
-    StageOutcome,
+    BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceStatus, Harness, RuntimeAdapter,
+    RuntimeEvaluator, Scenario, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
 
@@ -99,7 +99,7 @@ fn changed_or_unimplemented_scenario_contracts_are_not_reported_as_executed() {
         StageOutcome::Skipped { .. }
     ));
     assert!(matches!(
-        runtime.run_scenario(&scenario("TXN-001")),
+        runtime.run_scenario(&scenario("TXN-003")),
         StageOutcome::Skipped { .. }
     ));
 }
@@ -128,4 +128,17 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .count(),
         141
     );
+}
+
+#[test]
+fn transaction_scenarios_execute_through_the_real_table_evaluator() {
+    let mut runtime = RuntimeAdapter::new(orna_conformance_v1::TransactionalEvaluator::default());
+    assert!(matches!(
+        runtime.run_scenario(&scenario("TXN-001")),
+        StageOutcome::Passed
+    ));
+    assert!(matches!(
+        runtime.run_scenario(&scenario("TXN-002")),
+        StageOutcome::Passed
+    ));
 }
