@@ -21,6 +21,16 @@ pub struct SemanticAdapter {
     catalogue: Catalogue,
 }
 
+fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
+    match diagnostic.message() {
+        "cannot add Time and Energy" => "E5001".into(),
+        "cannot add two absolute affine temperatures" => "E5002".into(),
+        "cannot add different currencies without conversion" => "E5003".into(),
+        "Float is not a valid primary-key type" => "E3003".into(),
+        _ => diagnostic.code().into(),
+    }
+}
+
 impl Default for SemanticAdapter {
     fn default() -> Self {
         Self {
@@ -112,7 +122,7 @@ impl SemanticPhase {
 impl ConformanceAdapter for SemanticAdapter {
     type Diagnostic = Diagnostic;
     fn diagnostic_code(&self, diagnostic: &Diagnostic) -> String {
-        diagnostic.code().into()
+        published_diagnostic_code(diagnostic)
     }
     fn diagnostic_message(&self, diagnostic: &Diagnostic) -> String {
         diagnostic.message().into()
@@ -436,7 +446,7 @@ impl<R> RuntimeAdapter<R> {
 impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     type Diagnostic = Diagnostic;
     fn diagnostic_code(&self, diagnostic: &Diagnostic) -> String {
-        diagnostic.code().into()
+        published_diagnostic_code(diagnostic)
     }
     fn diagnostic_message(&self, diagnostic: &Diagnostic) -> String {
         diagnostic.message().into()

@@ -86,6 +86,25 @@ fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
     assert_eq!(diagnostic.code(), "ORNA-S021-TYPE");
 }
 
+#[test]
+fn semantic_adapter_preserves_published_closed_type_diagnostics() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
+    for fixture_id in [
+        "invalid/affine-addition.orna",
+        "invalid/currency-addition.orna",
+        "invalid/float-key.orna",
+        "invalid/incompatible-dimensions.orna",
+    ] {
+        let fixture = report
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.fixture == fixture_id)
+            .expect("closed type fixture");
+        assert!(fixture.passed, "{fixture_id}: {:?}", fixture.stages);
+    }
+}
+
 #[derive(Default)]
 struct RecordingRuntime {
     calls: usize,
