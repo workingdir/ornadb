@@ -853,7 +853,7 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
             target: returned_target,
             state: orna_protocol_v1::RequestState::Orphaned,
             fingerprint: Some(returned_fingerprint),
-            result: None,
+            result: Some(_),
         } if returned_target == [25; 16] && returned_fingerprint == fingerprint
     ));
 
