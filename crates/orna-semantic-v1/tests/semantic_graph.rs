@@ -93,6 +93,16 @@ fn system_run_history_sorting_resolves_system_row_fields() {
 }
 
 #[test]
+fn system_storage_relation_filters_typed_status_fields() {
+    let result = analyze(&[ModuleInput::new(
+        "sys-storage.orna",
+        "pub fn pending() = sys.Storage | filter(storage => storage.pending_rows > 0);",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),

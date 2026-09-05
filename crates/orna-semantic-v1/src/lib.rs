@@ -3730,6 +3730,13 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             ty: Type::Named("sys.Run".into()),
             effects: EffectSummary::default(),
         },
+        ["sys", "Storage"] => Inferred {
+            ty: Type::Relation(Box::new(Type::Named("sys.Storage".into()))),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
         ["sys", "Checkpoint", "as_of"] => Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -3758,6 +3765,9 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
     match (base, name) {
         (Type::Named(system_type), "started") if system_type == "sys.Run" => Some(Type::Instant),
+        (Type::Named(system_type), "pending_rows") if system_type == "sys.Storage" => {
+            Some(Type::Int)
+        }
         _ => None,
     }
 }
