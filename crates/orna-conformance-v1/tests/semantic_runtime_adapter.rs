@@ -115,6 +115,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/incompatible-dimensions.orna",
         "invalid/reserved-std.orna",
         "invalid/reserved-sys.orna",
+        "invalid/range-key-overlap-magic.orna",
     ] {
         let fixture = report
             .fixtures
