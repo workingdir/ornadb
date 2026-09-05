@@ -24,6 +24,7 @@ pub struct SemanticAdapter {
 
 fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
     match diagnostic.message() {
+        "calendar bucketing of Instant requires a time zone" => "E6001".into(),
         message if message.starts_with("table write contains an unknown field `") => "E2003".into(),
         message if message.starts_with("table write field has an incompatible type:") => {
             "E2001".into()
