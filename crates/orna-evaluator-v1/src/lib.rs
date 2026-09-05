@@ -10,7 +10,8 @@ use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
-    ControlKind, Expr, LiteralKind, Pattern, ReplInput, Statement, parse_expression, parse_repl,
+    ControlKind, Expr, LiteralKind, Pattern, PatternField, ReplInput, Statement, StringSegment,
+    parse_expression, parse_repl,
 };
 use orna_value_v1::Raw;
 
@@ -46,6 +47,8 @@ impl Default for Limits {
 }
 
 /// A deterministic name environment. Values must be canonical OVB-1 values.
+/// Qualified enum-label patterns resolve an exact `Type.variant` binding here;
+/// its enum type and variant identities are matched before payload fields bind.
 pub type Environment = BTreeMap<String, CanonicalValue>;
 
 /// A payload-free, stable failure suitable for conformance adapters.
@@ -164,6 +167,16 @@ enum Value {
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
+    NominalRecord {
+        type_id: Raw,
+        fields: Vec<(Raw, Value)>,
+    },
+    Enum {
+        type_id: Raw,
+        variant_id: Raw,
+        payload: Option<Box<Value>>,
+    },
+    Option(Option<Box<Value>>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,6 +302,37 @@ impl Value {
                         .collect(),
                 )
             }
+            Self::NominalRecord { type_id, fields } => Raw::Tag(
+                60009,
+                Box::new(Raw::Array(vec![
+                    type_id,
+                    Raw::Array(
+                        fields
+                            .into_iter()
+                            .map(|(key, value)| Raw::Array(vec![key, value.raw()]))
+                            .collect(),
+                    ),
+                ])),
+            ),
+            Self::Enum {
+                type_id,
+                variant_id,
+                payload,
+            } => Raw::Tag(
+                60008,
+                Box::new(Raw::Array(vec![
+                    type_id,
+                    variant_id,
+                    payload.map_or(Raw::Null, |value| value.raw()),
+                ])),
+            ),
+            Self::Option(value) => Raw::Tag(
+                60013,
+                Box::new(match value {
+                    Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()]),
+                    None => Raw::Array(vec![Raw::Int(0.into())]),
+                }),
+            ),
         }
     }
     fn from_canonical(
@@ -329,6 +373,9 @@ impl Value {
                 Ok(Self::Record(record))
             }
             Raw::Tag(60000, boxed) => Self::decimal_from_raw(boxed, context),
+            Raw::Tag(60008, boxed) => Self::enum_from_raw(boxed, context, depth),
+            Raw::Tag(60009, boxed) => Self::nominal_record_from_raw(boxed, context, depth),
+            Raw::Tag(60013, boxed) => Self::option_from_raw(boxed, context, depth),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -346,6 +393,73 @@ impl Value {
         context.integer(coefficient.clone())?;
         context.integer(exponent.clone())?;
         DecimalValue::new(coefficient.clone(), exponent.clone()).map(Self::Decimal)
+    }
+    fn enum_from_raw(
+        raw: &Raw,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [type_id, variant_id, payload] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let payload = match payload {
+            Raw::Null => None,
+            value => Some(Box::new(Self::from_raw(value, context, depth + 1)?)),
+        };
+        Ok(Self::Enum {
+            type_id: type_id.clone(),
+            variant_id: variant_id.clone(),
+            payload,
+        })
+    }
+    fn nominal_record_from_raw(
+        raw: &Raw,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        let [type_id, Raw::Array(raw_fields)] = parts.as_slice() else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        context.items(raw_fields.len())?;
+        let mut fields = Vec::with_capacity(raw_fields.len());
+        for field in raw_fields {
+            let Raw::Array(parts) = field else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            let [key, value] = parts.as_slice() else {
+                return Err(error("ORNA-EVAL-VALUE"));
+            };
+            if let Raw::Text(name) = key {
+                context.string(name.clone())?;
+            }
+            fields.push((key.clone(), Self::from_raw(value, context, depth + 1)?));
+        }
+        Ok(Self::NominalRecord {
+            type_id: type_id.clone(),
+            fields,
+        })
+    }
+    fn option_from_raw(
+        raw: &Raw,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        let Raw::Array(parts) = raw else {
+            return Err(error("ORNA-EVAL-VALUE"));
+        };
+        match parts.as_slice() {
+            [Raw::Int(tag)] if tag.is_zero() => Ok(Self::Option(None)),
+            [Raw::Int(tag), value] if *tag == BigInt::from(1) => Ok(Self::Option(Some(Box::new(
+                Self::from_raw(value, context, depth + 1)?,
+            )))),
+            _ => Err(error("ORNA-EVAL-VALUE")),
+        }
     }
 }
 
@@ -427,6 +541,9 @@ impl Context {
                 .cloned()
                 .ok_or_else(|| error("ORNA-EVAL-NAME")),
             Expr::Literal { text, kind, .. } => self.literal(text, *kind),
+            Expr::InterpolatedString { segments, .. } => {
+                self.interpolated_string(segments, scope, depth)
+            }
             Expr::Group { inner, .. } => self.evaluate(inner, scope, depth + 1),
             Expr::Unary { op, rhs, .. } => {
                 let value = self.evaluate(rhs, scope, depth + 1)?;
@@ -523,6 +640,30 @@ impl Context {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
+    fn interpolated_string(
+        &mut self,
+        segments: &[StringSegment],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(segments.len())?;
+        let mut output = String::new();
+        for segment in segments {
+            match segment {
+                StringSegment::Text { text, .. } => output.push_str(&unescape_string_body(text)?),
+                StringSegment::Expression { value, .. } => {
+                    let Value::String(value) = self.evaluate(value, scope, depth + 1)? else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    output.push_str(&value);
+                }
+            }
+            if output.len() > self.limits.max_string_bytes {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+        }
+        Ok(Value::String(output))
+    }
     fn sequence(
         &mut self,
         elements: &[Expr],
@@ -553,7 +694,7 @@ impl Context {
                     ..
                 } => {
                     let value = self.evaluate(value, &mut local, depth + 1)?;
-                    if !bind(pattern, value, &mut local, self)? {
+                    if !bind(pattern, value, &mut local, self, depth + 1)? {
                         return Err(error("ORNA-EVAL-TYPE"));
                     }
                 }
@@ -719,7 +860,7 @@ impl Context {
         self.items(arms.len())?;
         for arm in arms {
             let mut local = scope.clone();
-            if !bind(&arm.pattern, value.clone(), &mut local, self)? {
+            if !bind(&arm.pattern, value.clone(), &mut local, self, depth + 1)? {
                 continue;
             }
             if let Some(guard) = &arm.guard {
@@ -764,19 +905,25 @@ fn bind(
     value: Value,
     scope: &mut Scope,
     context: &Context,
+    depth: usize,
 ) -> Result<bool, EvaluationError> {
+    context.depth(depth)?;
     match pattern {
         Pattern::Name(name, _) => {
             scope.0.insert(name.clone(), value);
             Ok(true)
         }
         Pattern::Wildcard(_) => Ok(true),
+        Pattern::Literal {
+            kind: LiteralKind::Null,
+            ..
+        } if matches!(value, Value::Option(None)) => Ok(true),
         Pattern::Literal { text, kind, .. } => Ok(context.literal(text, *kind)? == value),
         Pattern::Tuple { elements, .. } => match value {
             Value::Tuple(values) if values.len() == elements.len() => {
                 context.items(values.len())?;
                 for (pattern, value) in elements.iter().zip(values) {
-                    if !bind(pattern, value, scope, context)? {
+                    if !bind(pattern, value, scope, context, depth + 1)? {
                         return Ok(false);
                     }
                 }
@@ -788,7 +935,7 @@ fn bind(
             Value::List(values) if values.len() == elements.len() => {
                 context.items(values.len())?;
                 for (pattern, value) in elements.iter().zip(values) {
-                    if !bind(pattern, value, scope, context)? {
+                    if !bind(pattern, value, scope, context, depth + 1)? {
                         return Ok(false);
                     }
                 }
@@ -804,7 +951,7 @@ fn bind(
                         return Ok(false);
                     };
                     if let Some(pattern) = pattern {
-                        if !bind(pattern, value, scope, context)? {
+                        if !bind(pattern, value, scope, context, depth + 1)? {
                             return Ok(false);
                         }
                     } else {
@@ -815,8 +962,100 @@ fn bind(
             }
             _ => Ok(false),
         },
-        Pattern::Constructor { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        Pattern::Constructor {
+            path,
+            arguments,
+            fields,
+            ..
+        } => bind_constructor(path, arguments, fields, value, scope, context, depth),
     }
+}
+fn bind_constructor(
+    path: &[orna_syntax_v1::NameSegment],
+    arguments: &[Pattern],
+    fields: &[PatternField],
+    value: Value,
+    scope: &mut Scope,
+    context: &Context,
+    depth: usize,
+) -> Result<bool, EvaluationError> {
+    context.items(path.len())?;
+    context.items(arguments.len())?;
+    context.items(fields.len())?;
+    if path.len() == 1 && path[0].text == "Some" {
+        let [argument] = arguments else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        if !fields.is_empty() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        return match value {
+            Value::Option(Some(value)) => bind(argument, *value, scope, context, depth + 1),
+            Value::Option(None) => Ok(false),
+            _ => Ok(false),
+        };
+    }
+    if path.len() < 2 || !arguments.is_empty() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    let qualified_name = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
+    let qualified_name = context.string(qualified_name)?;
+    let Some(Value::Enum {
+        type_id: expected_type,
+        variant_id: expected_variant,
+        ..
+    }) = scope.0.get(&qualified_name)
+    else {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    };
+    let Value::Enum {
+        type_id,
+        variant_id,
+        payload,
+    } = value
+    else {
+        return Ok(false);
+    };
+    if type_id != *expected_type || variant_id != *expected_variant {
+        return Ok(false);
+    }
+    match (fields, payload) {
+        ([], None) => Ok(true),
+        ([], Some(_)) | (_, None) => Ok(false),
+        (_, Some(payload)) => bind_pattern_fields(fields, *payload, scope, context, depth + 1),
+    }
+}
+fn bind_pattern_fields(
+    patterns: &[PatternField],
+    value: Value,
+    scope: &mut Scope,
+    context: &Context,
+    depth: usize,
+) -> Result<bool, EvaluationError> {
+    context.depth(depth)?;
+    let Value::NominalRecord { fields, .. } = value else {
+        return Ok(false);
+    };
+    for field in patterns {
+        let Some((_, value)) = fields
+            .iter()
+            .find(|(key, _)| matches!(key, Raw::Text(name) if name == &field.name))
+        else {
+            return Ok(false);
+        };
+        if let Some(pattern) = &field.pattern {
+            if !bind(pattern, value.clone(), scope, context, depth + 1)? {
+                return Ok(false);
+            }
+        } else {
+            scope.0.insert(field.name.clone(), value.clone());
+        }
+    }
+    Ok(true)
 }
 fn named_arguments(
     function: &str,
@@ -960,7 +1199,9 @@ fn unescape_string(text: &str) -> Result<String, EvaluationError> {
     if text.len() < 2 {
         return Err(error("ORNA-EVAL-VALUE"));
     }
-    let body = &text[1..text.len() - 1];
+    unescape_string_body(&text[1..text.len() - 1])
+}
+fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
     let mut output = String::new();
     let mut characters = body.chars();
     while let Some(character) = characters.next() {
