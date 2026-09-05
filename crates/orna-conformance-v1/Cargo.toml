@@ -7,6 +7,7 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
