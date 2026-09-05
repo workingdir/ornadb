@@ -414,6 +414,41 @@ fn published_money_and_affine_diagnostics_are_preserved() {
 }
 
 #[test]
+fn legacy_system_admin_methods_are_rejected_with_published_messages() {
+    let result = analyze(&[ModuleInput::new(
+        "legacy.orna",
+        r#"
+            pub fn reset(checkpoint: sys.Checkpoint, position: sys.CheckpointPosition) =
+                checkpoint.reset(to: position);
+            pub fn replay(failure: sys.Failure) = failure.replay();
+            pub fn resolve(failure: sys.Failure) = failure.resolve();
+            pub fn retry(stream: sys.Stream) = stream.retry();
+            pub fn skip(stream: sys.Stream) = stream.skip(reason: "drop it");
+        "#,
+    )]);
+    let messages = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message())
+        .collect::<Vec<_>>();
+    assert!(messages.contains(
+        &"system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments"
+    ));
+    assert!(messages.contains(
+        &"system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`"
+    ));
+    assert!(messages.contains(
+        &"system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`"
+    ));
+    assert!(messages.contains(
+        &"system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`"
+    ));
+    assert!(messages.contains(
+        &"system rows are read-only; use `sys.admin.skip_failure` on a `sys.FailureRef`"
+    ));
+}
+
+#[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
     let currencies = analyze(&[ModuleInput::new(
         "currency.orna",
