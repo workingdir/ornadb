@@ -692,25 +692,47 @@ impl LiveHost {
                         target_kind,
                         target,
                     } => {
-                        let response =
-                            application.cancel(session, request, fingerprint, &envelope.message)?;
+                        let target_active = match target_kind {
+                            TargetKind::Request => {
+                                match self.serving.request_state(session, *target) {
+                                    Ok(
+                                        orna_serving_v1::RequestState::Reserved
+                                        | orna_serving_v1::RequestState::Running,
+                                    ) => true,
+                                    Ok(
+                                        orna_serving_v1::RequestState::Cancelled
+                                        | orna_serving_v1::RequestState::Completed,
+                                    ) => false,
+                                    Err(ServingError::RequestUnknown) => return Err(Error::Denied),
+                                    Err(error) => return Err(map_serving(error)),
+                                }
+                            }
+                            TargetKind::Watch => self.watches.contains(&(session, *target)),
+                        };
+                        let response = if target_active {
+                            application.cancel(session, request, fingerprint, &envelope.message)?
+                        } else {
+                            unit_result_response(request, fingerprint)
+                        };
                         let outcome = validate_control_response(
                             request,
                             fingerprint,
                             response,
                             self.limits.protocol,
                         )?;
-                        match target_kind {
-                            TargetKind::Request => self.serving.cancel_request(session, *target),
-                            TargetKind::Watch => {
-                                self.serving
-                                    .close_watch(session, *target)
-                                    .map_err(map_serving)?;
-                                self.watches.remove(&(session, *target));
-                                Ok(())
+                        if target_active {
+                            match target_kind {
+                                TargetKind::Request => {
+                                    self.cancel_target_request(session, *target)?;
+                                }
+                                TargetKind::Watch => {
+                                    self.serving
+                                        .close_watch(session, *target)
+                                        .map_err(map_serving)?;
+                                    self.watches.remove(&(session, *target));
+                                }
                             }
                         }
-                        .map_err(map_serving)?;
                         self.complete(
                             session,
                             request,
@@ -843,6 +865,30 @@ impl LiveHost {
         }
         let _ = self.serving.cancel_request(session, request);
         self.requests.remove(&(session, request));
+    }
+
+    fn cancel_target_request(&mut self, session: [u8; 16], request: [u8; 16]) -> Result<()> {
+        self.serving
+            .cancel_request(session, request)
+            .map_err(map_serving)?;
+        if let Some(record) = self.requests.get_mut(&(session, request)) {
+            let fingerprint = record.fingerprint;
+            record.terminal = Some(DispatchOutcome {
+                outcome: FrameOutcome::Cancelled,
+                response: Some(Envelope {
+                    request: Some(request),
+                    watch: None,
+                    message: Message::Result {
+                        status: ResultStatus::Cancellation,
+                        value: None,
+                        fingerprint,
+                        diagnostic: None,
+                    },
+                    extensions: BTreeMap::new(),
+                }),
+            });
+        }
+        Ok(())
     }
 
     fn open_watch(
