@@ -256,7 +256,7 @@ fn validate_repository_paths(root: &Path) -> Result<(), ProjectLoadError> {
                 let namespace = namespace_for_path(&logical_path)?;
                 if namespace
                     .first()
-                    .is_some_and(|component| component == "sys")
+                    .is_some_and(|component| matches!(component.as_str(), "sys" | "std"))
                 {
                     return Err(ProjectLoadError::ReservedNamespace);
                 }
