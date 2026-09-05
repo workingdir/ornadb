@@ -249,9 +249,244 @@ where
     }
 }
 
+/// Committed relations for one in-memory database.
+///
+/// A [`DatabaseActivation`] owns a single private overlay spanning every
+/// relation it changes. Consequently no relation becomes visible before the
+/// root publishes the complete overlay.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DatabaseRuntime<Table, Key, Row> {
+    committed: BTreeMap<Table, BTreeMap<Key, Row>>,
+}
+
+impl<Table, Key, Row> DatabaseRuntime<Table, Key, Row>
+where
+    Table: Clone + Ord,
+    Key: Clone + Ord,
+    Row: Clone,
+{
+    /// Starts a root activation spanning all named relations.
+    pub fn begin(&mut self) -> DatabaseActivation<'_, Table, Key, Row> {
+        DatabaseActivation {
+            runtime: self,
+            overlay: BTreeMap::new(),
+            state: ActivationState::Open,
+        }
+    }
+
+    /// Runs one database activation and publishes all relation overlays only
+    /// when the operation returns successfully.
+    pub fn activate<T, E, F>(&mut self, operation: F) -> Result<T, ActivationError<E>>
+    where
+        F: FnOnce(&mut DatabaseActivation<'_, Table, Key, Row>) -> Result<T, E>,
+    {
+        let mut activation = self.begin();
+        match operation(&mut activation) {
+            Ok(value) => activation
+                .commit()
+                .map(|()| value)
+                .map_err(ActivationError::Commit),
+            Err(error) => {
+                activation.rollback();
+                Err(ActivationError::Operation(error))
+            }
+        }
+    }
+
+    /// Returns the committed row for one relation/key pair.
+    pub fn committed(&self, table: &Table, key: &Key) -> Option<&Row> {
+        self.committed.get(table)?.get(key)
+    }
+
+    /// Returns one committed relation, if it has published rows.
+    pub fn committed_rows(&self, table: &Table) -> Option<&BTreeMap<Key, Row>> {
+        self.committed.get(table)
+    }
+}
+
+/// Root transaction owner for all relations in a [`DatabaseRuntime`].
+pub struct DatabaseActivation<'runtime, Table, Key, Row> {
+    runtime: &'runtime mut DatabaseRuntime<Table, Key, Row>,
+    overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    state: ActivationState,
+}
+
+impl<'runtime, Table, Key, Row> DatabaseActivation<'runtime, Table, Key, Row>
+where
+    Table: Clone + Ord,
+    Key: Clone + Ord,
+    Row: Clone,
+{
+    /// Borrows the same database activation for a nested ordinary call.
+    pub fn child<'scope>(
+        &'scope mut self,
+    ) -> Result<DatabaseChildScope<'scope, 'runtime, Table, Key, Row>, TableError> {
+        self.require_open()?;
+        Ok(DatabaseChildScope { activation: self })
+    }
+
+    /// Stages a new row in one relation.
+    pub fn insert(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
+        self.require_open()?;
+        if self.candidate(&table, &key).is_some() {
+            return Err(TableError::DuplicateKey);
+        }
+        self.overlay
+            .entry(table)
+            .or_default()
+            .insert(key, Some(row));
+        Ok(())
+    }
+
+    /// Stages a replacement of one existing candidate row.
+    pub fn update(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
+        self.require_open()?;
+        if self.candidate(&table, &key).is_none() {
+            return Err(TableError::MissingRow);
+        }
+        self.overlay
+            .entry(table)
+            .or_default()
+            .insert(key, Some(row));
+        Ok(())
+    }
+
+    /// Stages deletion of one existing candidate row.
+    pub fn delete(&mut self, table: Table, key: Key) -> Result<(), TableError> {
+        self.require_open()?;
+        if self.candidate(&table, &key).is_none() {
+            return Err(TableError::MissingRow);
+        }
+        self.overlay.entry(table).or_default().insert(key, None);
+        Ok(())
+    }
+
+    /// Reads the candidate relation, including all writes staged by this root.
+    pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
+        self.require_open()?;
+        Ok(self.candidate(table, key))
+    }
+
+    /// Materialises one unpublished candidate relation for validation.
+    pub fn candidate_rows(&self, table: &Table) -> Result<BTreeMap<Key, Row>, TableError> {
+        self.require_open()?;
+        let mut candidate = self
+            .runtime
+            .committed
+            .get(table)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(overlay) = self.overlay.get(table) {
+            for (key, mutation) in overlay {
+                match mutation {
+                    Some(row) => {
+                        candidate.insert(key.clone(), row.clone());
+                    }
+                    None => {
+                        candidate.remove(key);
+                    }
+                }
+            }
+        }
+        Ok(candidate)
+    }
+
+    /// Publishes the overlays of every changed relation together.
+    pub fn commit(&mut self) -> Result<(), TableError> {
+        match self.state {
+            ActivationState::Committed => return Err(TableError::DoubleCommit),
+            ActivationState::RolledBack => return Err(TableError::UseAfterClose),
+            ActivationState::Open => {}
+        }
+        for (table, overlay) in &self.overlay {
+            let relation = self.runtime.committed.entry(table.clone()).or_default();
+            for (key, mutation) in overlay {
+                match mutation {
+                    Some(row) => {
+                        relation.insert(key.clone(), row.clone());
+                    }
+                    None => {
+                        relation.remove(key);
+                    }
+                }
+            }
+        }
+        self.state = ActivationState::Committed;
+        Ok(())
+    }
+
+    /// Discards every relation overlay. Repeated cleanup is harmless.
+    pub fn rollback(&mut self) {
+        if self.state == ActivationState::Open {
+            self.overlay.clear();
+            self.state = ActivationState::RolledBack;
+        }
+    }
+
+    fn require_open(&self) -> Result<(), TableError> {
+        if self.state == ActivationState::Open {
+            Ok(())
+        } else {
+            Err(TableError::UseAfterClose)
+        }
+    }
+
+    fn candidate(&self, table: &Table, key: &Key) -> Option<&Row> {
+        match self
+            .overlay
+            .get(table)
+            .and_then(|relation| relation.get(key))
+        {
+            Some(Some(row)) => Some(row),
+            Some(None) => None,
+            None => self.runtime.committed.get(table)?.get(key),
+        }
+    }
+}
+
+/// A nested ordinary call borrowing a [`DatabaseActivation`].
+pub struct DatabaseChildScope<'scope, 'runtime, Table, Key, Row> {
+    activation: &'scope mut DatabaseActivation<'runtime, Table, Key, Row>,
+}
+
+impl<'scope, 'runtime, Table, Key, Row> DatabaseChildScope<'scope, 'runtime, Table, Key, Row>
+where
+    Table: Clone + Ord,
+    Key: Clone + Ord,
+    Row: Clone,
+{
+    /// Creates a deeper nested ordinary call in the same root activation.
+    pub fn child<'child>(
+        &'child mut self,
+    ) -> Result<DatabaseChildScope<'child, 'runtime, Table, Key, Row>, TableError> {
+        self.activation.child()
+    }
+
+    pub fn insert(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
+        self.activation.insert(table, key, row)
+    }
+
+    pub fn update(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
+        self.activation.update(table, key, row)
+    }
+
+    pub fn delete(&mut self, table: Table, key: Key) -> Result<(), TableError> {
+        self.activation.delete(table, key)
+    }
+
+    pub fn read(&self, table: &Table, key: &Key) -> Result<Option<&Row>, TableError> {
+        self.activation.read(table, key)
+    }
+
+    /// Nested calls cannot independently publish the root's overlays.
+    pub fn commit(&mut self) -> Result<(), TableError> {
+        Err(TableError::ChildCannotCommit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ActivationError, TableError, TableRuntime};
+    use super::{ActivationError, DatabaseRuntime, TableError, TableRuntime};
     use std::panic::AssertUnwindSafe;
 
     #[test]
@@ -343,5 +578,83 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(table.committed(&1), None);
+    }
+
+    #[test]
+    fn database_relations_remain_private_before_root_commit() {
+        let mut database = DatabaseRuntime::<&str, u64, String>::default();
+        {
+            let mut root = database.begin();
+            {
+                let mut child = root.child().unwrap();
+                child.insert("orders", 1, "order".into()).unwrap();
+                child.insert("audits", 1, "audit".into()).unwrap();
+                assert_eq!(child.commit(), Err(TableError::ChildCannotCommit));
+            }
+            assert_eq!(
+                root.read(&"orders", &1).unwrap().map(String::as_str),
+                Some("order")
+            );
+            assert_eq!(
+                root.read(&"audits", &1).unwrap().map(String::as_str),
+                Some("audit")
+            );
+        }
+        assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn database_root_commit_publishes_all_relations_together() {
+        let mut database = DatabaseRuntime::<&str, u64, String>::default();
+        database
+            .activate(|root| {
+                let mut child = root.child()?;
+                child.insert("orders", 1, "order".into())?;
+                child.insert("audits", 1, "audit".into())?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            database.committed(&"orders", &1).map(String::as_str),
+            Some("order")
+        );
+        assert_eq!(
+            database.committed(&"audits", &1).map(String::as_str),
+            Some("audit")
+        );
+    }
+
+    #[test]
+    fn database_activation_error_rolls_back_every_relation() {
+        let mut database = DatabaseRuntime::<&str, u64, String>::default();
+        assert_eq!(
+            database.activate(|root| {
+                root.insert("orders", 1, "order".into())?;
+                root.insert("audits", 1, "audit".into())?;
+                Err::<(), _>(TableError::UseAfterClose)
+            }),
+            Err(ActivationError::Operation(TableError::UseAfterClose))
+        );
+
+        assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn database_activation_panic_rolls_back_every_relation() {
+        let mut database = DatabaseRuntime::<&str, u64, String>::default();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _: Result<(), ActivationError<()>> = database.activate(|root| {
+                root.insert("orders", 1, "order".into()).unwrap();
+                root.insert("audits", 1, "audit".into()).unwrap();
+                panic!("activation failed");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"audits", &1), None);
     }
 }
