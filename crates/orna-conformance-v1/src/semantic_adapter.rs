@@ -25,7 +25,12 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
     match diagnostic.message() {
         "cannot add Time and Energy" => "E5001".into(),
         "cannot add two absolute affine temperatures" => "E5002".into(),
+        "cannot sum absolute affine quantities" => "E5003".into(),
         "cannot add different currencies without conversion" => "E5003".into(),
+        "currency symbols belong to locale-aware formatting, not Currency identity" => {
+            "ORNA091-E-CURRENCY-SYMBOL".into()
+        }
+        "binary Float cannot enter an exact Money calculation implicitly" => "E5103".into(),
         "Float is not a valid primary-key type" => "E3003".into(),
         _ => diagnostic.code().into(),
     }
