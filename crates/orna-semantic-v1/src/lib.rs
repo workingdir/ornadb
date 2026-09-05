@@ -2138,6 +2138,26 @@ fn infer_success_pipeline(
             effects: input.effects,
         };
     }
+    if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
+        return match rhs {
+            Expr::Call {
+                callee, arguments, ..
+            } => infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics),
+            Expr::Name { .. } => {
+                infer_named_pipeline_stage(input, rhs, &[], scope, local, diagnostics)
+            }
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_UNSUPPORTED,
+                    "pipeline stage is outside this semantic slice",
+                ));
+                Inferred {
+                    ty: Type::Error,
+                    effects: input.effects,
+                }
+            }
+        };
+    }
     let Expr::Call {
         callee, arguments, ..
     } = rhs
@@ -2205,6 +2225,75 @@ fn infer_success_pipeline(
         effects.may_fail = true;
     }
     Inferred { ty, effects }
+}
+
+/// Applies a named callable pipeline stage by checking the implicit input as
+/// its first positional argument. Relation and stream stages are intentionally
+/// handled by `infer_success_pipeline`'s closed intrinsic path above.
+fn infer_named_pipeline_stage(
+    input: Inferred,
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if !matches!(callee, Expr::Name { .. }) {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline stage must be a named callable",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    }
+    let callee = infer(callee, scope, local, diagnostics);
+    let mut effects = input.effects;
+    effects.join(&callee.effects);
+    let mut values = Vec::with_capacity(arguments.len() + 1);
+    values.push(input.ty);
+    for argument in arguments {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+    if arguments.iter().any(|argument| argument.name.is_some()) {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline callable arguments must be positional in this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+    let Type::Function {
+        parameters, result, ..
+    } = callee.ty
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline stage is not a supported named callable",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    if parameters.len() != values.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "function argument count does not match its static signature",
+        ));
+    }
+    for (expected, actual) in parameters.iter().zip(&values) {
+        require_same(expected, actual, diagnostics);
+    }
+    Inferred {
+        ty: *result,
+        effects,
+    }
 }
 
 fn is_numeric_range_bound(ty: &Type) -> bool {

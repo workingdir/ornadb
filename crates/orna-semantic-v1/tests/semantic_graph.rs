@@ -272,6 +272,54 @@ fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_executi
 }
 
 #[test]
+fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_arguments() {
+    let pipe_first_argument = r#"
+        pub fn between(value: Int, min: Int, max: Int) =
+            value >= min && value <= max;
+
+        pub fn selected(value: Int) =
+            value | between(10, 20);
+    "#;
+    let pipeline_precedence = r#"
+        pub fn square(value: Int) = value * value;
+        pub fn count_is_positive(values: [Int]) = values | count > 0;
+        pub fn square_sum(a: Int, b: Int) = a + b | square;
+        pub fn increment_count(values: [Int]) = (values | count) + 1;
+    "#;
+    let precedence_source = format!("pub fn count(values: [Int]): Int = 0;\n{pipeline_precedence}");
+
+    let result = analyze(&[
+        ModuleInput::new("pipe-first-argument.orna", pipe_first_argument),
+        ModuleInput::new("pipeline-precedence.orna", precedence_source),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let precedence = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "pipeline-precedence")
+        .unwrap();
+    assert!(matches!(
+        &precedence.symbols["square_sum"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    assert!(matches!(
+        &precedence.symbols["increment_count"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+}
+
+#[test]
+fn generic_and_table_pipeline_stages_remain_fail_closed() {
+    let result = analyze(&[ModuleInput::new(
+        "unsupported.orna",
+        "table Books(id: Int) { title: Str, } fn generic() = 1 | (value => value); fn table() = 1 | Books;",
+    )]);
+
+    assert!(has(&result, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn stream_from_list_requires_the_closed_named_identity_argument() {
     let result = analyze(&[ModuleInput::new(
         "invalid.orna",
