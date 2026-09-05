@@ -728,12 +728,24 @@ impl RuntimeState {
         identity: RequestIdentity,
         fingerprint: [u8; 32],
     ) -> Result<Option<RequestStatus>, RuntimeError> {
-        validate_request_identity(identity)?;
-        let status = request_status_tx(&self.connection, identity).await?;
+        let status = self.request_status_for_identity(identity).await?;
         if let Some(status) = &status {
             require_fingerprint(status, fingerprint)?;
         }
         Ok(status)
+    }
+
+    /// Returns a request record without a fingerprint precondition.
+    ///
+    /// Trusted runtime owners use this only after authenticating the session
+    /// and request identity at their own boundary, for example to recover a
+    /// cancellation target whose fingerprint is not part of the wire command.
+    pub async fn request_status_for_identity(
+        &self,
+        identity: RequestIdentity,
+    ) -> Result<Option<RequestStatus>, RuntimeError> {
+        validate_request_identity(identity)?;
+        request_status_tx(&self.connection, identity).await
     }
 
     async fn transition_request(
@@ -1272,6 +1284,10 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(
             state.request_status(identity, digest(6)).await.unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            state.request_status_for_identity(identity).await.unwrap(),
             Some(first)
         );
     }
