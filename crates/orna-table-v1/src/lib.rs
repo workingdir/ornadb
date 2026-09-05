@@ -159,6 +159,16 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         Relation::new(self.source.map(mapper))
     }
 
+    /// Maps each value to an ordered inner sequence and flattens it.
+    pub fn flat_map<Output: 'a, M, Inner>(self, mapper: M) -> Relation<'a, Output>
+    where
+        M: FnMut(Item) -> Inner + 'a,
+        Inner: IntoIterator<Item = Output> + 'a,
+        Inner::IntoIter: 'a,
+    {
+        Relation::new(self.source.flat_map(mapper))
+    }
+
     /// Takes a bounded prefix without enumerating later items.
     pub fn take(self, limit: usize) -> Self {
         Self::new(self.source.take(limit))
@@ -1270,6 +1280,13 @@ mod tests {
                 .map(|((left_key, _), (right_key, _))| (left_key, right_key))
                 .collect::<Vec<_>>(),
             vec![(1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (4, 4)]
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .flat_map(|(_, row)| row.chars())
+                .collect::<String>(),
+            "onetwothreefour"
         );
 
         let mut activation = database.begin();
