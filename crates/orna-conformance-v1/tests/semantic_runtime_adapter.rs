@@ -110,6 +110,8 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/legacy-sys-runtime.orna",
         "invalid/legacy-sys-storage-call.orna",
         "invalid/legacy-tryfrom.orna",
+        "invalid/legacy-assert-owner-pipe.orna",
+        "invalid/legacy-assert-self-pipe.orna",
         "invalid/incompatible-dimensions.orna",
     ] {
         let fixture = report

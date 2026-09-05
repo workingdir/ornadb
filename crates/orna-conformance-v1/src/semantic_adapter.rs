@@ -46,6 +46,10 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions" => {
             "ORNA100-E-SYS-STORAGE-CALL".into()
         }
+        "remove `self |`; the table already supplies its candidate relation"
+        | "remove the repeated table owner before the assertion predicate" => {
+            "ORNA-A091-002".into()
+        }
         "Float is not a valid primary-key type" => "E3003".into(),
         _ => diagnostic.code().into(),
     }
