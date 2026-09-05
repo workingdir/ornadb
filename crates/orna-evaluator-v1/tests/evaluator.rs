@@ -32,6 +32,133 @@ fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value
     )
 }
 
+fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, EvaluationError> {
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let functions = parsed
+        .value
+        .items
+        .into_iter()
+        .map(|item| {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
+                panic!("function expected")
+            };
+            (
+                signature.name,
+                orna_evaluator_v1::PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            )
+        })
+        .collect();
+    let parsed = orna_syntax_v1::parse_expression(expression);
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    orna_evaluator_v1::evaluate_with_functions(
+        &parsed.value,
+        &Environment::new(),
+        &functions,
+        limits,
+    )
+}
+
+#[test]
+fn source_calls_bind_positional_named_and_nested_defaults() {
+    let source = "fn twice(value: Int) = value + value; fn add(value: Int, extra = twice(3)) = value + extra;";
+    for expression in [
+        "add(10)",
+        "add(value: 10)",
+        "add(10, extra: 6)",
+        "add(extra: 6, value: 10)",
+    ] {
+        assert_eq!(
+            call_module(source, expression, Limits::default()).unwrap(),
+            Value::int(16.into())
+        );
+    }
+    assert_eq!(
+        call_module(source, "add(twice(5))", Limits::default()).unwrap(),
+        Value::int(16.into())
+    );
+    for expression in [
+        "add()",
+        "add(1, 2, 3)",
+        "add(1, value: 2)",
+        "add(value: 1, 2)",
+        "add(unknown: 1)",
+    ] {
+        assert_eq!(
+            code(call_module(source, expression, Limits::default())),
+            "ORNA-EVAL-ARGUMENT",
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn source_calls_are_lexical_and_respect_value_shadowing() {
+    let source = "fn inner() = secret; fn outer(secret: Int) = inner();";
+    assert_eq!(
+        code(call_module(source, "outer(7)", Limits::default())),
+        "ORNA-EVAL-NAME"
+    );
+    let source = "fn identity(value: Int) = value;";
+    assert_eq!(
+        code(call_module(
+            source,
+            "if true { let identity = 1; identity(2) } else { 0 }",
+            Limits::default()
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+}
+
+#[test]
+fn source_call_arguments_evaluate_in_source_order() {
+    let source = "fn encode(a: Int, b: Int) = 10 * a + b; fn caller() { let counter = 0; encode(b: if true { counter += 1; counter } else { 0 }, a: if true { counter += 1; counter } else { 0 }) }";
+    assert_eq!(
+        call_module(source, "caller()", Limits::default()).unwrap(),
+        Value::int(21.into())
+    );
+}
+
+#[test]
+fn recursive_calls_terminate_or_hit_shared_limits() {
+    let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
+    assert_eq!(
+        call_module(source, "factorial(5)", Limits::default()).unwrap(),
+        Value::int(120.into())
+    );
+    for limits in [
+        Limits {
+            max_steps: 8,
+            ..Limits::default()
+        },
+        Limits {
+            max_depth: 8,
+            ..Limits::default()
+        },
+    ] {
+        assert_eq!(
+            code(call_module("fn recur() = recur();", "recur()", limits)),
+            "ORNA-EVAL-LIMIT"
+        );
+    }
+    let source = "fn small() = 1 + 2; fn combined() = small() + small();";
+    assert_eq!(
+        code(call_module(
+            source,
+            "combined()",
+            Limits {
+                max_steps: 6,
+                ..Limits::default()
+            }
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
 #[test]
 fn function_defaults_return_values_and_see_earlier_parameters() {
     let source =

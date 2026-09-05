@@ -55,6 +55,17 @@ impl Default for Limits {
 /// its enum type and variant identities are matched before payload fields bind.
 pub type Environment = BTreeMap<String, CanonicalValue>;
 
+/// An admitted pure function and its lexical immutable value environment.
+#[derive(Clone, Debug)]
+pub struct PureFunction {
+    pub parameters: Vec<Parameter>,
+    pub body: Expr,
+    pub environment: Environment,
+}
+
+/// Explicitly admitted named functions; no host or module lookup is performed.
+pub type Functions = BTreeMap<String, PureFunction>;
+
 /// A payload-free, stable failure suitable for conformance adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationError {
@@ -115,8 +126,24 @@ pub fn evaluate_parsed(
     environment: &Environment,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    evaluate_with_functions(expression, environment, &Functions::new(), limits)
+}
+
+/// Evaluate a parsed expression with an explicit pure-function namespace.
+/// Nested calls share the same limits and cannot access the caller's locals.
+pub fn evaluate_with_functions(
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
-    let mut context = Context { limits, steps: 0 };
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+    };
+    context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
     context
         .evaluate(expression, &mut scope, 0)
@@ -135,28 +162,45 @@ pub fn evaluate_function(
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
-    let mut context = Context { limits, steps: 0 };
+    let functions = Functions::new();
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions: &functions,
+    };
+    let supplied = Scope::from_environment(arguments, &mut context)?;
+    invoke_pure(&mut context, parameters, body, environment, supplied, 0).and_then(Value::canonical)
+}
+
+fn invoke_pure(
+    context: &mut Context,
+    parameters: &[Parameter],
+    body: &Expr,
+    environment: &Environment,
+    supplied: Scope,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    context.depth(depth)?;
     context.items(parameters.len())?;
-    context.items(arguments.len())?;
+    context.items(supplied.0.len())?;
     let mut names = BTreeSet::new();
     for parameter in parameters {
         let Pattern::Name(name, _) = &parameter.pattern else {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         };
-        if name.len() > limits.max_string_bytes {
+        if name.len() > context.limits.max_string_bytes {
             return Err(error("ORNA-EVAL-LIMIT"));
         }
         if !names.insert(name.as_str())
-            || (!arguments.contains_key(name) && parameter.default.is_none())
+            || (!supplied.0.contains_key(name) && parameter.default.is_none())
         {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         }
     }
-    if arguments.keys().any(|name| !names.contains(name.as_str())) {
+    if supplied.0.keys().any(|name| !names.contains(name.as_str())) {
         return Err(error("ORNA-EVAL-ARGUMENT"));
     }
-    let mut scope = Scope::from_environment(environment, &mut context)?;
-    let supplied = Scope::from_environment(arguments, &mut context)?;
+    let mut scope = Scope::from_environment(environment, context)?;
     for parameter in parameters {
         let Pattern::Name(name, _) = &parameter.pattern else {
             unreachable!("parameter patterns were admitted above");
@@ -170,15 +214,13 @@ pub fn evaluate_function(
                     .as_ref()
                     .expect("omitted defaults were admitted above"),
                 &mut scope,
-                0,
+                depth,
             )?
         };
         scope.0.insert(name.clone(), value);
         context.items(scope.0.len())?;
     }
-    context
-        .evaluate(body, &mut scope, 0)
-        .and_then(Value::canonical)
+    context.evaluate(body, &mut scope, depth)
 }
 
 fn check_limits(source: &str, limits: Limits) -> Result<(), EvaluationError> {
@@ -544,11 +586,12 @@ impl Scope {
     }
 }
 
-struct Context {
+struct Context<'a> {
     limits: Limits,
     steps: u64,
+    functions: &'a Functions,
 }
-impl Context {
+impl Context<'_> {
     fn step(&mut self) -> Result<(), EvaluationError> {
         self.steps = self
             .steps
@@ -986,6 +1029,50 @@ impl Context {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        if let Expr::Name { text, .. } = callee {
+            if scope.0.contains_key(text) {
+                return Err(error("ORNA-EVAL-TYPE"));
+            }
+            let functions = self.functions;
+            let function = functions.get(text).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+            self.depth(depth + 1)?;
+            self.items(arguments.len())?;
+            let mut supplied = BTreeMap::new();
+            let mut positional = 0;
+            let mut named_started = false;
+            for argument in arguments {
+                let name = if let Some(name) = &argument.name {
+                    named_started = true;
+                    name
+                } else {
+                    if named_started {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    let Some(Parameter {
+                        pattern: Pattern::Name(name, _),
+                        ..
+                    }) = function.parameters.get(positional)
+                    else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    positional += 1;
+                    name
+                };
+                if supplied.contains_key(name) {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                supplied.insert(name.clone(), value);
+            }
+            return invoke_pure(
+                self,
+                &function.parameters,
+                &function.body,
+                &function.environment,
+                Scope(supplied),
+                depth + 1,
+            );
+        }
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         self.items(arguments.len())?;
         let values = arguments
