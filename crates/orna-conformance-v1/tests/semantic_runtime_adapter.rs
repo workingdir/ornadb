@@ -106,6 +106,10 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/money-float.orna",
         "invalid/module-single-table-assertion.orna",
         "invalid/module-zero-table-assertion.orna",
+        "invalid/legacy-result.orna",
+        "invalid/legacy-sys-runtime.orna",
+        "invalid/legacy-sys-storage-call.orna",
+        "invalid/legacy-tryfrom.orna",
         "invalid/incompatible-dimensions.orna",
     ] {
         let fixture = report
