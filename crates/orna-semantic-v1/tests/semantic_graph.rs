@@ -28,6 +28,25 @@ fn closure_lists_do_not_erase_incompatible_return_types() {
 }
 
 #[test]
+fn relation_comparisons_require_an_explicit_comparison_operation() {
+    for expression in ["Row == Row", "Row != Row", "Row.as_of(HEAD) == Row"] {
+        let result = analyze(&[ModuleInput::new(
+            "relations.orna",
+            format!("pub table Row {{ name: Str, }} pub fn compare() = {expression};"),
+        )]);
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message() == "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
+        }), "{:?}", result.diagnostics);
+    }
+    let scalars = analyze(&[ModuleInput::new(
+        "scalars.orna",
+        "pub fn compare(a: Int, b: Int) = a == b;",
+    )]);
+    assert!(scalars.is_ok(), "{:?}", scalars.diagnostics);
+}
+
+#[test]
 fn failure_skip_requires_a_typed_version_precondition() {
     for arguments in [
         "failure.reference, expected_status: failure.status, reason: reason",
