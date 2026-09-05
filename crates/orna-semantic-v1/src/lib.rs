@@ -1185,7 +1185,7 @@ fn check_item(
             for member in members {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
-                        let inferred = infer_table_assertion(value, &row, scope, diagnostics);
+                        let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
                         assertion(
                             AssertionOwner::Table(name.clone()),
                             value,
@@ -3810,10 +3810,30 @@ fn infer_refined_assertion(
 /// prove them.
 fn infer_table_assertion(
     value: &Expr,
+    owner_name: &str,
     row: &Type,
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Expr::Binary { lhs, op, .. } = value
+        && op == "|"
+        && let Expr::Name { text, .. } = lhs.as_ref()
+    {
+        let message = match text.as_str() {
+            "self" => Some("remove `self |`; the table already supplies its candidate relation"),
+            text if text == owner_name => {
+                Some("remove the repeated table owner before the assertion predicate")
+            }
+            _ => None,
+        };
+        if let Some(message) = message {
+            diagnostics.push(diag(DIAG_ASSERTION, message));
+            return Inferred {
+                ty: Type::Bool,
+                effects: EffectSummary::default(),
+            };
+        }
+    }
     let Expr::Call {
         callee, arguments, ..
     } = value
