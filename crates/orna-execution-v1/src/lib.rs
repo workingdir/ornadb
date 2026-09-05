@@ -252,7 +252,11 @@ impl ActivationCoordinator {
         self.require_current(owner)?;
         let current = self.owner.as_mut().expect("checked");
         current.cancellation_epoch += 1;
-        self.phase = TransactionPhase::RolledBack;
+        self.phase = if self.children.values().any(|joined| !joined) {
+            TransactionPhase::ChildrenJoining
+        } else {
+            TransactionPhase::RolledBack
+        };
         Ok(())
     }
     pub fn spawn_child(&mut self, owner: OwnerLease) -> Result<ChildId, CoordinationError> {
@@ -267,11 +271,22 @@ impl ActivationCoordinator {
         owner: OwnerLease,
         child: ChildId,
     ) -> Result<(), CoordinationError> {
-        self.require_live(owner)?;
+        // Cancellation revokes the capability to do more work, but the owner
+        // identity remains valid long enough to acknowledge child cleanup.
+        // Requiring a live lease here would make structured cancellation
+        // impossible: unfinished children could never be joined.
+        self.require_owner_identity(owner)?;
         let Some(joined) = self.children.get_mut(&child) else {
             return Err(CoordinationError::InvalidPhase);
         };
         *joined = true;
+        if self
+            .owner
+            .is_some_and(|current| current.cancellation_epoch != 0)
+            && self.children.values().all(|joined| *joined)
+        {
+            self.phase = TransactionPhase::RolledBack;
+        }
         Ok(())
     }
     pub fn phase(&self) -> TransactionPhase {
@@ -337,6 +352,15 @@ impl ActivationCoordinator {
             Err(CoordinationError::StaleOwner)
         }
     }
+    fn require_owner_identity(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
+        if self.owner.is_some_and(|current| {
+            current.activation == owner.activation && current.epoch == owner.epoch
+        }) {
+            Ok(())
+        } else {
+            Err(CoordinationError::StaleOwner)
+        }
+    }
     fn require_live(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         self.require_current(owner)?;
         if owner.cancellation_epoch == 0 {
@@ -360,6 +384,9 @@ impl ActivationCoordinator {
         // A stale completion belongs to an earlier owner. It must not change
         // the phase of a successor which has already taken the coordinator.
         if reason == RollbackReason::StaleOwner {
+            Outcome::RolledBack { reason }
+        } else if self.children.values().any(|joined| !joined) {
+            self.phase = TransactionPhase::ChildrenJoining;
             Outcome::RolledBack { reason }
         } else {
             self.rollback(reason)
@@ -533,6 +560,28 @@ mod tests {
         c.cancel(owner).unwrap();
         let mut store = InMemoryAtomicStore::default();
         let mut provider = Provider(Ok(Value(3)));
+        let mut fault = NoFault;
+        assert_eq!(
+            c.execute(owner, &mut provider, &mut store, checkpoint(), &mut fault),
+            Outcome::RolledBack {
+                reason: RollbackReason::Cancelled
+            }
+        );
+        assert!(store.visible().is_empty());
+    }
+
+    #[test]
+    fn cancellation_waits_for_child_join_before_terminal_phase() {
+        let (mut c, owner) = active();
+        let child = c.spawn_child(owner).unwrap();
+
+        c.cancel(owner).unwrap();
+        assert_eq!(c.phase(), TransactionPhase::ChildrenJoining);
+        assert!(c.join_child(owner, child).is_ok());
+        assert_eq!(c.phase(), TransactionPhase::RolledBack);
+
+        let mut store = InMemoryAtomicStore::default();
+        let mut provider = Provider(Ok(Value(9)));
         let mut fault = NoFault;
         assert_eq!(
             c.execute(owner, &mut provider, &mut store, checkpoint(), &mut fault),
