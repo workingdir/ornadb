@@ -51,6 +51,7 @@ impl SessionDeletionAdapter for Delete {
 struct UnitApplication {
     calls: usize,
     reject: bool,
+    reject_cancel: bool,
 }
 
 fn unit_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
@@ -96,6 +97,9 @@ impl LiveApplication for UnitApplication {
         _: &Message,
     ) -> Result<Envelope, Error> {
         self.calls += 1;
+        if self.reject_cancel {
+            return Err(Error::ApplicationRejected);
+        }
         Ok(unit_result(request, fingerprint))
     }
 }
@@ -194,12 +198,15 @@ fn subscribe() -> Vec<u8> {
     .unwrap()
 }
 fn cancel() -> Vec<u8> {
+    cancel_request([7; 16], [8; 16])
+}
+fn cancel_request(request: [u8; 16], target: [u8; 16]) -> Vec<u8> {
     Envelope {
-        request: Some([7; 16]),
+        request: Some(request),
         watch: None,
         message: Message::Cancel {
             target_kind: TargetKind::Request,
-            target: [8; 16],
+            target,
         },
         extensions: BTreeMap::new(),
     }
@@ -407,6 +414,43 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
         Err(Error::Denied)
     );
     assert_eq!(application.calls, 1);
+}
+
+#[test]
+fn rejected_non_durable_cancellation_callback_does_not_cancel_the_target() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    host.reserve_request([1; 16], [8; 16]).unwrap();
+    host.start_request([1; 16], [8; 16]).unwrap();
+    let mut rejecting = UnitApplication {
+        reject_cancel: true,
+        ..UnitApplication::default()
+    };
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(cancel()), &mut rejecting,)),
+        Err(Error::ApplicationRejected)
+    );
+    let mut accepting = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [5; 16],
+            3,
+            Frame::Binary(cancel_request([13; 16], [8; 16])),
+            &mut accepting,
+        ))
+        .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Cancelled)
+    );
+    assert_eq!(accepting.calls, 1);
 }
 
 #[test]
