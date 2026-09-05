@@ -4,9 +4,13 @@
 //! this crate owns no socket or HTTP implementation. All public failures are
 //! stable redacted codes and inbound protocol bytes are decoded canonically.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, RequestState};
+use orna_foundation_v1::OvbRaw;
+use orna_protocol_v1::{
+    Envelope, Limits as ProtocolLimits, Message, RequestState, ResultStatus, TargetKind,
+    canonical_request_fingerprint,
+};
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
     SessionBoundary, SessionDeletionAdapter, SessionId,
@@ -124,6 +128,57 @@ pub trait LiveApplication {
         request: [u8; 16],
         message: &Message,
     ) -> Result<Envelope>;
+
+    /// Handles a client subscription after protocol admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted error when the subscription cannot be served.
+    fn subscribe(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    /// Handles a client watch closure after protocol admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted error when the watch cannot be closed.
+    fn unsubscribe(
+        &mut self,
+        _: [u8; 16],
+        _: [u8; 16],
+        _: [u8; 32],
+        _: &Message,
+    ) -> Result<Envelope> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    /// Produces a fresh snapshot for an existing server watch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted error when a fresh snapshot cannot be served.
+    fn resync(&mut self, _: [u8; 16], _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    /// Handles one client event after protocol admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted error when the event cannot be applied.
+    fn event(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    /// Handles a client cancellation after protocol admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted error when the cancellation cannot be applied.
+    fn cancel(&mut self, _: [u8; 16], _: [u8; 16], _: [u8; 32], _: &Message) -> Result<Envelope> {
+        Err(Error::UnsupportedOperation)
+    }
 }
 
 struct RejectApplication;
@@ -134,6 +189,12 @@ impl LiveApplication for RejectApplication {
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
         Err(Error::UnsupportedOperation)
     }
+}
+
+#[derive(Clone)]
+struct RequestRecord {
+    fingerprint: [u8; 32],
+    terminal: Option<DispatchOutcome>,
 }
 
 /// Host-issued identity for a session. The two credential representations are
@@ -213,7 +274,8 @@ pub struct LiveHost {
     security: SessionBoundary,
     serving: Serving,
     attachments: BTreeMap<[u8; 16], [u8; 16]>,
-    fingerprints: BTreeMap<([u8; 16], [u8; 16]), [u8; 32]>,
+    requests: BTreeMap<([u8; 16], [u8; 16]), RequestRecord>,
+    watches: BTreeSet<([u8; 16], [u8; 16])>,
 }
 
 // The state boundary is synchronous today, but the async methods keep the
@@ -233,7 +295,8 @@ impl LiveHost {
             security,
             serving,
             attachments: BTreeMap::new(),
-            fingerprints: BTreeMap::new(),
+            requests: BTreeMap::new(),
+            watches: BTreeSet::new(),
         })
     }
 
@@ -404,6 +467,9 @@ impl LiveHost {
             .delete(session_id(request.id), deletion)
             .is_ok();
         self.attachments.retain(|_, session| *session != request.id);
+        self.requests
+            .retain(|(session, _), _| *session != request.id);
+        self.watches.retain(|(session, _)| *session != request.id);
         self.serving
             .credential_deleted(request.id, deleted)
             .map_err(|_| Error::DeletionFailed)?;
@@ -448,8 +514,8 @@ impl LiveHost {
     }
 
     /// Dispatches one complete client frame through the full client registry.
-    /// Eval and watch require the supplied application seam; the compatibility
-    /// method above explicitly rejects them.
+    /// Application-owned operations are delegated through [`LiveApplication`];
+    /// their typed canonical response is validated before it is retained.
     ///
     /// # Errors
     ///
@@ -485,29 +551,142 @@ impl LiveHost {
             Frame::Binary(bytes) => {
                 let envelope = self.decode(&bytes)?;
                 let request = envelope.request.ok_or(Error::InvalidMessage)?;
+                if matches!(
+                    envelope.message,
+                    Message::Snapshot { .. }
+                        | Message::Delta { .. }
+                        | Message::Result { .. }
+                        | Message::Diagnostic { .. }
+                        | Message::RequestStatusResult { .. }
+                ) {
+                    return Err(Error::InvalidMessage);
+                }
+                let fingerprint =
+                    canonical_request_fingerprint(session, &envelope, self.limits.protocol)
+                        .map_err(|_| Error::InvalidMessage)?;
+                if let Message::Event {
+                    fingerprint: sent, ..
+                }
+                | Message::Eval {
+                    fingerprint: sent, ..
+                } = &envelope.message
+                    && *sent != fingerprint
+                {
+                    return Err(Error::RequestMismatch);
+                }
+                if let Some(record) = self.requests.get(&(session, request)) {
+                    if record.fingerprint != fingerprint {
+                        return Err(Error::RequestMismatch);
+                    }
+                    return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
+                        outcome: FrameOutcome::Accepted,
+                        response: None,
+                    }));
+                }
+                self.reserve_and_start(session, request, fingerprint)?;
                 match &envelope.message {
-                    Message::Cancel { .. } => {
-                        self.serving
-                            .cancel_envelope(session, &envelope)
-                            .map_err(map_serving)?;
-                        Ok(DispatchOutcome {
-                            outcome: FrameOutcome::Cancelled,
-                            response: None,
-                        })
+                    Message::Subscribe { .. } => {
+                        let response =
+                            application.subscribe(session, request, &envelope.message)?;
+                        let outcome = validate_snapshot_response(request, None, response)?;
+                        let watch = outcome
+                            .response
+                            .as_ref()
+                            .and_then(|response| response.watch)
+                            .ok_or(Error::ApplicationRejected)?;
+                        self.open_watch(session, watch, &outcome)?;
+                        self.complete(session, request, outcome)
                     }
                     Message::Resync => {
+                        let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+                        if !self.watches.contains(&(session, watch)) {
+                            return Err(Error::Denied);
+                        }
                         let revisions = self.serving.resync(session, 0).map_err(map_serving)?.len();
-                        Ok(DispatchOutcome {
-                            outcome: FrameOutcome::Resync { revisions },
-                            response: None,
-                        })
+                        let response =
+                            application.resync(session, request, watch, &envelope.message)?;
+                        let outcome = validate_snapshot_response(request, Some(watch), response)?;
+                        self.complete(
+                            session,
+                            request,
+                            DispatchOutcome {
+                                outcome: FrameOutcome::Resync { revisions },
+                                response: outcome.response,
+                            },
+                        )
+                    }
+                    Message::Unsubscribe => {
+                        let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+                        if !self.watches.contains(&(session, watch)) {
+                            return Err(Error::Denied);
+                        }
+                        let response = application.unsubscribe(
+                            session,
+                            request,
+                            fingerprint,
+                            &envelope.message,
+                        )?;
+                        let outcome = validate_control_response(request, fingerprint, response)?;
+                        self.serving
+                            .close_watch(session, watch)
+                            .map_err(map_serving)?;
+                        self.watches.remove(&(session, watch));
+                        self.complete(session, request, outcome)
+                    }
+                    Message::Event { .. } => {
+                        let response = application.event(session, request, &envelope.message)?;
+                        let outcome = validate_result_response(request, fingerprint, response)?;
+                        self.complete(session, request, outcome)
+                    }
+                    Message::Eval { .. } => {
+                        let response = application.eval(session, request, &envelope.message)?;
+                        let outcome = validate_result_response(request, fingerprint, response)?;
+                        self.complete(session, request, outcome)
+                    }
+                    Message::Watch { .. } => {
+                        let response = application.watch(session, request, &envelope.message)?;
+                        let outcome = validate_snapshot_response(request, None, response)?;
+                        let watch = outcome
+                            .response
+                            .as_ref()
+                            .and_then(|response| response.watch)
+                            .ok_or(Error::ApplicationRejected)?;
+                        self.open_watch(session, watch, &outcome)?;
+                        self.complete(session, request, outcome)
+                    }
+                    Message::Cancel {
+                        target_kind,
+                        target,
+                    } => {
+                        let response =
+                            application.cancel(session, request, fingerprint, &envelope.message)?;
+                        let outcome = validate_control_response(request, fingerprint, response)?;
+                        match target_kind {
+                            TargetKind::Request => self.serving.cancel_request(session, *target),
+                            TargetKind::Watch => {
+                                self.serving
+                                    .close_watch(session, *target)
+                                    .map_err(map_serving)?;
+                                self.watches.remove(&(session, *target));
+                                Ok(())
+                            }
+                        }
+                        .map_err(map_serving)?;
+                        self.complete(
+                            session,
+                            request,
+                            DispatchOutcome {
+                                outcome: FrameOutcome::Cancelled,
+                                response: outcome.response,
+                            },
+                        )
                     }
                     Message::RequestStatus {
                         target,
-                        fingerprint,
+                        fingerprint: expected,
                     } => {
-                        let retained = self.fingerprints.get(&(session, *target)).copied();
-                        if retained.is_some_and(|known| known != *fingerprint) {
+                        let retained = self.requests.get(&(session, *target));
+                        if retained.is_some_and(|record| record.fingerprint != *expected) {
                             return Err(Error::RequestMismatch);
                         }
                         let state = match self.serving.request_state(session, *target) {
@@ -520,7 +699,7 @@ impl LiveHost {
                             Err(ServingError::RequestUnknown) => RequestState::Unknown,
                             Err(error) => return Err(map_serving(error)),
                         };
-                        Ok(DispatchOutcome {
+                        let outcome = DispatchOutcome {
                             outcome: FrameOutcome::Accepted,
                             response: Some(Envelope {
                                 request: Some(request),
@@ -528,41 +707,94 @@ impl LiveHost {
                                 message: Message::RequestStatusResult {
                                     target: *target,
                                     state,
-                                    fingerprint: retained,
+                                    fingerprint: retained.map(|record| record.fingerprint),
                                     result: None,
                                 },
                                 extensions: BTreeMap::new(),
                             }),
-                        })
+                        };
+                        self.complete(session, request, outcome)
                     }
-                    Message::Eval { fingerprint, .. } => {
-                        match self.fingerprints.get(&(session, request)) {
-                            Some(known) if *known != *fingerprint => {
-                                return Err(Error::RequestMismatch);
-                            }
-                            Some(_) => {}
-                            None => {
-                                self.fingerprints.insert((session, request), *fingerprint);
-                            }
-                        }
-                        let response = application.eval(session, request, &envelope.message)?;
-                        validate_eval_response(request, *fingerprint, response)
-                    }
-                    Message::Watch { .. } => {
-                        let response = application.watch(session, request, &envelope.message)?;
-                        validate_watch_response(request, response)
-                    }
-                    Message::Subscribe { .. }
-                    | Message::Unsubscribe
-                    | Message::Event { .. }
-                    | Message::Snapshot { .. }
+                    Message::Snapshot { .. }
                     | Message::Delta { .. }
                     | Message::Result { .. }
                     | Message::Diagnostic { .. }
-                    | Message::RequestStatusResult { .. } => Err(Error::UnsupportedOperation),
+                    | Message::RequestStatusResult { .. } => Err(Error::InvalidMessage),
                 }
             }
         }
+    }
+
+    fn reserve_and_start(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> Result<()> {
+        self.requests.insert(
+            (session, request),
+            RequestRecord {
+                fingerprint,
+                terminal: None,
+            },
+        );
+        let started = match self.serving.reserve_request(session, request) {
+            Ok(()) => self
+                .serving
+                .start_request(session, request)
+                .map_err(map_serving),
+            Err(ServingError::RequestTerminal)
+                if matches!(
+                    self.serving.request_state(session, request),
+                    Ok(orna_serving_v1::RequestState::Reserved)
+                ) =>
+            {
+                self.serving
+                    .start_request(session, request)
+                    .map_err(map_serving)
+            }
+            Err(error) => Err(map_serving(error)),
+        };
+        if started.is_err() {
+            self.requests.remove(&(session, request));
+        }
+        started
+    }
+
+    fn complete(
+        &mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        outcome: DispatchOutcome,
+    ) -> Result<DispatchOutcome> {
+        self.serving
+            .complete_request(session, request)
+            .map_err(map_serving)?;
+        self.requests
+            .get_mut(&(session, request))
+            .ok_or(Error::Denied)?
+            .terminal = Some(outcome.clone());
+        Ok(outcome)
+    }
+
+    fn open_watch(
+        &mut self,
+        session: [u8; 16],
+        watch: [u8; 16],
+        outcome: &DispatchOutcome,
+    ) -> Result<()> {
+        let Some(Envelope {
+            message: Message::Snapshot { revision, .. },
+            ..
+        }) = outcome.response.as_ref()
+        else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.serving
+            .open_watch(session, watch, *revision)
+            .map_err(map_serving)?;
+        self.watches.insert((session, watch));
+        Ok(())
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Envelope> {
@@ -599,7 +831,7 @@ impl LiveHost {
     }
 }
 
-fn validate_eval_response(
+fn validate_result_response(
     request: [u8; 16],
     fingerprint: [u8; 32],
     response: Envelope,
@@ -623,8 +855,15 @@ fn validate_eval_response(
     })
 }
 
-fn validate_watch_response(request: [u8; 16], response: Envelope) -> Result<DispatchOutcome> {
-    if response.request != Some(request) || response.watch.is_none() {
+fn validate_snapshot_response(
+    request: [u8; 16],
+    watch: Option<[u8; 16]>,
+    response: Envelope,
+) -> Result<DispatchOutcome> {
+    if response.request != Some(request)
+        || response.watch.is_none()
+        || watch.is_some_and(|expected| response.watch != Some(expected))
+    {
         return Err(Error::ApplicationRejected);
     }
     if !matches!(response.message, Message::Snapshot { .. }) {
@@ -634,6 +873,29 @@ fn validate_watch_response(request: [u8; 16], response: Envelope) -> Result<Disp
         outcome: FrameOutcome::Accepted,
         response: Some(response),
     })
+}
+
+fn validate_control_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    response: Envelope,
+) -> Result<DispatchOutcome> {
+    let outcome = validate_result_response(request, fingerprint, response)?;
+    let Some(Envelope {
+        message:
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            },
+        ..
+    }) = outcome.response.as_ref()
+    else {
+        return Err(Error::ApplicationRejected);
+    };
+    matches!(value.raw(), OvbRaw::Tag(60_014, unit) if matches!(unit.as_ref(), OvbRaw::Array(items) if items.is_empty()))
+        .then_some(outcome)
+        .ok_or(Error::ApplicationRejected)
 }
 
 /// Issuers that also expose the last *just issued* credential let a host bind
@@ -1480,4 +1742,39 @@ fn sha1(input: &[u8]) -> [u8; 20] {
         out[i * 4..i * 4 + 4].copy_from_slice(&value.to_be_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(request: u8, fingerprint: u8) -> Envelope {
+        Envelope {
+            request: Some([request; 16]),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                fingerprint: [fingerprint; 32],
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn control_responses_reject_non_unit_results() {
+        assert_eq!(
+            validate_control_response([1; 16], [2; 32], result(1, 2)),
+            Err(Error::ApplicationRejected)
+        );
+    }
+
+    #[test]
+    fn result_response_rejects_a_different_request_fingerprint() {
+        assert_eq!(
+            validate_result_response([1; 16], [2; 32], result(1, 3)),
+            Err(Error::RequestMismatch)
+        );
+    }
 }
