@@ -203,8 +203,7 @@ use orna_protocol::{
     decode_retained_invoke_request, encode_active_value, encode_rows_value,
 };
 use orna_standard::{
-    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-    STD_JSON_ENCODE_FUNCTION_ID, registered_opaque_codecs,
+    STANDARD_LIBRARY_V8_REVISION_ID, STANDARD_LIBRARY_V9_REVISION_ID, registered_opaque_codecs,
 };
 use sha2::{Digest, Sha256};
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
