@@ -366,6 +366,75 @@ fn project_row_admission_rejects_computed_fields() {
 }
 
 #[test]
+fn project_row_admission_accepts_exact_current_container_forms() {
+    let project = container_row_project(
+        "{ name: \"Pencil\", emails: [\"sales@example.com\"], contact: { email: \"sales@example.com\", verified: true }, coordinates: (51, \"north\"), nickname: null, backup_name: \"HB\" }",
+    );
+
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    assert_eq!(adapter.validate_rows(&project), StageOutcome::Passed);
+
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "inventory.orna",
+            project.modules[0].source.clone(),
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    let rows = orna_conformance_v1::row_admission::admit_project_rows(
+        &project,
+        &analysis,
+        Limits::default(),
+    )
+    .expect("container row admission");
+    assert!(matches!(rows[0].body["emails"].raw(), OvbRaw::Array(_)));
+    assert!(matches!(rows[0].body["contact"].raw(), OvbRaw::Map(_)));
+    assert!(matches!(
+        rows[0].body["coordinates"].raw(),
+        OvbRaw::Array(_)
+    ));
+    assert!(matches!(rows[0].body["nickname"].raw(), OvbRaw::Null));
+}
+
+#[test]
+fn project_row_admission_rejects_wrong_container_members_and_shapes() {
+    for source in [
+        "{ name: \"Pencil\", emails: [1], contact: { email: \"sales@example.com\", verified: true }, coordinates: (51, \"north\"), nickname: null, backup_name: \"HB\" }",
+        "{ name: \"Pencil\", emails: [\"sales@example.com\"], contact: { email: \"sales@example.com\", verified: true, extra: \"no\" }, coordinates: (51, \"north\"), nickname: null, backup_name: \"HB\" }",
+        "{ name: \"Pencil\", emails: [\"sales@example.com\"], contact: { email: \"sales@example.com\" }, coordinates: (51, \"north\"), nickname: null, backup_name: \"HB\" }",
+        "{ name: \"Pencil\", emails: [\"sales@example.com\"], contact: { email: \"sales@example.com\", verified: true }, coordinates: [51, \"north\"], nickname: null, backup_name: \"HB\" }",
+        "{ name: \"Pencil\", emails: (\"sales@example.com\",), contact: { email: \"sales@example.com\", verified: true }, coordinates: (51, \"north\"), nickname: null, backup_name: \"HB\" }",
+        "{ name: \"Pencil\", emails: [\"sales@example.com\"], contact: { email: \"sales@example.com\", verified: true }, coordinates: (51, \"north\"), nickname: 1, backup_name: \"HB\" }",
+    ] {
+        let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+        let StageOutcome::Failed(diagnostic) =
+            adapter.validate_rows(&container_row_project(source))
+        else {
+            panic!("invalid nested container value must not pass row admission");
+        };
+        assert_eq!(diagnostic.code(), "ORNA-CONFORMANCE-ROW-TYPE");
+    }
+}
+
+#[test]
+fn project_row_admission_reports_unsupported_nested_field_types() {
+    let project = admission_project(
+        "pub table Item(id: Int) { opaque_ids: [Uuid], }",
+        vec![SourceUnit {
+            fixture_id: "row-admission-containers".into(),
+            source_id: "logical/project/inventory/Item/42.orna".into(),
+            parse_as: "row_unit".into(),
+            source: "{ opaque_ids: [\"not-an-admitted-uuid\"] }".into(),
+        }],
+    );
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let StageOutcome::Failed(diagnostic) = adapter.validate_rows(&project) else {
+        panic!("unsupported nested field type must not pass row admission");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE");
+}
+
+#[test]
 fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
     let unit = SourceUnit {
         fixture_id: "type-error".into(),
@@ -699,6 +768,18 @@ fn admission_project(module_source: &str, loose_rows: Vec<SourceUnit>) -> Projec
             steps: Vec::new(),
         },
     }
+}
+
+fn container_row_project(source: &str) -> ProjectUnit {
+    admission_project(
+        "pub table Item(id: Int) { name: Str, emails: [Str], contact: { email: Str, verified: Bool, }, coordinates: (Int, Str), nickname: Str?, backup_name: Str?, }",
+        vec![SourceUnit {
+            fixture_id: "row-admission-containers".into(),
+            source_id: "logical/project/inventory/Item/42.orna".into(),
+            parse_as: "row_unit".into(),
+            source: source.into(),
+        }],
+    )
 }
 
 #[test]

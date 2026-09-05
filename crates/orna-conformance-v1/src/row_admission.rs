@@ -215,6 +215,10 @@ fn admit_row(
             ));
         }
     }
+    let expressions = fields
+        .iter()
+        .map(|field| (field.name.as_str(), &field.value))
+        .collect::<BTreeMap<_, _>>();
 
     let value = evaluate_parsed(&parsed.value, &BTreeMap::new(), limits).map_err(|error| {
         if error.diagnostic().code() == "ORNA-EVAL-LIMIT" {
@@ -245,13 +249,25 @@ fn admit_row(
                 "loose row body contains an unknown field",
             )
         })?;
+        let expression = expressions.get(name.as_str()).ok_or_else(|| {
+            row_error(
+                "ORNA-CONFORMANCE-ROW-EVALUATION",
+                "loose row body could not be evaluated",
+            )
+        })?;
         let value = Value::new(value.clone()).map_err(|_| {
             row_error(
                 "ORNA-CONFORMANCE-ROW-EVALUATION",
                 "loose row body could not be evaluated",
             )
         })?;
-        if !matches_value(value.raw(), expected) {
+        if !supports_field_type(expected) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE",
+                "row admission does not support this field type",
+            ));
+        }
+        if !matches_value(value.raw(), expected, expression) {
             return Err(row_error(
                 "ORNA-CONFORMANCE-ROW-TYPE",
                 "loose row body field has an incompatible type",
@@ -305,13 +321,65 @@ fn decode_key(text: &str, ty: &Type) -> RowResult<Value> {
     })
 }
 
-fn matches_value(value: &Raw, ty: &Type) -> bool {
+fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
     match ty {
         Type::Text => matches!(value, Raw::Text(_)),
         Type::Int => matches!(value, Raw::Int(_)),
         Type::Bool => matches!(value, Raw::Bool(_)),
         Type::Decimal => matches!(value, Raw::Tag(60000, _)),
-        Type::Optional(inner) => matches!(value, Raw::Null) || matches_value(value, inner),
+        Type::List(inner) => match (value, expression) {
+            (Raw::Array(values), Expr::List { elements, .. }) if values.len() == elements.len() => {
+                values
+                    .iter()
+                    .zip(elements)
+                    .all(|(value, expression)| matches_value(value, inner, expression))
+            }
+            _ => false,
+        },
+        Type::Tuple(types) => match (value, expression) {
+            (Raw::Array(values), Expr::Tuple { elements, .. })
+                if values.len() == types.len() && elements.len() == types.len() =>
+            {
+                values
+                    .iter()
+                    .zip(types)
+                    .zip(elements)
+                    .all(|((value, ty), expression)| matches_value(value, ty, expression))
+            }
+            _ => false,
+        },
+        Type::Record(types) => match (value, expression) {
+            (Raw::Map(values), Expr::Record { fields, .. }) if values.len() == types.len() => {
+                types.iter().all(|(name, ty)| {
+                    let value = values.iter().find_map(|(key, value)| match key {
+                        Raw::Text(key) if key == name => Some(value),
+                        _ => None,
+                    });
+                    let expression = fields
+                        .iter()
+                        .find(|field| field.name == *name)
+                        .map(|field| &field.value);
+                    matches!((value, expression), (Some(value), Some(expression))
+                        if matches_value(value, ty, expression))
+                })
+            }
+            _ => false,
+        },
+        // Source evaluation represents optional absence as bare `null`; its
+        // OVB option wrapper is introduced only by a type-directed codec.
+        Type::Optional(inner) => {
+            matches!(value, Raw::Null) || matches_value(value, inner, expression)
+        }
+        _ => false,
+    }
+}
+
+fn supports_field_type(ty: &Type) -> bool {
+    match ty {
+        Type::Text | Type::Int | Type::Bool | Type::Decimal => true,
+        Type::List(inner) | Type::Optional(inner) => supports_field_type(inner),
+        Type::Tuple(types) => types.iter().all(supports_field_type),
+        Type::Record(fields) => fields.values().all(supports_field_type),
         _ => false,
     }
 }
