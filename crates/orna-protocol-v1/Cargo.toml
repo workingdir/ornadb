@@ -10,3 +10,4 @@ description = "Bounded canonical Orna 1.0 live-protocol envelope codec"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+sha2 = "0.10.9"
