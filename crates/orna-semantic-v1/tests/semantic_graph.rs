@@ -12,6 +12,64 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn table_selectors_are_callable_and_reject_rows_from_other_tables() {
+    let declaration = "table Person(id: Str) { name: Str, } table Team(id: Str) { name: Str, }";
+    for (body, valid) in [
+        ("fn name(person: Person): Str = Person.name(person);", true),
+        ("fn name(person: Person): Str = person | Person.name;", true),
+        ("fn names() = Person | map(Person.name);", true),
+        (
+            "fn local(): Int { let Person = { name: 1 }; Person.name }",
+            true,
+        ),
+        (
+            "fn name(person: Person): Str { let selector = Person.name; selector(person) }",
+            true,
+        ),
+        ("fn wrong(team: Team) = Person.name(team);", false),
+        ("fn wrong() = Team | map(Person.name);", false),
+        (
+            "fn wrong() = Person.name({ id: \"a\", name: \"Alice\" });",
+            false,
+        ),
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "selectors.orna",
+            format!("{declaration} {body}"),
+        )]);
+        if valid {
+            assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
+        } else {
+            assert!(has(&result, DIAG_TYPE), "{body}: {:?}", result.diagnostics);
+        }
+    }
+    let catalogue = Catalogue::authoritative_fixture();
+    for (body, valid) in [
+        (
+            "use contacts as addressbook; fn name(contact: contacts.Contact): Str = addressbook.Contact.name(contact);",
+            true,
+        ),
+        (
+            "fn names() = contacts.Contact | map(contacts.Contact.name);",
+            true,
+        ),
+        ("fn wrong() = contacts.Contact | map(Contact.name);", false),
+        (
+            "fn local(contacts: { Contact: { name: Int } }): Int = contacts.Contact.name;",
+            true,
+        ),
+    ] {
+        let result =
+            analyze_with_catalogue(&[ModuleInput::new("selectors.orna", body)], &catalogue);
+        if valid {
+            assert!(result.is_ok(), "{body}: {:?}", result.diagnostics);
+        } else {
+            assert!(has(&result, DIAG_TYPE), "{body}: {:?}", result.diagnostics);
+        }
+    }
+}
+
+#[test]
 fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
     let catalogue = Catalogue::authoritative_fixture();
     for source in [
@@ -1392,7 +1450,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                     pub fn names() =
                         contacts.Contact
                         | filter(contact => (contact.emails | count) > 0)
-                        | map(Contact.full_name)
+                        | map(contacts.Contact.full_name)
                         | sort_by(value => value);
                     pub fn days() = energy.Reading | bucket_by(1.day, zone: Europe.London);
                 "#,

@@ -2075,13 +2075,7 @@ fn infer(
             let symbol = local.get(text).or_else(|| scope.names.get(text));
             match symbol {
                 Some(s) if s.kind == SymbolKind::Table => Inferred {
-                    ty: Type::Relation(Box::new(
-                        scope
-                            .table_rows
-                            .get(text)
-                            .cloned()
-                            .unwrap_or_else(|| s.ty.clone()),
-                    )),
+                    ty: Type::Relation(Box::new(s.ty.clone())),
                     effects: EffectSummary {
                         effects: BTreeSet::from(["database read".into()]),
                         may_fail: true,
@@ -2164,6 +2158,9 @@ fn infer(
                 && let Some(inferred) = infer_system_path(&path)
             {
                 return inferred;
+            }
+            if let Some(projection) = infer_table_projection(expr, scope, local) {
+                return projection;
             }
             if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
@@ -3919,7 +3916,7 @@ fn infer_success_pipeline(
             Expr::Call {
                 callee, arguments, ..
             } => infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics),
-            Expr::Name { .. } => {
+            Expr::Name { .. } | Expr::Field { .. } => {
                 infer_named_pipeline_stage(input, rhs, &[], scope, local, diagnostics)
             }
             _ => {
@@ -3971,9 +3968,13 @@ fn infer_success_pipeline(
         && argument.name.is_none()
     {
         if let Some(projection) = infer_table_projection(&argument.value, scope, local) {
-            let Type::Function { result, .. } = projection.ty else {
+            let Type::Function {
+                parameters, result, ..
+            } = projection.ty
+            else {
                 unreachable!("table projection is always callable");
             };
+            require_same(&parameters[0], &element, diagnostics);
             let mut effects = input.effects;
             effects.join(&projection.effects);
             return Inferred {
@@ -4591,6 +4592,9 @@ fn table_symbol<'a>(
             .filter(|symbol| symbol.kind == SymbolKind::Table),
         Expr::Field { .. } => {
             let path = qualified_path(expr)?;
+            if local.contains_key(path[0]) {
+                return None;
+            }
             let root = scope.modules.get(path[0])?;
             let namespace = Namespace(
                 root.0
