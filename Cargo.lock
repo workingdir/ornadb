@@ -1837,6 +1837,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-table-v1"
+version = "1.0.0"
+
+[[package]]
 name = "orna-traceability-v1"
 version = "1.0.0"
 dependencies = [
