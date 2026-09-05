@@ -453,12 +453,21 @@ pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> 
             &mut result.diagnostics,
         );
         let mut symbols = header.symbols.clone();
+        let table_rows = tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut plans = Vec::new();
         for item in &tree.items {
             check_item(
                 item,
                 &mut symbols,
                 &scope,
+                &table_rows,
                 &mut plans,
                 &mut result.diagnostics,
             );
@@ -826,6 +835,7 @@ fn check_item(
     item: &Item,
     symbols: &mut BTreeMap<String, Symbol>,
     scope: &Scope,
+    table_rows: &BTreeMap<String, Type>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -869,7 +879,7 @@ fn check_item(
             }
         }
         Declaration::Assertion { value } => {
-            let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
+            let inferred = infer_module_assertion(value, table_rows, scope, diagnostics);
             assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
         }
         Declaration::Table { name, members, .. } => {
@@ -1323,6 +1333,91 @@ fn infer_table_assertion(
     let valid = text == "all_unique" || inferred.ty == Type::Bool;
     Inferred {
         ty: if valid { Type::Bool } else { Type::Error },
+        effects: inferred.effects,
+    }
+}
+
+/// Elaborates the bounded relational query form used by module assertions in
+/// the frozen reference project. A module assertion names each relation
+/// explicitly, so this has no implicit owner subject and no runtime behavior.
+fn infer_module_assertion(
+    value: &Expr,
+    table_rows: &BTreeMap<String, Type>,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    infer_module_relation(value, table_rows, scope, &BTreeMap::new(), diagnostics)
+}
+
+fn infer_module_relation(
+    value: &Expr,
+    table_rows: &BTreeMap<String, Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Expr::Call {
+        callee, arguments, ..
+    } = value
+    else {
+        return infer(value, scope, local, diagnostics);
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        return infer(value, scope, local, diagnostics);
+    };
+    if !matches!(text.as_str(), "every" | "exists") || arguments.len() != 2 {
+        return infer(value, scope, local, diagnostics);
+    }
+    let Expr::Name { text: table, .. } = &arguments[0].value else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Some(row) = table_rows.get(table) else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &arguments[1].value
+    else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let [parameter] = parameters.as_slice() else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Pattern::Name(name, _) = &parameter.pattern else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let mut locals = local.clone();
+    locals.insert(
+        name.clone(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty: row.clone(),
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
+    let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
+    Inferred {
+        ty: if inferred.ty == Type::Bool {
+            Type::Bool
+        } else {
+            Type::Error
+        },
         effects: inferred.effects,
     }
 }
