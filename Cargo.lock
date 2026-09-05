@@ -1546,6 +1546,7 @@ dependencies = [
  "orna-foundation-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
+ "orna-table-v1",
  "orna-value-v1",
  "serde",
  "serde_json",
