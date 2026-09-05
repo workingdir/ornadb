@@ -14,8 +14,8 @@ use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
-    AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Pattern, PatternField,
-    ReplInput, Statement, StringSegment, parse_expression, parse_repl,
+    AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
+    PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::Raw;
 
@@ -120,6 +120,64 @@ pub fn evaluate_parsed(
     let mut scope = Scope::from_environment(environment, &mut context)?;
     context
         .evaluate(expression, &mut scope, 0)
+        .and_then(Value::canonical)
+}
+
+/// Invoke a parsed, statically checked pure function with canonical named
+/// arguments. Defaults execute in declaration order after earlier parameters
+/// are bound, and only when omitted. Argument admission, defaults, and the body
+/// share one resource budget. This does not provide module or external calls.
+pub fn evaluate_function(
+    parameters: &[Parameter],
+    body: &Expr,
+    environment: &Environment,
+    arguments: &Environment,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
+    validate_limits(limits)?;
+    let mut context = Context { limits, steps: 0 };
+    context.items(parameters.len())?;
+    context.items(arguments.len())?;
+    let mut names = BTreeSet::new();
+    for parameter in parameters {
+        let Pattern::Name(name, _) = &parameter.pattern else {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        };
+        if name.len() > limits.max_string_bytes {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        if !names.insert(name.as_str())
+            || (!arguments.contains_key(name) && parameter.default.is_none())
+        {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+    }
+    if arguments.keys().any(|name| !names.contains(name.as_str())) {
+        return Err(error("ORNA-EVAL-ARGUMENT"));
+    }
+    let mut scope = Scope::from_environment(environment, &mut context)?;
+    let supplied = Scope::from_environment(arguments, &mut context)?;
+    for parameter in parameters {
+        let Pattern::Name(name, _) = &parameter.pattern else {
+            unreachable!("parameter patterns were admitted above");
+        };
+        let value = if let Some(value) = supplied.0.get(name) {
+            value.clone()
+        } else {
+            context.evaluate(
+                parameter
+                    .default
+                    .as_ref()
+                    .expect("omitted defaults were admitted above"),
+                &mut scope,
+                0,
+            )?
+        };
+        scope.0.insert(name.clone(), value);
+        context.items(scope.0.len())?;
+    }
+    context
+        .evaluate(body, &mut scope, 0)
         .and_then(Value::canonical)
 }
 
