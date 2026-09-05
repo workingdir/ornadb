@@ -1,4 +1,5 @@
 /target/
+/crates/*-v1/target
 
 # Beads / Dolt files (added by bd init)
 .dolt/
