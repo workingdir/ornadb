@@ -383,6 +383,37 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
 }
 
 #[test]
+fn published_money_and_affine_diagnostics_are_preserved() {
+    let affine_sum = analyze(&[ModuleInput::new(
+        "sum.orna",
+        "pub fn bad(values: [Float<C>]) = values | sum;",
+    )]);
+    assert!(
+        affine_sum
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "cannot sum absolute affine quantities" })
+    );
+
+    let currency_symbol = analyze(&[ModuleInput::new(
+        "currency.orna",
+        "pub protocol Currency { static code: Str; static symbol: Str; static minor_digits: Int; }",
+    )]);
+    assert!(currency_symbol.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "currency symbols belong to locale-aware formatting, not Currency identity"
+    }));
+
+    let float_money = analyze(&[ModuleInput::new(
+        "money.orna",
+        "pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;",
+    )]);
+    assert!(float_money.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
+    }));
+}
+
+#[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
     let currencies = analyze(&[ModuleInput::new(
         "currency.orna",

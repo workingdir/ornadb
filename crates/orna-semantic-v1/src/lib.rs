@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, Statement, StringSegment, SyntaxTree, TypeExpr,
-    TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
+    LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement, StringSegment, SyntaxTree,
+    TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -1148,6 +1148,18 @@ fn check_item(
             }
         }
         Declaration::Function { .. } => check_function(item, symbols, scope, diagnostics),
+        Declaration::Protocol { name, members, .. } if name == "Currency" => {
+            for member in members {
+                if let ProtocolMember::Static { name, .. } = member
+                    && name == "symbol"
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "currency symbols belong to locale-aware formatting, not Currency identity",
+                    ));
+                }
+            }
+        }
         Declaration::Assertion { value } => {
             let inferred = infer_module_assertion(value, table_rows, scope, diagnostics);
             assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
@@ -1763,6 +1775,18 @@ fn infer(
                 return Inferred { ty, effects };
             }
             if op == "*" {
+                if (is_binary_float(&left.ty) && is_money_rate(&right.ty))
+                    || (is_money_rate(&left.ty) && is_binary_float(&right.ty))
+                {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "binary Float cannot enter an exact Money calculation implicitly",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects,
+                    };
+                }
                 if let Some(ty) = reduce_exact_money_rate(&left.ty, &right.ty) {
                     return Inferred { ty, effects };
                 }
@@ -3144,10 +3168,7 @@ fn infer_affine_collection_aggregate(
     match operation {
         "max" | "mean" => Some(Type::Optional(Box::new(element.clone()))),
         "sum" => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "sum is invalid for absolute affine quantities",
-            ));
+            diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
             Some(Type::Error)
         }
         _ => None,
@@ -3526,6 +3547,14 @@ fn reduce_exact_money_rate(left: &Type, right: &Type) -> Option<Type> {
         }
         _ => None,
     }
+}
+
+fn is_binary_float(ty: &Type) -> bool {
+    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+}
+
+fn is_money_rate(ty: &Type) -> bool {
+    matches!(ty, Type::MoneyPerUnit { .. })
 }
 
 fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
