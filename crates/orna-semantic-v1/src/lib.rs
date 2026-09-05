@@ -76,6 +76,11 @@ pub enum Type {
     Bool,
     Null,
     List(Box<Type>),
+    /// A composable table/query value. This is a semantic summary only; it
+    /// neither enumerates rows nor constructs a runtime query plan.
+    Relation(Box<Type>),
+    /// A checkpointable source summary. This crate never starts or resumes it.
+    Stream(Box<Type>),
     Record(BTreeMap<String, Type>),
     Tuple(Vec<Type>),
     Function {
@@ -703,6 +708,10 @@ struct Scope {
     /// The closed source/catalogue module set used by qualified lookup. This
     /// is data assembled by the caller, never a filesystem loader.
     available_modules: BTreeMap<Namespace, ModuleHeader>,
+    /// Local table rows are separate from public table identities: a table
+    /// expression produces its relation row shape, while table operations
+    /// retain the declared nominal table result.
+    table_rows: BTreeMap<String, Type>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -716,6 +725,14 @@ fn resolve_imports(
         ambiguous: BTreeSet::new(),
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
+        table_rows: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
+                _ => None,
+            })
+            .collect(),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -997,6 +1014,19 @@ fn infer(
             }
             let symbol = local.get(text).or_else(|| scope.names.get(text));
             match symbol {
+                Some(s) if s.kind == SymbolKind::Table => Inferred {
+                    ty: Type::Relation(Box::new(
+                        scope
+                            .table_rows
+                            .get(text)
+                            .cloned()
+                            .unwrap_or_else(|| s.ty.clone()),
+                    )),
+                    effects: EffectSummary {
+                        effects: BTreeSet::from(["database read".into()]),
+                        may_fail: true,
+                    },
+                },
                 Some(s) => Inferred {
                     ty: s.ty.clone(),
                     effects: s.effects.clone(),
@@ -1066,6 +1096,15 @@ fn infer(
             if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
             {
+                if let Some(table) = table_symbol(expr, scope, local) {
+                    return Inferred {
+                        ty: Type::Relation(Box::new(table.ty.clone())),
+                        effects: EffectSummary {
+                            effects: BTreeSet::from(["database read".into()]),
+                            may_fail: true,
+                        },
+                    };
+                }
                 return resolve_qualified_module_member(&path, scope, diagnostics);
             }
             let base = infer(base, scope, local, diagnostics);
@@ -1117,6 +1156,16 @@ fn infer(
             callee, arguments, ..
         } => {
             if let Some(inferred) =
+                infer_stream_from_list(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_relation_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -1160,6 +1209,9 @@ fn infer(
         }
         Expr::Unary { rhs, .. } => infer(rhs, scope, local, diagnostics),
         Expr::Binary { lhs, op, rhs, .. } => {
+            if op == "|" {
+                return infer_success_pipeline(lhs, rhs, scope, local, diagnostics);
+            }
             let left = infer(lhs, scope, local, diagnostics);
             let right = infer(rhs, scope, local, diagnostics);
             let mut effects = left.effects;
@@ -1232,6 +1284,246 @@ fn infer(
             }
         }
     }
+}
+
+/// Resolves the finite, declarative core stream constructor. The result is a
+/// type/effect summary; list hashing, replay and checkpoint behavior belong to
+/// the runtime contract.
+fn infer_stream_from_list(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    if qualified_path(callee)?.as_slice() != ["Stream", "from_list"] {
+        return None;
+    }
+    let values = arguments.first().map(|argument| &argument.value);
+    let source_identity = arguments.get(1);
+    let Some(values) = values else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Stream.from_list requires values and source_identity",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    };
+    let values = infer(values, scope, local, diagnostics);
+    let valid_identity = source_identity.is_some_and(|argument| {
+        argument.name.as_deref() == Some("source_identity")
+            && matches!(
+                infer(&argument.value, scope, local, diagnostics).ty,
+                Type::Text
+            )
+    });
+    if arguments.len() != 2 || !valid_identity {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Stream.from_list requires a named Text source_identity",
+        ));
+    }
+    let Type::List(element) = values.ty else {
+        diagnostics.push(diag(DIAG_TYPE, "Stream.from_list values must be a list"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: values.effects,
+        });
+    };
+    Some(Inferred {
+        ty: Type::Stream(element),
+        effects: values.effects,
+    })
+}
+
+fn infer_relation_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Some("exists") = core_relation_call_name(callee) else {
+        return None;
+    };
+    if arguments.len() != 2 {
+        return None;
+    }
+    let relation = infer(&arguments[0].value, scope, local, diagnostics);
+    let Type::Relation(element) = relation.ty else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "exists requires a relation as its first argument",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: relation.effects,
+        });
+    };
+    let callback = infer_callback(
+        &arguments[1].value,
+        *element,
+        Type::Bool,
+        scope,
+        local,
+        diagnostics,
+    );
+    let mut effects = relation.effects;
+    effects.join(&callback.effects);
+    Some(Inferred {
+        ty: Type::Bool,
+        effects,
+    })
+}
+
+/// The frozen parser represents `!exists(rows, predicate)` as a call whose
+/// callee is unary `!exists`; it is still the root `exists` relation form.
+fn core_relation_call_name(callee: &Expr) -> Option<&str> {
+    match callee {
+        Expr::Name { text, .. } => Some(text),
+        Expr::Unary { op, rhs, .. } if op == "!" => match rhs.as_ref() {
+            Expr::Name { text, .. } => Some(text),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Applies one of the parsed success-pipeline forms used by the reference
+/// project. It models argument-one insertion only; it does not invoke stages.
+fn infer_success_pipeline(
+    lhs: &Expr,
+    rhs: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let input = infer(lhs, scope, local, diagnostics);
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline stage is outside this semantic slice",
+        ));
+        return input;
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline stage is outside this semantic slice",
+        ));
+        return input;
+    };
+    let (element, is_stream) = match &input.ty {
+        Type::Relation(element) => (element.as_ref().clone(), false),
+        Type::Stream(element) => (element.as_ref().clone(), true),
+        _ => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "pipeline input is not a supported relation or stream",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: input.effects,
+            };
+        }
+    };
+    let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
+        ("filter", false, [_]) => (Type::Relation(Box::new(element.clone())), Some(Type::Bool)),
+        ("one", false, []) => (element.clone(), None),
+        ("for_each", true, [_]) => (Type::Null, Some(Type::Null)),
+        _ => {
+            let ignored = infer(rhs, scope, local, diagnostics);
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "pipeline operation is outside this semantic slice",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects: {
+                    let mut effects = input.effects;
+                    effects.join(&ignored.effects);
+                    effects
+                },
+            };
+        }
+    };
+    let mut effects = input.effects;
+    if let Some(result) = callback_result {
+        let callback = infer_callback(
+            &arguments[0].value,
+            element,
+            result,
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+    }
+    if text == "one" {
+        effects.may_fail = true;
+    }
+    Inferred { ty, effects }
+}
+
+fn infer_callback(
+    expression: &Expr,
+    parameter: Type,
+    result: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Expr::Lambda {
+        parameters, body, ..
+    } = expression
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "core operation callback must be a one-parameter lambda",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let [lambda_parameter] = parameters.as_slice() else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "core operation callback must take one parameter",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Pattern::Name(name, _) = &lambda_parameter.pattern else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "core operation callback pattern is outside this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let mut callback_locals = local.clone();
+    callback_locals.insert(
+        name.clone(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty: parameter,
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
+    let inferred = infer(body, scope, &callback_locals, diagnostics);
+    require_same(&result, &inferred.ty, diagnostics);
+    inferred
 }
 
 /// Resolves the small, intrinsic associated-operation surface of a table.

@@ -1,6 +1,6 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE,
-    DIAG_RESERVED, DIAG_UNRESOLVED, ModuleInput, analyze, analyze_with_catalogue,
+    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -240,4 +240,42 @@ fn catalogue_does_not_relax_reserved_source_roots() {
     );
 
     assert!(has(&result, DIAG_RESERVED));
+}
+
+#[test]
+fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
+    let source = r#"
+            pub table Book(id: Int) { title: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            pub table Reading(id: Int) { value: Int, }
+            fn available() = Book
+                | filter(book => !exists(Loan, loan => loan.book_id == book.id))
+                | one();
+            fn ingest() {
+                Stream.from_list([1], source_identity: "fixture") | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                });
+            }
+        "#;
+    let result = analyze(&[ModuleInput::new("sensors.orna", source)]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "sensors")
+        .unwrap();
+    let ingest = module.symbols.get("ingest").unwrap();
+    assert!(ingest.effects.effects.contains("database write"));
+    assert!(ingest.effects.may_fail);
+}
+
+#[test]
+fn stream_from_list_requires_the_closed_named_identity_argument() {
+    let result = analyze(&[ModuleInput::new(
+        "invalid.orna",
+        "fn input() = Stream.from_list([1], identity: \"fixture\");",
+    )]);
+
+    assert!(has(&result, DIAG_TYPE));
 }
