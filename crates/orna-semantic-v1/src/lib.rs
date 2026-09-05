@@ -1748,6 +1748,12 @@ fn infer(
                 };
             }
             let base = infer(base, scope, local, diagnostics);
+            if let Some(ty) = infer_system_member(&base.ty, name) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_TYPE, message));
                 return Inferred {
@@ -3024,6 +3030,30 @@ fn infer_success_pipeline(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let input = infer(lhs, scope, local, diagnostics);
+    if let Type::Relation(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
+        && text == "sort_by"
+        && let [argument] = arguments.as_slice()
+        && argument.name.is_none()
+    {
+        let callback = infer_callback(
+            &argument.value,
+            element.as_ref().clone(),
+            Type::Error,
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&callback.effects);
+        return Inferred {
+            ty: Type::Relation(element.clone()),
+            effects,
+        };
+    }
     if let Type::List(element) = &input.ty
         && let Expr::Call {
             callee, arguments, ..
@@ -3696,6 +3726,10 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             ty: Type::Named("sys.Checkpoint".into()),
             effects: EffectSummary::default(),
         },
+        ["sys", "Run"] => Inferred {
+            ty: Type::Named("sys.Run".into()),
+            effects: EffectSummary::default(),
+        },
         ["sys", "Checkpoint", "as_of"] => Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -3706,9 +3740,26 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 may_fail: true,
             },
         },
+        ["sys", "Run", "as_of"] => Inferred {
+            ty: function(
+                vec![Type::Named("sys.SnapshotRef".into())],
+                Type::Relation(Box::new(Type::Named("sys.Run".into()))),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
         _ => return None,
     };
     Some(inferred)
+}
+
+fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
+    match (base, name) {
+        (Type::Named(system_type), "started") if system_type == "sys.Run" => Some(Type::Instant),
+        _ => None,
+    }
 }
 
 fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
