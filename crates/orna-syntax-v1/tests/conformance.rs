@@ -1,4 +1,6 @@
-use orna_syntax_v1::{Expr, TokenKind, lex, parse_expression, parse_module, parse_repl, parse_row};
+use orna_syntax_v1::{
+    Declaration, Expr, TokenKind, lex, parse_expression, parse_module, parse_repl, parse_row,
+};
 use std::path::Path;
 
 fn reference(path: &str) -> String {
@@ -248,6 +250,15 @@ fn expression_ast_retains_control_and_postfix_structure() {
             ..
         }
     ));
+}
+
+#[test]
+fn generic_type_constructor_is_admitted_as_a_call_callee() {
+    let parsed = parse_module("pub fn bad(value: Float) = Money<GBP>(value);");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Declaration::Function { .. } = &parsed.value.items[0].declaration else {
+        panic!("expected function declaration");
+    };
 }
 
 #[test]

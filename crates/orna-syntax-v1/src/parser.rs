@@ -634,6 +634,60 @@ fn type_span(ty: &TypeExpr) -> SourceSpan {
         | TypeExpr::Function { span, .. } => span.clone(),
     }
 }
+
+fn type_expr_text(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Name {
+            path, arguments, ..
+        } => {
+            let mut text = path.join(".");
+            if !arguments.is_empty() {
+                text.push('<');
+                text.push_str(
+                    &arguments
+                        .iter()
+                        .map(type_expr_text)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                text.push('>');
+            }
+            text
+        }
+        TypeExpr::Optional { inner, .. } => format!("{}?", type_expr_text(inner)),
+        TypeExpr::Product { lhs, op, rhs, .. } => {
+            format!("{}{}{}", type_expr_text(lhs), op, type_expr_text(rhs))
+        }
+        TypeExpr::List { inner, .. } => format!("[{}]", type_expr_text(inner)),
+        TypeExpr::Record { fields, .. } => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(name, ty, _)| format!("{name}:{}", type_expr_text(ty)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        TypeExpr::Tuple { elements, .. } => format!(
+            "({})",
+            elements
+                .iter()
+                .map(type_expr_text)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        TypeExpr::Function {
+            parameters, result, ..
+        } => format!(
+            "fn({}):{}",
+            parameters
+                .iter()
+                .map(type_expr_text)
+                .collect::<Vec<_>>()
+                .join(","),
+            type_expr_text(result)
+        ),
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseArm {
     pub pattern: Pattern,
@@ -1556,6 +1610,20 @@ impl Parser {
                 && matches!(
                     tokens[i + 2].kind,
                     TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=")
+                )
+                && !matches!(
+                    (
+                        tokens.get(i).map(|token| &token.kind),
+                        tokens.get(i + 1).map(|token| &token.kind),
+                        tokens.get(i + 2).map(|token| &token.kind),
+                        tokens.get(i + 3).map(|token| &token.kind),
+                    ),
+                    (
+                        Some(TokenKind::Punct("<")),
+                        Some(TokenKind::Identifier { .. }),
+                        Some(TokenKind::Punct(">")),
+                        Some(TokenKind::Punct("(")),
+                    )
                 )
             {
                 self.errors.push(Diagnostic::error(
@@ -3031,6 +3099,55 @@ impl Parser {
     fn expr(&mut self) -> Option<Expr> {
         self.pratt(0)
     }
+
+    fn generic_call_ahead(&self) -> bool {
+        if !self.is_punct("<") {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut index = self.at;
+        while let Some(token) = self.tokens.get(index) {
+            match token.kind {
+                TokenKind::Punct("<") => depth += 1,
+                TokenKind::Punct(">") if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|next| &next.kind),
+                            Some(TokenKind::Punct("("))
+                        );
+                    }
+                }
+                TokenKind::Punct(";" | "=" | "=>") => return false,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn parse_generic_callee_name(&mut self, base: &str) -> Option<String> {
+        if !self.generic_call_ahead() {
+            return None;
+        }
+        self.bump();
+        let mut arguments = Vec::new();
+        while !self.eof() && !self.is_punct(">") {
+            arguments.push(type_expr_text(&self.parse_type_expr()?));
+            if self.is_punct(",") {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        if !self.is_punct(">") {
+            return None;
+        }
+        self.bump();
+        Some(format!("{base}<{}>", arguments.join(",")))
+    }
+
     fn pratt(&mut self, min: u8) -> Option<Expr> {
         let mut lhs = self.prefix()?;
         loop {
@@ -3145,7 +3262,8 @@ impl Parser {
                         body: Box::new(body),
                     });
                 }
-                if self.is_punct("{") && self.is_direct_record_body() {
+                let generic_name = self.parse_generic_callee_name(&t.text);
+                if generic_name.is_none() && self.is_punct("{") && self.is_direct_record_body() {
                     let fields = self.parse_record();
                     return Some(Expr::Nominal {
                         path: vec![NameSegment {
@@ -3156,9 +3274,10 @@ impl Parser {
                         span: t.span.join(self.previous().span.clone()),
                     });
                 }
+                let text = generic_name.unwrap_or_else(|| t.text.clone());
                 Some(Expr::Name {
-                    text: t.text,
-                    span: t.span,
+                    text,
+                    span: t.span.join(self.previous().span.clone()),
                 })
             }
             TokenKind::Integer
