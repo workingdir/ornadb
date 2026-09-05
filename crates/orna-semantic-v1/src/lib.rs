@@ -1660,6 +1660,29 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if let Some(currency) = money_constructor_currency(callee)
+                && arguments.len() == 1
+                && arguments[0].name.is_none()
+            {
+                let value = infer(&arguments[0].value, scope, local, diagnostics);
+                if is_binary_float(&value.ty) {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "Money cannot be constructed from an inexact Float without explicit rounding",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects: value.effects,
+                    };
+                }
+                return Inferred {
+                    ty: Type::Applied {
+                        base: "Money".into(),
+                        arguments: vec![Type::Named(currency.into())],
+                    },
+                    effects: value.effects,
+                };
+            }
             if let Some(inferred) =
                 infer_stream_from_list(callee, arguments, scope, local, diagnostics)
             {
@@ -3589,6 +3612,14 @@ fn reduce_exact_money_rate(left: &Type, right: &Type) -> Option<Type> {
 
 fn is_binary_float(ty: &Type) -> bool {
     matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+}
+
+fn money_constructor_currency(expr: &Expr) -> Option<&str> {
+    let Expr::Name { text, .. } = expr else {
+        return None;
+    };
+    let currency = text.strip_prefix("Money<")?.strip_suffix('>')?;
+    (!currency.is_empty() && !currency.contains(',')).then_some(currency)
 }
 
 fn is_money_rate(ty: &Type) -> bool {
