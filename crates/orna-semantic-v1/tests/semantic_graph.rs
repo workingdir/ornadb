@@ -653,6 +653,46 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
 }
 
 #[test]
+fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
+    let result = analyze(&[ModuleInput::new(
+        "lambda.orna",
+        "pub fn curried_add() = x => y => x + y;",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result
+            .modules
+            .values()
+            .next()
+            .expect("module")
+            .symbols
+            .get("curried_add")
+            .expect("function")
+            .ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            result: Box::new(Type::Function {
+                parameters: vec![Type::Int],
+                parameter_names: Some(vec!["x".into()]),
+                result: Box::new(Type::Function {
+                    parameters: vec![Type::Int],
+                    parameter_names: Some(vec!["y".into()]),
+                    result: Box::new(Type::Int),
+                }),
+            }),
+        }
+    );
+
+    let underconstrained = analyze(&[ModuleInput::new(
+        "lambda.orna",
+        "fn identity() = value => value;",
+    )]);
+    assert!(has(&underconstrained, "ORNA-S020-ANNOTATION"));
+}
+
+#[test]
 fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases() {
     let result = analyze(&[ModuleInput::new(
         "values.orna",

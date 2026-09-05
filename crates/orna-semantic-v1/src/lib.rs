@@ -1505,11 +1505,17 @@ fn infer(
                     .as_ref()
                     .map(type_of)
                     .unwrap_or_else(|| {
-                        diagnostics.push(diag(
-                            DIAG_ANNOTATION,
-                            "lambda parameter needs a static annotation",
-                        ));
-                        Type::Error
+                        if let Pattern::Name(name, _) = &parameter.pattern
+                            && lambda_numeric_parameter_usage(body, name)
+                        {
+                            Type::Int
+                        } else {
+                            diagnostics.push(diag(
+                                DIAG_ANNOTATION,
+                                "lambda parameter needs a static annotation",
+                            ));
+                            Type::Error
+                        }
                     });
                 bind_pattern(&parameter.pattern, ty.clone(), &mut locals, diagnostics);
                 types.push(ty);
@@ -1801,6 +1807,64 @@ fn infer(
             }
         }
     }
+}
+
+fn lambda_numeric_parameter_usage(expression: &Expr, name: &str) -> bool {
+    fn direct_name(expression: &Expr, name: &str) -> bool {
+        match expression {
+            Expr::Name { text, .. } => text == name,
+            Expr::Group { inner, .. } => direct_name(inner, name),
+            _ => false,
+        }
+    }
+    fn visit(expression: &Expr, name: &str) -> bool {
+        match expression {
+            Expr::Binary { lhs, op, rhs, .. } => {
+                (matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "<" | "<=" | ">" | ">=" | "==" | "!="
+                ) && (direct_name(lhs, name) || direct_name(rhs, name)))
+                    || visit(lhs, name)
+                    || visit(rhs, name)
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, name),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => visit(base, name),
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                visit(callee, name)
+                    || arguments
+                        .iter()
+                        .any(|argument| visit(&argument.value, name))
+            }
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                elements.iter().any(|element| visit(element, name))
+            }
+            Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+                fields.iter().any(|field| visit(&field.value, name))
+            }
+            Expr::Lambda { body, .. } => visit(body, name),
+            Expr::Block { tail, .. } => tail.as_deref().is_some_and(|tail| visit(tail, name)),
+            Expr::Control {
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                condition
+                    .as_deref()
+                    .is_some_and(|condition| visit(condition, name))
+                    || body.as_deref().is_some_and(|body| visit(body, name))
+                    || arms.iter().any(|arm| visit(&arm.body, name))
+                    || alternate
+                        .as_deref()
+                        .is_some_and(|alternate| visit(alternate, name))
+            }
+            _ => false,
+        }
+    }
+    visit(expression, name)
 }
 
 fn infer_assignment(
