@@ -1,0 +1,14 @@
+[package]
+name = "orna-storage-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded loose-row projection and PUB-1 recovery model for Orna 1.0"
+
+[dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-runtime-v1 = { path = "../orna-runtime-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
+sha2 = "0.10.9"
