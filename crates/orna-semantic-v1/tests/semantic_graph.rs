@@ -40,6 +40,38 @@ fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_asserti
 }
 
 #[test]
+fn qualified_module_member_calls_resolve_only_public_imported_exports() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "library.orna",
+            "pub fn seed(): Int = 1; fn hidden(): Int = 2;",
+        ),
+        ModuleInput::new(
+            "warehouse.orna",
+            "pub fn transfer(from: Int, to: Int, amount: Int): Int = from + to + amount;",
+        ),
+        ModuleInput::new(
+            "main.orna",
+            "use library; use warehouse; fn seed() = library.seed(); fn move_stock() = warehouse.transfer(1, 2, 3);",
+        ),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let private = analyze(&[
+        ModuleInput::new("library.orna", "fn hidden(): Int = 2;"),
+        ModuleInput::new("main.orna", "use library; fn f() = library.hidden();"),
+    ]);
+    assert!(has(&private, DIAG_UNRESOLVED));
+
+    let missing = analyze(&[
+        ModuleInput::new("library.orna", "pub fn seed(): Int = 1;"),
+        ModuleInput::new("main.orna", "use library; fn f() = library.missing();"),
+    ]);
+    assert!(has(&missing, DIAG_UNRESOLVED));
+}
+
+#[test]
 fn table_assertion_rejects_authoritative_std_net_effect() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
