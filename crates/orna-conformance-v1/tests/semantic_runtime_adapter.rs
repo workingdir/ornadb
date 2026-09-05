@@ -354,6 +354,24 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn retained_module_functions_call_helpers_in_defaults_and_bodies() {
+    let module = SourceUnit {
+        fixture_id: "nested-functions".into(),
+        source_id: "logical/nested-functions.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn entry(value = helper(40)) = helper(value); fn helper(value: Int) = value + 1; fn recurse() = recurse();".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("entry"), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("recurse") else {
+        panic!("recursive calls must hit the shared invocation limits");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
 fn retained_function_defaults_cannot_reset_the_invocation_budget() {
     let module = SourceUnit {
         fixture_id: "default-budget".into(),

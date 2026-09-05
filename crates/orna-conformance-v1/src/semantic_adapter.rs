@@ -9,11 +9,12 @@
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
 use orna_evaluator_v1::{
-    Environment, Limits as EvaluatorLimits, evaluate_expression, evaluate_function, evaluate_parsed,
+    Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction, evaluate_expression,
+    evaluate_parsed, invoke_named,
 };
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Expr, Parameter, Pattern, parse_module};
+use orna_syntax_v1::{Declaration, Pattern, parse_module};
 use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
@@ -233,13 +234,6 @@ pub struct BoundedEvaluator {
     functions: BTreeMap<String, RetainedFunction>,
 }
 
-#[derive(Clone)]
-struct RetainedFunction {
-    body: Expr,
-    environment: Environment,
-    parameters: Vec<Parameter>,
-}
-
 impl BoundedEvaluator {
     #[must_use]
     pub fn new(limits: EvaluatorLimits) -> Self {
@@ -268,18 +262,12 @@ impl BoundedEvaluator {
     /// Explicitly invokes one retained pure function with named arguments.
     /// Defaults are evaluated only after earlier parameters have been bound.
     pub fn invoke_with(&self, function: &str, arguments: &Environment) -> StageOutcome<Diagnostic> {
-        let Some(function) = self.functions.get(function) else {
+        if !self.functions.contains_key(function) {
             return StageOutcome::Skipped {
                 reason: "function is not retained by the bounded evaluator".into(),
             };
-        };
-        match evaluate_function(
-            &function.parameters,
-            &function.body,
-            &function.environment,
-            arguments,
-            self.limits,
-        ) {
+        }
+        match invoke_named(function, &self.functions, arguments, self.limits) {
             Ok(_) => StageOutcome::Passed,
             Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
         }
