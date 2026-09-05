@@ -805,6 +805,29 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
                     .map_err(|error| transaction_error(table_error_code(error)))?;
                 Ok(Some(row.clone()))
             }
+            "upsert" => {
+                let [row] = arguments else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                };
+                let key = table_key(row, key_field)?;
+                if let Some(existing) = self
+                    .activation
+                    .read(table, &key)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .cloned()
+                {
+                    let row = merge_upsert_row(&existing, row, key_field)?;
+                    self.activation
+                        .update(table.clone(), key, row.clone())
+                        .map_err(|error| transaction_error(table_error_code(error)))?;
+                    Ok(Some(row))
+                } else {
+                    self.activation
+                        .insert(table.clone(), key, row.clone())
+                        .map_err(|error| transaction_error(table_error_code(error)))?;
+                    Ok(Some(row.clone()))
+                }
+            }
             "update" => {
                 let [key, patch] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
@@ -932,6 +955,24 @@ fn merge_row(existing: &Value, patch: &Value, key_field: &str) -> Result<Value, 
         *value = patch_value.clone();
     }
     Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
+}
+
+fn merge_upsert_row(
+    existing: &Value,
+    patch: &Value,
+    key_field: &str,
+) -> Result<Value, EvaluationError> {
+    let OvbRaw::Map(fields) = patch.raw() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
+    };
+    let fields = fields
+        .iter()
+        .filter(|(key, _)| !matches!(key, OvbRaw::Text(name) if name == key_field))
+        .cloned()
+        .collect();
+    let patch =
+        Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+    merge_row(existing, &patch, key_field)
 }
 
 fn replace_record_field(
