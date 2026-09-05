@@ -113,6 +113,8 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/legacy-assert-owner-pipe.orna",
         "invalid/legacy-assert-self-pipe.orna",
         "invalid/incompatible-dimensions.orna",
+        "invalid/reserved-std.orna",
+        "invalid/reserved-sys.orna",
     ] {
         let fixture = report
             .fixtures
