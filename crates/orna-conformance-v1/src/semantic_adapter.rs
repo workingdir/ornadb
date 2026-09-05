@@ -126,6 +126,7 @@ impl SemanticPhase {
                     | "ORNA-S021-TYPE"
                     | "ORNA-S022-UNSUPPORTED"
                     | "ORNA-A091-004"
+                    | "ORNA-A091-003"
                     | "ORNA-A091-007"
                     | "ORNA-A091-012"
             ),
