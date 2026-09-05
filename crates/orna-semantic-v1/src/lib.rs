@@ -95,6 +95,13 @@ pub enum Type {
         base: String,
         arguments: Vec<Type>,
     },
+    /// The one rate shape needed by the exact money rule. This is not a
+    /// general dimensional-algebra representation: unsupported products still
+    /// remain `Error` and are never treated as dynamic values.
+    MoneyPerUnit {
+        currency: Box<Type>,
+        unit: Box<Type>,
+    },
     Function {
         parameters: Vec<Type>,
         /// Source parameter names when every declaration pattern is a name.
@@ -746,7 +753,21 @@ fn type_of(ty: &TypeExpr) -> Type {
             result: Box::new(type_of(result)),
         },
         TypeExpr::Optional { inner, .. } => Type::Optional(Box::new(type_of(inner))),
-        TypeExpr::Product { .. } => Type::Error,
+        TypeExpr::Product { lhs, op, rhs, .. } => {
+            let lhs = type_of(lhs);
+            let rhs = type_of(rhs);
+            match (lhs, op.as_str(), rhs) {
+                (Type::Applied { base, arguments }, "/", unit)
+                    if base == "Money" && arguments.len() == 1 =>
+                {
+                    Type::MoneyPerUnit {
+                        currency: Box::new(arguments.into_iter().next().unwrap_or(Type::Error)),
+                        unit: Box::new(unit),
+                    }
+                }
+                _ => Type::Error,
+            }
+        }
     }
 }
 fn primitive(name: &str) -> Option<Type> {
@@ -799,6 +820,9 @@ struct Scope {
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
+    /// Local nominal types with an explicit nested `Currency` implementation.
+    /// This is intentionally not inferred from names or static members.
+    currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
 }
@@ -823,6 +847,7 @@ fn resolve_imports(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
+        currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
@@ -972,11 +997,15 @@ fn check_item(
             annotation,
             value,
         } => {
-            let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
             if let Some(expected) = annotation.as_ref().map(type_of) {
+                let inferred =
+                    infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
+                bind_pattern(pattern, inferred.ty, symbols, diagnostics);
+            } else {
+                let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
+                bind_pattern(pattern, inferred.ty, symbols, diagnostics);
             }
-            bind_pattern(pattern, inferred.ty, symbols, diagnostics);
         }
         Declaration::Function { .. } => check_function(item, symbols, scope, diagnostics),
         Declaration::Assertion { value } => {
@@ -1005,11 +1034,17 @@ fn check_item(
                             ),
                         ty,
                         ..
-                    } => require_same(
-                        &type_of(ty),
-                        &infer(value, scope, &BTreeMap::new(), diagnostics).ty,
-                        diagnostics,
-                    ),
+                    } => {
+                        let expected = type_of(ty);
+                        let inferred = infer_contextual(
+                            value,
+                            &expected,
+                            scope,
+                            &BTreeMap::new(),
+                            diagnostics,
+                        );
+                        require_same(&expected, &inferred.ty, diagnostics);
+                    }
                     _ => {}
                 }
             }
@@ -1040,16 +1075,19 @@ fn check_function(
             diagnostics,
         );
     }
-    let inferred = infer(body, scope, &local, diagnostics);
     if let Some(expected) = signature.result.as_ref().map(type_of) {
+        let inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
         require_same(&expected, &inferred.ty, diagnostics);
-    }
-    if let Some(symbol) = symbols.get_mut(&signature.name) {
-        symbol.effects = inferred.effects;
-        if signature.result.is_none()
-            && let Type::Function { result, .. } = &mut symbol.ty
-        {
-            **result = inferred.ty;
+        if let Some(symbol) = symbols.get_mut(&signature.name) {
+            symbol.effects = inferred.effects;
+        }
+    } else {
+        let inferred = infer(body, scope, &local, diagnostics);
+        if let Some(symbol) = symbols.get_mut(&signature.name) {
+            symbol.effects = inferred.effects;
+            if let Type::Function { result, .. } = &mut symbol.ty {
+                **result = inferred.ty;
+            }
         }
     }
 }
@@ -1082,6 +1120,34 @@ struct Inferred {
     ty: Type,
     effects: EffectSummary,
 }
+
+/// Applies the sole contextual numeric conversion admitted by the language:
+/// an exact fractional literal may be checked directly as `Float`. All other
+/// expressions remain inferred through the ordinary closed-world path.
+fn infer_contextual(
+    expr: &Expr,
+    expected: &Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if matches!(expected, Type::Float)
+        && matches!(
+            expr,
+            Expr::Literal {
+                kind: LiteralKind::Decimal,
+                ..
+            }
+        )
+    {
+        return Inferred {
+            ty: Type::Float,
+            effects: EffectSummary::default(),
+        };
+    }
+    infer(expr, scope, local, diagnostics)
+}
+
 fn infer(
     expr: &Expr,
     scope: &Scope,
@@ -1226,11 +1292,28 @@ fn infer(
                 return resolve_qualified_module_member(&path, scope, diagnostics);
             }
             let base = infer(base, scope, local, diagnostics);
+            if let Some(ty) = infer_numeric_postfix(&base.ty, name, scope) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
             let ty = match &base.ty {
                 Type::Record(fields) => fields.get(name).cloned().unwrap_or_else(|| {
                     diagnostics.push(diag(DIAG_UNRESOLVED, "record field cannot be resolved"));
                     Type::Error
                 }),
+                Type::Named(table) => scope
+                    .table_rows
+                    .get(table)
+                    .and_then(|row| match row {
+                        Type::Record(fields) => fields.get(name).cloned(),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
+                        Type::Error
+                    }),
                 _ => {
                     diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
                     Type::Error
@@ -1381,6 +1464,23 @@ fn infer(
                     }
                 };
                 return Inferred { ty, effects };
+            }
+            if op == "*" {
+                if let Some(ty) = reduce_exact_money_rate(&left.ty, &right.ty) {
+                    return Inferred { ty, effects };
+                }
+                if matches!(left.ty, Type::MoneyPerUnit { .. })
+                    || matches!(right.ty, Type::MoneyPerUnit { .. })
+                {
+                    diagnostics.push(diag(
+                        DIAG_UNSUPPORTED,
+                        "dimensional algebra is outside this semantic slice",
+                    ));
+                    return Inferred {
+                        ty: Type::Error,
+                        effects,
+                    };
+                }
             }
             let ty = if matches!(
                 op.as_str(),
@@ -2661,6 +2761,56 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
     }
 }
 
+fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
+    match base {
+        Type::Decimal if scope.currency_types.contains(name) => Some(Type::Applied {
+            base: "Money".into(),
+            arguments: vec![Type::Named(name.into())],
+        }),
+        Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
+        Type::Int | Type::Decimal | Type::Float => Some(Type::Applied {
+            base: numeric_base(base)?.into(),
+            arguments: vec![Type::Named(name.into())],
+        }),
+        Type::Applied { base, arguments }
+            if arguments.len() == 1
+                && arguments
+                    .first()
+                    .is_some_and(|unit| unit == &Type::Named(name.into())) =>
+        {
+            Some(Type::Applied {
+                base: base.clone(),
+                arguments: arguments.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn numeric_base(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Int => Some("Int"),
+        Type::Decimal => Some("Decimal"),
+        Type::Float => Some("Float"),
+        _ => None,
+    }
+}
+
+fn reduce_exact_money_rate(left: &Type, right: &Type) -> Option<Type> {
+    match (left, right) {
+        (Type::Applied { base, arguments }, Type::MoneyPerUnit { currency, unit })
+        | (Type::MoneyPerUnit { currency, unit }, Type::Applied { base, arguments })
+            if base == "Decimal" && arguments.as_slice() == [unit.as_ref().clone()] =>
+        {
+            Some(Type::Applied {
+                base: "Money".into(),
+                arguments: vec![currency.as_ref().clone()],
+            })
+        }
+        _ => None,
+    }
+}
+
 fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let Some(path) = qualified_path(callee) else {
         return EffectSummary::default();
@@ -2915,6 +3065,36 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
         })
         .collect();
     Some((name.clone(), Type::Record(fields)))
+}
+
+fn currency_types(tree: &SyntaxTree) -> BTreeSet<String> {
+    tree.items
+        .iter()
+        .filter_map(|item| {
+            let Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } = &item.declaration
+            else {
+                return None;
+            };
+            members
+                .iter()
+                .any(|member| {
+                    matches!(
+                        member,
+                        TypeMember::Implementation { implementation, .. }
+                            if matches!(
+                                &implementation.protocol,
+                                TypeExpr::Name { path, arguments, .. }
+                                    if path.as_slice() == ["Currency"] && arguments.is_empty()
+                            )
+                    )
+                })
+                .then_some(name.clone())
+        })
+        .collect()
 }
 
 fn enum_variant_types(
