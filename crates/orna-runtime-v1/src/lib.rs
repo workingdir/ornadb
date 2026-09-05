@@ -12,9 +12,9 @@ use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot};
 use orna_repository_v1::Repository;
 use orna_stream_v1::{
     AsyncCheckpointBackend, CancellationClassification, Checkpoint as StreamCheckpoint,
-    CheckpointKey, CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity,
-    DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus,
-    LeasePurpose, Position, RejectReason, SafeDiagnostic,
+    CheckpointKey, CheckpointPrecondition, CommitIntent, CommitResult, Component, ConsumerIdentity,
+    DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
+    FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
 };
 use uuid::Uuid;
 
@@ -271,6 +271,16 @@ pub struct RuntimeState {
     connection: Connection,
 }
 
+pub struct StreamDeliveryCommit<'a> {
+    pub writer: WriterLease,
+    pub expected_capture: &'a CwdCapture,
+    pub mutations: &'a [Mutation],
+    pub next_digest: [u8; 32],
+    pub delivery: DeliveryLease,
+    pub expected_stream: CheckpointPrecondition,
+    pub faults: &'a dyn FaultInjector,
+}
+
 /// Writer-fenced stream administration backed by one runtime state.
 pub struct RuntimeStreamBackend<'a> {
     state: &'a RuntimeState,
@@ -486,14 +496,7 @@ impl RuntimeState {
         faults: &dyn FaultInjector,
     ) -> Result<CwdCapture, RuntimeError> {
         validate_id(lease.owner_id)?;
-        if mutations.is_empty() {
-            return Err(RuntimeError::EmptyMutationBatch);
-        }
-        for mutation in mutations {
-            validate_id(mutation.id)?;
-            validate_digest(mutation.digest)?;
-        }
-        validate_digest(next_digest)?;
+        validate_mutations(mutations, next_digest)?;
         let current = self.capture().await?;
         if &current != expected {
             return Err(RuntimeError::StaleCapture {
@@ -506,74 +509,61 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&tx, lease).await?;
-        let current = capture_tx(&tx).await?;
-        if &current != expected {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(current),
-            });
-        }
-        let mut sequence: Option<i64> = None;
-        for mutation in mutations {
-            tx.execute(
-                "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
-                params![
-                    mutation.id.to_vec(),
-                    mutation.payload.clone(),
-                    mutation.digest.to_vec()
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let mut rows = tx
-                .query("SELECT last_insert_rowid()", ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            sequence = Some(
-                rows.next()
-                    .await
-                    .map_err(|_| RuntimeError::StorageUnavailable)?
-                    .ok_or(RuntimeError::RecoveryInvalid)?
-                    .get(0)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            );
-        }
-        faults.check(FaultPoint::AfterMutation)?;
-        let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
-        let generation = current
-            .generation()
-            .to_u64_digits()
-            .1
-            .first()
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        tx.execute(
-            "INSERT INTO checkpoint (generation, digest, mutation_sequence) VALUES (?1, ?2, ?3)",
-            params![
-                i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                next_digest.to_vec(),
-                sequence
-            ],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        faults.check(FaultPoint::AfterCheckpoint)?;
-        tx.execute(
-            "UPDATE runtime_meta SET generation = ?1, generation_digest = ?2 WHERE singleton = 1",
-            params![
-                i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                next_digest.to_vec()
-            ],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-        faults.check(FaultPoint::AfterCapture)?;
-        let next = capture_tx(&tx).await?;
+        let next = append_mutations_tx(&tx, expected, mutations, next_digest, faults).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(next)
+    }
+
+    /// Commits handler mutations and the corresponding stream checkpoint in
+    /// one writer-fenced transaction. A rejected stream precondition rolls
+    /// back without exposing any mutation or changing the CWD capture.
+    pub async fn commit_stream_delivery(
+        &self,
+        request: StreamDeliveryCommit<'_>,
+    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
+        let StreamDeliveryCommit {
+            writer,
+            expected_capture,
+            mutations,
+            next_digest,
+            delivery,
+            expected_stream,
+            faults,
+        } = request;
+        validate_id(writer.owner_id)?;
+        validate_mutations(mutations, next_digest)?;
+        let current = self.capture().await?;
+        if &current != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::Complete {
+                lease: delivery,
+                expected: expected_stream,
+            },
+        )
+        .await?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            let current = capture_tx(&tx).await?;
+            return Ok((current, result));
+        }
+        let next =
+            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok((next, result))
     }
 
     pub async fn pending(&self) -> Result<Vec<Mutation>, RuntimeError> {
@@ -1955,6 +1945,94 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
     )
     .map_err(|_| RuntimeError::RecoveryInvalid)
 }
+
+fn validate_mutations(mutations: &[Mutation], next_digest: [u8; 32]) -> Result<(), RuntimeError> {
+    if mutations.is_empty() {
+        return Err(RuntimeError::EmptyMutationBatch);
+    }
+    for mutation in mutations {
+        validate_id(mutation.id)?;
+        validate_digest(mutation.digest)?;
+    }
+    validate_digest(next_digest)
+}
+
+async fn append_mutations_tx(
+    connection: &Connection,
+    expected: &CwdCapture,
+    mutations: &[Mutation],
+    next_digest: [u8; 32],
+    faults: &dyn FaultInjector,
+) -> Result<CwdCapture, RuntimeError> {
+    let current = capture_tx(connection).await?;
+    if &current != expected {
+        return Err(RuntimeError::StaleCapture {
+            current: Box::new(current),
+        });
+    }
+    let mut sequence: Option<i64> = None;
+    for mutation in mutations {
+        connection
+            .execute(
+                "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
+                params![
+                    mutation.id.to_vec(),
+                    mutation.payload.clone(),
+                    mutation.digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = connection
+            .query("SELECT last_insert_rowid()", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        sequence = Some(
+            rows.next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?
+                .get(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        );
+    }
+    faults.check(FaultPoint::AfterMutation)?;
+    let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
+    let generation = current
+        .generation()
+        .to_u64_digits()
+        .1
+        .first()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    connection
+        .execute(
+            "INSERT INTO checkpoint (generation, digest, mutation_sequence) VALUES (?1, ?2, ?3)",
+            params![
+                i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                next_digest.to_vec(),
+                sequence
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    faults.check(FaultPoint::AfterCheckpoint)?;
+    connection
+        .execute(
+            "UPDATE runtime_meta SET generation = ?1, generation_digest = ?2 WHERE singleton = 1",
+            params![
+                i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                next_digest.to_vec()
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    faults.check(FaultPoint::AfterCapture)?;
+    capture_tx(connection).await
+}
+
 fn fixed<const N: usize>(value: Vec<u8>) -> Result<[u8; N], RuntimeError> {
     value.try_into().map_err(|_| RuntimeError::RecoveryInvalid)
 }
@@ -2602,6 +2680,150 @@ mod tests {
                 .await,
             Err(RuntimeError::EmptyMutationBatch)
         );
+    }
+
+    #[tokio::test]
+    async fn stream_delivery_commit_publishes_mutations_and_checkpoint_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("one", "two");
+        let stream_expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let delivery_lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: stream_expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            }
+        };
+
+        let (next, result) = state
+            .commit_stream_delivery(StreamDeliveryCommit {
+                writer,
+                expected_capture: &capture,
+                mutations: &[mutation(5), mutation(6)],
+                next_digest: digest(9),
+                delivery: delivery_lease,
+                expected_stream: stream_expected,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        let CommitResult::CheckpointAdvanced { checkpoint } = result else {
+            panic!("stream completion must advance its checkpoint");
+        };
+        assert_eq!(checkpoint.version, 1);
+        assert_eq!(
+            checkpoint
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("two")
+        );
+        assert_eq!(
+            state.pending().await.unwrap(),
+            vec![mutation(5), mutation(6)]
+        );
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap(),
+            Some(Checkpoint {
+                generation: 1,
+                digest: digest(9),
+                mutation_sequence: 2,
+            })
+        );
+        assert_eq!(next.generation_digest(), digest(9));
+    }
+
+    #[tokio::test]
+    async fn stream_delivery_commit_rolls_back_both_sides_on_fault_or_stale_cas() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("one", "two");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let delivery_lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            state
+                .commit_stream_delivery(StreamDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &[mutation(7)],
+                    next_digest: digest(8),
+                    delivery: delivery_lease.clone(),
+                    expected_stream: expected.clone(),
+                    faults: &Fail(FaultPoint::AfterCheckpoint),
+                },)
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint))
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(state.capture().await.unwrap(), capture);
+        let checkpoint = {
+            let stream = state.stream_backend(writer);
+            stream
+                .checkpoint_async(&delivery_lease.delivery.checkpoint_key())
+                .await
+                .unwrap()
+        };
+        assert_eq!(checkpoint.version, 0);
+        assert_eq!(checkpoint.committed, None);
+
+        let stale = CheckpointPrecondition {
+            version: 1,
+            committed: None,
+        };
+        let (unchanged, result) = state
+            .commit_stream_delivery(StreamDeliveryCommit {
+                writer,
+                expected_capture: &capture,
+                mutations: &[mutation(8)],
+                next_digest: digest(9),
+                delivery: delivery_lease,
+                expected_stream: stale,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert_eq!(unchanged, capture);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
     }
 
     #[tokio::test]
