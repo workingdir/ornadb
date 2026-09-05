@@ -11,9 +11,9 @@ use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome,
 use orna_evaluator_v1::{
     Environment, Limits as EvaluatorLimits, evaluate_expression, evaluate_parsed,
 };
-use orna_foundation_v1::Diagnostic;
+use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Expr, Pattern, parse_module};
+use orna_syntax_v1::{Declaration, Expr, Parameter, Pattern, parse_module};
 use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
@@ -116,7 +116,8 @@ pub trait RuntimeEvaluator {
 }
 
 /// Runs the bounded, side-effect-free evaluator for row/expression units and
-/// modules composed only of immutable bindings and zero-argument functions.
+/// modules composed only of immutable bindings and pure functions with named
+/// parameters.
 ///
 /// Module execution, table access, mutations, external effects, and prose
 /// scenarios remain explicit skips until their owning runtime contracts exist.
@@ -131,6 +132,7 @@ pub struct BoundedEvaluator {
 struct RetainedFunction {
     body: Expr,
     environment: Environment,
+    parameters: Vec<Parameter>,
 }
 
 impl BoundedEvaluator {
@@ -155,12 +157,52 @@ impl BoundedEvaluator {
     /// Explicitly invokes one zero-argument function retained during module
     /// loading. Loading a module never evaluates a retained function body.
     pub fn invoke(&self, function: &str) -> StageOutcome<Diagnostic> {
+        self.invoke_with(function, &Environment::new())
+    }
+
+    /// Explicitly invokes one retained pure function with named arguments.
+    /// Defaults are evaluated only after earlier parameters have been bound.
+    pub fn invoke_with(&self, function: &str, arguments: &Environment) -> StageOutcome<Diagnostic> {
         let Some(function) = self.functions.get(function) else {
             return StageOutcome::Skipped {
                 reason: "function is not retained by the bounded evaluator".into(),
             };
         };
-        match evaluate_parsed(&function.body, &function.environment, self.limits) {
+        let parameter_names = function
+            .parameters
+            .iter()
+            .map(|parameter| match &parameter.pattern {
+                Pattern::Name(name, _) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(parameter_names) = parameter_names else {
+            return Self::argument_error();
+        };
+        if arguments
+            .keys()
+            .any(|argument| !parameter_names.contains(&argument.as_str()))
+        {
+            return Self::argument_error();
+        }
+        let mut environment = function.environment.clone();
+        for parameter in &function.parameters {
+            let Pattern::Name(name, _) = &parameter.pattern else {
+                return Self::argument_error();
+            };
+            let value = match arguments.get(name) {
+                Some(value) => value.clone(),
+                None => match &parameter.default {
+                    Some(default) => match evaluate_parsed(default, &environment, self.limits) {
+                        Ok(value) => value,
+                        Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+                    },
+                    None => return Self::argument_error(),
+                },
+            };
+            environment.insert(name.clone(), value);
+        }
+        match evaluate_parsed(&function.body, &environment, self.limits) {
             Ok(_) => StageOutcome::Passed,
             Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
         }
@@ -194,7 +236,10 @@ impl BoundedEvaluator {
                     pattern: Pattern::Name(_, _),
                     ..
                 } => true,
-                Declaration::Function { signature, .. } => signature.parameters.is_empty(),
+                Declaration::Function { signature, .. } => signature
+                    .parameters
+                    .iter()
+                    .all(|parameter| matches!(parameter.pattern, Pattern::Name(_, _))),
                 _ => false,
             })
         {
@@ -220,6 +265,7 @@ impl BoundedEvaluator {
                         RetainedFunction {
                             body,
                             environment: environment.clone(),
+                            parameters: signature.parameters,
                         },
                     );
                 }
@@ -233,8 +279,20 @@ impl BoundedEvaluator {
 
     fn unsupported_module() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
-            reason: "module execution requires an effect-free module with immutable bindings and zero-argument functions".into(),
+            reason: "module execution requires an effect-free module with immutable bindings and named-parameter functions".into(),
         }
+    }
+
+    fn argument_error() -> StageOutcome<Diagnostic> {
+        StageOutcome::Failed(
+            Diagnostic::new(
+                SafeText::new("ORNA-EVAL-ARGUMENT").expect("static safe code"),
+                DiagnosticSeverity::Error,
+                SafeText::redacted(),
+            )
+            .expect("static diagnostic")
+            .redacted(),
+        )
     }
 }
 
