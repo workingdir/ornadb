@@ -1633,6 +1633,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-protocol-v1"
+version = "1.0.0"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "orna-foundation-v1",
+]
+
+[[package]]
 name = "orna-repository-v1"
 version = "1.0.0"
 dependencies = [
@@ -1731,6 +1740,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-stream-v1"
+version = "1.0.0"
+
+[[package]]
 name = "orna-syntax"
 version = "1.0.0"
 dependencies = [
@@ -1746,6 +1759,24 @@ dependencies = [
  "proptest",
  "unicode-ident",
  "unicode-normalization",
+]
+
+[[package]]
+name = "orna-sys-v1"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "orna-traceability-v1"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
