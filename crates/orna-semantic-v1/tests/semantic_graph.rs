@@ -12,6 +12,36 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
+    let catalogue = Catalogue::authoritative_fixture();
+    for source in [
+        "pub fn create(customer: Customer): Order = Order.insert({ customer: customer, created: now() });",
+        "pub fn created(): Instant = Order.one().created;",
+        "use contacts as addressbook; pub fn read(): contacts.Contact = addressbook.Contact.one();",
+        "use contacts as addressbook; pub fn name(): Str = addressbook.Contact.one().name;",
+        "pub fn pay(order: Order) = Payment.insert({ order: order, amount: 10.GBP });",
+    ] {
+        let result =
+            analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
+        assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
+    }
+    for source in [
+        "pub fn bad(customer: Customer) = Payment.insert({ order: customer, amount: 10.GBP });",
+        "pub fn bad(customer: Customer) = Payment.insert({ order: { customer: customer, created: now() }, amount: 10.GBP });",
+        "pub fn bad(): Order = Contact.one();",
+        "pub fn bad(): Contact = contacts.Contact.one();",
+    ] {
+        let result =
+            analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn stored_email_provider_is_typed_without_changing_connector_messages() {
     let catalogue = Catalogue::authoritative_fixture();
     for (source, expected) in [
