@@ -348,10 +348,14 @@ impl Runtime {
         outcome: TerminalClass,
     ) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
-        self.invocations
+        let stored = self
+            .invocations
             .get_mut(&handle.invocation)
-            .expect("checked")
-            .terminal = Some(outcome.clone());
+            .expect("checked");
+        if stored.terminal.is_some() {
+            return Ok(());
+        }
+        stored.terminal = Some(outcome.clone());
         for entry in self
             .idempotency
             .values_mut()
@@ -767,6 +771,31 @@ mod tests {
         }));
         assert_eq!(cancelled.ordinary_failure(), None);
         assert_eq!(cancelled.terminal_class(), TerminalClass::Cancelled);
+    }
+    #[test]
+    fn committed_terminal_classification_wins_over_late_cancellation() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut first = request(Some(value("Int", "1")), ArgumentMap::default());
+        first.idempotency_key = Some("key".into());
+        let handle = match runtime.admit(first.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime
+            .classify_terminal(&handle, TerminalClass::Succeeded)
+            .unwrap();
+        runtime
+            .classify_terminal(&handle, TerminalClass::Cancelled)
+            .unwrap();
+
+        assert!(matches!(
+            runtime.admit(first).unwrap(),
+            Admission::Terminal {
+                outcome: TerminalClass::Succeeded,
+                ..
+            }
+        ));
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {
