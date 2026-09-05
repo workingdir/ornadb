@@ -59,6 +59,9 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
             "ORNA-A091-002".into()
         }
         "Float is not a valid primary-key type" => "E3003".into(),
+        "relation equality is ambiguous; choose sequence or row-set comparison explicitly" => {
+            "E4107".into()
+        }
         _ => diagnostic.code().into(),
     }
 }
