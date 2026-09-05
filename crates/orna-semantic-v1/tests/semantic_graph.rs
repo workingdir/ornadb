@@ -910,6 +910,57 @@ fn authoritative_core_types_locale_aware_money_pipeline() {
 }
 
 #[test]
+fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
+    let sources = [
+        (
+            "attached tables",
+            ModuleInput::new(
+                "attached_tables.orna",
+                r#"
+                    pub fn names() =
+                        contacts.Contact
+                        | filter(contact => (contact.emails | count) > 0)
+                        | map(Contact.full_name)
+                        | sort_by(value => value);
+                    pub fn days() = energy.Reading | bucket_by(1.day, zone: Europe.London);
+                "#,
+            ),
+        ),
+        (
+            "attached connectors",
+            ModuleInput::new(
+                "attached_connectors.orna",
+                r#"
+                    use vehicle.corsa.*;
+                    pub fn recent() = Reading | filter(reading => reading.time > now() - 1.min) | last();
+                    pub fn parallel() = std.concurrent.parallel([
+                        mail.google.sync,
+                        finance.openbanking.sync,
+                        vehicle.corsa.freematics.sync,
+                    ]);
+                    pub fn source() = google.mail(credential: std.secret.ref("google.personal"));
+                "#,
+            ),
+        ),
+        (
+            "attached csv",
+            ModuleInput::new(
+                "attached_csv.orna",
+                r#"
+                    pub fn import(path: Str) =
+                        std.encoding.csv.rows(std.io.fs.read(path))
+                        | for_each(row => Contact.insert(row));
+                "#,
+            ),
+        ),
+    ];
+    for (name, source) in sources {
+        let result = analyze_with_catalogue(&[source], &Catalogue::authoritative_fixture());
+        assert!(result.is_ok(), "{name}: {:?}", result.diagnostics);
+    }
+}
+
+#[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
     let result = analyze(&[ModuleInput::new(
         "units.orna",
