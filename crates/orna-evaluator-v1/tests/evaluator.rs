@@ -166,6 +166,73 @@ fn source_call_arguments_evaluate_in_source_order() {
 }
 
 #[test]
+fn wildcard_and_structured_lambda_parameters_bind_by_position() {
+    for (expression, expected) in [
+        ("(_ => 7)(123)", 7),
+        ("((_, _) => 7)(1, 2)", 7),
+        ("10 | (_ => 7)", 7),
+        ("(((a, b)) => a + b)((1, 2))", 3),
+        ("(([a, b]) => a + b)([1, 2])", 3),
+        ("(({a, b}) => a + b)({a: 1, b: 2})", 3),
+        ("(1, 2) | (((a, b)) => a + b)", 3),
+    ] {
+        assert_eq!(
+            evaluate(expression),
+            Value::int(expected.into()),
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "(_ => 7)(1 / 0)",
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    for expression in ["(((a, b)) => a + b)(1)", "(([a, b]) => a + b)([1])"] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-TYPE"
+        );
+    }
+    for expression in [
+        "((_, _) => 7)(1)",
+        "(((a, b)) => a + b)(a: 1, b: 2)",
+        "(({a}, a) => a)({a: 1}, 2)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-ARGUMENT"
+        );
+    }
+}
+
+#[test]
+fn named_functions_share_structured_parameter_binding_and_defaults() {
+    let source = "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7;";
+    for (expression, expected) in [
+        ("add()", 3),
+        ("add((10, 20))", 30),
+        ("(10, 20) | add", 30),
+        ("ignore(1, 2)", 7),
+    ] {
+        assert_eq!(
+            call_module(source, expression, Limits::default()).unwrap(),
+            Value::int(expected.into())
+        );
+    }
+}
+
+#[test]
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
     for (source, expression, expected) in [
         (
