@@ -6,7 +6,11 @@
 //! their parent's writes but cannot publish independently. Only the root
 //! [`Activation`] can publish its overlay.
 
-use std::{collections::BTreeMap, iter::Peekable, ops::RangeBounds};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    iter::Peekable,
+    ops::RangeBounds,
+};
 
 /// The committed relation for one table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +178,15 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         let mut items = self.source.collect::<Vec<_>>();
         items.sort_by_key(&mut key);
         Self::new(items.into_iter())
+    }
+
+    /// Keeps the first occurrence of each value in the established order.
+    pub fn distinct(self) -> Self
+    where
+        Item: Clone + Ord,
+    {
+        let mut seen = BTreeSet::new();
+        Self::new(self.source.filter(move |item| seen.insert((*item).clone())))
     }
 }
 
@@ -1185,6 +1198,14 @@ mod tests {
                 .map(|(key, row)| (key, row))
                 .collect::<Vec<_>>(),
             vec![(4, "four"), (1, "one"), (3, "three"), (2, "two")]
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .map(|(_, row)| row.chars().next().expect("nonempty row"))
+                .distinct()
+                .collect::<Vec<_>>(),
+            vec!['o', 't', 'f']
         );
 
         let mut activation = database.begin();
