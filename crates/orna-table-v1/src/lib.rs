@@ -85,6 +85,11 @@ where
     {
         self.committed.range(range)
     }
+
+    /// Returns a lazy ordered relation over committed rows.
+    pub fn relation(&self) -> Relation<'_, (Key, Row)> {
+        Relation::new(self.scan().map(|(key, row)| (key.clone(), row.clone())))
+    }
 }
 
 /// An error raised by a table mutation or transaction lifecycle operation.
@@ -118,6 +123,56 @@ enum ActivationState {
 
 type CommittedRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Row)> + 'a>;
 type OverlayRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Option<Row>)> + 'a>;
+
+/// A lazy ordered relation value.
+pub struct Relation<'a, Item> {
+    source: Box<dyn Iterator<Item = Item> + 'a>,
+}
+
+impl<'a, Item: 'a> Relation<'a, Item> {
+    fn new<I>(source: I) -> Self
+    where
+        I: Iterator<Item = Item> + 'a,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+
+    /// Keeps input order while retaining items accepted by `predicate`.
+    pub fn filter<P>(self, predicate: P) -> Self
+    where
+        P: FnMut(&Item) -> bool + 'a,
+    {
+        Self::new(self.source.filter(predicate))
+    }
+
+    /// Maps items without changing their order.
+    pub fn map<Output: 'a, M>(self, mapper: M) -> Relation<'a, Output>
+    where
+        M: FnMut(Item) -> Output + 'a,
+    {
+        Relation::new(self.source.map(mapper))
+    }
+
+    /// Takes a bounded prefix without enumerating later items.
+    pub fn take(self, limit: usize) -> Self {
+        Self::new(self.source.take(limit))
+    }
+
+    /// Drops an ordered prefix.
+    pub fn drop(self, count: usize) -> Self {
+        Self::new(self.source.skip(count))
+    }
+}
+
+impl<Item> Iterator for Relation<'_, Item> {
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.source.next()
+    }
+}
 
 struct CandidateScan<'a, Key, Row> {
     committed: Peekable<CommittedRows<'a, Key, Row>>,
@@ -291,6 +346,15 @@ where
         ))
     }
 
+    /// Returns a lazy ordered relation over this activation's candidate rows.
+    pub fn candidate_relation(&self) -> Result<Relation<'_, (Key, Row)>, TableError> {
+        self.require_open()?;
+        Ok(Relation::new(CandidateScan::new(
+            self.runtime.committed.iter(),
+            self.overlay.iter(),
+        )))
+    }
+
     /// Publishes every staged change together. Nested scopes cannot call this.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -387,6 +451,10 @@ where
         R: RangeBounds<Key> + Clone,
     {
         self.activation.candidate_scan_range(range)
+    }
+
+    pub fn candidate_relation(&self) -> Result<Relation<'_, (Key, Row)>, TableError> {
+        self.activation.candidate_relation()
     }
 
     /// Nested calls have no publication capability.
@@ -487,6 +555,14 @@ where
             .get(table)
             .into_iter()
             .flat_map(move |relation| relation.range(range.clone()))
+    }
+
+    /// Returns a lazy ordered relation over one committed relation.
+    pub fn relation(&self, table: &Table) -> Relation<'_, (Key, Row)> {
+        Relation::new(
+            self.scan(table)
+                .map(|(key, row)| (key.clone(), row.clone())),
+        )
     }
 }
 
@@ -619,6 +695,22 @@ where
         Ok(CandidateScan::new(committed, overlay))
     }
 
+    /// Returns a lazy ordered relation over one activation candidate relation.
+    pub fn candidate_relation(
+        &self,
+        table: &Table,
+    ) -> Result<Relation<'_, (Key, Row)>, TableError> {
+        self.require_open()?;
+        let committed = self
+            .runtime
+            .committed
+            .get(table)
+            .into_iter()
+            .flat_map(BTreeMap::iter);
+        let overlay = self.overlay.get(table).into_iter().flat_map(BTreeMap::iter);
+        Ok(Relation::new(CandidateScan::new(committed, overlay)))
+    }
+
     /// Publishes the overlays of every changed relation together.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -723,6 +815,13 @@ where
         R: RangeBounds<Key> + Clone + 'a,
     {
         self.activation.candidate_scan_range(table, range)
+    }
+
+    pub fn candidate_relation(
+        &self,
+        table: &Table,
+    ) -> Result<Relation<'_, (Key, Row)>, TableError> {
+        self.activation.candidate_relation(table)
     }
 
     /// Nested calls cannot independently publish the root's overlays.
@@ -1044,5 +1143,43 @@ mod tests {
         activation.rollback();
         assert_eq!(database.committed(&"orders", &2), None);
         assert_eq!(database.committed(&"orders", &1).copied(), Some("old"));
+    }
+
+    #[test]
+    fn lazy_relations_compose_in_order_over_committed_and_candidate_rows() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                for (key, row) in [(1, "one"), (2, "two"), (3, "three"), (4, "four")] {
+                    activation.insert("notes", key, row)?;
+                }
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .filter(|(_, row)| *row != "two")
+                .map(|(key, row)| (key, row.to_ascii_uppercase()))
+                .drop(1)
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec![(3, "THREE".into()), (4, "FOUR".into())]
+        );
+
+        let mut activation = database.begin();
+        activation.update("notes", 2, "updated").unwrap();
+        activation.delete("notes", 3).unwrap();
+        activation.insert("notes", 5, "five").unwrap();
+        assert_eq!(
+            activation
+                .candidate_relation(&"notes")
+                .unwrap()
+                .take(3)
+                .collect::<Vec<_>>(),
+            vec![(1, "one"), (2, "updated"), (4, "four")]
+        );
+        activation.rollback();
     }
 }
