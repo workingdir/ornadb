@@ -368,6 +368,21 @@ fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
 }
 
 #[test]
+fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
+    let key = analyze(&[ModuleInput::new(
+        "key.orna",
+        "pub table Bad(value: Float) { text: Str, }",
+    )]);
+    assert!(has(&key, DIAG_TYPE));
+
+    let temperature = analyze(&[ModuleInput::new(
+        "temperature.orna",
+        "pub fn bad() = 20.C + 5.C;",
+    )]);
+    assert!(has(&temperature, DIAG_TYPE));
+}
+
+#[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",

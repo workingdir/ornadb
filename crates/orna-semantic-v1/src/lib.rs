@@ -1152,7 +1152,20 @@ fn check_item(
             let inferred = infer_module_assertion(value, table_rows, scope, diagnostics);
             assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
         }
-        Declaration::Table { name, members, .. } => {
+        Declaration::Table {
+            name,
+            keys,
+            members,
+            ..
+        } => {
+            for key in keys {
+                let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
+                if matches!(ty, Type::Float)
+                    || matches!(ty, Type::Applied { base, .. } if base == "Float")
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "Float is not a valid primary-key type"));
+                }
+            }
             let row = table_row_type(item);
             for member in members {
                 match member {
@@ -1765,6 +1778,16 @@ fn infer(
                         effects,
                     };
                 }
+            }
+            if op == "+" && left.ty == right.ty && is_absolute_affine_temperature(&left.ty) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "cannot add two absolute affine temperatures",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
             }
             let ty = if matches!(
                 op.as_str(),
@@ -3408,6 +3431,15 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
         }
         _ => None,
     }
+}
+
+fn is_absolute_affine_temperature(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if matches!(base.as_str(), "Int" | "Decimal" | "Float")
+                && matches!(arguments.as_slice(), [Type::Named(unit)] if unit == "C")
+    )
 }
 
 fn numeric_base(ty: &Type) -> Option<&'static str> {
