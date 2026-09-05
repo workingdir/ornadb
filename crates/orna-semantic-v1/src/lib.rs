@@ -111,6 +111,9 @@ pub enum Type {
         /// Function type expressions and catalogue summaries do not invent
         /// names, so named invocation of those summaries fails closed.
         parameter_names: Option<Vec<String>>,
+        /// Positions with a declaration-provided default; omitted arguments
+        /// are legal only at these positions.
+        default_parameters: BTreeSet<usize>,
         result: Box<Type>,
     },
     Named(String),
@@ -437,6 +440,7 @@ impl Catalogue {
         let page_builder = Type::Function {
             parameters: vec![Type::Error],
             parameter_names: None,
+            default_parameters: BTreeSet::new(),
             result: Box::new(ui.clone()),
         };
         modules.insert(
@@ -774,6 +778,7 @@ fn function(parameters: Vec<Type>, result: Type) -> Type {
     Type::Function {
         parameters,
         parameter_names: None,
+        default_parameters: BTreeSet::new(),
         result: Box::new(result),
     }
 }
@@ -786,6 +791,7 @@ fn named_function(parameters: Vec<(&str, Type)>, result: Type) -> Type {
     Type::Function {
         parameters: parameters.into_iter().map(|(_, ty)| ty).collect(),
         parameter_names: Some(parameter_names),
+        default_parameters: BTreeSet::new(),
         result: Box::new(result),
     }
 }
@@ -1094,6 +1100,12 @@ fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
                 Type::Function {
                     parameters,
                     parameter_names,
+                    default_parameters: signature
+                        .parameters
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, parameter)| parameter.default.as_ref().map(|_| index))
+                        .collect(),
                     result: Box::new(
                         signature
                             .result
@@ -1164,6 +1176,7 @@ fn type_of(ty: &TypeExpr) -> Type {
         } => Type::Function {
             parameters: parameters.iter().map(type_of).collect(),
             parameter_names: None,
+            default_parameters: BTreeSet::new(),
             result: Box::new(type_of(result)),
         },
         TypeExpr::Optional { inner, .. } => Type::Optional(Box::new(type_of(inner))),
@@ -1734,6 +1747,7 @@ fn check_function(
         unreachable!("function checker called for a non-function declaration");
     };
     let mut local = BTreeMap::new();
+    let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
         let ty = parameter
             .annotation
@@ -1746,6 +1760,21 @@ fn check_function(
                 "function parameter needs a static annotation",
             ));
         }
+        if let Some(default) = &parameter.default {
+            let inferred = infer_contextual(
+                default,
+                ty.as_ref().unwrap_or(&Type::Error),
+                scope,
+                &local,
+                diagnostics,
+            );
+            require_same(
+                ty.as_ref().unwrap_or(&Type::Error),
+                &inferred.ty,
+                diagnostics,
+            );
+            default_effects.join(&inferred.effects);
+        }
         bind_pattern(
             &parameter.pattern,
             ty.unwrap_or(Type::Error),
@@ -1754,13 +1783,15 @@ fn check_function(
         );
     }
     if let Some(expected) = signature.result.as_ref().map(type_of) {
-        let inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
+        let mut inferred = infer_contextual(body, &expected, scope, &local, diagnostics);
+        inferred.effects.join(&default_effects);
         require_same(&expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let inferred = infer(body, scope, &local, diagnostics);
+        let mut inferred = infer(body, scope, &local, diagnostics);
+        inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
             if let Type::Function { result, .. } = &mut symbol.ty {
@@ -1888,6 +1919,7 @@ fn infer_contextual_lambda(
     Inferred {
         ty: Type::Function {
             parameters: types,
+            default_parameters: BTreeSet::new(),
             parameter_names: parameters
                 .iter()
                 .map(|parameter| match &parameter.pattern {
@@ -2176,6 +2208,7 @@ fn infer(
             Inferred {
                 ty: Type::Function {
                     parameters: types,
+                    default_parameters: BTreeSet::new(),
                     parameter_names: parameters
                         .iter()
                         .map(|parameter| match &parameter.pattern {
@@ -2295,10 +2328,12 @@ fn infer(
                     parameters,
                     parameter_names,
                     result,
+                    default_parameters,
                 } => {
                     check_call_arguments(
                         &parameters,
                         parameter_names.as_deref(),
+                        &default_parameters,
                         arguments,
                         &values,
                         None,
@@ -3060,9 +3095,11 @@ fn infer_if(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_call_arguments(
     parameters: &[Type],
     parameter_names: Option<&[String]>,
+    default_parameters: &BTreeSet<usize>,
     arguments: &[orna_syntax_v1::Argument],
     values: &[Type],
     input: Option<&Type>,
@@ -3077,7 +3114,10 @@ fn check_call_arguments(
                 "named arguments require declared parameter names",
             ));
         } else {
-            if parameters.len() != argument_count {
+            if argument_count > parameters.len()
+                || (argument_count..parameters.len())
+                    .any(|index| !default_parameters.contains(&index))
+            {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "function argument count does not match its static signature",
@@ -3090,7 +3130,7 @@ fn check_call_arguments(
         return;
     };
     let mut seen = BTreeSet::new();
-    let mut malformed = parameters.len() != argument_count;
+    let mut malformed = argument_count > parameters.len();
     let mut positional = 0usize;
     let mut named_started = false;
     let supplied = input.into_iter().map(|value| (None, value)).chain(
@@ -3123,7 +3163,9 @@ fn check_call_arguments(
         }
         require_same(&parameters[index], actual, diagnostics);
     }
-    if seen.len() != parameters.len() {
+    if (0..parameters.len())
+        .any(|index| !seen.contains(&index) && !default_parameters.contains(&index))
+    {
         malformed = true;
     }
     if malformed {
@@ -3467,11 +3509,13 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
             parameters: left_parameters,
             parameter_names: left_names,
             result: left_result,
+            default_parameters: left_defaults,
         },
         Type::Function {
             parameters: right_parameters,
             parameter_names: right_names,
             result: right_result,
+            default_parameters: right_defaults,
         },
     ) = (left, right)
     else {
@@ -3488,6 +3532,10 @@ fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
     }
     Some(Type::Function {
         parameters: left_parameters.clone(),
+        default_parameters: left_defaults
+            .intersection(right_defaults)
+            .copied()
+            .collect(),
         parameter_names: (left_names == right_names)
             .then(|| left_names.clone())
             .flatten(),
@@ -4088,6 +4136,7 @@ fn infer_named_pipeline_stage(
         parameters,
         parameter_names,
         result,
+        default_parameters,
     } = callee.ty
     else {
         diagnostics.push(diag(
@@ -4102,6 +4151,7 @@ fn infer_named_pipeline_stage(
     check_call_arguments(
         &parameters,
         parameter_names.as_deref(),
+        &default_parameters,
         arguments,
         &values[1..],
         values.first(),
@@ -4559,14 +4609,26 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             },
         },
         ["sys", "admin", "replay_failure"] => Inferred {
-            ty: named_function(
-                vec![
-                    ("failure", Type::Named("sys.FailureRef".into())),
-                    ("expected_version", Type::Named("sys.FailureVersion".into())),
-                    ("expected_status", Type::Named("sys.FailureStatus".into())),
-                ],
-                Type::Named("sys.InvocationHandle".into()),
-            ),
+            ty: {
+                let mut callable = named_function(
+                    vec![
+                        ("failure", Type::Named("sys.FailureRef".into())),
+                        ("expected_version", Type::Named("sys.FailureVersion".into())),
+                        ("expected_status", Type::Named("sys.FailureStatus".into())),
+                    ],
+                    Type::Applied {
+                        base: "sys.InvocationHandle".into(),
+                        arguments: vec![Type::Named("sys.Value".into())],
+                    },
+                );
+                if let Type::Function {
+                    default_parameters, ..
+                } = &mut callable
+                {
+                    default_parameters.insert(2);
+                }
+                callable
+            },
             effects: EffectSummary {
                 effects: BTreeSet::from(["admin".into()]),
                 may_fail: true,
@@ -4690,6 +4752,7 @@ fn legacy_sys_admin_message(base: &Type, member: &str) -> Option<&'static str> {
 fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
     match (base, name) {
         (Type::Decimal, "divide") => Some(Type::Function {
+            default_parameters: BTreeSet::new(),
             parameters: vec![Type::Decimal, Type::Int, Type::Named("std.Rounding".into())],
             parameter_names: Some(vec!["value".into(), "scale".into(), "rounding".into()]),
             result: Box::new(Type::Decimal),
@@ -5385,6 +5448,7 @@ mod tests {
             Type::Function {
                 parameters: vec![],
                 parameter_names: Some(vec![]),
+                default_parameters: BTreeSet::new(),
                 result: Box::new(Type::Record(BTreeMap::from([("a".into(), Type::Int)])))
             }
         );
@@ -5393,6 +5457,7 @@ mod tests {
             Type::Function {
                 parameters: vec![],
                 parameter_names: Some(vec![]),
+                default_parameters: BTreeSet::new(),
                 result: Box::new(Type::List(Box::new(Type::Int)))
             }
         );
