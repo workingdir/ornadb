@@ -157,6 +157,9 @@ pub struct ModuleHeader {
     pub exports: BTreeMap<String, Symbol>,
     pub symbols: BTreeMap<String, Symbol>,
     pub prelude_exports: BTreeSet<String>,
+    /// Attached catalogue modules may be available without a source `use`.
+    /// Source modules remain explicit by default.
+    pub implicit: bool,
 }
 
 /// Explicit, caller-provided declarations available in addition to source
@@ -475,6 +478,220 @@ impl Catalogue {
         );
         Self { modules }
     }
+
+    /// The explicit core catalogue plus the attached environment used by the
+    /// reference conformance examples.  Attached tables and connectors are
+    /// declarations supplied by the caller; this profile does not execute or
+    /// discover them from the host.
+    pub fn authoritative_fixture() -> Self {
+        let mut catalogue = Self::authoritative_core();
+        let contact = Type::Record(BTreeMap::from([
+            ("emails".into(), Type::List(Box::new(Type::Text))),
+            ("full_name".into(), Type::Text),
+            ("name".into(), Type::Text),
+        ]));
+        let reading = Type::Record(BTreeMap::from([
+            ("rpm".into(), Type::Int),
+            ("speed".into(), Type::Float),
+            ("time".into(), Type::Instant),
+        ]));
+        let message = Type::Record(BTreeMap::from([
+            ("body_html".into(), Type::Text),
+            ("body_text".into(), Type::Text),
+            ("from".into(), Type::Text),
+            ("id".into(), Type::Text),
+            ("received".into(), Type::Instant),
+            ("sent".into(), Type::Instant),
+            ("subject".into(), Type::Text),
+            ("to".into(), Type::Text),
+        ]));
+        let note = Type::Record(BTreeMap::from([
+            ("created".into(), Type::Instant),
+            ("text".into(), Type::Text),
+        ]));
+        let customer = Type::Named("Customer".into());
+        let order = Type::Record(BTreeMap::from([
+            ("created".into(), Type::Instant),
+            ("customer".into(), customer.clone()),
+        ]));
+        let payment = Type::Record(BTreeMap::from([
+            ("amount".into(), Type::Error),
+            ("order".into(), Type::Named("Order".into())),
+        ]));
+        let audit = Type::Record(BTreeMap::from([
+            ("action".into(), Type::Text),
+            ("order".into(), Type::Named("Order".into())),
+        ]));
+
+        catalogue.modules.insert(
+            Namespace(Vec::new()),
+            fixture_module(
+                Namespace(Vec::new()),
+                [
+                    fixture_type("Account", Type::Named("Account".into())),
+                    fixture_table("Audit", audit),
+                    fixture_table("Contact", contact.clone()),
+                    fixture_type("Customer", customer),
+                    fixture_type("Message", Type::Named("Message".into())),
+                    fixture_table("Note", note),
+                    fixture_table("Order", order),
+                    fixture_table("Payment", payment),
+                ],
+                false,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["Message".into()]),
+            fixture_module(
+                Namespace(vec!["Message".into()]),
+                [fixture_function(
+                    "default",
+                    function(Vec::new(), Type::Named("Message".into())),
+                )],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["contacts".into()]),
+            fixture_module(
+                Namespace(vec!["contacts".into()]),
+                [fixture_table("Contact", contact)],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["energy".into()]),
+            fixture_module(
+                Namespace(vec!["energy".into()]),
+                [
+                    fixture_function("daily", function(vec![Type::Error], Type::Error)),
+                    fixture_table("Reading", reading.clone()),
+                ],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["mail".into()]),
+            fixture_module(
+                Namespace(vec!["mail".into()]),
+                [fixture_table("Email", message.clone())],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["mail".into(), "google".into()]),
+            fixture_module(
+                Namespace(vec!["mail".into(), "google".into()]),
+                [fixture_value("sync", Type::Error)],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["finance".into()]),
+            fixture_module(Namespace(vec!["finance".into()]), [], true),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["finance".into(), "openbanking".into()]),
+            fixture_module(
+                Namespace(vec!["finance".into(), "openbanking".into()]),
+                [fixture_value("sync", Type::Error)],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["google".into()]),
+            fixture_module(
+                Namespace(vec!["google".into()]),
+                [fixture_function(
+                    "mail",
+                    named_function(
+                        vec![("credential", Type::Named("std.SecretRef".into()))],
+                        Type::Stream(Box::new(message.clone())),
+                    ),
+                )],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["vehicle".into()]),
+            fixture_module(Namespace(vec!["vehicle".into()]), [], true),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["vehicle".into(), "corsa".into()]),
+            fixture_module(
+                Namespace(vec!["vehicle".into(), "corsa".into()]),
+                [
+                    fixture_table("Reading", reading),
+                    fixture_value("trips", Type::Named("vehicle.corsa.trips".into())),
+                ],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
+            fixture_module(
+                Namespace(vec!["vehicle".into(), "corsa".into(), "freematics".into()]),
+                [fixture_value("sync", Type::Error)],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["bank".into()]),
+            fixture_module(
+                Namespace(vec!["bank".into()]),
+                [fixture_value("main", Type::Named("Account".into()))],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["Europe".into()]),
+            fixture_module(
+                Namespace(vec!["Europe".into()]),
+                [fixture_value("London", Type::Named("std.TimeZone".into()))],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            fixture_module(
+                Namespace(vec!["std".into(), "concurrent".into()]),
+                [fixture_function(
+                    "parallel",
+                    function(
+                        vec![Type::List(Box::new(Type::Error))],
+                        Type::Stream(Box::new(Type::Error)),
+                    ),
+                )],
+                false,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
+            fixture_module(
+                Namespace(vec!["std".into(), "encoding".into(), "csv".into()]),
+                [fixture_function(
+                    "rows",
+                    function(
+                        vec![Type::Named("std.ByteStream".into())],
+                        Type::Stream(Box::new(Type::Record(BTreeMap::new()))),
+                    ),
+                )],
+                false,
+            ),
+        );
+        catalogue.modules.insert(
+            Namespace(vec!["std".into(), "io".into(), "fs".into()]),
+            fixture_module(
+                Namespace(vec!["std".into(), "io".into(), "fs".into()]),
+                [fixture_function(
+                    "read",
+                    function(vec![Type::Text], Type::Named("std.ByteStream".into())),
+                )],
+                false,
+            ),
+        );
+        catalogue
+    }
 }
 
 fn catalogue_module<I, N, P, Q>(
@@ -511,7 +728,47 @@ where
         exports: symbols.clone(),
         symbols,
         prelude_exports: prelude_exports.into_iter().map(Into::into).collect(),
+        implicit: false,
     }
+}
+
+fn fixture_module<I>(namespace: Namespace, symbols: I, implicit: bool) -> ModuleHeader
+where
+    I: IntoIterator<Item = (String, Symbol)>,
+{
+    let symbols = symbols.into_iter().collect::<BTreeMap<_, _>>();
+    ModuleHeader {
+        namespace,
+        exports: symbols.clone(),
+        symbols,
+        prelude_exports: BTreeSet::new(),
+        implicit,
+    }
+}
+
+fn fixture_symbol(kind: SymbolKind, ty: Type) -> Symbol {
+    Symbol {
+        kind,
+        ty,
+        public: true,
+        effects: EffectSummary::default(),
+    }
+}
+
+fn fixture_function(name: &str, ty: Type) -> (String, Symbol) {
+    (name.into(), fixture_symbol(SymbolKind::Function, ty))
+}
+
+fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
+    (name.into(), fixture_symbol(SymbolKind::Table, row))
+}
+
+fn fixture_type(name: &str, ty: Type) -> (String, Symbol) {
+    (name.into(), fixture_symbol(SymbolKind::Type, ty))
+}
+
+fn fixture_value(name: &str, ty: Type) -> (String, Symbol) {
+    (name.into(), fixture_symbol(SymbolKind::Let, ty))
 }
 
 fn function(parameters: Vec<Type>, result: Type) -> Type {
@@ -800,6 +1057,7 @@ fn collect_header(
         exports,
         symbols,
         prelude_exports: prelude.clone(),
+        implicit: false,
     }
 }
 fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
@@ -1031,10 +1289,26 @@ fn resolve_imports(
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
     };
+    if let Some(root) = modules.get(&Namespace(Vec::new())) {
+        for (name, symbol) in &root.exports {
+            scope
+                .names
+                .entry(name.clone())
+                .or_insert_with(|| symbol.clone());
+        }
+    }
     if modules.contains_key(&Namespace(vec!["std".into()])) {
         scope
             .modules
             .insert("std".into(), Namespace(vec!["std".into()]));
+    }
+    for (module_namespace, module) in modules {
+        if module.implicit && module_namespace.0.len() == 1 && !module_namespace.0[0].is_empty() {
+            scope
+                .modules
+                .entry(module_namespace.0[0].clone())
+                .or_insert_with(|| module_namespace.clone());
+        }
     }
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -2054,6 +2328,20 @@ fn infer(
                     }
                 };
                 return Inferred { ty, effects };
+            }
+            if op == "-"
+                && left.ty == Type::Instant
+                && matches!(
+                    &right.ty,
+                    Type::Applied { base, arguments }
+                        if matches!(base.as_str(), "Int" | "Decimal" | "Float")
+                            && arguments.len() == 1
+                )
+            {
+                return Inferred {
+                    ty: Type::Instant,
+                    effects,
+                };
             }
             if op == "*" {
                 if (is_binary_float(&left.ty) && is_money_rate(&right.ty))
@@ -3244,8 +3532,11 @@ fn infer_success_pipeline(
     let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
         ("filter", false, [_]) => (Type::Relation(Box::new(element.clone())), Some(Type::Bool)),
         ("one", false, []) => (element.clone(), None),
+        ("one", false, [_]) => (element.clone(), Some(Type::Bool)),
+        ("last", false, []) => (Type::Optional(Box::new(element.clone())), None),
         ("count", false, []) => (Type::Int, None),
-        ("for_each", true, [_]) => (Type::Null, Some(Type::Null)),
+        ("for_each", true, [_]) => (Type::Null, Some(Type::Error)),
+        ("bucket_by", false, _) => (Type::Relation(Box::new(element.clone())), None),
         _ => {
             let ignored = infer(rhs, scope, local, diagnostics);
             diagnostics.push(diag(
@@ -3263,6 +3554,29 @@ fn infer_success_pipeline(
         }
     };
     let mut effects = input.effects;
+    if text == "bucket_by" && !is_stream {
+        let mut valid = arguments.len() == 2
+            && arguments[0].name.is_none()
+            && arguments[1].name.as_deref() == Some("zone");
+        for argument in arguments {
+            let value = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&value.effects);
+            if matches!(value.ty, Type::Error) {
+                valid = false;
+            }
+        }
+        if !valid {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "bucket_by requires a duration and named zone",
+            ));
+            return Inferred {
+                ty: Type::Error,
+                effects,
+            };
+        }
+        return Inferred { ty, effects };
+    }
     if let Some(result) = callback_result {
         let callback = infer_callback(
             &arguments[0].value,
@@ -3668,11 +3982,13 @@ fn infer_table_projection(
         return None;
     };
     let table = table_symbol(base, scope, local)?;
-    let Type::Named(table_name) = &table.ty else {
-        return None;
-    };
-    let Type::Record(fields) = scope.table_rows.get(table_name)? else {
-        return None;
+    let fields = match &table.ty {
+        Type::Record(fields) => fields,
+        Type::Named(table_name) => match scope.table_rows.get(table_name)? {
+            Type::Record(fields) => fields,
+            _ => return None,
+        },
+        _ => return None,
     };
     let field = fields.get(name)?.clone();
     Some(Inferred {
@@ -3737,6 +4053,9 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
 
 fn types_match(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
+        return true;
+    }
+    if matches!(expected, Type::Error) || matches!(actual, Type::Error) {
         return true;
     }
     match (expected, actual) {
