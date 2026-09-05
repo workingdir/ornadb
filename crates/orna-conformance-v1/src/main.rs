@@ -1,20 +1,30 @@
-use orna_conformance_v1::{Corpus, Harness, ImplementationClaim, SyntaxAdapter};
+use orna_conformance_v1::{Corpus, Harness, ImplementationClaim, SemanticAdapter};
 
 fn main() {
     let corpus = Corpus::load_default().unwrap_or_else(|error| {
         eprintln!("cannot load authoritative Orna corpus: {error}");
         std::process::exit(2)
     });
-    let mut adapter = SyntaxAdapter;
+    let mut adapter = SemanticAdapter::default();
     let report = Harness::new(corpus)
         .with_claim(ImplementationClaim {
             implementation_id: "orna-conformance-v1".into(),
-            profile: "syntax-parse".into(),
-            command: "orna-conformance --profile syntax-parse".into(),
+            profile: "semantic-read-only".into(),
+            command: "orna-conformance --profile semantic-read-only".into(),
             environment: [
-                ("adapter".into(), "SyntaxAdapter (parse-only)".into()),
-                ("semantic-stages".into(), "not integrated".into()),
-                ("runtime-stages".into(), "not integrated".into()),
+                (
+                    "adapter".into(),
+                    "SemanticAdapter (syntax plus orna-semantic-v1)".into(),
+                ),
+                (
+                    "semantic-stages".into(),
+                    "executed through the read-only v1 analyzer".into(),
+                ),
+                (
+                    "runtime-stages".into(),
+                    "skipped: orna-runtime-v1 has no source evaluator or scenario invocation API"
+                        .into(),
+                ),
             ]
             .into_iter()
             .collect(),
