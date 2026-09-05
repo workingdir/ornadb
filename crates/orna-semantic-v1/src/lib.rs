@@ -2701,6 +2701,38 @@ fn infer_success_pipeline(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let input = infer(lhs, scope, local, diagnostics);
+    if let Type::List(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
+    {
+        match (text.as_str(), arguments.as_slice()) {
+            ("sort_by", [argument]) if argument.name.is_none() => {
+                let callback = infer_callback(
+                    &argument.value,
+                    element.as_ref().clone(),
+                    Type::Error,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                let mut effects = input.effects;
+                effects.join(&callback.effects);
+                return Inferred {
+                    ty: input.ty,
+                    effects,
+                };
+            }
+            ("last", []) => {
+                return Inferred {
+                    ty: Type::Optional(element.clone()),
+                    effects: input.effects,
+                };
+            }
+            _ => {}
+        }
+    }
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
