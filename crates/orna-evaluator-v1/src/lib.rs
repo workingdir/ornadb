@@ -91,6 +91,17 @@ pub struct EvaluationError {
 }
 
 impl EvaluationError {
+    /// Constructs a payload-free error from an already-admitted safe code.
+    /// Effect handlers cannot attach source, argument, or host payloads.
+    pub fn redacted(code: SafeText) -> Self {
+        Self {
+            diagnostic: Box::new(
+                Diagnostic::new(code, DiagnosticSeverity::Error, SafeText::redacted())
+                    .expect("safe diagnostic code")
+                    .redacted(),
+            ),
+        }
+    }
     pub fn diagnostic(&self) -> &Diagnostic {
         &self.diagnostic
     }
@@ -104,6 +115,17 @@ impl fmt::Display for EvaluationError {
     }
 }
 impl std::error::Error for EvaluationError {}
+
+/// Executes an admitted effect after its arguments have been evaluated exactly
+/// once into canonical values. Returning `Ok(None)` leaves the call to the
+/// ordinary pure evaluator.
+pub trait EffectHandler {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError>;
+}
 
 /// Evaluate one expression using [`parse_expression`].
 pub fn evaluate_expression(
@@ -171,6 +193,7 @@ pub fn evaluate_with_functions(
         limits,
         steps: 0,
         functions,
+        effects: None,
     };
     context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -196,6 +219,7 @@ pub fn evaluate_function(
         limits,
         steps: 0,
         functions: &functions,
+        effects: None,
     };
     let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
@@ -215,6 +239,38 @@ pub fn invoke_named(
         limits,
         steps: 0,
         functions,
+        effects: None,
+    };
+    context.items(functions.len())?;
+    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+    let supplied = supplied_arguments(arguments, &mut context)?;
+    let captured = Scope::from_environment(&function.environment, &mut context)?;
+    invoke_pure(
+        &mut context,
+        &function.parameters,
+        &function.body,
+        captured,
+        supplied,
+        0,
+    )
+    .and_then(Value::canonical)
+}
+
+/// Invokes an admitted function with one effect handler. Nested pure calls and
+/// handled effects share the same evaluator resource context.
+pub fn invoke_named_with_effects(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+) -> Result<CanonicalValue, EvaluationError> {
+    validate_limits(limits)?;
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+        effects: Some(effects),
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -335,17 +391,7 @@ fn validate_limits(limits: Limits) -> Result<(), EvaluationError> {
 fn error(code: &'static str) -> EvaluationError {
     // No parser diagnostic, source text, span, input value, or filesystem data
     // crosses this boundary.
-    EvaluationError {
-        diagnostic: Box::new(
-            Diagnostic::new(
-                SafeText::new(code).expect("static safe code"),
-                DiagnosticSeverity::Error,
-                SafeText::redacted(),
-            )
-            .expect("static diagnostic")
-            .redacted(),
-        ),
-    }
+    EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -706,12 +752,13 @@ impl Scope {
     }
 }
 
-struct Context<'a> {
+struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
-    functions: &'a Functions,
+    functions: &'functions Functions,
+    effects: Option<&'effects mut dyn EffectHandler>,
 }
-impl Context<'_> {
+impl Context<'_, '_> {
     fn step(&mut self) -> Result<(), EvaluationError> {
         self.steps = self
             .steps
@@ -1193,6 +1240,25 @@ impl Context<'_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         if math_name(callee).is_none() {
+            if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
+                self.items(arguments.len() + usize::from(input.is_some()))?;
+                let mut values = input.clone().into_iter().collect::<Vec<_>>();
+                for argument in arguments {
+                    values.push(self.evaluate(&argument.value, scope, depth + 1)?);
+                }
+                let values = values
+                    .into_iter()
+                    .map(Value::canonical)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let handled = self
+                    .effects
+                    .as_deref_mut()
+                    .expect("checked effect handler")
+                    .handle(callee, &values)?;
+                if let Some(value) = handled {
+                    return Value::from_canonical(&value, self, depth + 1);
+                }
+            }
             let callable = self.evaluate(callee, scope, depth + 1)?;
             let functions = self.functions;
             let (parameters, body, captured) = match &callable {
