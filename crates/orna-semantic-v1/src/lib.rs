@@ -1871,6 +1871,13 @@ fn infer(
                     effects: EffectSummary::default(),
                 };
             }
+            if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
+                diagnostics.push(diag(DIAG_TYPE, "sys.Commit is read-only"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            }
             if let Some(currency) = money_constructor_currency(callee)
                 && arguments.len() == 1
                 && arguments[0].name.is_none()
