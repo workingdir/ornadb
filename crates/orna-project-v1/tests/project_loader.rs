@@ -115,6 +115,7 @@ fn applies_limits_before_reading_an_unbounded_project() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1024,
+        max_repository_entries: 16,
     });
     assert!(matches!(
         loader.load(&repository),
@@ -128,10 +129,28 @@ fn applies_total_source_limit_with_a_bounded_read() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1,
+        max_repository_entries: 16,
     });
     assert!(matches!(
         loader.load(&repository),
         Err(ProjectLoadError::SourceTooLarge)
+    ));
+}
+
+#[test]
+fn bounds_repository_metadata_before_reachable_source_processing() {
+    let (_directory, repository) = repository(&[
+        ("main.orna", "pub fn run() {}"),
+        ("unreachable.orna", "this body must never be parsed"),
+    ]);
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_repository_entries: 1,
+    });
+    assert!(matches!(
+        loader.load(&repository),
+        Err(ProjectLoadError::RepositoryLimit)
     ));
 }
 
