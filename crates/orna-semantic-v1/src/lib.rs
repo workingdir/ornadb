@@ -153,6 +153,17 @@ pub struct Symbol {
     pub ty: Type,
     pub public: bool,
     pub effects: EffectSummary,
+    /// Declaration-backed write admission, retained through module exports.
+    /// None means the caller supplied no field-admission metadata.
+    pub table_schema: Option<TableSchema>,
+}
+
+/// Static field shape and insertion rules; defaults are not evaluated here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableSchema {
+    pub fields: BTreeMap<String, Type>,
+    pub required: BTreeSet<String>,
+    pub computed: BTreeSet<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleHeader {
@@ -720,6 +731,7 @@ where
             (
                 name.into(),
                 Symbol {
+                    table_schema: None,
                     kind: if matches!(ty, Type::Function { .. }) {
                         SymbolKind::Function
                     } else {
@@ -757,6 +769,7 @@ where
 
 fn fixture_symbol(kind: SymbolKind, ty: Type) -> Symbol {
     Symbol {
+        table_schema: None,
         kind,
         ty,
         public: true,
@@ -1056,6 +1069,7 @@ fn collect_header(
             .insert(
                 name,
                 Symbol {
+                    table_schema: declared_table_schema(item),
                     kind,
                     ty,
                     public,
@@ -1373,6 +1387,7 @@ fn resolve_imports(
         let target = Namespace(path.iter().map(|x| x.name.clone()).collect());
         if target.0.first().is_some_and(|r| r == "sys") {
             let binding = Symbol {
+                table_schema: None,
                 kind: SymbolKind::Let,
                 ty: Type::Named(target.display()),
                 public: true,
@@ -1414,6 +1429,7 @@ fn resolve_imports(
                     &mut explicit,
                     name.clone(),
                     Symbol {
+                        table_schema: None,
                         kind: SymbolKind::Let,
                         ty: Type::Named(target.display()),
                         public: true,
@@ -1440,6 +1456,7 @@ fn resolve_imports(
                     &mut explicit,
                     name.clone(),
                     Symbol {
+                        table_schema: None,
                         kind: SymbolKind::Let,
                         ty: Type::Named(target.display()),
                         public: true,
@@ -1571,6 +1588,7 @@ fn check_item(
                         (
                             field.clone(),
                             Symbol {
+                                table_schema: None,
                                 kind: SymbolKind::Let,
                                 ty: ty.clone(),
                                 public: false,
@@ -1817,6 +1835,7 @@ fn bind_pattern(
             into.insert(
                 name.clone(),
                 Symbol {
+                    table_schema: None,
                     kind: SymbolKind::Let,
                     ty,
                     public: false,
@@ -3487,6 +3506,7 @@ fn insert_case_binding(name: &str, ty: Type, local: &mut BTreeMap<String, Symbol
     local.insert(
         name.to_owned(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty,
             public: false,
@@ -4038,6 +4058,7 @@ fn infer_recovery_pipeline(
     callback_locals.insert(
         name.clone(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty: Type::Error,
             public: false,
@@ -4104,6 +4125,7 @@ fn infer_lambda_pipeline_stage(
     lambda_locals.insert(
         name.clone(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty: parameter_type,
             public: false,
@@ -4259,6 +4281,7 @@ fn infer_callback(
     callback_locals.insert(
         name.clone(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty: parameter,
             public: false,
@@ -4323,18 +4346,42 @@ fn infer_table_operation(
         effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
         may_fail: true,
     };
-    let row = match &table.ty {
-        Type::Record(fields) => Some(fields),
-        Type::Named(table_name) => match scope.table_rows.get(table_name) {
-            Some(Type::Record(fields)) => Some(fields),
+    let row = table
+        .table_schema
+        .as_ref()
+        .map(|schema| &schema.fields)
+        .or_else(|| match &table.ty {
+            Type::Record(fields) => Some(fields),
+            Type::Named(table_name) => match scope.table_rows.get(table_name) {
+                Some(Type::Record(fields)) => Some(fields),
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
-    };
+        });
     for argument in arguments {
         let inferred = if matches!(name.as_str(), "insert" | "upsert") {
             row.map(|fields| {
-                infer_table_row_input(&argument.value, fields, scope, local, diagnostics)
+                let inferred =
+                    infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
+                if let Some(schema) = &table.table_schema
+                    && let Type::Record(supplied) = &inferred.ty
+                {
+                    for field in &schema.required {
+                        if !supplied.contains_key(field) {
+                            diagnostics
+                                .push(diag(DIAG_TYPE, "table insertion omits a required field"));
+                        }
+                    }
+                    for field in &schema.computed {
+                        if supplied.contains_key(field) {
+                            diagnostics.push(diag(
+                                DIAG_TYPE,
+                                "table insertion cannot supply a computed field",
+                            ));
+                        }
+                    }
+                }
+                inferred
             })
             .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
         } else {
@@ -5210,6 +5257,7 @@ fn infer_table_assertion(
     let local = BTreeMap::from([(
         name.clone(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty: row.clone(),
             public: false,
@@ -5292,6 +5340,7 @@ fn infer_module_relation(
     locals.insert(
         name.clone(),
         Symbol {
+            table_schema: None,
             kind: SymbolKind::Let,
             ty: row.clone(),
             public: false,
@@ -5307,6 +5356,45 @@ fn infer_module_relation(
         },
         effects: inferred.effects,
     }
+}
+
+fn declared_table_schema(item: &Item) -> Option<TableSchema> {
+    let Declaration::Table { keys, members, .. } = &item.declaration else {
+        return None;
+    };
+    let Type::Record(fields) = table_row_type(item) else {
+        unreachable!()
+    };
+    let mut required = BTreeSet::new();
+    let mut computed = BTreeSet::new();
+    for key in keys {
+        if key.default.is_none()
+            && let Pattern::Name(name, _) = &key.pattern
+        {
+            required.insert(name.clone());
+        }
+    }
+    for member in members {
+        if let orna_syntax_v1::TableMember::Field {
+            name, initializer, ..
+        } = member
+        {
+            match initializer {
+                None => {
+                    required.insert(name.clone());
+                }
+                Some(FieldInitializer::Computed(_)) => {
+                    computed.insert(name.clone());
+                }
+                Some(FieldInitializer::Default(_)) => {}
+            }
+        }
+    }
+    Some(TableSchema {
+        fields,
+        required,
+        computed,
+    })
 }
 
 fn table_row_type(item: &Item) -> Type {

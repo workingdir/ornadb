@@ -12,6 +12,105 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn declared_table_admission_retains_required_default_and_computed_metadata_across_imports() {
+    let declaration = r#"pub table Person(id: Str = "generated") {
+        name: Str,
+        country: Str = "GB",
+        label: Str => name,
+    }"#;
+    for imported in [false, true] {
+        for operation in ["insert", "upsert"] {
+            for (row, expected) in [
+                (r#"{ name: "Alice" }"#, None),
+                (r#"{ id: "a", name: "Alice", country: "US" }"#, None),
+                (
+                    r#"{ country: "GB" }"#,
+                    Some("table insertion omits a required field"),
+                ),
+                (
+                    r#"{ name: "Alice", label: "override" }"#,
+                    Some("table insertion cannot supply a computed field"),
+                ),
+                (
+                    r#"{ name: 42 }"#,
+                    Some("table write field has an incompatible type:"),
+                ),
+                (
+                    r#"{ name: "Alice", extra: true }"#,
+                    Some("table write contains an unknown field"),
+                ),
+            ] {
+                for indirect in [false, true] {
+                    let receiver = if imported { "people.Person" } else { "Person" };
+                    let body = if indirect {
+                        format!("{{ let row = {row}; {receiver}.{operation}(row); }}")
+                    } else {
+                        format!("= {receiver}.{operation}({row});")
+                    };
+                    let inputs = if imported {
+                        vec![
+                            ModuleInput::new("people.orna", declaration),
+                            ModuleInput::new("main.orna", format!("use people; fn write() {body}")),
+                        ]
+                    } else {
+                        vec![ModuleInput::new(
+                            "main.orna",
+                            format!("{declaration} fn write() {body}"),
+                        )]
+                    };
+                    let result = analyze(&inputs);
+                    if let Some(expected) = expected {
+                        assert!(
+                            result
+                                .diagnostics
+                                .iter()
+                                .any(|diagnostic| diagnostic.message().starts_with(expected)),
+                            "{imported} {indirect} {operation} {row}: {:?}",
+                            result.diagnostics
+                        );
+                    } else {
+                        assert!(
+                            result.is_ok(),
+                            "{imported} {indirect} {operation} {row}: {:?}",
+                            result.diagnostics
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let missing_key = analyze(&[ModuleInput::new(
+        "rows.orna",
+        r#"table Person(id: Str) { name: Str, } fn write() = Person.insert({ name: "Alice" });"#,
+    )]);
+    assert!(
+        missing_key
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "table insertion omits a required field")
+    );
+    let distinct_schemas = analyze(&[
+        ModuleInput::new("people.orna", declaration),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+            use people;
+            table Person(id: Int) { age: Int, }
+            fn write() {
+                people.Person.insert({ name: "Alice" });
+                Person.insert({ id: 1, age: 40 });
+            }
+        "#,
+        ),
+    ]);
+    assert!(
+        distinct_schemas.is_ok(),
+        "{:?}",
+        distinct_schemas.diagnostics
+    );
+}
+
+#[test]
 fn table_insert_and_upsert_validate_provided_fields() {
     let attached = analyze_with_catalogue(
         &[ModuleInput::new(
