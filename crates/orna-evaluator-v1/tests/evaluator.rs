@@ -32,10 +32,10 @@ fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value
     )
 }
 
-fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, EvaluationError> {
+fn functions_from_source(source: &str) -> orna_evaluator_v1::Functions {
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-    let functions = parsed
+    parsed
         .value
         .items
         .into_iter()
@@ -52,7 +52,11 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
                 },
             )
         })
-        .collect();
+        .collect()
+}
+
+fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, EvaluationError> {
+    let functions = functions_from_source(source);
     let parsed = orna_syntax_v1::parse_expression(expression);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     orna_evaluator_v1::evaluate_with_functions(
@@ -61,6 +65,44 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
         &functions,
         limits,
     )
+}
+
+#[test]
+fn host_invocation_uses_the_same_named_function_namespace() {
+    let functions = functions_from_source(
+        "fn helper(value: Int) = value + 1; fn entry(value = helper(40)) = helper(value);",
+    );
+    assert_eq!(
+        orna_evaluator_v1::invoke_named(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
+        Value::int(42.into())
+    );
+    assert_eq!(
+        code(orna_evaluator_v1::invoke_named(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits {
+                max_steps: 4,
+                ..Limits::default()
+            }
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert_eq!(
+        code(orna_evaluator_v1::invoke_named(
+            "missing",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-NAME"
+    );
 }
 
 #[test]
