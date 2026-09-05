@@ -495,6 +495,59 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
 }
 
 #[test]
+fn control_flow_fixture_infers_typed_if_else_and_keeps_other_control_fail_closed() {
+    let fixture = analyze(&[ModuleInput::new(
+        "control-flow.orna",
+        r#"
+            pub fn describe(values: [Int]): Str {
+                let total = 0;
+
+                for value in values {
+                    total = total + value;
+                }
+
+                if total > 100 {
+                    "large"
+                } else {
+                    "small"
+                }
+            }
+        "#,
+    )]);
+    let module = fixture.modules.values().next().unwrap();
+    assert!(matches!(
+        &module.symbols["describe"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Text
+    ));
+    assert_eq!(
+        fixture
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect::<Vec<_>>(),
+        vec![DIAG_UNSUPPORTED]
+    );
+
+    let mismatched_branches = analyze(&[ModuleInput::new(
+        "mismatched-if.orna",
+        "fn choose(value: Int): Str { if value > 0 { \"positive\" } else { 0 } }",
+    )]);
+    assert!(has(&mismatched_branches, DIAG_TYPE));
+
+    let missing_else = analyze(&[ModuleInput::new(
+        "missing-else.orna",
+        "fn choose(value: Int): Str { if value > 0 { \"positive\" } }",
+    )]);
+    assert!(has(&missing_else, DIAG_UNSUPPORTED));
+
+    let assignment = analyze(&[ModuleInput::new(
+        "assignment.orna",
+        "fn update() { let value = 0; value = 1; }",
+    )]);
+    assert!(has(&assignment, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn coalesce_types_optional_values_with_precedence_and_grouping() {
     let valid = analyze(&[
         ModuleInput::new(
