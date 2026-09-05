@@ -181,6 +181,19 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         Self::new(self.source.chain(other.source))
     }
 
+    /// Returns adjacent overlapping pairs in input order.
+    pub fn pairs(self) -> Relation<'a, (Item, Item)>
+    where
+        Item: Clone,
+    {
+        let mut source = self.source.peekable();
+        Relation::new(std::iter::from_fn(move || {
+            let left = source.next()?;
+            let right = source.peek()?.clone();
+            Some((left, right))
+        }))
+    }
+
     /// Returns the first value, or `None` when the relation is empty.
     pub fn first(mut self) -> Option<Item> {
         self.next()
@@ -1379,5 +1392,20 @@ mod tests {
             vec![(1, "one"), (2, "updated"), (4, "four")]
         );
         activation.rollback();
+    }
+
+    #[test]
+    fn relation_pairs_are_adjacent_overlapping_and_ordered() {
+        let pairs = super::Relation::new([1, 2, 3, 4].into_iter())
+            .pairs()
+            .collect::<Vec<_>>();
+
+        assert_eq!(pairs, vec![(1, 2), (2, 3), (3, 4)]);
+        assert!(
+            super::Relation::new(std::iter::empty::<u8>())
+                .pairs()
+                .next()
+                .is_none()
+        );
     }
 }
