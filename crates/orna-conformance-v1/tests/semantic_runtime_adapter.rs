@@ -354,6 +354,85 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn module_admission_checks_source_and_zero_limits_before_parsing() {
+    let unit = SourceUnit {
+        fixture_id: "module-admission".into(),
+        source_id: "logical/module-admission.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "invalid(".into(),
+    };
+    for limits in [
+        orna_evaluator_v1::Limits {
+            max_source_bytes: 2,
+            ..Default::default()
+        },
+        orna_evaluator_v1::Limits {
+            max_steps: 0,
+            ..Default::default()
+        },
+    ] {
+        let mut evaluator = BoundedEvaluator::new(limits);
+        let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&unit) else {
+            panic!("module admission limits must fail before parsing");
+        };
+        assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+        assert_eq!(diagnostic.message(), "<redacted>");
+        let StageOutcome::Failed(diagnostic) =
+            evaluator.evaluate_project(&pure_project(vec![unit.clone()]))
+        else {
+            panic!("project preflight must apply source limits before parsing");
+        };
+        assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+    }
+}
+
+#[test]
+fn rejected_project_capacity_does_not_publish_partial_function_updates() {
+    let original = SourceUnit {
+        fixture_id: "retained-limit".into(),
+        source_id: "logical/retained-limit.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn stable() = 1;".into(),
+    };
+    let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
+        max_collection_items: 2,
+        ..Default::default()
+    });
+    assert_eq!(evaluator.evaluate(&original), StageOutcome::Passed);
+    let replacement = SourceUnit {
+        source: "fn stable() = 99; fn added() = 2;".into(),
+        ..original.clone()
+    };
+    let overflow = SourceUnit {
+        source: "fn excess() = 3;".into(),
+        ..original.clone()
+    };
+    let StageOutcome::Failed(diagnostic) =
+        evaluator.evaluate_project(&pure_project(vec![replacement, overflow]))
+    else {
+        panic!("retained function count must be bounded across modules");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+    assert!(matches!(
+        evaluator.invoke("added"),
+        StageOutcome::Skipped { .. }
+    ));
+    let probe = SourceUnit {
+        parse_as: "expression_unit".into(),
+        source: "if stable() == 1 { 1 } else { 1 / 0 }".into(),
+        ..original.clone()
+    };
+    assert_eq!(evaluator.evaluate(&probe), StageOutcome::Passed);
+    // Replacing an existing definition does not consume another retained slot.
+    let replacement = SourceUnit {
+        source: "fn stable() = 1; fn added() = 2;".into(),
+        ..original
+    };
+    assert_eq!(evaluator.evaluate(&replacement), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("added"), StageOutcome::Passed);
+}
+
+#[test]
 fn expression_units_use_retained_functions_and_rejected_modules_preserve_them() {
     let module = SourceUnit {
         fixture_id: "retained-functions".into(),

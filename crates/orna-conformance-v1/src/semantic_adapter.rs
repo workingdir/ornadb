@@ -15,7 +15,7 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, parse_module};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct SemanticAdapter {
     syntax: SyntaxAdapter,
@@ -228,7 +228,7 @@ pub trait RuntimeEvaluator {
 ///
 /// Module execution, table access, mutations, external effects, and prose
 /// scenarios remain explicit skips until their owning runtime contracts exist.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
@@ -293,6 +293,9 @@ impl BoundedEvaluator {
     }
 
     fn evaluate_module(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        if let Err(error) = self.limits.check_source(&unit.source) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
         let parsed = parse_module(&unit.source);
         if !parsed.is_ok() {
             let mut syntax = SyntaxAdapter;
@@ -300,6 +303,27 @@ impl BoundedEvaluator {
         }
         if !Self::supports_pure_declarations(&parsed.value.items) {
             return Self::unsupported_module();
+        }
+        let names = self
+            .functions
+            .keys()
+            .chain(
+                parsed
+                    .value
+                    .items
+                    .iter()
+                    .filter_map(|item| match &item.declaration {
+                        Declaration::Function { signature, .. } => Some(&signature.name),
+                        _ => None,
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        if let Err(error) = self
+            .limits
+            .check_items(parsed.value.items.len())
+            .and_then(|_| self.limits.check_items(names.len()))
+        {
+            return StageOutcome::Failed(error.diagnostic().clone());
         }
         let mut functions = self.functions.clone();
         for item in parsed.value.items {
@@ -364,15 +388,25 @@ impl RuntimeEvaluator for BoundedEvaluator {
         // Preflight the complete project before loading any module.  This
         // leaves evaluator state unchanged when a later module needs tables,
         // effects, streams, or another integrated-runtime feature.
+        if let Err(error) = self.limits.check_items(project.modules.len()) {
+            return StageOutcome::Failed(error.diagnostic().clone());
+        }
+        for module in &project.modules {
+            if let Err(error) = self.limits.check_source(&module.source) {
+                return StageOutcome::Failed(error.diagnostic().clone());
+            }
+        }
         if !Self::supports_pure_project(project) {
             return Self::unsupported_project();
         }
+        let mut staged = self.clone();
         for module in &project.modules {
-            match self.evaluate_module(module) {
+            match staged.evaluate_module(module) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
         }
+        *self = staged;
         StageOutcome::Passed
     }
 
