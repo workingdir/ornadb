@@ -65,7 +65,7 @@ struct TestDirectory(PathBuf);
 impl TestDirectory {
     fn new(label: &str) -> io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
-            "orna-sqlite-test-{}-{}-{label}",
+            "o-{}-{}-{label}",
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
