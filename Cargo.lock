@@ -1631,6 +1631,7 @@ dependencies = [
  "futures",
  "orna-foundation-v1",
  "orna-protocol-v1",
+ "orna-repository-v1",
  "orna-runtime-v1",
  "orna-security-v1",
  "orna-serving-v1",

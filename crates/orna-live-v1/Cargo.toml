@@ -20,3 +20,6 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+
+[dev-dependencies]
+orna-repository-v1 = { path = "../orna-repository-v1" }
