@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    Environment, EvaluationError, Limits, evaluate_expression, evaluate_parsed, evaluate_repl,
+    Environment, EvaluationError, Limits, evaluate_expression, evaluate_function, evaluate_parsed,
+    evaluate_repl,
 };
 use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan};
 use orna_value_v1::{Raw, Value};
@@ -12,6 +13,103 @@ fn evaluate(source: &str) -> Value {
 }
 fn code(result: Result<Value, EvaluationError>) -> String {
     result.unwrap_err().code().to_owned()
+}
+
+fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value, EvaluationError> {
+    let parsed = orna_syntax_v1::parse_module(source);
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let orna_syntax_v1::Declaration::Function { signature, body } =
+        &parsed.value.items[0].declaration
+    else {
+        panic!("function expected");
+    };
+    evaluate_function(
+        &signature.parameters,
+        body,
+        &Environment::new(),
+        arguments,
+        limits,
+    )
+}
+
+#[test]
+fn function_defaults_return_values_and_see_earlier_parameters() {
+    let source =
+        "fn compute(first: Int, second = first + 1, third = second + 1) = first + second + third;";
+    let arguments = Environment::from([("first".into(), Value::int(10.into()))]);
+    assert_eq!(
+        invoke(source, &arguments, Limits::default()).unwrap(),
+        Value::int(33.into())
+    );
+    let arguments = Environment::from([
+        ("first".into(), Value::int(10.into())),
+        ("second".into(), Value::int(20.into())),
+    ]);
+    assert_eq!(
+        invoke(source, &arguments, Limits::default()).unwrap(),
+        Value::int(51.into())
+    );
+    assert_eq!(
+        invoke(source, &arguments, Limits::default()).unwrap(),
+        Value::int(51.into())
+    );
+}
+
+#[test]
+fn supplied_arguments_do_not_evaluate_their_defaults() {
+    let source = "fn choose(value: Int = 1 / 0) = value;";
+    let arguments = Environment::from([("value".into(), Value::int(7.into()))]);
+    assert_eq!(
+        invoke(source, &arguments, Limits::default()).unwrap(),
+        Value::int(7.into())
+    );
+    assert_eq!(
+        code(invoke(source, &Environment::new(), Limits::default())),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+#[test]
+fn function_defaults_and_body_share_a_single_step_budget() {
+    let source = "fn compute(first = 1 + 2, second = 3 + 4) = first + second;";
+    let limits = Limits {
+        max_steps: 6,
+        ..Limits::default()
+    };
+    assert_eq!(
+        code(invoke(source, &Environment::new(), limits)),
+        "ORNA-EVAL-LIMIT"
+    );
+    let limits = Limits {
+        max_steps: 9,
+        ..Limits::default()
+    };
+    assert_eq!(
+        invoke(source, &Environment::new(), limits).unwrap(),
+        Value::int(10.into())
+    );
+}
+
+#[test]
+fn function_argument_admission_precedes_default_evaluation_and_redacts_errors() {
+    for (source, arguments) in [
+        (
+            "fn compute(first = 1 / 0, second: Int) = first;",
+            Environment::new(),
+        ),
+        (
+            "fn compute(first = 1 / 0) = first;",
+            Environment::from([("secret".into(), Value::int(1.into()))]),
+        ),
+        (
+            "fn compute(first: Int, first: Int) = first;",
+            Environment::from([("first".into(), Value::int(1.into()))]),
+        ),
+    ] {
+        let error = invoke(source, &arguments, Limits::default()).unwrap_err();
+        assert_eq!(error.code(), "ORNA-EVAL-ARGUMENT");
+        assert_eq!(error.diagnostic().message(), "<redacted>");
+    }
 }
 
 #[test]
