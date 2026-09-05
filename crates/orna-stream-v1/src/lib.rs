@@ -5,6 +5,7 @@
 //! [`CheckpointBackend`], then performs any provider or execution work outside this
 //! boundary.  A delivery can advance a checkpoint only through `Complete` or `Skip`.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -62,7 +63,7 @@ impl ConsumerIdentity {
 }
 
 /// Identifies one provider delivery and its explicit checkpoint transition.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug)]
 pub struct DeliveryIdentity {
     pub consumer: ConsumerIdentity,
     pub source_format: Component,
@@ -74,6 +75,49 @@ pub struct DeliveryIdentity {
     pub position: Position,
     /// The provider-selected checkpoint position after this delivery commits.
     pub successor: Position,
+}
+
+impl PartialEq for DeliveryIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.consumer == other.consumer
+            && self.source_format == other.source_format
+            && self.source == other.source
+            && self.partition_format == other.partition_format
+            && self.partition == other.partition
+            && self.position_format == other.position_format
+            && self.position == other.position
+    }
+}
+
+impl Eq for DeliveryIdentity {}
+
+impl PartialOrd for DeliveryIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeliveryIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (
+            &self.consumer,
+            &self.source_format,
+            &self.source,
+            &self.partition_format,
+            &self.partition,
+            &self.position_format,
+            &self.position,
+        )
+            .cmp(&(
+                &other.consumer,
+                &other.source_format,
+                &other.source,
+                &other.partition_format,
+                &other.partition,
+                &other.position_format,
+                &other.position,
+            ))
+    }
 }
 
 impl DeliveryIdentity {
@@ -722,6 +766,7 @@ mod tests {
         let second = delivery("receipt:opaque-a", "resume:different");
         assert_eq!(first.canonical(), second.canonical());
         assert_eq!(first.checkpoint_key(), second.checkpoint_key());
+        assert_eq!(first, second);
         assert!(Component::new("bad|identity").is_err());
     }
 
@@ -989,6 +1034,25 @@ mod tests {
             }),
             CommitResult::Rejected(RejectReason::LeaseFenced)
         );
+    }
+
+    #[test]
+    fn successor_drift_updates_one_stable_failure_row() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let first = delivery("receipt:stable", "resume:first");
+        let failed = acquire_and_fail(&mut backend, first.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Retry {
+                failure: failed.identity.clone(),
+                expected_version: failed.version,
+            }),
+            CommitResult::RetryScheduled { .. }
+        ));
+
+        let same_delivery = delivery("receipt:stable", "resume:changed");
+        let failed_again = acquire_and_fail(&mut backend, same_delivery);
+        assert_eq!(failed_again.identity, failed.identity);
+        assert_eq!(failed_again.attempts, 2);
     }
 
     #[test]
