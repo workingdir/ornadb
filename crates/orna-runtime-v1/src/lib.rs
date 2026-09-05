@@ -5457,6 +5457,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_source_resumes_from_durable_successor_after_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(9)).await.unwrap();
+        let key = stream_delivery("0", "1").checkpoint_key();
+        let mut source = ListStreamSource::new(key.clone(), vec![vec![10], vec![11]]);
+        let mut first_handler = TestHandler {
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(7)],
+                next_digest: digest(7),
+            })),
+            calls: 0,
+        };
+
+        let first = state
+            .run_stream_once(writer, &key, &mut source, &mut first_handler)
+            .await
+            .unwrap();
+        assert!(matches!(first, StreamStep::Committed { .. }));
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(9)).await.unwrap();
+        let mut source = ListStreamSource::new(key.clone(), vec![vec![10], vec![11]]);
+        let mut second_handler = TestHandler {
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(8)],
+                next_digest: digest(8),
+            })),
+            calls: 0,
+        };
+        assert!(matches!(
+            reopened
+                .run_stream_once(writer, &key, &mut source, &mut second_handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed { .. }
+        ));
+        assert_eq!(reopened.pending().await.unwrap().len(), 2);
+        assert!(matches!(
+            reopened
+                .run_stream_once(writer, &key, &mut source, &mut second_handler)
+                .await
+                .unwrap(),
+            StreamStep::Exhausted
+        ));
+    }
+
+    #[tokio::test]
     async fn legacy_failure_rows_are_migrated_without_retained_payload() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
