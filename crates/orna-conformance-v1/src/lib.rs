@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
 pub use semantic_adapter::{BoundedEvaluator, RuntimeAdapter, RuntimeEvaluator, SemanticAdapter};
