@@ -360,6 +360,19 @@ fn closed_enum_case_blocks_accept_the_core_log_intrinsic() {
 }
 
 #[test]
+fn parenthesized_pipeline_lambdas_receive_the_input_type_context() {
+    let result = analyze(&[ModuleInput::new(
+        "contacts.orna",
+        r#"
+            pub table Contact(id: Str) { name: Str, }
+            pub fn name(contact: Contact) = contact | (value => value.name);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
@@ -429,7 +442,7 @@ fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_argume
 fn generic_and_table_pipeline_stages_remain_fail_closed() {
     let result = analyze(&[ModuleInput::new(
         "unsupported.orna",
-        "table Books(id: Int) { title: Str, } fn generic() = 1 | (value => value); fn table() = 1 | Books;",
+        "table Books(id: Int) { title: Str, } fn use_books() = 1 | Books;",
     )]);
 
     assert!(has(&result, DIAG_UNSUPPORTED));

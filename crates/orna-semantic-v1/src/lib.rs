@@ -2478,6 +2478,9 @@ fn infer_success_pipeline(
         };
     }
     if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
+        if let Some(lambda) = pipeline_lambda(rhs) {
+            return infer_lambda_pipeline_stage(input, lambda, scope, local, diagnostics);
+        }
         return match rhs {
             Expr::Call {
                 callee, arguments, ..
@@ -2565,6 +2568,72 @@ fn infer_success_pipeline(
         effects.may_fail = true;
     }
     Inferred { ty, effects }
+}
+
+fn pipeline_lambda(expression: &Expr) -> Option<&Expr> {
+    match expression {
+        Expr::Lambda { .. } => Some(expression),
+        Expr::Group { inner, .. } => pipeline_lambda(inner),
+        _ => None,
+    }
+}
+
+fn infer_lambda_pipeline_stage(
+    input: Inferred,
+    expression: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Expr::Lambda {
+        parameters, body, ..
+    } = expression
+    else {
+        unreachable!("pipeline_lambda only returns lambda expressions");
+    };
+    let [parameter] = parameters.as_slice() else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline lambda must take exactly one parameter",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    };
+    let Pattern::Name(name, _) = &parameter.pattern else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "pipeline lambda parameter pattern is outside this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    };
+    let parameter_type = parameter
+        .annotation
+        .as_ref()
+        .map(type_of)
+        .unwrap_or_else(|| input.ty.clone());
+    require_same(&parameter_type, &input.ty, diagnostics);
+    let mut lambda_locals = local.clone();
+    lambda_locals.insert(
+        name.clone(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty: parameter_type,
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
+    let body = infer(body, scope, &lambda_locals, diagnostics);
+    let mut effects = input.effects;
+    effects.join(&body.effects);
+    Inferred {
+        ty: body.ty,
+        effects,
+    }
 }
 
 /// Applies a named callable pipeline stage by checking the implicit input as
