@@ -1,6 +1,6 @@
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION_SCOPE, DIAG_RESERVED, DIAG_UNRESOLVED, ModuleInput,
-    analyze, analyze_with_catalogue,
+    Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE,
+    DIAG_RESERVED, DIAG_UNRESOLVED, ModuleInput, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -37,6 +37,29 @@ fn graph_resolution_keeps_explicit_imports_over_globs_and_rejects_module_asserti
 
     assert!(!has(&result, DIAG_AMBIGUOUS));
     assert!(has(&result, DIAG_ASSERTION_SCOPE));
+}
+
+#[test]
+fn declaration_assertion_rejects_authoritative_std_net_effect() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std as std; assert std.net.connect(\"db.internal\") == true;",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(has(&result, DIAG_ASSERTION_EFFECT));
+}
+
+#[test]
+fn table_assertion_rejects_owner_type_mismatch() {
+    let result = analyze(&[ModuleInput::new(
+        "books.orna",
+        "table Book(id: Int) { assert 1; }",
+    )]);
+
+    assert!(has(&result, DIAG_ASSERTION));
 }
 
 #[test]
