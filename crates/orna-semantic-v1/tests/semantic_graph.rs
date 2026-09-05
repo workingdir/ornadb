@@ -457,6 +457,7 @@ fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
             parameters: vec![],
             parameter_names: Some(vec![]),
             result: Box::new(Type::Named("Port".into())),
+            default_parameters: Default::default(),
         }
     );
     assert_eq!(
@@ -557,6 +558,7 @@ fn authoritative_ui_catalogue_checks_page_builder_contextually() {
             parameters: vec![Type::List(Box::new(Type::Text))],
             parameter_names: Some(vec!["values".into()]),
             result: Box::new(Type::Named("std.UI".into())),
+            default_parameters: Default::default(),
         }
     );
 }
@@ -583,6 +585,7 @@ fn generic_ordering_pipeline_keeps_element_and_optional_types() {
             parameters: vec![Type::List(Box::new(Type::Named("T".into())))],
             parameter_names: Some(vec!["values".into()]),
             result: Box::new(Type::Optional(Box::new(Type::Named("T".into())))),
+            default_parameters: Default::default(),
         }
     );
 }
@@ -602,6 +605,7 @@ fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
             parameters: vec![Type::Int],
             parameter_names: Some(vec!["value".into()]),
             result: Box::new(Type::Int),
+            default_parameters: Default::default(),
         }
     );
 }
@@ -1244,6 +1248,127 @@ fn authoritative_named_pipeline_fixtures_insert_the_input_before_explicit_argume
 }
 
 #[test]
+fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
+    for expression in [
+        "add(1)",
+        "1 | add",
+        "1 | add()",
+        "add(value: 1)",
+        "add(1, extra: 3)",
+        "1 | add(extra: 3)",
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "defaults.orna",
+            format!("fn add(value: Int, extra = 2) = value + extra; fn test() = {expression};"),
+        )]);
+        assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
+    }
+    for source in [
+        "fn add(value: Int, extra = 2) = value + extra; fn test() = add();",
+        "fn add(value: Int, extra = 2) = value + extra; fn test() = add(extra: 3);",
+        "fn add(value: Int, extra = 2) = value + extra; fn test() = 1 | add(extra: true);",
+        "fn add(value: Int, extra = 2) = value + extra; fn test() = 1 | add(extra: 3, extra: 4);",
+        "fn bad(value: Int = true) = value;",
+    ] {
+        let result = analyze(&[ModuleInput::new("invalid-defaults.orna", source)]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{source}: {:?}",
+            result.diagnostics
+        );
+    }
+    let unresolved = analyze(&[ModuleInput::new(
+        "unresolved-default.orna",
+        "fn bad(value: Int = missing) = value;",
+    )]);
+    assert!(
+        has(&unresolved, DIAG_UNRESOLVED),
+        "{:?}",
+        unresolved.diagnostics
+    );
+}
+
+#[test]
+fn replay_status_default_does_not_waive_the_version_precondition() {
+    for expression in [
+        "sys.admin.replay_failure(failure.reference, expected_version: failure.version)",
+        "failure.reference | sys.admin.replay_failure(expected_version: failure.version)",
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "replay-default.orna",
+            format!("pub fn replay(failure: sys.Failure) = {expression};"),
+        )]);
+        assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
+        let symbol = &result.modules.values().next().unwrap().exports["replay"];
+        assert!(matches!(&symbol.ty, Type::Function { result, .. }
+            if result.as_ref() == &Type::Applied {
+                base: "sys.InvocationHandle".into(),
+                arguments: vec![Type::Named("sys.Value".into())],
+            }
+        ));
+    }
+    let invalid = analyze(&[ModuleInput::new(
+        "replay-default.orna",
+        "fn replay(failure: sys.Failure) = sys.admin.replay_failure(failure.reference);",
+    )]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+}
+
+#[test]
+fn callable_list_defaults_require_every_member_to_supply_a_default() {
+    for (second, expected_defaults) in [
+        (
+            "fn second(value: Int) = value;",
+            std::collections::BTreeSet::new(),
+        ),
+        (
+            "fn second(value: Int = 2) = value;",
+            std::collections::BTreeSet::from([0]),
+        ),
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "callable-defaults.orna",
+            format!(
+                "fn first(value: Int = 1) = value; {second} pub fn callbacks() = [first, second];"
+            ),
+        )]);
+        assert!(result.is_ok(), "{:?}", result.diagnostics);
+        let Type::Function {
+            result: returned, ..
+        } = &result.modules.values().next().unwrap().exports["callbacks"].ty
+        else {
+            panic!("function expected")
+        };
+        let Type::List(element) = returned.as_ref() else {
+            panic!("list expected")
+        };
+        let Type::Function {
+            default_parameters, ..
+        } = element.as_ref()
+        else {
+            panic!("callable element expected")
+        };
+        assert_eq!(default_parameters, &expected_defaults);
+    }
+}
+
+#[test]
+fn default_expression_effects_remain_visible_on_the_callable() {
+    for annotation in ["", ": sys.SnapshotRef"] {
+        let result = analyze(&[ModuleInput::new(
+            "effectful-default.orna",
+            format!(
+                "pub fn pinned(snapshot: sys.SnapshotRef = sys.snapshot(\"HEAD\")){annotation} = snapshot;"
+            ),
+        )]);
+        assert!(result.is_ok(), "{:?}", result.diagnostics);
+        let symbol = &result.modules.values().next().unwrap().exports["pinned"];
+        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.may_fail);
+    }
+}
+
+#[test]
 fn direct_and_piped_calls_share_argument_validation() {
     for (arguments, valid) in [
         ("10, 20", true),
@@ -1445,12 +1570,15 @@ fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
         Type::Function {
             parameters: vec![],
             parameter_names: Some(vec![]),
+            default_parameters: Default::default(),
             result: Box::new(Type::Function {
                 parameters: vec![Type::Int],
                 parameter_names: Some(vec!["x".into()]),
+                default_parameters: Default::default(),
                 result: Box::new(Type::Function {
                     parameters: vec![Type::Int],
                     parameter_names: Some(vec!["y".into()]),
+                    default_parameters: Default::default(),
                     result: Box::new(Type::Int),
                 }),
             }),
