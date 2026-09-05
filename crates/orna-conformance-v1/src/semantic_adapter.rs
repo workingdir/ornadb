@@ -67,7 +67,7 @@ impl Default for SemanticAdapter {
     fn default() -> Self {
         Self {
             syntax: SyntaxAdapter,
-            catalogue: Catalogue::authoritative_core(),
+            catalogue: Catalogue::authoritative_fixture(),
         }
     }
 }
