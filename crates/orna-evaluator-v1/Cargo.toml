@@ -1,0 +1,16 @@
+[package]
+name = "orna-evaluator-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded deterministic evaluator for the Orna 1.0 expression subset"
+publish = false
+
+[dependencies]
+num-bigint = "0.4.6"
+num-integer = "0.1.47"
+num-traits = "0.2.19"
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
