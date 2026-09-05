@@ -10,6 +10,7 @@ members = [
     "crates/orna-evolution-v1",
     "crates/orna-execution-v1",
     "crates/orna-lsp",
+    "crates/orna-live-v1",
     "crates/orna-postgres",
     "crates/orna-protocol",
     "crates/orna-protocol-v1",
