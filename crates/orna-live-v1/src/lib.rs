@@ -1332,6 +1332,11 @@ impl LiveTransport {
     /// Reassembles and dispatches complete application messages through the
     /// supplied runtime/presentation host. The compatibility [`Self::receive`]
     /// method remains fail-closed for callers that have not supplied one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol, size, transport, or application-boundary
+    /// error without forwarding a partial message.
     pub async fn receive_with_application(
         &mut self,
         socket: &mut WebSocketState,
