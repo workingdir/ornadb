@@ -907,6 +907,10 @@ struct Scope {
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
+    /// Local refined aliases retain their underlying representation so the
+    /// closed `Port.from(value)` constructor can check the source value
+    /// without erasing the refined nominal result.
+    refined_types: BTreeMap<String, Type>,
     /// Local nominal types with an explicit nested `Currency` implementation.
     /// This is intentionally not inferred from names or static members.
     currency_types: BTreeSet<String>,
@@ -934,6 +938,23 @@ fn resolve_imports(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
+        refined_types: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Type {
+                    name,
+                    representation: TypeRepresentation::Alias { ty, refinements },
+                    ..
+                } if refinements
+                    .iter()
+                    .any(|member| matches!(member, TypeMember::Assertion { .. })) =>
+                {
+                    Some((name.clone(), type_of(ty)))
+                }
+                _ => None,
+            })
+            .collect(),
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
     };
@@ -1138,6 +1159,25 @@ fn check_item(
                         require_same(&expected, &inferred.ty, diagnostics);
                     }
                     _ => {}
+                }
+            }
+        }
+        Declaration::Type {
+            name,
+            representation: TypeRepresentation::Alias { ty, refinements },
+            ..
+        } => {
+            let base = type_of(ty);
+            for member in refinements {
+                if let TypeMember::Assertion { value, .. } = member {
+                    let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
+                    assertion(
+                        AssertionOwner::RefinedType(name.clone()),
+                        value,
+                        inferred,
+                        plans,
+                        diagnostics,
+                    );
                 }
             }
         }
@@ -1397,6 +1437,12 @@ fn infer(
                 };
             }
             if let Some(ty) = infer_numeric_postfix(&base.ty, name, scope) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
+            if let Some(ty) = infer_refined_member(&base.ty, name, scope) {
                 return Inferred {
                     ty,
                     effects: base.effects,
@@ -3070,6 +3116,14 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
     }
 }
 
+fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
+    let Type::Named(refined) = base else {
+        return None;
+    };
+    let underlying = scope.refined_types.get(refined)?;
+    (name == "from").then(|| function(vec![underlying.clone()], base.clone()))
+}
+
 fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
     match (base, name) {
         (Type::Decimal, "divide") => Some(Type::Function {
@@ -3207,6 +3261,38 @@ fn assertion(
         dependencies,
         effects: inferred.effects,
     });
+}
+
+fn infer_refined_assertion(
+    value: &Expr,
+    base: &Type,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Expr::Unary { op, rhs, .. } = value else {
+        return infer(value, scope, &BTreeMap::new(), diagnostics);
+    };
+    if !matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=" | "in") {
+        return infer(value, scope, &BTreeMap::new(), diagnostics);
+    }
+    let inferred = infer(rhs, scope, &BTreeMap::new(), diagnostics);
+    let effects = inferred.effects;
+    if op == "in" {
+        match inferred.ty {
+            Type::Range(element) => require_same(base, &element, diagnostics),
+            Type::Error => {}
+            _ => diagnostics.push(diag(
+                DIAG_TYPE,
+                "refined membership assertion requires a numeric range",
+            )),
+        }
+    } else {
+        require_same(base, &inferred.ty, diagnostics);
+    }
+    Inferred {
+        ty: Type::Bool,
+        effects,
+    }
 }
 
 /// Elaborates the two owner-local relational predicate constructors used by

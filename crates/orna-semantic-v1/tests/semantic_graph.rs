@@ -210,6 +210,46 @@ fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
 }
 
 #[test]
+fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
+    let result = analyze(&[ModuleInput::new(
+        "ports.orna",
+        r#"
+            type Port = Int {
+                assert >= 1;
+                assert <= 65_535;
+            }
+            pub fn default_port(): Port = Port.from(8080);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("module header");
+    assert_eq!(
+        module.symbols.get("default_port").expect("function").ty,
+        Type::Function {
+            parameters: vec![],
+            parameter_names: Some(vec![]),
+            result: Box::new(Type::Named("Port".into())),
+        }
+    );
+    assert_eq!(
+        result.assertions.values().next().expect("plans"),
+        &vec![
+            orna_semantic_v1::AssertionPlan {
+                owner: orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
+                dependencies: Default::default(),
+                effects: Default::default(),
+            },
+            orna_semantic_v1::AssertionPlan {
+                owner: orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
+                dependencies: Default::default(),
+                effects: Default::default(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn catalogue_is_closed_world_and_diagnostics_remain_redacted_and_stable() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
