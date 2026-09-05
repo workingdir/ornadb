@@ -1584,6 +1584,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-evaluator-v1"
+version = "1.0.0"
+dependencies = [
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "orna-foundation-v1",
+ "orna-syntax-v1",
+ "orna-value-v1",
+]
+
+[[package]]
 name = "orna-evolution-v1"
 version = "1.0.0"
 dependencies = [
