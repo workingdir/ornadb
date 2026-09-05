@@ -812,6 +812,48 @@ mod tests {
     }
 
     #[test]
+    fn publication_collision_preserves_unrelated_ordinary_staging() {
+        let upper = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        let lower = LoosePath::for_key("Contact", &["alice".into()]).unwrap();
+        let unrelated = LoosePath::for_key("Contact", &["unrelated".into()]).unwrap();
+        let base = IndexImage::default().entry(upper.clone(), Some(row("head")));
+        let ordinary = base
+            .clone()
+            .entry(unrelated.clone(), Some(row("staged-only")));
+        let before = ordinary.clone();
+        let batch = FrozenBatch::new(
+            id("collision"),
+            vec![LooseMutation {
+                id: id("collision-lower"),
+                path: lower,
+                expected: None,
+                next: Some(row("published")),
+            }],
+            1,
+        )
+        .unwrap();
+        let (old, new) = objects();
+
+        assert!(matches!(
+            Publication::prepare(
+                batch,
+                RefName::new("refs/heads/main").unwrap(),
+                old,
+                new,
+                base,
+                ordinary.clone(),
+            ),
+            Err(Error::PathCollision)
+        ));
+        assert_eq!(ordinary, before);
+        assert_eq!(
+            ordinary.get(&unrelated).unwrap().as_ref().unwrap().bytes(),
+            b"staged-only"
+        );
+        assert!(ordinary.get(&upper).unwrap().is_some());
+    }
+
+    #[test]
     fn projection_is_idempotent_under_fault_retry() {
         let mut projection = LooseProjection::default();
         let frozen = batch(None, Some(row("one")));
