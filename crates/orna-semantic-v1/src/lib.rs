@@ -1840,6 +1840,18 @@ fn infer_contextual(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let (Expr::List { elements, .. }, Type::List(element_type)) = (expr, expected) {
+        let mut effects = EffectSummary::default();
+        for element in elements {
+            let inferred = infer_contextual(element, element_type, scope, local, diagnostics);
+            require_same(element_type, &inferred.ty, diagnostics);
+            effects.join(&inferred.effects);
+        }
+        return Inferred {
+            ty: expected.clone(),
+            effects,
+        };
+    }
     if let (
         Expr::Lambda {
             parameters, body, ..
@@ -4256,8 +4268,8 @@ fn infer_callback(
 ///
 /// This deliberately runs only for call expressions: a table is still a
 /// relation value in every other expression, and ordinary record field access
-/// keeps its existing diagnostics.  The row-shape and mutation execution
-/// contracts remain runtime concerns outside this read-only semantic slice.
+/// keeps its existing diagnostics. Provided insertion fields are checked against
+/// the row schema; mutation execution remains a separate runtime concern.
 fn infer_table_operation(
     callee: &Expr,
     arguments: &[orna_syntax_v1::Argument],
@@ -4305,13 +4317,79 @@ fn infer_table_operation(
         effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
         may_fail: true,
     };
+    let row = match &table.ty {
+        Type::Record(fields) => Some(fields),
+        Type::Named(table_name) => match scope.table_rows.get(table_name) {
+            Some(Type::Record(fields)) => Some(fields),
+            _ => None,
+        },
+        _ => None,
+    };
     for argument in arguments {
-        effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+        let inferred = if matches!(name.as_str(), "insert" | "upsert") {
+            row.map(|fields| {
+                infer_table_row_input(&argument.value, fields, scope, local, diagnostics)
+            })
+            .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        effects.join(&inferred.effects);
     }
     Some(Inferred {
         ty: result,
         effects,
     })
+}
+
+/// Check provided write fields against the known row schema. Required/defaulted
+/// and computed-field admission needs declaration metadata beyond the row type.
+fn infer_table_row_input(
+    expression: &Expr,
+    fields: &BTreeMap<String, Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let inferred = if let Expr::Record {
+        fields: supplied, ..
+    } = expression
+    {
+        let mut actual = BTreeMap::new();
+        let mut effects = EffectSummary::default();
+        for field in supplied {
+            let value = if let Some(expected) = fields.get(&field.name) {
+                infer_contextual(&field.value, expected, scope, local, diagnostics)
+            } else {
+                infer(&field.value, scope, local, diagnostics)
+            };
+            effects.join(&value.effects);
+            actual.insert(field.name.clone(), value.ty);
+        }
+        Inferred {
+            ty: Type::Record(actual),
+            effects,
+        }
+    } else {
+        infer(expression, scope, local, diagnostics)
+    };
+    if let Type::Record(actual) = &inferred.ty {
+        for (name, actual) in actual {
+            match fields.get(name) {
+                None => diagnostics.push(diag(DIAG_TYPE, "table write contains an unknown field")),
+                Some(expected) if !types_match(expected, actual) => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "table write field has an incompatible type",
+                    ));
+                }
+                _ => {}
+            }
+        }
+    } else if !matches!(inferred.ty, Type::Error) {
+        diagnostics.push(diag(DIAG_TYPE, "table write requires a record"));
+    }
+    inferred
 }
 
 fn table_symbol<'a>(
