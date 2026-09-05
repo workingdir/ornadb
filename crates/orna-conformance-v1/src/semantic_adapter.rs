@@ -8,9 +8,12 @@
 //! still owns module execution, effects, and scenario lifecycles.
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
-use orna_evaluator_v1::{Environment, Limits as EvaluatorLimits, evaluate_expression};
+use orna_evaluator_v1::{
+    Environment, Limits as EvaluatorLimits, evaluate_expression, evaluate_parsed,
+};
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_syntax_v1::{Declaration, Pattern, parse_module};
 use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
@@ -84,6 +87,9 @@ impl ConformanceAdapter for SemanticAdapter {
     fn typecheck_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         self.analyze_units(project.modules.clone())
     }
+    fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        Self::unsupported_runtime()
+    }
     fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
     }
@@ -99,12 +105,18 @@ impl ConformanceAdapter for SemanticAdapter {
 /// and typed project/scenario contracts, never host paths or corpus roots.
 pub trait RuntimeEvaluator {
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic>;
+    fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "project execution requires the integrated Orna runtime".into(),
+        }
+    }
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic>;
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic>;
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic>;
 }
 
-/// Runs the bounded, side-effect-free evaluator for row/expression units.
+/// Runs the bounded, side-effect-free evaluator for row/expression units and
+/// modules composed only of immutable bindings and zero-argument functions.
 ///
 /// Module execution, table access, mutations, external effects, and prose
 /// scenarios remain explicit skips until their owning runtime contracts exist.
@@ -139,9 +151,59 @@ impl BoundedEvaluator {
                     Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
                 }
             }
-            _ => StageOutcome::Skipped {
-                reason: "module execution requires the integrated Orna runtime".into(),
-            },
+            "module_unit" => self.evaluate_module(unit),
+            _ => Self::unsupported_module(),
+        }
+    }
+
+    fn evaluate_module(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        let parsed = parse_module(&unit.source);
+        if !parsed.is_ok() {
+            let mut syntax = SyntaxAdapter;
+            return syntax.parse(unit);
+        }
+        if !parsed
+            .value
+            .items
+            .iter()
+            .all(|item| match &item.declaration {
+                Declaration::Let {
+                    pattern: Pattern::Name(_, _),
+                    ..
+                } => true,
+                Declaration::Function { signature, .. } => signature.parameters.is_empty(),
+                _ => false,
+            })
+        {
+            return Self::unsupported_module();
+        }
+        let mut environment = self.environment.clone();
+        for item in parsed.value.items {
+            match item.declaration {
+                Declaration::Let {
+                    pattern: Pattern::Name(name, _),
+                    value,
+                    ..
+                } => match evaluate_parsed(&value, &environment, self.limits) {
+                    Ok(value) => {
+                        environment.insert(name, value);
+                    }
+                    Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+                },
+                Declaration::Function { body, .. } => {
+                    if let Err(error) = evaluate_parsed(&body, &environment, self.limits) {
+                        return StageOutcome::Failed(error.diagnostic().clone());
+                    }
+                }
+                _ => return Self::unsupported_module(),
+            }
+        }
+        StageOutcome::Passed
+    }
+
+    fn unsupported_module() -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "module execution requires an effect-free module with immutable bindings and zero-argument functions".into(),
         }
     }
 }
@@ -149,6 +211,16 @@ impl BoundedEvaluator {
 impl RuntimeEvaluator for BoundedEvaluator {
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         self.evaluate_unit(unit)
+    }
+
+    fn evaluate_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        for module in &project.modules {
+            match self.evaluate_module(module) {
+                StageOutcome::Passed => {}
+                outcome => return outcome,
+            }
+        }
+        StageOutcome::Passed
     }
 
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
@@ -210,6 +282,9 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     }
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         self.runtime.evaluate(unit)
+    }
+    fn evaluate_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        self.runtime.evaluate_project(project)
     }
     fn parse_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         self.semantic.parse_project(project)

@@ -213,6 +213,12 @@ pub trait ConformanceAdapter {
     fn typecheck_project(&mut self, _: &ProjectUnit) -> StageOutcome<Self::Diagnostic> {
         skipped()
     }
+    /// Executes the project only through an explicitly integrated project
+    /// runtime boundary. This remains distinct from row validation so a
+    /// project executor cannot turn skipped rows into execution evidence.
+    fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Self::Diagnostic> {
+        skipped()
+    }
     /// Validates a loose row unit after its table schema has been resolved.
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Self::Diagnostic>;
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Self::Diagnostic>;
@@ -785,6 +791,7 @@ impl Harness {
                 Stage::Parse,
                 Stage::Resolve,
                 Stage::Typecheck,
+                Stage::Evaluate,
                 Stage::RowValidation,
             ]
         } else {
@@ -819,6 +826,9 @@ impl Harness {
                     Stage::Typecheck if project => {
                         adapter.typecheck_project(project_unit.as_ref().expect("project unit"))
                     }
+                    Stage::Evaluate if project => {
+                        adapter.evaluate_project(project_unit.as_ref().expect("project unit"))
+                    }
                     Stage::Parse => adapter.parse(&unit),
                     Stage::Resolve => adapter.resolve(&unit),
                     Stage::Typecheck => adapter.typecheck(&unit),
@@ -830,7 +840,16 @@ impl Harness {
                 }
             };
             let correct = stage_matches(fixture, &stage, expected, &outcome, adapter);
-            if !matches!(outcome, StageOutcome::Passed) {
+            // An explicitly unimplemented stage may be `not-run` while a
+            // later independent stage (notably project row validation) still
+            // has its own executable adapter. Record the skip as evidence,
+            // but do not let it erase that later evidence.
+            let should_halt = match &outcome {
+                StageOutcome::Passed => false,
+                StageOutcome::Skipped { .. } if expected == "not-run" => false,
+                StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => true,
+            };
+            if should_halt {
                 halted = true;
             }
             let class = outcome.stage_class(&stage);
