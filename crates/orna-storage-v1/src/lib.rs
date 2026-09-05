@@ -318,6 +318,9 @@ impl Publication {
         Ok(())
     }
     pub fn install_index(&mut self, observed: &IndexImage) -> Result<(), Error> {
+        if self.journal.stage != JournalStage::RefAdvanced {
+            return Err(Error::InvalidTransition);
+        }
         if observed != &self.journal.base_index {
             return Err(Error::RecoveryIndexConflict);
         }
@@ -357,7 +360,10 @@ impl Publication {
             return Err(Error::RefConflict);
         }
         if observed_index == &self.journal.base_index {
-            self.journal.stage = JournalStage::IndexReconciled;
+            // The durable journal can prove that reconciliation is still
+            // required, but it cannot claim the index was installed before
+            // the adapter performs that action.
+            self.journal.stage = JournalStage::RefAdvanced;
             return Ok(Recovery::InstallIndex(
                 self.journal.reconciled_index.clone(),
             ));
@@ -560,10 +566,27 @@ mod tests {
         let Recovery::InstallIndex(index) = publication.recover(&new, &base).unwrap() else {
             panic!("expected index recovery")
         };
+        assert_eq!(publication.journal().stage, JournalStage::RefAdvanced);
+        assert!(matches!(
+            publication.cleanup(),
+            Err(Error::InvalidTransition)
+        ));
         assert_eq!(
             index.get(&path()).unwrap().as_ref().unwrap().bytes(),
             b"published"
         );
+        publication.install_index(&base).unwrap();
+        assert_eq!(publication.journal().stage, JournalStage::IndexReconciled);
+    }
+    #[test]
+    fn index_reconciliation_cannot_precede_ref_advance() {
+        let base = IndexImage::default();
+        let mut publication = publication(base.clone(), base.clone());
+        assert!(matches!(
+            publication.install_index(&base),
+            Err(Error::InvalidTransition)
+        ));
+        assert_eq!(publication.journal().stage, JournalStage::Journaled);
     }
     #[test]
     fn reconciliation_preserves_unrelated_partially_staged_entry() {
