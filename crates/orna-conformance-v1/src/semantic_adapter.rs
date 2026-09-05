@@ -45,6 +45,22 @@ impl SemanticAdapter {
             None => StageOutcome::Passed,
         }
     }
+
+    fn analyze_project(&self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+        let units = project.modules.iter().map(|unit| {
+            let logical_path = unit
+                .source_id
+                .strip_prefix(&prefix)
+                .unwrap_or(&unit.source_id)
+                .to_owned();
+            SourceUnit {
+                source_id: logical_path,
+                ..unit.clone()
+            }
+        });
+        self.analyze_units(units)
+    }
     fn unsupported_runtime() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
             reason: "orna-runtime-v1 supplies durable runtime state only; it has no source evaluator or scenario invocation contract".into(),
@@ -82,10 +98,10 @@ impl ConformanceAdapter for SemanticAdapter {
         StageOutcome::Passed
     }
     fn resolve_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_units(project.modules.clone())
+        self.analyze_project(project)
     }
     fn typecheck_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        self.analyze_units(project.modules.clone())
+        self.analyze_project(project)
     }
     fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
