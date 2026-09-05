@@ -1,6 +1,6 @@
 use orna_conformance_v1::{
-    Corpus, EvidenceStatus, Harness, ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario,
-    SemanticAdapter, SourceUnit, StageOutcome,
+    BoundedEvaluator, Corpus, EvidenceStatus, Harness, ProjectUnit, RuntimeAdapter,
+    RuntimeEvaluator, Scenario, SemanticAdapter, SourceUnit, StageOutcome,
 };
 use orna_foundation_v1::Diagnostic;
 
@@ -68,4 +68,28 @@ fn runtime_adapter_has_an_executable_seam_but_lazy_semantic_failures_precede_it(
             .iter()
             .all(|scenario| scenario.status == EvidenceStatus::Passed)
     );
+}
+
+#[test]
+fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
+    let mut evaluator = BoundedEvaluator::default();
+    let valid = SourceUnit {
+        fixture_id: "test-valid".into(),
+        source_id: "logical/test.orna".into(),
+        parse_as: "row_unit".into(),
+        source: "{ total: std.math.increment(1) }".into(),
+    };
+    assert_eq!(evaluator.evaluate(&valid), StageOutcome::Passed);
+
+    let invalid = SourceUnit {
+        fixture_id: "test-invalid".into(),
+        source_id: "logical/test.orna".into(),
+        parse_as: "row_unit".into(),
+        source: "{ total: missing }".into(),
+    };
+    let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid) else {
+        panic!("unknown name must fail");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
+    assert_eq!(diagnostic.message(), "<redacted>");
 }
