@@ -1340,6 +1340,20 @@ fn infer(
             let right = infer(rhs, scope, local, diagnostics);
             let mut effects = left.effects;
             effects.join(&right.effects);
+            if op == "??" {
+                let ty = match (&left.ty, &right.ty) {
+                    (Type::Optional(_), Type::Error) | (Type::Error, _) => Type::Error,
+                    (Type::Optional(inner), right) if inner.as_ref() == right => (**inner).clone(),
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "coalesce fallback must match the optional value type",
+                        ));
+                        Type::Error
+                    }
+                };
+                return Inferred { ty, effects };
+            }
             let ty = if matches!(
                 op.as_str(),
                 "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"
