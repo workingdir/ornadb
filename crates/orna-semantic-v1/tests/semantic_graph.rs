@@ -25,7 +25,8 @@ fn table_insert_and_upsert_validate_provided_fields() {
         attached
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.message() == "table write contains an unknown field"),
+            .all(|diagnostic| diagnostic.message()
+                == "table write contains an unknown field `banana`"),
         "{:?}",
         attached.diagnostics
     );
@@ -57,7 +58,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
                     result
                         .diagnostics
                         .iter()
-                        .any(|diagnostic| diagnostic.message() == expected),
+                        .any(|diagnostic| diagnostic.message().starts_with(expected)),
                     "{operation} {value}: {:?}",
                     result.diagnostics
                 );
@@ -83,6 +84,29 @@ fn table_insert_and_upsert_validate_provided_fields() {
         )]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     }
+}
+
+#[test]
+fn attached_reading_write_diagnostics_retain_units_without_record_values() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "rows.orna",
+            "pub fn bad() = vehicle.corsa.Reading.insert({ time: now(), speed: \"private-value\", rpm: 1000 });",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message()
+                == "table write field has an incompatible type: expected Float<mph>, found Str"),
+        "{:?}",
+        result.diagnostics
+    );
+    let encoded = serde_json::to_string(&result.diagnostics).unwrap();
+    assert!(!encoded.contains("private-value"));
+    assert!(!encoded.contains("rows.orna"));
 }
 
 #[test]
