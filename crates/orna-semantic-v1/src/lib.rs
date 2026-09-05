@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LiteralKind, Pattern, Statement, StringSegment, SyntaxTree, TypeExpr, TypeMember,
-    TypeRepresentation, UseTail, Visibility, parse_module_with_file,
+    LambdaParameter, LiteralKind, Pattern, Statement, StringSegment, SyntaxTree, TypeExpr,
+    TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -395,6 +395,11 @@ impl Catalogue {
             ),
         );
         let ui = Type::Named("std.UI".into());
+        let page_builder = Type::Function {
+            parameters: vec![Type::Error],
+            parameter_names: None,
+            result: Box::new(ui.clone()),
+        };
         modules.insert(
             Namespace(vec!["std".into(), "ui".into()]),
             catalogue_module(
@@ -403,6 +408,15 @@ impl Catalogue {
                     ("UI", ui.clone()),
                     ("text", function(vec![Type::Text], ui.clone())),
                     ("button", function(vec![Type::Text, Type::Bool], ui.clone())),
+                    (
+                        "Page",
+                        named_function(
+                            vec![("path", Type::Text), ("builder", page_builder)],
+                            ui.clone(),
+                        ),
+                    ),
+                    ("List", function(vec![Type::Error], ui.clone())),
+                    ("Table", function(vec![Type::Error], ui.clone())),
                     ("panel", function(vec![ui.clone()], ui.clone())),
                     ("row", function(vec![ui.clone()], ui.clone())),
                     ("column", function(vec![ui.clone()], ui.clone())),
@@ -1283,6 +1297,27 @@ fn infer_contextual(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let (
+        Expr::Lambda {
+            parameters, body, ..
+        },
+        Type::Function {
+            parameters: expected_parameters,
+            result: expected_result,
+            ..
+        },
+    ) = (expr, expected)
+    {
+        return infer_contextual_lambda(
+            parameters,
+            body,
+            expected_parameters,
+            expected_result,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     if matches!(expected, Type::Float)
         && matches!(
             expr,
@@ -1298,6 +1333,60 @@ fn infer_contextual(
         };
     }
     infer(expr, scope, local, diagnostics)
+}
+
+fn infer_contextual_lambda(
+    parameters: &[LambdaParameter],
+    body: &Expr,
+    expected_parameters: &[Type],
+    expected_result: &Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if parameters.len() != expected_parameters.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "contextual lambda parameter count does not match the function signature",
+        ));
+    }
+    let mut callback_locals = local.clone();
+    let mut types = Vec::with_capacity(parameters.len());
+    for (index, parameter) in parameters.iter().enumerate() {
+        let ty = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .or_else(|| expected_parameters.get(index).cloned())
+            .unwrap_or(Type::Error);
+        bind_pattern(
+            &parameter.pattern,
+            ty.clone(),
+            &mut callback_locals,
+            diagnostics,
+        );
+        types.push(ty);
+    }
+    let inferred = if matches!(expected_result, Type::Error) {
+        infer(body, scope, &callback_locals, diagnostics)
+    } else {
+        infer_contextual(body, expected_result, scope, &callback_locals, diagnostics)
+    };
+    require_same(expected_result, &inferred.ty, diagnostics);
+    Inferred {
+        ty: Type::Function {
+            parameters: types,
+            parameter_names: parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) if name != "_" => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
+            result: Box::new(inferred.ty.clone()),
+        },
+        effects: inferred.effects,
+    }
 }
 
 fn infer(
@@ -1558,12 +1647,26 @@ fn infer(
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
             effects.join(&intrinsic);
+            let call_parameters = match &callee.ty {
+                Type::Function {
+                    parameters,
+                    parameter_names,
+                    ..
+                } => Some((parameters.as_slice(), parameter_names.as_deref())),
+                _ => None,
+            };
             let values = arguments
                 .iter()
-                .map(|a| {
+                .enumerate()
+                .map(|(index, a)| {
                     let x = if a.name.as_deref() == Some("as") {
                         infer_type_argument(&a.value)
                             .unwrap_or_else(|| infer(&a.value, scope, local, diagnostics))
+                    } else if let Some((parameters, parameter_names)) = call_parameters
+                        && let Some(expected) =
+                            expected_call_parameter(parameters, parameter_names, arguments, index)
+                    {
+                        infer_contextual(&a.value, expected, scope, local, diagnostics)
                     } else {
                         infer(&a.value, scope, local, diagnostics)
                     };
@@ -2098,6 +2201,26 @@ fn check_call_arguments(
             "named function arguments do not match its static signature",
         ));
     }
+}
+
+fn expected_call_parameter<'a>(
+    parameters: &'a [Type],
+    parameter_names: Option<&'a [String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    index: usize,
+) -> Option<&'a Type> {
+    let argument = arguments.get(index)?;
+    if let Some(name) = argument.name.as_deref() {
+        return parameter_names?
+            .iter()
+            .position(|parameter| parameter == name)
+            .and_then(|position| parameters.get(position));
+    }
+    let positional = arguments[..index]
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .count();
+    parameters.get(positional)
 }
 
 #[allow(clippy::too_many_arguments)]
