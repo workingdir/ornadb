@@ -337,6 +337,29 @@ fn qualified_kwh_units_share_the_closed_cross_database_identity() {
 }
 
 #[test]
+fn closed_enum_case_blocks_accept_the_core_log_intrinsic() {
+    let result = analyze(&[ModuleInput::new(
+        "inspection.orna",
+        r#"
+            pub enum Inspection {
+                value { value: Int },
+                failed { reason: Str },
+            }
+            pub fn inspect(result: Inspection) =
+                case result {
+                    Inspection.value { value }: { value: value },
+                    Inspection.failed { reason }: {
+                        log(reason);
+                        { value: 0 }
+                    },
+                };
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
