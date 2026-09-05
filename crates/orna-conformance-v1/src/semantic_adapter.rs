@@ -9,20 +9,32 @@
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
 use orna_foundation_v1::Diagnostic;
-use orna_semantic_v1::{ModuleInput, analyze};
+use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 
-#[derive(Default)]
 pub struct SemanticAdapter {
     syntax: SyntaxAdapter,
+    catalogue: Catalogue,
+}
+
+impl Default for SemanticAdapter {
+    fn default() -> Self {
+        Self {
+            syntax: SyntaxAdapter,
+            catalogue: Catalogue::authoritative_core(),
+        }
+    }
 }
 
 impl SemanticAdapter {
-    fn analyze_units(units: impl IntoIterator<Item = SourceUnit>) -> StageOutcome<Diagnostic> {
+    fn analyze_units(
+        &self,
+        units: impl IntoIterator<Item = SourceUnit>,
+    ) -> StageOutcome<Diagnostic> {
         let inputs = units
             .into_iter()
             .map(|unit| ModuleInput::new(unit.source_id, unit.source))
             .collect::<Vec<_>>();
-        let analysis = analyze(&inputs);
+        let analysis = analyze_with_catalogue(&inputs, &self.catalogue);
         match analysis.diagnostics.into_iter().next() {
             Some(diagnostic) => StageOutcome::Failed(diagnostic.redacted()),
             None => StageOutcome::Passed,
@@ -47,10 +59,10 @@ impl ConformanceAdapter for SemanticAdapter {
         self.syntax.parse(unit)
     }
     fn resolve(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::analyze_units([unit.clone()])
+        self.analyze_units([unit.clone()])
     }
     fn typecheck(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::analyze_units([unit.clone()])
+        self.analyze_units([unit.clone()])
     }
     fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
@@ -65,10 +77,10 @@ impl ConformanceAdapter for SemanticAdapter {
         StageOutcome::Passed
     }
     fn resolve_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        Self::analyze_units(project.modules.clone())
+        self.analyze_units(project.modules.clone())
     }
     fn typecheck_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
-        Self::analyze_units(project.modules.clone())
+        self.analyze_units(project.modules.clone())
     }
     fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
