@@ -11,6 +11,7 @@ libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 num-bigint = "0.4.6"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-stream-v1 = { path = "../orna-stream-v1" }
 uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]
