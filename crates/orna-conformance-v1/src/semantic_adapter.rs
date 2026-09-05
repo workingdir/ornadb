@@ -24,6 +24,10 @@ pub struct SemanticAdapter {
 
 fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
     match diagnostic.message() {
+        message if message.starts_with("table write contains an unknown field `") => "E2003".into(),
+        message if message.starts_with("table write field has an incompatible type:") => {
+            "E2001".into()
+        }
         "cannot add Time and Energy" => "E5001".into(),
         "cannot add two absolute affine temperatures" => "E5002".into(),
         "cannot sum absolute affine quantities" => "E5003".into(),
