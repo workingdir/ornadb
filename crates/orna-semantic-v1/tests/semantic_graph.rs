@@ -162,6 +162,16 @@ fn table_projection_stages_type_computed_and_default_fields() {
 }
 
 #[test]
+fn system_dependency_queries_use_object_references() {
+    let result = analyze(&[ModuleInput::new(
+        "dependency-query.orna",
+        "pub fn impact(object: sys.Object) = sys.dependents(object.reference);",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
