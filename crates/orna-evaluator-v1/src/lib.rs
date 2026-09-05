@@ -706,7 +706,7 @@ impl Context<'_> {
             } => self.block(statements, tail.as_deref(), scope, depth),
             Expr::Call {
                 callee, arguments, ..
-            } => self.call(callee, arguments, scope, depth),
+            } => self.call(callee, arguments, None, scope, depth),
             Expr::Index { base, index, .. } => {
                 let base = self.evaluate(base, scope, depth + 1)?;
                 let index = self.evaluate(index, scope, depth + 1)?;
@@ -953,6 +953,16 @@ impl Context<'_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         match op {
+            "|" => {
+                let input = self.evaluate(lhs, scope, depth + 1)?;
+                let (callee, arguments) = match rhs {
+                    Expr::Call {
+                        callee, arguments, ..
+                    } => (callee.as_ref(), arguments.as_slice()),
+                    _ => (rhs, &[][..]),
+                };
+                self.call(callee, arguments, Some(input), scope, depth)
+            }
             "??" => match self.evaluate(lhs, scope, depth + 1)? {
                 Value::Option(Some(value)) => Ok(*value),
                 Value::Option(None) | Value::Null => self.evaluate(rhs, scope, depth + 1),
@@ -1054,6 +1064,7 @@ impl Context<'_> {
         &mut self,
         callee: &Expr,
         arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -1064,9 +1075,20 @@ impl Context<'_> {
             let functions = self.functions;
             let function = functions.get(text).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
             self.depth(depth + 1)?;
-            self.items(arguments.len())?;
+            self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
             let mut positional = 0;
+            if let Some(input) = input {
+                let Some(Parameter {
+                    pattern: Pattern::Name(name, _),
+                    ..
+                }) = function.parameters.first()
+                else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                supplied.insert(name.clone(), input);
+                positional = 1;
+            }
             let mut named_started = false;
             for argument in arguments {
                 let name = if let Some(name) = &argument.name {
@@ -1102,12 +1124,15 @@ impl Context<'_> {
             );
         }
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        self.items(arguments.len())?;
-        let values = arguments
+        let implicit = usize::from(input.is_some());
+        self.items(arguments.len() + implicit)?;
+        let mut values = input.into_iter().collect::<Vec<_>>();
+        let explicit = arguments
             .iter()
             .map(|argument| self.evaluate(&argument.value, scope, depth + 1))
             .collect::<Result<Vec<_>, _>>()?;
-        self.math(name, named_arguments(name, arguments, values)?)
+        values.extend(explicit);
+        self.math(name, named_arguments(name, arguments, values, implicit)?)
     }
     fn index(&self, base: Value, index: Value) -> Result<Value, EvaluationError> {
         let Value::Int(index) = index else {
@@ -1377,12 +1402,10 @@ fn named_arguments(
     function: &str,
     arguments: &[orna_syntax_v1::Argument],
     values: Vec<Value>,
+    implicit: usize,
 ) -> Result<Vec<Value>, EvaluationError> {
     if arguments.iter().all(|argument| argument.name.is_none()) {
         return Ok(values);
-    }
-    if arguments.iter().any(|argument| argument.name.is_none()) {
-        return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
     let expected: &[&str] = match function {
         "increment" | "decrement" | "is_zero" => &["value"],
@@ -1390,20 +1413,35 @@ fn named_arguments(
         "clamp" => &["value", "min", "max"],
         _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
     };
-    if arguments.len() != expected.len() {
+    if values.len() != expected.len() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    expected
-        .iter()
-        .map(|expected_name| {
-            arguments
-                .iter()
-                .zip(values.iter())
-                .find_map(|(argument, value)| {
-                    (argument.name.as_deref() == Some(*expected_name)).then(|| value.clone())
-                })
-                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
-        })
+    let mut ordered = vec![None; expected.len()];
+    let mut positional = 0;
+    let mut named_started = false;
+    for (index, value) in values.into_iter().enumerate() {
+        let name = index
+            .checked_sub(implicit)
+            .and_then(|index| arguments.get(index))
+            .and_then(|argument| argument.name.as_deref());
+        let position = if let Some(name) = name {
+            named_started = true;
+            expected.iter().position(|expected| *expected == name)
+        } else if named_started {
+            None
+        } else {
+            let position = Some(positional);
+            positional += 1;
+            position
+        }
+        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        if ordered[position].replace(value).is_some() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+    }
+    ordered
+        .into_iter()
+        .map(|value| value.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED")))
         .collect()
 }
 fn math_name(expression: &Expr) -> Option<&str> {
