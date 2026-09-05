@@ -432,6 +432,49 @@ fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
 }
 
 #[test]
+fn cancelling_a_terminal_request_is_idempotent_and_preserves_its_result() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let target = eval([1; 16], [20; 16], "1");
+    let target_outcome =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(target.clone()), &mut application))
+            .unwrap();
+    let cancel = Envelope {
+        request: Some([22; 16]),
+        watch: None,
+        message: Message::Cancel {
+            target_kind: TargetKind::Request,
+            target: [20; 16],
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(cancel), &mut application,))
+            .unwrap()
+            .outcome,
+        FrameOutcome::Cancelled
+    );
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(target), &mut application,)),
+        Ok(target_outcome)
+    );
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
 fn dispatches_request_status_and_rejects_unsupported_client_operations() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
