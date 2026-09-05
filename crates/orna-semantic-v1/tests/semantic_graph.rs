@@ -441,6 +441,18 @@ fn table_keys_reject_ranges_with_the_published_primary_key_rule() {
 }
 
 #[test]
+fn automatic_key_tables_reject_explicit_rekey_operations() {
+    let result = analyze(&[ModuleInput::new(
+        "rekey.orna",
+        "pub table Note { text: Str, } pub fn bad() = Note.rekey(1, 2);",
+    )]);
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "an automatic-key table cannot be explicitly re-keyed"
+    }));
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
