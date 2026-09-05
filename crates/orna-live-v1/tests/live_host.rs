@@ -1,11 +1,15 @@
 use futures::executor::block_on;
+use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
-    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, Limits,
+    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, Limits, LiveApplication,
     LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
     SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
     WebSocketState, WireRequest,
 };
-use orna_protocol_v1::{Envelope, Message, PresentationContext, TargetKind};
+use orna_protocol_v1::{
+    DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
+    canonical_request_fingerprint,
+};
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
     SessionDeletionAdapter,
@@ -32,6 +36,55 @@ impl SessionDeletionAdapter for Delete {
     type Error = ();
     fn delete(&mut self, _: orna_security_v1::SessionId) -> Result<(), Self::Error> {
         self.0.then_some(()).ok_or(())
+    }
+}
+
+#[derive(Default)]
+struct UnitApplication {
+    calls: usize,
+}
+
+fn unit_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Result {
+            status: ResultStatus::Success,
+            value: Some(CanonicalValue::unit()),
+            fingerprint,
+            diagnostic: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+}
+
+impl LiveApplication for UnitApplication {
+    fn eval(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> Result<Envelope, Error> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.calls += 1;
+        Ok(unit_result(request, *fingerprint))
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+
+    fn cancel(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        _: &Message,
+    ) -> Result<Envelope, Error> {
+        self.calls += 1;
+        Ok(unit_result(request, fingerprint))
     }
 }
 
@@ -101,6 +154,38 @@ fn resync() -> Vec<u8> {
     }
     .encode(Limits::default().protocol)
     .unwrap()
+}
+
+fn eval(session: [u8; 16], request: [u8; 16], source: &str) -> Vec<u8> {
+    let mut envelope = Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Eval {
+            source: source.into(),
+            database: DatabaseContext {
+                database: [2; 16],
+                snapshot: None,
+            },
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/dark".into(),
+                supported_kinds: vec![],
+            },
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    };
+    let fingerprint =
+        canonical_request_fingerprint(session, &envelope, Limits::default().protocol).unwrap();
+    if let Message::Eval {
+        fingerprint: sent, ..
+    } = &mut envelope.message
+    {
+        *sent = fingerprint;
+    }
+    envelope.encode(Limits::default().protocol).unwrap()
 }
 
 fn create(host: &mut LiveHost, issuer: &mut Issuer) -> SessionCredential {
@@ -231,6 +316,7 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
     .unwrap();
     host.reserve_request([1; 16], [8; 16]).unwrap();
     host.start_request([1; 16], [8; 16]).unwrap();
+    let mut application = UnitApplication::default();
     assert_eq!(
         block_on(host.handle_frame([5; 16], 2, Frame::Text("x".into()))),
         Err(Error::InvalidFrame)
@@ -240,13 +326,49 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
         Err(Error::InvalidMessage)
     );
     assert_eq!(
-        block_on(host.handle_frame([5; 16], 2, Frame::Binary(cancel()))),
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(cancel()), &mut application,))
+            .map(|outcome| outcome.outcome),
         Ok(FrameOutcome::Cancelled)
     );
     assert_eq!(
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(resync()))),
-        Ok(FrameOutcome::Resync { revisions: 0 })
+        Err(Error::Denied)
     );
+    assert_eq!(application.calls, 1);
+}
+
+#[test]
+fn dispatch_computes_fingerprints_and_replays_terminal_results() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let first = eval([1; 16], [20; 16], "1");
+    let replay =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(first.clone()), &mut application))
+            .unwrap();
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(first), &mut application,)),
+        Ok(replay.clone())
+    );
+    assert_eq!(application.calls, 1);
+    let different_input = eval([1; 16], [20; 16], "2");
+    assert_eq!(
+        block_on(
+            host.dispatch_frame([5; 16], 2, Frame::Binary(different_input), &mut application,)
+        ),
+        Err(Error::RequestMismatch)
+    );
+    assert_eq!(application.calls, 1);
 }
 
 #[test]
@@ -544,10 +666,8 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
             .is_empty()
     );
     assert_eq!(
-        block_on(transport.receive(&mut socket, 2, &masked(true, 0, &message[split..]))).unwrap(),
-        vec![WebSocketOutput::Accepted(FrameOutcome::Resync {
-            revisions: 0
-        })]
+        block_on(transport.receive(&mut socket, 2, &masked(true, 0, &message[split..]))),
+        Err(Error::Denied)
     );
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 9, b"p"))).unwrap(),
