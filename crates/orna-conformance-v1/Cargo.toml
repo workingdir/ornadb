@@ -1,0 +1,20 @@
+[package]
+name = "orna-conformance-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+# This nested workspace deliberately keeps the harness independently runnable
+# until the main workspace adopts it as a member.
+[workspace]
+
+[dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+num-bigint = "0.4.6"
