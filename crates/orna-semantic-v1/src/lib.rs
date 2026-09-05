@@ -1754,6 +1754,12 @@ fn infer(
                     effects: base.effects,
                 };
             }
+            if let Some(ty) = infer_text_member(&base.ty, name) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_TYPE, message));
                 return Inferred {
@@ -3192,6 +3198,26 @@ fn infer_success_pipeline(
             };
         }
     };
+    if !is_stream
+        && text == "map"
+        && let [argument] = arguments.as_slice()
+        && argument.name.is_none()
+    {
+        let callback = infer_callback(
+            &argument.value,
+            element,
+            Type::Error,
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&callback.effects);
+        return Inferred {
+            ty: Type::Relation(Box::new(callback.ty)),
+            effects,
+        };
+    }
     let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
         ("filter", false, [_]) => (Type::Relation(Box::new(element.clone())), Some(Type::Bool)),
         ("one", false, []) => (element.clone(), None),
@@ -3751,6 +3777,28 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 may_fail: true,
             },
         },
+        ["sys", "catalog", "definitions"] => Inferred {
+            ty: Type::Relation(Box::new(Type::Named("sys.Definition".into()))),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "catalog", "objects"] => Inferred {
+            ty: Type::Relation(Box::new(Type::Named("sys.Object".into()))),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "ObjectKind"] => Inferred {
+            ty: Type::Named("sys.ObjectKind".into()),
+            effects: EffectSummary::default(),
+        },
+        ["sys", "ObjectKind", _] => Inferred {
+            ty: Type::Named("sys.ObjectKind".into()),
+            effects: EffectSummary::default(),
+        },
         ["sys", "Checkpoint", "as_of"] => Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -3785,8 +3833,28 @@ fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
         (Type::Named(system_type), "reference") if system_type == "sys.File" => {
             Some(Type::Named("sys.FileRef".into()))
         }
+        (Type::Named(system_type), "definition") if system_type == "sys.Function" => {
+            Some(Type::Named("sys.DefinitionRef".into()))
+        }
+        (Type::Named(system_type), "reference") if system_type == "sys.Definition" => {
+            Some(Type::Named("sys.DefinitionRef".into()))
+        }
+        (Type::Named(system_type), "file") if system_type == "sys.Definition" => {
+            Some(Type::Named("sys.FileRef".into()))
+        }
+        (Type::Named(system_type), "kind") if system_type == "sys.Object" => {
+            Some(Type::Named("sys.ObjectKind".into()))
+        }
+        (Type::Named(system_type), "qualified_name") if system_type == "sys.Object" => {
+            Some(Type::Text)
+        }
         _ => None,
     }
+}
+
+fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
+    (matches!(base, Type::Text) && name == "starts_with")
+        .then(|| function(vec![Type::Text], Type::Bool))
 }
 
 fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
