@@ -1,0 +1,20 @@
+[package]
+name = "orna-live-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Transport-facing live-session adapter for orna.present.v1"
+
+[dependencies]
+futures = "0.3.31"
+orna-protocol-v1 = { path = "../orna-protocol-v1" }
+orna-security-v1 = { path = "../orna-security-v1" }
+orna-serving-v1 = { path = "../orna-serving-v1" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
