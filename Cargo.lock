@@ -1714,6 +1714,7 @@ dependencies = [
  "num-bigint",
  "orna-foundation-v1",
  "orna-repository-v1",
+ "orna-stream-v1",
  "tempfile",
  "tokio",
  "uuid",
