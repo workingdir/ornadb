@@ -926,6 +926,13 @@ pub(super) fn check_inspect_call(
             orna_core::system::SYS_INSPECT_SNAPSHOT_TYPE_ID,
         )
     };
+    references.push(CheckedDefinitionReference {
+        target: CheckedDefinitionReferenceTarget::Function(CheckedFunctionId::Existing(
+            system.id(),
+        )),
+        kind: DefinitionReferenceKind::FunctionCall,
+        location: location(input.logical_path, span),
+    });
     Some(Some((
         CheckedClientExpression::Inspect { operation },
         ClientExpressionType {
