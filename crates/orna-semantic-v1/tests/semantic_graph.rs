@@ -493,3 +493,29 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
     )]);
     assert!(has(&malformed, DIAG_TYPE));
 }
+
+#[test]
+fn coalesce_types_optional_values_with_precedence_and_grouping() {
+    let valid = analyze(&[
+        ModuleInput::new(
+            "coalesce-precedence.orna",
+            r#"
+                pub fn threshold(value: Int?, days: Int?) = {
+                    above: value ?? 0 > 5,
+                    default_days: days ?? 90 == 90,
+                };
+            "#,
+        ),
+        ModuleInput::new(
+            "grouped-coalesce.orna",
+            "pub fn value(input: Int?): Int = (input ?? 0);",
+        ),
+    ]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let incompatible = analyze(&[ModuleInput::new(
+        "incompatible-coalesce.orna",
+        "pub fn bad(input: Int?): Int = input ?? \"fallback\";",
+    )]);
+    assert!(has(&incompatible, DIAG_TYPE));
+}
