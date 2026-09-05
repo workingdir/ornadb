@@ -1236,6 +1236,23 @@ fn check_item(
                 }
             }
             let row = table_row_type(item);
+            let row_locals = match &row {
+                Type::Record(fields) => fields
+                    .iter()
+                    .map(|(field, ty)| {
+                        (
+                            field.clone(),
+                            Symbol {
+                                kind: SymbolKind::Let,
+                                ty: ty.clone(),
+                                public: false,
+                                effects: EffectSummary::default(),
+                            },
+                        )
+                    })
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
             for member in members {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
@@ -1258,13 +1275,8 @@ fn check_item(
                             | FieldInitializer::Computed(value) => value,
                         };
                         let expected = type_of(ty);
-                        let inferred = infer_contextual(
-                            value,
-                            &expected,
-                            scope,
-                            &BTreeMap::new(),
-                            diagnostics,
-                        );
+                        let inferred =
+                            infer_contextual(value, &expected, scope, &row_locals, diagnostics);
                         if matches!(initializer, FieldInitializer::Computed(_))
                             && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
                         {
@@ -3203,6 +3215,17 @@ fn infer_success_pipeline(
         && let [argument] = arguments.as_slice()
         && argument.name.is_none()
     {
+        if let Some(projection) = infer_table_projection(&argument.value, scope, local) {
+            let Type::Function { result, .. } = projection.ty else {
+                unreachable!("table projection is always callable");
+            };
+            let mut effects = input.effects;
+            effects.join(&projection.effects);
+            return Inferred {
+                ty: Type::Relation(result),
+                effects,
+            };
+        }
         let callback = infer_callback(
             &argument.value,
             element,
@@ -3634,6 +3657,28 @@ fn table_symbol<'a>(
         }
         _ => None,
     }
+}
+
+fn infer_table_projection(
+    expression: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = expression else {
+        return None;
+    };
+    let table = table_symbol(base, scope, local)?;
+    let Type::Named(table_name) = &table.ty else {
+        return None;
+    };
+    let Type::Record(fields) = scope.table_rows.get(table_name)? else {
+        return None;
+    };
+    let field = fields.get(name)?.clone();
+    Some(Inferred {
+        ty: function(vec![table.ty.clone()], field),
+        effects: EffectSummary::default(),
+    })
 }
 
 /// Resolves a member through one explicitly imported module root. A root may

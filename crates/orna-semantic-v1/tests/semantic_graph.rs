@@ -129,6 +129,39 @@ fn system_catalogue_relations_support_typed_filter_and_map_queries() {
 }
 
 #[test]
+fn table_projection_stages_type_computed_and_default_fields() {
+    let source = r#"
+        pub table Contact(id: Str) {
+            first: Str,
+            last: Str,
+            country: Str = "GB",
+            full_name: Str => "{first} {last}",
+        }
+
+        pub fn names() = Contact | map(Contact.full_name);
+    "#;
+    let filtered = r#"
+        pub table Contact(id: Str) {
+            first: Str,
+            last: Str,
+            country: Str = "GB",
+            full_name: Str => "{first} {last}",
+        }
+
+        pub fn british_names() =
+            Contact
+            | filter(contact => contact.country == "GB")
+            | map(Contact.full_name);
+    "#;
+    let result = analyze(&[
+        ModuleInput::new("computed-field.orna", source),
+        ModuleInput::new("default-and-computed-fields.orna", filtered),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
