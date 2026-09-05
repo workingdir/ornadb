@@ -12,6 +12,135 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
 }
 
 #[test]
+fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
+    let declaration = r#"pub table Person(id: Str) {
+        name: Str,
+        label: Str => name,
+    }
+    pub table Reading(sensor: Str, sequence: Int) { value: Int, }
+    pub table Note { text: Str, }"#;
+    for imported in [false, true] {
+        let prefix = if imported { "data." } else { "" };
+        for (operation, expected) in [
+            (r#"Person.update("a", { name: "Bob" })"#, None),
+            (
+                r#"Person.update("a", { label: "override" })"#,
+                Some("table update cannot change a computed field"),
+            ),
+            (
+                r#"Person.update("a", { id: "b" })"#,
+                Some("table update cannot change a primary key; use rekey"),
+            ),
+            (
+                r#"Person.update("a", { name: 1 })"#,
+                Some("table write field has an incompatible type:"),
+            ),
+            (
+                r#"Person.update("a", { extra: true })"#,
+                Some("table write contains an unknown field"),
+            ),
+            (
+                r#"Person.update("a", 42)"#,
+                Some("table write requires a record"),
+            ),
+            (
+                r#"Person.update(1, { name: "Bob" })"#,
+                Some("static types are incompatible"),
+            ),
+            (r#"Person.delete("a")"#, None),
+            (r#"Person.delete(1)"#, Some("static types are incompatible")),
+            (r#"Person.rekey("a", "b")"#, None),
+            (
+                r#"Person.rekey("a", 1)"#,
+                Some("static types are incompatible"),
+            ),
+            (
+                r#"Person.rekey(1, "b")"#,
+                Some("static types are incompatible"),
+            ),
+            (r#"Reading.update(("s", 1), { value: 2 })"#, None),
+            (
+                r#"Reading.delete((1, "s"))"#,
+                Some("static types are incompatible"),
+            ),
+            (
+                r#"Reading.delete("s")"#,
+                Some("static types are incompatible"),
+            ),
+            (r#"Reading.rekey(("s", 1), ("s", 2))"#, None),
+            (r#"Note.update(1, { text: "updated" })"#, None),
+            (
+                r#"Note.update(1, { id: 2 })"#,
+                Some("table update cannot change a primary key; use rekey"),
+            ),
+            (
+                r#"Note.delete("one")"#,
+                Some("static types are incompatible"),
+            ),
+            (
+                r#"Note.rekey(1, 2)"#,
+                Some("an automatic-key table cannot be explicitly re-keyed"),
+            ),
+        ] {
+            let body = format!("fn change() = {prefix}{operation};");
+            let inputs = if imported {
+                vec![
+                    ModuleInput::new("data.orna", declaration),
+                    ModuleInput::new("main.orna", format!("use data; {body}")),
+                ]
+            } else {
+                vec![ModuleInput::new(
+                    "main.orna",
+                    format!("{declaration} {body}"),
+                )]
+            };
+            let result = analyze(&inputs);
+            if let Some(expected) = expected {
+                assert!(
+                    result
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.message().starts_with(expected)),
+                    "{imported} {operation}: {:?}",
+                    result.diagnostics
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "{imported} {operation}: {:?}",
+                    result.diagnostics
+                );
+            }
+        }
+    }
+    for (patch, expected) in [
+        (
+            r#"{ id: "b" }"#,
+            "table update cannot change a primary key; use rekey",
+        ),
+        (
+            r#"{ label: "override" }"#,
+            "table update cannot change a computed field",
+        ),
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "rows.orna",
+            format!(
+                "{declaration} fn change() {{ let patch = {patch}; Person.update(\"a\", patch); }}"
+            ),
+        )]);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == expected),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn declared_table_admission_retains_required_default_and_computed_metadata_across_imports() {
     let declaration = r#"pub table Person(id: Str = "generated") {
         name: Str,
