@@ -15,6 +15,7 @@ orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
+orna-table-v1 = { path = "../orna-table-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 num-bigint = "0.4.6"
 serde = { version = "1.0", features = ["derive"] }
