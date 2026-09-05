@@ -832,7 +832,7 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT COUNT(*), COALESCE(MAX(generation), 0) FROM checkpoint",
+                "SELECT COUNT(*), COALESCE(MIN(generation), 0), COALESCE(MAX(generation), 0) FROM checkpoint",
                 (),
             )
             .await
@@ -843,11 +843,19 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
             .ok_or(RuntimeError::RecoveryInvalid)?;
         let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let maximum: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let minimum: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let maximum: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let checkpoint_count = u64::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let checkpoint_minimum =
+            u64::try_from(minimum).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let checkpoint_maximum =
             u64::try_from(maximum).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if checkpoint_count != generation || checkpoint_maximum != generation {
+        if (generation == 0 && checkpoint_count != 0)
+            || (generation > 0
+                && (checkpoint_count != generation
+                    || checkpoint_minimum != 1
+                    || checkpoint_maximum != generation))
+        {
             return Err(RuntimeError::RecoveryInvalid);
         }
         match (generation, self.latest_checkpoint().await?) {
@@ -1443,6 +1451,47 @@ mod tests {
                 "PRAGMA ignore_check_constraints = ON;
                  UPDATE request_ledger SET state = 3, terminal_outcome = NULL;
                  PRAGMA ignore_check_constraints = OFF;",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        drop(state);
+
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+    #[tokio::test]
+    async fn recovery_rejects_noncontiguous_checkpoint_generations() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let next = state
+            .commit(lease, &capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        state
+            .commit(lease, &next, &mutation(7), digest(8), &NoFault)
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE checkpoint SET generation = 0 WHERE generation = 1",
+                (),
             )
             .await
             .unwrap();
