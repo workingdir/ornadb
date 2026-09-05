@@ -934,6 +934,9 @@ struct Scope {
     /// expression produces its relation row shape, while table operations
     /// retain the declared nominal table result.
     table_rows: BTreeMap<String, Type>,
+    /// Tables without declared keys use the implicit automatic key and cannot
+    /// be explicitly re-keyed by source code.
+    auto_key_tables: BTreeSet<String>,
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
@@ -964,6 +967,14 @@ fn resolve_imports(
             .iter()
             .filter_map(|item| match &item.declaration {
                 Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
+                _ => None,
+            })
+            .collect(),
+        auto_key_tables: tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Table { name, keys, .. } if keys.is_empty() => Some(name.clone()),
                 _ => None,
             })
             .collect(),
@@ -3352,6 +3363,14 @@ fn infer_table_operation(
         return None;
     };
     let table = table_symbol(base, scope, local)?;
+    let automatic_key =
+        matches!(&table.ty, Type::Named(table_name) if scope.auto_key_tables.contains(table_name));
+    if name == "rekey" && automatic_key {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "an automatic-key table cannot be explicitly re-keyed",
+        ));
+    }
     let (parameters, result, effect) = match name.as_str() {
         "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
         "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
