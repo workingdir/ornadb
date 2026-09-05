@@ -533,6 +533,16 @@ impl Catalogue {
             ("subject".into(), Type::Text),
             ("to".into(), Type::Text),
         ]));
+        // A stored email has provider identity in addition to the connector's
+        // message fields; provider messages do not themselves acquire it.
+        let email = match &message {
+            Type::Record(fields) => {
+                let mut fields = fields.clone();
+                fields.insert("provider".into(), Type::Text);
+                Type::Record(fields)
+            }
+            _ => unreachable!("message catalogue shape is a record"),
+        };
         let note = Type::Record(BTreeMap::from([
             ("created".into(), Type::Instant),
             ("text".into(), Type::Text),
@@ -597,7 +607,7 @@ impl Catalogue {
             Namespace(vec!["mail".into()]),
             fixture_module(
                 Namespace(vec!["mail".into()]),
-                [fixture_table("Email", message.clone())],
+                [fixture_table("Email", email)],
                 true,
             ),
         );
