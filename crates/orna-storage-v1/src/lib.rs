@@ -181,6 +181,7 @@ impl LooseProjection {
         for mutation in &batch.mutations {
             candidate.apply(mutation)?;
         }
+        validate_portable_paths(candidate.rows.keys())?;
         *self = candidate;
         Ok(())
     }
@@ -214,6 +215,31 @@ impl LooseProjection {
         self.applied.insert(mutation.id.clone(), mutation.clone());
         Ok(())
     }
+}
+
+fn validate_portable_paths<'a>(
+    paths: impl IntoIterator<Item = &'a LoosePath>,
+) -> Result<(), Error> {
+    let mut siblings = BTreeMap::new();
+    for path in paths {
+        let mut prefix = Vec::new();
+        for (index, component) in path.0.as_path().iter().enumerate() {
+            let component = component.to_str().ok_or(Error::UnsafePath)?;
+            // Table roots are supplied by the schema adapter; collisions here
+            // concern encoded key siblings within the same table.
+            prefix.push(if index == 0 {
+                component.to_owned()
+            } else {
+                component.to_ascii_lowercase()
+            });
+            if let Some(previous) = siblings.insert(prefix.clone(), component)
+                && previous != component
+            {
+                return Err(Error::PathCollision);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,6 +301,12 @@ pub fn reconcile_index(
             .0
             .insert(mutation.path.clone(), mutation.next.clone());
     }
+    validate_portable_paths(
+        result
+            .0
+            .iter()
+            .filter_map(|(path, row)| row.as_ref().map(|_| path)),
+    )?;
     Ok(result)
 }
 
@@ -433,6 +465,7 @@ pub enum Error {
     InvalidKey,
     UnsafePath,
     InvalidRow,
+    PathCollision,
     IncompleteStaging,
     InvalidRef,
     InvalidObjectId,
@@ -460,6 +493,7 @@ impl fmt::Display for Error {
             Self::InvalidKey => "invalid loose row key",
             Self::UnsafePath => "unsafe loose row path",
             Self::InvalidRow => "invalid loose row",
+            Self::PathCollision => "portable loose-row path collision",
             Self::IncompleteStaging => "incomplete publication staging",
             Self::InvalidRef => "invalid ref",
             Self::InvalidObjectId => "invalid object id",
@@ -552,6 +586,82 @@ mod tests {
         }
         assert!(LoosePath::from_encoded_key("../Contact", &["alice.orna".into()]).is_err());
     }
+    #[test]
+    fn portable_sibling_collisions_reject_the_entire_candidate() {
+        let mut independent = LooseProjection::default();
+        for (name, table, keys) in [
+            ("one", "Contact", vec!["Alice", "one"]),
+            ("two", "Contact", vec!["Alice", "two"]),
+            ("other-table", "Other", vec!["alice", "one"]),
+        ] {
+            let mutation = LooseMutation {
+                id: id(name),
+                path: LoosePath::for_key(
+                    table,
+                    &keys.into_iter().map(String::from).collect::<Vec<_>>(),
+                )
+                .unwrap(),
+                expected: None,
+                next: Some(row("body")),
+            };
+            independent
+                .project(&FrozenBatch::new(id("independent"), vec![mutation], 1).unwrap())
+                .unwrap();
+        }
+        assert_eq!(independent.rows.len(), 3);
+        for (first, second) in [
+            (vec!["Alice"], vec!["alice"]),
+            (vec!["Alice", "one"], vec!["alice", "two"]),
+        ] {
+            let key = |parts: Vec<&str>| {
+                LoosePath::for_key(
+                    "Contact",
+                    &parts.into_iter().map(String::from).collect::<Vec<_>>(),
+                )
+                .unwrap()
+            };
+            let first = key(first);
+            let second = key(second);
+            let insert = |name, path| LooseMutation {
+                id: id(name),
+                path,
+                expected: None,
+                next: Some(row("body")),
+            };
+            let a = insert("first", first.clone());
+            let b = insert("second", second.clone());
+            for mutations in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+                let mut projection = LooseProjection::default();
+                let batch = FrozenBatch::new(id("both"), mutations, 1).unwrap();
+                assert_eq!(projection.project(&batch), Err(Error::PathCollision));
+                assert_eq!(projection, LooseProjection::default());
+            }
+            let mut projection = LooseProjection::default();
+            projection
+                .project(&FrozenBatch::new(id("initial"), vec![a], 1).unwrap())
+                .unwrap();
+            let before = projection.clone();
+            assert_eq!(
+                projection.project(&FrozenBatch::new(id("conflict"), vec![b.clone()], 2).unwrap()),
+                Err(Error::PathCollision)
+            );
+            assert_eq!(projection, before);
+            let delete = LooseMutation {
+                id: id("delete"),
+                path: first,
+                expected: Some(row("body").hash()),
+                next: None,
+            };
+            for mutations in [vec![b.clone(), delete.clone()], vec![delete, b]] {
+                let mut replaced = before.clone();
+                replaced
+                    .project(&FrozenBatch::new(id("replace"), mutations, 3).unwrap())
+                    .unwrap();
+                assert!(replaced.row(&second).is_some());
+                assert_eq!(replaced.rows.len(), 1);
+            }
+        }
+    }
     fn id(text: &str) -> MutationId {
         MutationId::new(text).unwrap()
     }
@@ -585,6 +695,120 @@ mod tests {
             ordinary,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn publication_validates_portable_paths_in_its_final_candidate() {
+        let path = |key: Vec<&str>| {
+            LoosePath::for_key(
+                "Contact",
+                &key.into_iter().map(String::from).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let mutation = |name, path, expected, next| LooseMutation {
+            id: id(name),
+            path,
+            expected,
+            next,
+        };
+        let prepare = |batch, base, ordinary| {
+            let (old, new) = objects();
+            Publication::prepare(
+                batch,
+                RefName::new("refs/heads/main").unwrap(),
+                old,
+                new,
+                base,
+                ordinary,
+            )
+        };
+
+        let upper = path(vec!["Alice"]);
+        let lower = path(vec!["alice"]);
+        let same_batch = FrozenBatch::new(
+            id("same-batch"),
+            vec![
+                mutation("same-upper", upper.clone(), None, Some(row("upper"))),
+                mutation("same-lower", lower.clone(), None, Some(row("lower"))),
+            ],
+            1,
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare(same_batch, IndexImage::default(), IndexImage::default()),
+            Err(Error::PathCollision)
+        ));
+
+        let base = IndexImage::default().entry(upper.clone(), Some(row("old")));
+        let ordinary = base.clone();
+        let pre_existing = FrozenBatch::new(
+            id("pre-existing"),
+            vec![mutation(
+                "pre-existing-lower",
+                lower.clone(),
+                None,
+                Some(row("new")),
+            )],
+            2,
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare(pre_existing, base.clone(), ordinary.clone()),
+            Err(Error::PathCollision)
+        ));
+        assert_eq!(base.get(&upper).unwrap().as_ref().unwrap().bytes(), b"old");
+        assert_eq!(ordinary, base);
+
+        let nested_upper = path(vec!["Alice", "one"]);
+        let nested_lower = path(vec!["alice", "two"]);
+        let base = IndexImage::default().entry(nested_upper, Some(row("old")));
+        let composite_collision = FrozenBatch::new(
+            id("composite"),
+            vec![mutation(
+                "composite-lower",
+                nested_lower,
+                None,
+                Some(row("new")),
+            )],
+            3,
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare(composite_collision, base.clone(), base),
+            Err(Error::PathCollision)
+        ));
+
+        let delete = mutation(
+            "rename-delete",
+            upper.clone(),
+            Some(row("old").hash()),
+            None,
+        );
+        let insert = mutation("rename-insert", lower.clone(), None, Some(row("new")));
+        for mutations in [
+            vec![delete.clone(), insert.clone()],
+            vec![insert.clone(), delete.clone()],
+        ] {
+            let renamed = prepare(
+                FrozenBatch::new(id("case-rename"), mutations, 4).unwrap(),
+                IndexImage::default().entry(upper.clone(), Some(row("old"))),
+                IndexImage::default().entry(upper.clone(), Some(row("old"))),
+            )
+            .unwrap();
+            assert_eq!(renamed.journal().reconciled_index.get(&upper), Some(&None));
+            assert_eq!(
+                renamed
+                    .journal()
+                    .reconciled_index
+                    .get(&lower)
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .bytes(),
+                b"new"
+            );
+        }
     }
 
     #[test]
