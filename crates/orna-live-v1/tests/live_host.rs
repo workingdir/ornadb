@@ -156,6 +156,17 @@ fn resync() -> Vec<u8> {
     .unwrap()
 }
 
+fn unsubscribe() -> Vec<u8> {
+    Envelope {
+        request: Some([12; 16]),
+        watch: Some([11; 16]),
+        message: Message::Unsubscribe,
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap()
+}
+
 fn eval(session: [u8; 16], request: [u8; 16], source: &str) -> Vec<u8> {
     let mut envelope = Envelope {
         request: Some(request),
@@ -404,6 +415,45 @@ fn dispatches_request_status_and_rejects_unsupported_client_operations() {
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(subscribe()))),
         Err(Error::UnsupportedOperation)
     );
+}
+
+#[test]
+fn unsubscribe_of_an_absent_watch_is_an_idempotent_unit_success() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let outcome =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(unsubscribe()), &mut application))
+            .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Accepted);
+    assert!(matches!(
+        outcome.response.unwrap().message,
+        Message::Result {
+            status: ResultStatus::Success,
+            value: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 0);
+}
+
+#[test]
+fn request_retention_cannot_be_shorter_than_the_reconnect_lease() {
+    let mut limits = TransportLimits::default();
+    limits.request_retention_ms -= 1;
+    assert!(matches!(
+        LiveTransport::new(host(), limits),
+        Err(Error::Limit)
+    ));
 }
 
 #[test]
