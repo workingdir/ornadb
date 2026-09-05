@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
-    Envelope, Limits as ProtocolLimits, Message, RequestState, ResultStatus, TargetKind,
-    canonical_request_fingerprint,
+    Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
+    TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
     RequestIdentity, RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
@@ -836,15 +836,17 @@ impl LiveHost {
                             if retained.is_some_and(|record| record.fingerprint != *expected) {
                                 return Err(Error::RequestMismatch);
                             }
-                            let (state, fingerprint) =
+                            let (state, fingerprint, result) =
                                 match self.serving.request_state(session, *target) {
                                     Ok(orna_serving_v1::RequestState::Reserved) => (
                                         RequestState::Reserved,
                                         retained.map(|record| record.fingerprint),
+                                        None,
                                     ),
                                     Ok(orna_serving_v1::RequestState::Running) => (
                                         RequestState::Running,
                                         retained.map(|record| record.fingerprint),
+                                        None,
                                     ),
                                     Ok(
                                         orna_serving_v1::RequestState::Cancelled
@@ -852,6 +854,14 @@ impl LiveHost {
                                     ) => (
                                         RequestState::Terminal,
                                         retained.map(|record| record.fingerprint),
+                                        retained.and_then(|record| {
+                                            retained_result_body(
+                                                *target,
+                                                *expected,
+                                                record.terminal.as_ref(),
+                                                self.limits.protocol,
+                                            )
+                                        }),
                                     ),
                                     Err(ServingError::RequestUnknown) => match &self.runtime {
                                         Some(runtime) => {
@@ -866,8 +876,8 @@ impl LiveHost {
                                                 .await
                                                 .map_err(|error| map_runtime(&error))?;
                                             match status {
-                                                Some(status) => (
-                                                    match status.state {
+                                                Some(status) => {
+                                                    let state = match status.state {
                                                         DurableRequestState::Reserved => {
                                                             RequestState::Reserved
                                                         }
@@ -881,13 +891,19 @@ impl LiveHost {
                                                         DurableRequestState::Orphaned => {
                                                             RequestState::Orphaned
                                                         }
-                                                    },
-                                                    Some(status.fingerprint),
-                                                ),
-                                                None => (RequestState::Unknown, None),
+                                                    };
+                                                    let result = durable_result_body(
+                                                        *target,
+                                                        *expected,
+                                                        &status,
+                                                        self.limits.protocol,
+                                                    );
+                                                    (state, Some(status.fingerprint), result)
+                                                }
+                                                None => (RequestState::Unknown, None, None),
                                             }
                                         }
-                                        None => (RequestState::Unknown, None),
+                                        None => (RequestState::Unknown, None, None),
                                     },
                                     Err(error) => return Err(map_serving(error)),
                                 };
@@ -900,7 +916,7 @@ impl LiveHost {
                                         target: *target,
                                         state,
                                         fingerprint,
-                                        result: None,
+                                        result,
                                     },
                                     extensions: BTreeMap::new(),
                                 }),
@@ -1420,6 +1436,29 @@ fn retained_without_value_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> D
             extensions: BTreeMap::new(),
         }),
     }
+}
+
+fn retained_result_body(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    terminal: Option<&DispatchOutcome>,
+    limits: ProtocolLimits,
+) -> Option<ResultBody> {
+    let response = terminal?.response.as_ref()?;
+    validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
+    ResultBody::from_result(response, limits).ok()
+}
+
+fn durable_result_body(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    status: &DurableRequestStatus,
+    limits: ProtocolLimits,
+) -> Option<ResultBody> {
+    let bytes = status.terminal_outcome.as_ref()?.as_bytes();
+    let response = Envelope::decode(bytes, limits).ok()?;
+    validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
+    ResultBody::from_result(&response, limits).ok()
 }
 
 fn validate_result_response(
@@ -2456,6 +2495,35 @@ mod tests {
         assert_eq!(
             validate_result_response([1; 16], [2; 32], result(1, 3), ProtocolLimits::default(),),
             Err(Error::RequestMismatch)
+        );
+    }
+
+    #[test]
+    fn request_status_replays_only_the_matching_retained_result_body() {
+        let retained = retained_without_value_outcome([1; 16], [2; 32]);
+        assert!(
+            retained_result_body([1; 16], [2; 32], Some(&retained), ProtocolLimits::default(),)
+                .is_some()
+        );
+        assert!(
+            retained_result_body([1; 16], [3; 32], Some(&retained), ProtocolLimits::default(),)
+                .is_none()
+        );
+
+        let response = retained.response.unwrap();
+        let terminal =
+            TerminalOutcome::new(response.encode(ProtocolLimits::default()).unwrap()).unwrap();
+        let durable = DurableRequestStatus {
+            identity: RequestIdentity {
+                session_id: [4; 16],
+                request_id: [1; 16],
+            },
+            fingerprint: [2; 32],
+            state: DurableRequestState::Orphaned,
+            terminal_outcome: Some(terminal),
+        };
+        assert!(
+            durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default(),).is_some()
         );
     }
 }
