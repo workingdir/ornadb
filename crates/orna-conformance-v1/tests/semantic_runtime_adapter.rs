@@ -354,6 +354,52 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn expression_units_use_retained_functions_and_rejected_modules_preserve_them() {
+    let module = SourceUnit {
+        fixture_id: "retained-functions".into(),
+        source_id: "logical/retained-functions.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn increment(value: Int) = value + 1;".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    let expression = SourceUnit {
+        parse_as: "expression_unit".into(),
+        source: "if increment(41) == 42 { 1 } else { 1 / 0 }".into(),
+        ..module.clone()
+    };
+    assert_eq!(evaluator.evaluate(&expression), StageOutcome::Passed);
+    let failed_module = SourceUnit {
+        source: "fn increment(value: Int) = value + 100; let answer = increment(1);".into(),
+        ..module
+    };
+    let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&failed_module) else {
+        panic!("module-level let is not part of the module grammar");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-PARSE-001");
+    assert_eq!(evaluator.evaluate(&expression), StageOutcome::Passed);
+}
+
+#[test]
+fn registry_expression_dispatch_preserves_source_limits() {
+    let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
+        max_source_bytes: 2,
+        ..Default::default()
+    });
+    let unit = SourceUnit {
+        fixture_id: "source-budget".into(),
+        source_id: "logical/source-budget.orna".into(),
+        parse_as: "expression_unit".into(),
+        source: "invalid(".into(),
+    };
+    let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&unit) else {
+        panic!("source size limits apply before parsing");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
 fn retained_functions_admit_structured_parameters_and_wildcards() {
     let module = SourceUnit {
         fixture_id: "parameter-patterns".into(),

@@ -9,12 +9,12 @@
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
 use orna_evaluator_v1::{
-    Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction, evaluate_expression,
-    evaluate_parsed, invoke_named,
+    Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction,
+    evaluate_expression_with_functions, invoke_named,
 };
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Pattern, parse_module};
+use orna_syntax_v1::{Declaration, parse_module};
 use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
@@ -222,8 +222,9 @@ pub trait RuntimeEvaluator {
 }
 
 /// Runs the bounded, side-effect-free evaluator for row/expression units and
-/// modules composed only of immutable bindings and pure functions with named
-/// parameters.
+/// retains function-only modules for explicit invocation. Module-level `let`
+/// is not part of the module grammar; immutable values enter via the host
+/// environment or local bindings inside function bodies.
 ///
 /// Module execution, table access, mutations, external effects, and prose
 /// scenarios remain explicit skips until their owning runtime contracts exist.
@@ -276,7 +277,12 @@ impl BoundedEvaluator {
     fn evaluate_unit(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         match unit.parse_as.as_str() {
             "row_unit" | "expression_unit" | "repl_unit" => {
-                match evaluate_expression(&unit.source, &self.environment, self.limits) {
+                match evaluate_expression_with_functions(
+                    &unit.source,
+                    &self.environment,
+                    &self.functions,
+                    self.limits,
+                ) {
                     Ok(_) => StageOutcome::Passed,
                     Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
                 }
@@ -295,26 +301,15 @@ impl BoundedEvaluator {
         if !Self::supports_pure_declarations(&parsed.value.items) {
             return Self::unsupported_module();
         }
-        let mut environment = self.environment.clone();
         let mut functions = self.functions.clone();
         for item in parsed.value.items {
             match item.declaration {
-                Declaration::Let {
-                    pattern: Pattern::Name(name, _),
-                    value,
-                    ..
-                } => match evaluate_parsed(&value, &environment, self.limits) {
-                    Ok(value) => {
-                        environment.insert(name, value);
-                    }
-                    Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
-                },
                 Declaration::Function { signature, body } => {
                     functions.insert(
                         signature.name,
                         RetainedFunction {
                             body,
-                            environment: environment.clone(),
+                            environment: self.environment.clone(),
                             parameters: signature.parameters,
                         },
                     );
@@ -322,7 +317,6 @@ impl BoundedEvaluator {
                 _ => return Self::unsupported_module(),
             }
         }
-        self.environment = environment;
         self.functions = functions;
         StageOutcome::Passed
     }
@@ -333,15 +327,9 @@ impl BoundedEvaluator {
     }
 
     fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
-        items.iter().all(|item| {
-            matches!(
-                &item.declaration,
-                Declaration::Let {
-                    pattern: Pattern::Name(_, _),
-                    ..
-                } | Declaration::Function { .. }
-            )
-        })
+        items
+            .iter()
+            .all(|item| matches!(&item.declaration, Declaration::Function { .. }))
     }
 
     fn supports_pure_project(project: &ProjectUnit) -> bool {
@@ -356,13 +344,13 @@ impl BoundedEvaluator {
 
     fn unsupported_module() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
-            reason: "module execution requires an effect-free module with immutable bindings and pure functions".into(),
+            reason: "bounded module loading accepts function declarations only; other declarations require the integrated runtime".into(),
         }
     }
 
     fn unsupported_project() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
-            reason: "project execution requires an offline empty-state project whose every module has only immutable bindings and pure functions; tables, effects, and streams require the integrated runtime".into(),
+            reason: "project execution requires an offline empty-state project whose modules contain only function declarations; tables, effects, and streams require the integrated runtime".into(),
         }
     }
 }
