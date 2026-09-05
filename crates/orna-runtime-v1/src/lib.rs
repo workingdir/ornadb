@@ -865,6 +865,7 @@ impl RuntimeState {
                     && checkpoint.digest == capture.generation_digest() => {}
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
+        self.validate_checkpoint_anchors().await?;
         let mut request_rows = self
             .connection
             .query(
@@ -879,6 +880,95 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
             decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        }
+        Ok(())
+    }
+
+    /// A checkpoint is an anchor into the durable mutation ledger. Recovery
+    /// must not accept a contiguous generation history whose anchors have
+    /// been corrupted, removed, or reordered.
+    async fn validate_checkpoint_anchors(&self) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence \
+                 FROM checkpoint LEFT JOIN pending_mutation ON pending_mutation.sequence = checkpoint.mutation_sequence \
+                 ORDER BY checkpoint.generation",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut previous_sequence = 0;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let _: u64 = u64::try_from(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_digest(fixed(
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let sequence = u64::try_from(
+                row.get::<i64>(2)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let referenced: Option<i64> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if sequence == 0
+                || sequence <= previous_sequence
+                || referenced.and_then(|value| u64::try_from(value).ok()) != Some(sequence)
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            previous_sequence = sequence;
+        }
+
+        let mut freezes = self
+            .connection
+            .query(
+                "SELECT publication_freeze.intent_id, publication_freeze.checkpoint_generation, \
+                 publication_freeze.checkpoint_mutation_sequence, publication_freeze.checkpoint_digest, \
+                 publication_freeze.frozen, checkpoint.generation \
+                 FROM publication_freeze LEFT JOIN checkpoint ON checkpoint.generation = publication_freeze.checkpoint_generation \
+                 AND checkpoint.mutation_sequence = publication_freeze.checkpoint_mutation_sequence \
+                 AND checkpoint.digest = publication_freeze.checkpoint_digest",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = freezes
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            validate_id(fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let generation = u64::try_from(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let sequence = u64::try_from(
+                row.get::<i64>(2)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_digest(fixed(
+                row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let frozen: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let referenced: Option<i64> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if generation == 0 || sequence == 0 || frozen != 1 || referenced.is_none() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -1491,6 +1581,45 @@ mod tests {
             .connection
             .execute(
                 "UPDATE checkpoint SET generation = 0 WHERE generation = 1",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        drop(state);
+
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+    #[tokio::test]
+    async fn recovery_rejects_dangling_checkpoint_or_freeze_anchors() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        state.freeze(id(7), &checkpoint).await.unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE checkpoint SET mutation_sequence = 2 WHERE generation = 1",
                 (),
             )
             .await
