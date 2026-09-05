@@ -9,9 +9,9 @@
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
 use orna_evaluator_v1::{
-    Environment, Limits as EvaluatorLimits, evaluate_expression, evaluate_parsed,
+    Environment, Limits as EvaluatorLimits, evaluate_expression, evaluate_function, evaluate_parsed,
 };
-use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, Expr, Parameter, Pattern, parse_module};
 use std::collections::BTreeMap;
@@ -273,41 +273,13 @@ impl BoundedEvaluator {
                 reason: "function is not retained by the bounded evaluator".into(),
             };
         };
-        let parameter_names = function
-            .parameters
-            .iter()
-            .map(|parameter| match &parameter.pattern {
-                Pattern::Name(name, _) => Some(name.as_str()),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(parameter_names) = parameter_names else {
-            return Self::argument_error();
-        };
-        if arguments
-            .keys()
-            .any(|argument| !parameter_names.contains(&argument.as_str()))
-        {
-            return Self::argument_error();
-        }
-        let mut environment = function.environment.clone();
-        for parameter in &function.parameters {
-            let Pattern::Name(name, _) = &parameter.pattern else {
-                return Self::argument_error();
-            };
-            let value = match arguments.get(name) {
-                Some(value) => value.clone(),
-                None => match &parameter.default {
-                    Some(default) => match evaluate_parsed(default, &environment, self.limits) {
-                        Ok(value) => value,
-                        Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
-                    },
-                    None => return Self::argument_error(),
-                },
-            };
-            environment.insert(name.clone(), value);
-        }
-        match evaluate_parsed(&function.body, &environment, self.limits) {
+        match evaluate_function(
+            &function.parameters,
+            &function.body,
+            &function.environment,
+            arguments,
+            self.limits,
+        ) {
             Ok(_) => StageOutcome::Passed,
             Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
         }
@@ -406,18 +378,6 @@ impl BoundedEvaluator {
         StageOutcome::Skipped {
             reason: "project execution requires an offline empty-state project whose every module has only immutable bindings and named-parameter functions; tables, effects, and streams require the integrated runtime".into(),
         }
-    }
-
-    fn argument_error() -> StageOutcome<Diagnostic> {
-        StageOutcome::Failed(
-            Diagnostic::new(
-                SafeText::new("ORNA-EVAL-ARGUMENT").expect("static safe code"),
-                DiagnosticSeverity::Error,
-                SafeText::redacted(),
-            )
-            .expect("static diagnostic")
-            .redacted(),
-        )
     }
 }
 
