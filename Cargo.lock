@@ -1560,6 +1560,7 @@ version = "1.0.0"
 dependencies = [
  "num-bigint",
  "orna-foundation-v1",
+ "orna-semantic-v1",
  "orna-syntax-v1",
  "serde",
  "serde_json",

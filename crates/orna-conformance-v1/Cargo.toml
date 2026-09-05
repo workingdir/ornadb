@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
