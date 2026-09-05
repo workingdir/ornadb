@@ -352,7 +352,13 @@ impl ActivationCoordinator {
         } else {
             RollbackReason::StaleOwner
         };
-        self.rollback(reason)
+        // A stale completion belongs to an earlier owner. It must not change
+        // the phase of a successor which has already taken the coordinator.
+        if reason == RollbackReason::StaleOwner {
+            Outcome::RolledBack { reason }
+        } else {
+            self.rollback(reason)
+        }
     }
 }
 
@@ -533,7 +539,7 @@ mod tests {
     #[test]
     fn stale_lease_cannot_publish_after_handover() {
         let (mut c, owner) = active();
-        let _replacement = c
+        let replacement = c
             .replace_stale(owner, ActivationId::new(2).unwrap())
             .unwrap();
         let mut store = InMemoryAtomicStore::default();
@@ -546,6 +552,18 @@ mod tests {
             }
         );
         assert!(store.visible().is_empty());
+        assert_eq!(c.phase(), TransactionPhase::Running);
+        assert!(matches!(
+            c.execute(
+                replacement,
+                &mut provider,
+                &mut store,
+                checkpoint(),
+                &mut fault
+            ),
+            Outcome::Committed { .. }
+        ));
+        assert_eq!(store.visible().len(), 1);
     }
     #[test]
     fn children_must_join_before_commit() {
