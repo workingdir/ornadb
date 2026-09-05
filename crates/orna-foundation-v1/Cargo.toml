@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Shared Orna 1.0 source, diagnostic, value, and repository contracts"
 
-# This integration boundary remains independently buildable until the owning
-# integration work adopts it into the top-level workspace.
-[workspace]
-
 [dependencies]
 num-bigint = "0.4.6"
 orna-value-v1 = { path = "../orna-value-v1" }

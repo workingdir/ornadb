@@ -6,10 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Orna 1.0 OVB-1 canonical values, schemas and identities"
 
-# This vertical slice is intentionally isolated until the integration owner
-# elects it as a workspace member.
-[workspace]
-
 [dependencies]
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
