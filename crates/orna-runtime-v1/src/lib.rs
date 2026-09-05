@@ -47,7 +47,22 @@ CREATE TABLE IF NOT EXISTS publication_freeze (
     checkpoint_digest BLOB NOT NULL CHECK (length(checkpoint_digest) = 32),
     frozen INTEGER NOT NULL CHECK (frozen = 1)
 );
+CREATE TABLE IF NOT EXISTS request_ledger (
+    session_id BLOB NOT NULL CHECK (length(session_id) = 16),
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
+    state INTEGER NOT NULL CHECK (state IN (1, 2, 3, 4, 5)),
+    terminal_outcome BLOB,
+    PRIMARY KEY (session_id, request_id),
+    CHECK (
+        (state IN (1, 2) AND terminal_outcome IS NULL)
+        OR (state IN (3, 4, 5) AND terminal_outcome IS NOT NULL)
+    ),
+    CHECK (terminal_outcome IS NULL OR length(terminal_outcome) <= 16777216)
+);
 "#;
+
+pub const MAX_TERMINAL_OUTCOME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeIdentity {
@@ -82,6 +97,66 @@ pub struct PublicationFreeze {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestIdentity {
+    pub session_id: [u8; 16],
+    pub request_id: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestState {
+    Reserved,
+    Running,
+    Completed,
+    Cancelled,
+    Orphaned,
+}
+
+impl RequestState {
+    const fn code(self) -> i64 {
+        match self {
+            Self::Reserved => 1,
+            Self::Running => 2,
+            Self::Completed => 3,
+            Self::Cancelled => 4,
+            Self::Orphaned => 5,
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::Orphaned)
+    }
+}
+
+/// Bounded bytes retained without assigning runtime meaning to their format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalOutcome(Vec<u8>);
+
+impl TerminalOutcome {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, RuntimeError> {
+        if bytes.len() > MAX_TERMINAL_OUTCOME_BYTES {
+            return Err(RuntimeError::TerminalOutcomeTooLarge);
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestStatus {
+    pub identity: RequestIdentity,
+    pub fingerprint: [u8; 32],
+    pub state: RequestState,
+    pub terminal_outcome: Option<TerminalOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultPoint {
     AfterMutation,
     AfterCheckpoint,
@@ -112,6 +187,10 @@ pub enum RuntimeError {
     InvalidCapture,
     EmptyMutationBatch,
     ConflictingPublicationIntent,
+    RequestUnknown,
+    RequestFingerprintMismatch,
+    RequestStateConflict,
+    TerminalOutcomeTooLarge,
     RecoveryInvalid,
     FaultInjected(FaultPoint),
     StorageUnavailable,
@@ -128,6 +207,10 @@ impl fmt::Display for RuntimeError {
             Self::InvalidCapture => "invalid runtime capture",
             Self::EmptyMutationBatch => "empty runtime mutation batch",
             Self::ConflictingPublicationIntent => "conflicting publication intent",
+            Self::RequestUnknown => "runtime request is unknown",
+            Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
+            Self::RequestStateConflict => "runtime request state conflict",
+            Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
             Self::FaultInjected(_) => "runtime fault injected",
             Self::StorageUnavailable => "runtime state unavailable",
@@ -519,6 +602,177 @@ impl RuntimeState {
         })
     }
 
+    /// Atomically reserves a REQUEST-1 identity. Repeating the same identity
+    /// and fingerprint returns the durable record, including terminal replay.
+    pub async fn reserve_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<RequestStatus, RuntimeError> {
+        validate_request_identity(identity)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(status) = request_status_tx(&tx, identity).await? {
+            require_fingerprint(&status, fingerprint)?;
+            tx.commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(status);
+        }
+        tx.execute(
+            "INSERT INTO request_ledger (session_id, request_id, fingerprint, state, terminal_outcome) VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![
+                identity.session_id.to_vec(),
+                identity.request_id.to_vec(),
+                fingerprint.to_vec(),
+                RequestState::Reserved.code()
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestStatus {
+            identity,
+            fingerprint,
+            state: RequestState::Reserved,
+            terminal_outcome: None,
+        })
+    }
+
+    pub async fn start_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request(
+            identity,
+            fingerprint,
+            &[RequestState::Reserved],
+            RequestState::Running,
+            None,
+        )
+        .await
+    }
+
+    pub async fn complete_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request(
+            identity,
+            fingerprint,
+            &[RequestState::Reserved, RequestState::Running],
+            RequestState::Completed,
+            Some(outcome),
+        )
+        .await
+    }
+
+    pub async fn cancel_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request(
+            identity,
+            fingerprint,
+            &[RequestState::Reserved, RequestState::Running],
+            RequestState::Cancelled,
+            Some(outcome),
+        )
+        .await
+    }
+
+    pub async fn orphan_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request(
+            identity,
+            fingerprint,
+            &[RequestState::Running],
+            RequestState::Orphaned,
+            Some(outcome),
+        )
+        .await
+    }
+
+    pub async fn request_status(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<Option<RequestStatus>, RuntimeError> {
+        validate_request_identity(identity)?;
+        let status = request_status_tx(&self.connection, identity).await?;
+        if let Some(status) = &status {
+            require_fingerprint(status, fingerprint)?;
+        }
+        Ok(status)
+    }
+
+    async fn transition_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        allowed: &[RequestState],
+        next: RequestState,
+        terminal_outcome: Option<TerminalOutcome>,
+    ) -> Result<RequestStatus, RuntimeError> {
+        validate_request_identity(identity)?;
+        debug_assert_eq!(next.is_terminal(), terminal_outcome.is_some());
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if !allowed.contains(&current.state) || current.state.is_terminal() {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let outcome_bytes = terminal_outcome
+            .as_ref()
+            .map(|outcome| outcome.as_bytes().to_vec());
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger SET state = ?1, terminal_outcome = ?2 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5 AND state = ?6",
+                params![
+                    next.code(),
+                    outcome_bytes,
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    current.state.code()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestStatus {
+            identity,
+            fingerprint,
+            state: next,
+            terminal_outcome,
+        })
+    }
+
     async fn frozen_intent(&self, intent_id: [u8; 16]) -> Result<Option<Checkpoint>, RuntimeError> {
         let mut rows = self.connection.query("SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest FROM publication_freeze WHERE intent_id = ?1", params![intent_id.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
         let Some(row) = rows
@@ -575,6 +829,21 @@ impl RuntimeState {
                     && checkpoint.digest == capture.generation_digest() => {}
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
+        let mut request_rows = self
+            .connection
+            .query(
+                "SELECT session_id, request_id, fingerprint, state, terminal_outcome FROM request_ledger",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = request_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        }
         Ok(())
     }
 
@@ -597,6 +866,66 @@ impl RuntimeState {
             return Err(RuntimeError::OwnerLost);
         }
         Ok(())
+    }
+}
+
+async fn request_status_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+) -> Result<Option<RequestStatus>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT session_id, request_id, fingerprint, state, terminal_outcome FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
+            params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    rows.next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .map(|row| decode_request_status(&row))
+        .transpose()
+}
+
+fn decode_request_status(row: &libsql::Row) -> Result<RequestStatus, RuntimeError> {
+    let identity = RequestIdentity {
+        session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    };
+    validate_request_identity(identity).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let fingerprint = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let state = match row
+        .get::<i64>(3)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+    {
+        1 => RequestState::Reserved,
+        2 => RequestState::Running,
+        3 => RequestState::Completed,
+        4 => RequestState::Cancelled,
+        5 => RequestState::Orphaned,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let outcome: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let terminal_outcome = outcome
+        .map(TerminalOutcome::new)
+        .transpose()
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if state.is_terminal() != terminal_outcome.is_some() {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(RequestStatus {
+        identity,
+        fingerprint,
+        state,
+        terminal_outcome,
+    })
+}
+
+fn require_fingerprint(status: &RequestStatus, fingerprint: [u8; 32]) -> Result<(), RuntimeError> {
+    if status.fingerprint == fingerprint {
+        Ok(())
+    } else {
+        Err(RuntimeError::RequestFingerprintMismatch)
     }
 }
 
@@ -635,6 +964,10 @@ fn validate_identity(value: RuntimeIdentity) -> Result<(), RuntimeError> {
     validate_id(value.database_id)?;
     validate_id(value.repository_id)
 }
+fn validate_request_identity(value: RequestIdentity) -> Result<(), RuntimeError> {
+    validate_id(value.session_id)?;
+    validate_id(value.request_id)
+}
 fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
     if value == [0; 32] {
         Err(RuntimeError::InvalidDigest)
@@ -671,6 +1004,15 @@ mod tests {
             payload: vec![value],
             digest: digest(value),
         }
+    }
+    fn request(session: u8, request: u8) -> RequestIdentity {
+        RequestIdentity {
+            session_id: id(session),
+            request_id: id(request),
+        }
+    }
+    fn outcome(value: u8) -> TerminalOutcome {
+        TerminalOutcome::new(vec![value]).unwrap()
     }
     fn git(path: &Path, args: &[&str]) {
         assert!(
@@ -894,6 +1236,196 @@ mod tests {
         let reopened = open_state(&repo).await;
         reopened.validate_recovery().await.unwrap();
         assert_eq!(reopened.pending().await.unwrap(), vec![mutation(5)]);
+    }
+    #[tokio::test]
+    async fn duplicate_request_reservation_is_idempotent() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let first = state.reserve_request(identity, digest(6)).await.unwrap();
+
+        assert_eq!(
+            state.reserve_request(identity, digest(6)).await.unwrap(),
+            first
+        );
+        assert_eq!(
+            state.request_status(identity, digest(6)).await.unwrap(),
+            Some(first)
+        );
+    }
+    #[tokio::test]
+    async fn request_fingerprint_mismatch_is_stable() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        state.reserve_request(identity, digest(6)).await.unwrap();
+
+        for error in [
+            state
+                .reserve_request(identity, digest(7))
+                .await
+                .unwrap_err(),
+            state.start_request(identity, digest(7)).await.unwrap_err(),
+            state.request_status(identity, digest(7)).await.unwrap_err(),
+        ] {
+            assert_eq!(error, RuntimeError::RequestFingerprintMismatch);
+            assert_eq!(error.to_string(), "runtime request fingerprint mismatch");
+        }
+        assert_eq!(
+            state
+                .request_status(identity, digest(6))
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+    }
+    #[tokio::test]
+    async fn terminal_request_replays_retained_outcome_after_reopen() {
+        let (_temp, repo) = repository();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let state = open_state(&repo).await;
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state.start_request(identity, fingerprint).await.unwrap();
+        let completed = state
+            .complete_request(identity, fingerprint, outcome(7))
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .reserve_request(identity, fingerprint)
+                .await
+                .unwrap(),
+            completed
+        );
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(completed)
+        );
+    }
+    #[tokio::test]
+    async fn stale_and_terminal_request_mutations_are_rejected() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state.start_request(identity, fingerprint).await.unwrap();
+        assert_eq!(
+            state.start_request(identity, fingerprint).await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        let completed = state
+            .complete_request(identity, fingerprint, outcome(7))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .complete_request(identity, fingerprint, outcome(8))
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state
+                .cancel_request(identity, fingerprint, outcome(8))
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state
+                .orphan_request(identity, fingerprint, outcome(8))
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state.request_status(identity, fingerprint).await.unwrap(),
+            Some(completed)
+        );
+    }
+    #[tokio::test]
+    async fn request_cancellation_is_terminal_and_bounded() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+
+        let cancelled = state
+            .cancel_request(identity, fingerprint, outcome(7))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.state, RequestState::Cancelled);
+        assert_eq!(cancelled.terminal_outcome, Some(outcome(7)));
+        assert_eq!(
+            TerminalOutcome::new(vec![0; MAX_TERMINAL_OUTCOME_BYTES + 1]),
+            Err(RuntimeError::TerminalOutcomeTooLarge)
+        );
+    }
+    #[tokio::test]
+    async fn only_running_requests_can_be_orphaned() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        assert_eq!(
+            state
+                .orphan_request(identity, fingerprint, outcome(7))
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        state.start_request(identity, fingerprint).await.unwrap();
+
+        let orphaned = state
+            .orphan_request(identity, fingerprint, outcome(7))
+            .await
+            .unwrap();
+        assert_eq!(orphaned.state, RequestState::Orphaned);
+        assert_eq!(orphaned.terminal_outcome, Some(outcome(7)));
+    }
+    #[tokio::test]
+    async fn recovery_rejects_malformed_request_ledger_state() {
+        let (_temp, repo) = repository();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let state = open_state(&repo).await;
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE request_ledger SET state = 3, terminal_outcome = NULL;
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        drop(state);
+
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
     #[tokio::test]
     async fn worktrees_resolve_isolated_runtime_databases() {
