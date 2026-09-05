@@ -19,6 +19,26 @@ fn scenario(id: &str) -> Scenario {
 }
 
 #[test]
+fn pipeline_precedence_checks_all_three_parse_and_execution_obligations() {
+    let outcome = BoundedEvaluator::default().run_scenario(&scenario("PIPE-002"));
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    let mut runtime = BoundedEvaluator::new(Limits {
+        max_steps: 1,
+        ..Limits::default()
+    });
+    assert!(matches!(
+        runtime.run_scenario(&scenario("PIPE-002")),
+        StageOutcome::Failed(_)
+    ));
+    let mut changed = scenario("PIPE-002");
+    changed.then.push("an additional precedence rule".into());
+    assert!(matches!(
+        BoundedEvaluator::default().run_scenario(&changed),
+        StageOutcome::Skipped { .. }
+    ));
+}
+
+#[test]
 fn pipeline_insertion_executes_ordinary_function_argument_order() {
     let outcome = BoundedEvaluator::default().run_scenario(&scenario("PIPE-001"));
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -98,7 +118,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .map(|scenario| scenario.scenario.as_str())
             .collect::<Vec<_>>(),
-        ["LET-REBIND-091", "PIPE-001"]
+        ["LET-REBIND-091", "PIPE-001", "PIPE-002"]
     );
     assert_eq!(
         report
@@ -106,6 +126,6 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .filter(|scenario| scenario.status == EvidenceStatus::Skipped)
             .count(),
-        142
+        141
     );
 }
