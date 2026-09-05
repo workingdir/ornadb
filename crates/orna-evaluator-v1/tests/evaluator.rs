@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
-    Environment, EvaluationError, Limits, evaluate_expression, evaluate_function, evaluate_parsed,
-    evaluate_repl,
+    EffectHandler, Environment, EvaluationError, Limits, evaluate_expression, evaluate_function,
+    evaluate_parsed, evaluate_repl, invoke_named, invoke_named_with_effects,
 };
 use orna_syntax_v1::{Expr, Pattern, RecordField, Statement, SyntaxSpan};
 use orna_value_v1::{Raw, Value};
@@ -65,6 +65,31 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
         &functions,
         limits,
     )
+}
+
+#[derive(Default)]
+struct NoteEffects {
+    calls: Vec<Vec<Value>>,
+}
+
+impl EffectHandler for NoteEffects {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        let Expr::Field { base, name, .. } = callee else {
+            return Ok(None);
+        };
+        let Expr::Name { text, .. } = base.as_ref() else {
+            return Ok(None);
+        };
+        if text != "Note" || name != "insert" {
+            return Ok(None);
+        }
+        self.calls.push(arguments.to_vec());
+        Ok(Some(Value::int(arguments.len().into())))
+    }
 }
 
 #[test]
@@ -169,6 +194,62 @@ fn host_invocation_uses_the_same_named_function_namespace() {
             &functions,
             &Environment::new(),
             Limits::default()
+        )),
+        "ORNA-EVAL-NAME"
+    );
+}
+
+#[test]
+fn effect_handler_runs_for_a_nested_non_pure_field_call_with_once_evaluated_arguments() {
+    let functions = functions_from_source(
+        "fn child(value: Int) = Note.insert(value); fn entry() { let counter = 0; child(if true { counter += 1; counter } else { 0 }); counter }",
+    );
+    let mut effects = NoteEffects::default();
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        Value::int(1.into())
+    );
+    assert_eq!(effects.calls, vec![vec![Value::int(1.into())]]);
+}
+
+#[test]
+fn effect_handler_none_falls_through_without_intercepting_pure_calls() {
+    let functions =
+        functions_from_source("fn helper(value: Int) = value + 1; fn entry() = helper(41);");
+    let mut effects = NoteEffects::default();
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        Value::int(42.into())
+    );
+    assert!(effects.calls.is_empty());
+}
+
+#[test]
+fn invoke_named_remains_effect_free_for_non_pure_field_calls() {
+    let functions = functions_from_source("fn entry() = Note.insert(1);");
+
+    assert_eq!(
+        code(invoke_named(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
         )),
         "ORNA-EVAL-NAME"
     );
