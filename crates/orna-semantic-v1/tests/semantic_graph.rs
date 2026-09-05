@@ -321,6 +321,28 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
 }
 
 #[test]
+fn authoritative_core_types_locale_aware_money_pipeline() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "receipt.orna",
+            "pub fn receipt_total(total: Money<GBP>, locale: Locale): Str = total | std.money.format(locale: locale);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let wrong_input = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "receipt.orna",
+            "pub fn receipt_total(total: Int, locale: Locale): Str = total | std.money.format(locale: locale);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&wrong_input, DIAG_TYPE));
+}
+
+#[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
     let result = analyze(&[ModuleInput::new(
         "units.orna",

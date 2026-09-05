@@ -333,6 +333,29 @@ impl Catalogue {
             );
         }
         modules.insert(
+            Namespace(vec!["std".into(), "money".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "money".into()]),
+                [(
+                    "format",
+                    named_function(
+                        vec![
+                            (
+                                "value",
+                                Type::Applied {
+                                    base: "Money".into(),
+                                    arguments: vec![Type::Error],
+                                },
+                            ),
+                            ("locale", Type::Named("Locale".into())),
+                        ],
+                        Type::Text,
+                    ),
+                )],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
             Namespace(vec!["std".into(), "terminal".into()]),
             catalogue_module(
                 Namespace(vec!["std".into(), "terminal".into()]),
@@ -2647,7 +2670,7 @@ fn infer_named_pipeline_stage(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if !matches!(callee, Expr::Name { .. }) {
+    if qualified_path(callee).is_none() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "pipeline stage must be a named callable",
@@ -2667,18 +2690,10 @@ fn infer_named_pipeline_stage(
         effects.join(&value.effects);
         values.push(value.ty);
     }
-    if arguments.iter().any(|argument| argument.name.is_some()) {
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "pipeline callable arguments must be positional in this semantic slice",
-        ));
-        return Inferred {
-            ty: Type::Error,
-            effects,
-        };
-    }
     let Type::Function {
-        parameters, result, ..
+        parameters,
+        parameter_names,
+        result,
     } = callee.ty
     else {
         diagnostics.push(diag(
@@ -2690,18 +2705,89 @@ fn infer_named_pipeline_stage(
             effects,
         };
     };
-    if parameters.len() != values.len() {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "function argument count does not match its static signature",
-        ));
-    }
-    for (expected, actual) in parameters.iter().zip(&values) {
-        require_same(expected, actual, diagnostics);
-    }
+    check_pipeline_arguments(
+        &parameters,
+        parameter_names.as_deref(),
+        &values,
+        arguments,
+        diagnostics,
+    );
     Inferred {
         ty: *result,
         effects,
+    }
+}
+
+fn check_pipeline_arguments(
+    parameters: &[Type],
+    parameter_names: Option<&[String]>,
+    values: &[Type],
+    arguments: &[orna_syntax_v1::Argument],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(parameter_names) = parameter_names.filter(|names| names.len() == parameters.len())
+    else {
+        if arguments.iter().any(|argument| argument.name.is_some()) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "named arguments require declared parameter names",
+            ));
+        } else {
+            if parameters.len() != values.len() {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "function argument count does not match its static signature",
+                ));
+            }
+            for (expected, actual) in parameters.iter().zip(values) {
+                require_same(expected, actual, diagnostics);
+            }
+        }
+        return;
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut malformed = parameters.len() != values.len();
+    if let Some((expected, actual)) = parameters.first().zip(values.first()) {
+        seen.insert(0);
+        require_same(expected, actual, diagnostics);
+    } else {
+        malformed = true;
+    }
+    let mut positional = 1usize;
+    let mut named_started = false;
+    for (argument, actual) in arguments.iter().zip(values.iter().skip(1)) {
+        let index = if let Some(name) = argument.name.as_deref() {
+            named_started = true;
+            parameter_names
+                .iter()
+                .position(|parameter| parameter == name)
+        } else if named_started {
+            malformed = true;
+            None
+        } else {
+            let index = (positional < parameters.len()).then_some(positional);
+            positional += 1;
+            index
+        };
+        let Some(index) = index else {
+            malformed = true;
+            continue;
+        };
+        if !seen.insert(index) {
+            malformed = true;
+            continue;
+        }
+        require_same(&parameters[index], actual, diagnostics);
+    }
+    if seen.len() != parameters.len() {
+        malformed = true;
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "named function arguments do not match its static signature",
+        ));
     }
 }
 
@@ -2934,6 +3020,23 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         return true;
     }
     match (expected, actual) {
+        (
+            Type::Applied {
+                base: expected_base,
+                arguments: expected_arguments,
+            },
+            Type::Applied {
+                base: actual_base,
+                arguments: actual_arguments,
+            },
+        ) if expected_base == "Money"
+            && actual_base == "Money"
+            && expected_arguments.len() == 1
+            && actual_arguments.len() == 1
+            && expected_arguments.first() == Some(&Type::Error) =>
+        {
+            true
+        }
         (
             Type::Applied {
                 base: expected_base,
