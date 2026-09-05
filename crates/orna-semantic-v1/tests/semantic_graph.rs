@@ -72,6 +72,44 @@ fn qualified_module_member_calls_resolve_only_public_imported_exports() {
 }
 
 #[test]
+fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
+    let result = analyze(&[
+        ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
+        ModuleInput::new(
+            "main.orna",
+            r#"
+                use library;
+                table Stock(id: Str) { quantity: Int, }
+                table Reading(id: Str) { value: Int, }
+                fn seed() {
+                    library.Book.insert({ id: "book-1", title: "The Night Garden" });
+                    Stock.insert({ id: "north", quantity: 12 });
+                    Stock.update("north", { quantity: 9 });
+                    Reading.delete("sample-1");
+                }
+                fn read() = Stock.one();
+                fn first() = Reading.first();
+                fn count(): Int = Reading.count();
+            "#,
+        ),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let wrong_arity = analyze(&[ModuleInput::new(
+        "books.orna",
+        "pub table Book(id: Str) { title: Str, } fn bad() = Book.delete();",
+    )]);
+    assert!(has(&wrong_arity, "ORNA-S021-TYPE"));
+
+    let non_table = analyze(&[ModuleInput::new(
+        "books.orna",
+        "type Book; fn bad() = Book.insert({ id: \"book-1\" });",
+    )]);
+    assert!(has(&non_table, "ORNA-S021-TYPE"));
+}
+
+#[test]
 fn table_assertion_rejects_authoritative_std_net_effect() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(

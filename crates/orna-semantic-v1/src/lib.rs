@@ -1116,6 +1116,11 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if let Some(inferred) =
+                infer_table_operation(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
             let intrinsic = intrinsic_call_effects(callee);
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
@@ -1193,6 +1198,10 @@ fn infer(
                         effects.join(&x.effects);
                         require_same(&Type::Bool, &x.ty, diagnostics);
                     }
+                    Statement::Expression { value, .. } => {
+                        let x = infer(value, scope, &locals, diagnostics);
+                        effects.join(&x.effects);
+                    }
                     _ => diagnostics.push(diag(
                         DIAG_UNSUPPORTED,
                         "control or assignment statement is outside this semantic slice",
@@ -1222,6 +1231,90 @@ fn infer(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+/// Resolves the small, intrinsic associated-operation surface of a table.
+///
+/// This deliberately runs only for call expressions: a table is still a
+/// relation value in every other expression, and ordinary record field access
+/// keeps its existing diagnostics.  The row-shape and mutation execution
+/// contracts remain runtime concerns outside this read-only semantic slice.
+fn infer_table_operation(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = callee else {
+        return None;
+    };
+    let table = table_symbol(base, scope, local)?;
+    let (parameters, result, effect) = match name.as_str() {
+        "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
+        "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
+        "delete" => (1, Type::Null, Some("database write")),
+        "count" => (0, Type::Int, Some("database read")),
+        "first" => (
+            0,
+            Type::Named(format!("Optional<{:?}>", table.ty)),
+            Some("database read"),
+        ),
+        "one" => (0, table.ty.clone(), Some("database read")),
+        "as_of" => (1, table.ty.clone(), Some("database read")),
+        _ => return None,
+    };
+    if arguments.len() != parameters {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "table operation argument count does not match its static signature",
+        ));
+    }
+    let mut effects = EffectSummary {
+        effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
+        may_fail: true,
+    };
+    for argument in arguments {
+        effects.join(&infer(&argument.value, scope, local, diagnostics).effects);
+    }
+    Some(Inferred {
+        ty: result,
+        effects,
+    })
+}
+
+fn table_symbol<'a>(
+    expr: &Expr,
+    scope: &'a Scope,
+    local: &'a BTreeMap<String, Symbol>,
+) -> Option<&'a Symbol> {
+    match expr {
+        Expr::Name { text, .. } => local
+            .get(text)
+            .or_else(|| scope.names.get(text))
+            .filter(|symbol| symbol.kind == SymbolKind::Table),
+        Expr::Field { .. } => {
+            let path = qualified_path(expr)?;
+            let root = scope.modules.get(path[0])?;
+            let namespace = Namespace(
+                root.0
+                    .iter()
+                    .cloned()
+                    .chain(
+                        path[1..path.len() - 1]
+                            .iter()
+                            .map(|part| (*part).to_owned()),
+                    )
+                    .collect(),
+            );
+            scope
+                .available_modules
+                .get(&namespace)
+                .and_then(|module| module.exports.get(path[path.len() - 1]))
+                .filter(|symbol| symbol.kind == SymbolKind::Table)
+        }
+        _ => None,
     }
 }
 
