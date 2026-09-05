@@ -6,7 +6,7 @@
 //! their parent's writes but cannot publish independently. Only the root
 //! [`Activation`] can publish its overlay.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::RangeBounds};
 
 /// The committed relation for one table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +69,21 @@ where
     /// Scans committed rows in ascending canonical key order.
     pub fn scan(&self) -> impl Iterator<Item = (&Key, &Row)> {
         self.committed.iter()
+    }
+
+    /// Observes at most `limit` committed rows without materialising the
+    /// complete relation.
+    pub fn scan_window(&self, limit: usize) -> impl Iterator<Item = (&Key, &Row)> {
+        self.scan().take(limit)
+    }
+
+    /// Scans a canonical key range in ascending order without materialising
+    /// rows outside the requested bounds.
+    pub fn scan_range<R>(&self, range: R) -> impl Iterator<Item = (&Key, &Row)>
+    where
+        R: RangeBounds<Key>,
+    {
+        self.committed.range(range)
     }
 }
 
@@ -330,6 +345,30 @@ where
             .get(table)
             .into_iter()
             .flat_map(BTreeMap::iter)
+    }
+
+    /// Observes at most `limit` rows from one committed relation.
+    pub fn scan_window(
+        &self,
+        table: &Table,
+        limit: usize,
+    ) -> impl Iterator<Item = (&Key, &Row)> + '_ {
+        self.scan(table).take(limit)
+    }
+
+    /// Scans one committed relation over a canonical key range.
+    pub fn scan_range<'a, R>(
+        &'a self,
+        table: &Table,
+        range: R,
+    ) -> impl Iterator<Item = (&'a Key, &'a Row)> + 'a
+    where
+        R: Clone + RangeBounds<Key> + 'a,
+    {
+        self.committed
+            .get(table)
+            .into_iter()
+            .flat_map(move |relation| relation.range(range.clone()))
     }
 }
 
@@ -720,5 +759,33 @@ mod tests {
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         assert_eq!(keys, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn bounded_and_range_scans_preserve_canonical_order() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                for key in [1, 2, 3, 4] {
+                    activation.insert("notes", key, "note")?;
+                }
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            database
+                .scan_window(&"notes", 2)
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            database
+                .scan_range(&"notes", 2..=3)
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
     }
 }
