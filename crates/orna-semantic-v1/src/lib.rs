@@ -77,6 +77,9 @@ pub enum Type {
     Bool,
     Null,
     List(Box<Type>),
+    /// A bounded numeric range.  This semantic-only value retains its bound
+    /// type without constructing an iterator or admitting generic ranges.
+    Range(Box<Type>),
     /// A composable table/query value. This is a semantic summary only; it
     /// neither enumerates rows nor constructs a runtime query plan.
     Relation(Box<Type>),
@@ -1340,6 +1343,31 @@ fn infer(
             let right = infer(rhs, scope, local, diagnostics);
             let mut effects = left.effects;
             effects.join(&right.effects);
+            if matches!(op.as_str(), ".." | "..=") {
+                let ty = if left.ty == right.ty && is_numeric_range_bound(&left.ty) {
+                    Type::Range(Box::new(left.ty))
+                } else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "range bounds must have the same numeric type",
+                    ));
+                    Type::Error
+                };
+                return Inferred { ty, effects };
+            }
+            if op == "in" {
+                let ty = match &right.ty {
+                    Type::Range(element) => {
+                        require_same(element, &left.ty, diagnostics);
+                        Type::Bool
+                    }
+                    _ => {
+                        diagnostics.push(diag(DIAG_TYPE, "membership requires a numeric range"));
+                        Type::Error
+                    }
+                };
+                return Inferred { ty, effects };
+            }
             if op == "??" {
                 let ty = match (&left.ty, &right.ty) {
                     (Type::Optional(_), Type::Error) | (Type::Error, _) => Type::Error,
@@ -2076,6 +2104,31 @@ fn infer_success_pipeline(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let input = infer(lhs, scope, local, diagnostics);
+    if let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+        && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "take")
+        && let Type::List(element) = &input.ty
+    {
+        let mut effects = input.effects;
+        let ty = match arguments.as_slice() {
+            [argument] if argument.name.is_none() => {
+                let range = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&range.effects);
+                if range.ty == Type::Range(Box::new(Type::Int)) {
+                    Type::List(element.clone())
+                } else {
+                    diagnostics.push(diag(DIAG_TYPE, "take requires an integer range"));
+                    Type::Error
+                }
+            }
+            _ => {
+                diagnostics.push(diag(DIAG_TYPE, "take requires one integer range"));
+                Type::Error
+            }
+        };
+        return Inferred { ty, effects };
+    }
     if let Expr::Name { text, .. } = rhs
         && let Type::List(element) = &input.ty
         && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
@@ -2152,6 +2205,10 @@ fn infer_success_pipeline(
         effects.may_fail = true;
     }
     Inferred { ty, effects }
+}
+
+fn is_numeric_range_bound(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float)
 }
 
 /// Applies the closed affine-absolute aggregation matrix from the core

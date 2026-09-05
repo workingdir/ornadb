@@ -282,6 +282,39 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
 }
 
 #[test]
+fn authoritative_ranges_fixture_accepts_only_numeric_membership_and_list_take() {
+    let result = analyze(&[ModuleInput::new(
+        "ranges.orna",
+        r#"
+            pub fn inside(value: Int) = value in 1..=5;
+            pub fn first_ten(values: [Int]) = values | take(0..10);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().unwrap();
+    assert!(matches!(
+        &module.symbols["inside"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Bool
+    ));
+    assert!(matches!(
+        &module.symbols["first_ten"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+
+    let invalid = analyze(&[
+        ModuleInput::new("text-range.orna", "fn bad() = \"a\"..\"z\";"),
+        ModuleInput::new(
+            "table-take.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | take(0..10);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE));
+    assert!(has(&invalid, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn affine_collection_aggregates_preserve_absolute_values_and_reject_sum() {
     let valid = analyze(&[
         ModuleInput::new(
