@@ -258,6 +258,10 @@ pub enum InvocationResult<T> {
     Orphaned(Option<Diagnostic>),
 }
 
+pub trait InvocationExecutor {
+    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue>;
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct RetainedValue {
     static_type: TypeId,
@@ -421,6 +425,26 @@ impl Runtime {
             handle: self.handle(&invocation, request.witness.static_type().clone()),
             boundary: Box::new(boundary),
         })
+    }
+    /// Runs one newly admitted synchronous invocation through the supplied
+    /// execution boundary. Existing active and terminal idempotency records
+    /// never execute the callback a second time.
+    pub fn run<T, E>(
+        &mut self,
+        request: AdmissionRequest<T>,
+        executor: &mut E,
+    ) -> Result<InvocationState, AdmissionError>
+    where
+        E: InvocationExecutor,
+    {
+        match self.admit(request)? {
+            Admission::New { boundary, handle } => {
+                self.retain_terminal(&handle, executor.execute(&boundary))?;
+                self.invocation_state(&handle)
+            }
+            Admission::Active { .. } => Ok(InvocationState::Active),
+            Admission::Terminal { result, .. } => Ok(InvocationState::Terminal(result)),
+        }
     }
     pub fn classify_terminal<T>(
         &mut self,
@@ -807,6 +831,16 @@ mod tests {
     fn args(entries: Vec<Argument>) -> ArgumentMap {
         ArgumentMap::new(entries).unwrap()
     }
+    struct Executor {
+        calls: usize,
+        result: InvocationResult<TypedValue>,
+    }
+    impl InvocationExecutor for Executor {
+        fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+            self.calls += 1;
+            self.result.clone()
+        }
+    }
     fn diagnostic(code: &'static str) -> Diagnostic {
         Diagnostic {
             code,
@@ -964,6 +998,54 @@ mod tests {
             runtime.admit(conflict),
             Err(AdmissionError::IdempotencyMismatch)
         ));
+    }
+    #[test]
+    fn run_executes_new_idempotent_work_once_and_replays_terminal_state() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let mut first = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "answer")),
+        };
+        assert!(matches!(
+            runtime.run(request.clone(), &mut first),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(_)
+            ))
+        ));
+        assert_eq!(first.calls, 1);
+
+        let mut replay = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "wrong")),
+        };
+        assert!(matches!(
+            runtime.run(request, &mut replay),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Success(ref retained)
+            )) if retained.canonical() == Some(b"answer".as_slice())
+        ));
+        assert_eq!(replay.calls, 0);
+    }
+    #[test]
+    fn run_retains_cancellation_as_a_terminal_classification() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut executor = Executor {
+            calls: 0,
+            result: InvocationResult::Cancelled(Some(diagnostic("cancelled"))),
+        };
+        let state = runtime.run(
+            request(Some(value("Int", "1")), ArgumentMap::default()),
+            &mut executor,
+        );
+        assert!(matches!(
+            state,
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Cancelled(Some(_))
+            ))
+        ));
+        assert_eq!(executor.calls, 1);
     }
     #[test]
     fn fences_foreign_and_stale_handles() {
