@@ -91,6 +91,8 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
     for fixture_id in [
+        "invalid/unknown-field.orna",
+        "invalid/wrong-field-type.orna",
         "invalid/affine-addition.orna",
         "invalid/affine-sum.orna",
         "invalid/currency-addition.orna",
