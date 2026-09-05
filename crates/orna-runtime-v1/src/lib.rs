@@ -27,6 +27,7 @@ use orna_stream_v1::{
     DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
     RejectReason, ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const SCHEMA: &str = r#"
@@ -348,6 +349,30 @@ pub struct StreamReplayCommit<'a> {
     pub next_digest: [u8; 32],
     pub grant: ReplayGrant,
     pub faults: &'a dyn FaultInjector,
+}
+
+/// Connector-owned refetch for a protected failed-delivery reference.
+///
+/// The runtime supplies the opaque reference only to this callback. Returned
+/// bytes are accepted only after the runtime verifies the durable digest;
+/// provider errors are intentionally collapsed into a secret-free retry
+/// diagnostic.
+pub type StreamFailurePayloadFuture<'a, E> = Pin<Box<dyn Future<Output = Result<Vec<u8>, E>> + 'a>>;
+
+pub trait StreamFailurePayloadProvider {
+    type Error;
+
+    fn refetch<'a>(&'a self, reference: &'a str) -> StreamFailurePayloadFuture<'a, Self::Error>;
+}
+
+struct NoStreamFailurePayloadProvider;
+
+impl StreamFailurePayloadProvider for NoStreamFailurePayloadProvider {
+    type Error = ();
+
+    fn refetch<'a>(&'a self, _: &'a str) -> StreamFailurePayloadFuture<'a, Self::Error> {
+        Box::pin(async { Err(()) })
+    }
 }
 
 /// A provider result for one scheduler turn. Provider-specific positions stay
@@ -1668,6 +1693,44 @@ impl RuntimeState {
     where
         H: StreamHandler,
     {
+        self.replay_stream_failure_inner(
+            writer,
+            grant,
+            None::<&NoStreamFailurePayloadProvider>,
+            handler,
+        )
+        .await
+    }
+
+    /// Executes one replay grant with connector-owned refetch for protected
+    /// payload references. The runtime verifies the fetched bytes before the
+    /// handler sees them and leaves a failed refetch explicitly skipped.
+    pub async fn replay_stream_failure_with_provider<P, H>(
+        &self,
+        writer: WriterLease,
+        grant: ReplayGrant,
+        provider: &P,
+        handler: &mut H,
+    ) -> Result<CommitResult, StreamStepError>
+    where
+        P: StreamFailurePayloadProvider + ?Sized,
+        H: StreamHandler,
+    {
+        self.replay_stream_failure_inner(writer, grant, Some(provider), handler)
+            .await
+    }
+
+    async fn replay_stream_failure_inner<P, H>(
+        &self,
+        writer: WriterLease,
+        grant: ReplayGrant,
+        provider: Option<&P>,
+        handler: &mut H,
+    ) -> Result<CommitResult, StreamStepError>
+    where
+        P: StreamFailurePayloadProvider + ?Sized,
+        H: StreamHandler,
+    {
         self.require_owner(&self.connection, writer)
             .await
             .map_err(StreamStepError::Runtime)?;
@@ -1680,18 +1743,59 @@ impl RuntimeState {
                 retention: 1,
                 ..
             }) => payload,
-            Some(StoredStreamFailurePayload { retention: 2, .. }) => {
-                return self
-                    .fail_stream_replay(
-                        writer,
-                        &grant,
-                        SafeDiagnostic {
-                            code: DiagnosticCode::ProviderUnavailable,
-                            class: DiagnosticClass::Transient,
-                        },
-                    )
-                    .await
-                    .map_err(StreamStepError::Runtime);
+            Some(StoredStreamFailurePayload {
+                payload: None,
+                reference: Some(reference),
+                digest: Some(digest),
+                retention: 2,
+            }) => {
+                let Some(provider) = provider else {
+                    return self
+                        .fail_stream_replay(
+                            writer,
+                            &grant,
+                            SafeDiagnostic {
+                                code: DiagnosticCode::ProviderUnavailable,
+                                class: DiagnosticClass::Transient,
+                            },
+                        )
+                        .await
+                        .map_err(StreamStepError::Runtime);
+                };
+                let expected_digest: [u8; 32] = digest
+                    .try_into()
+                    .map_err(|_| StreamStepError::Runtime(RuntimeError::RecoveryInvalid))?;
+                let payload = match provider.refetch(&reference).await {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        return self
+                            .fail_stream_replay(
+                                writer,
+                                &grant,
+                                SafeDiagnostic {
+                                    code: DiagnosticCode::ProviderUnavailable,
+                                    class: DiagnosticClass::Transient,
+                                },
+                            )
+                            .await
+                            .map_err(StreamStepError::Runtime);
+                    }
+                };
+                let actual_digest: [u8; 32] = Sha256::digest(&payload).into();
+                if actual_digest != expected_digest {
+                    return self
+                        .fail_stream_replay(
+                            writer,
+                            &grant,
+                            SafeDiagnostic {
+                                code: DiagnosticCode::Internal,
+                                class: DiagnosticClass::Permanent,
+                            },
+                        )
+                        .await
+                        .map_err(StreamStepError::Runtime);
+                }
+                payload
             }
             Some(_) | None => {
                 return self
@@ -2412,6 +2516,23 @@ impl RuntimeStreamBackend<'_> {
     {
         self.state
             .replay_stream_failure(self.lease, grant, handler)
+            .await
+    }
+
+    /// Replays one granted failure, allowing its connector to refetch a
+    /// protected payload reference after runtime digest verification.
+    pub async fn replay_async_with_provider<P, H>(
+        &self,
+        grant: ReplayGrant,
+        provider: &P,
+        handler: &mut H,
+    ) -> Result<CommitResult, StreamStepError>
+    where
+        P: StreamFailurePayloadProvider + ?Sized,
+        H: StreamHandler,
+    {
+        self.state
+            .replay_stream_failure_with_provider(self.lease, grant, provider, handler)
             .await
     }
 
@@ -3965,6 +4086,91 @@ mod tests {
         }
     }
 
+    async fn protected_replay_fixture(
+        state: &RuntimeState,
+        writer: WriterLease,
+        label: &str,
+        payload_digest: [u8; 32],
+    ) -> (ReplayGrant, StreamCheckpoint, DeliveryIdentity) {
+        let delivery = stream_delivery(label, &format!("{label}-next"));
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected delivery lease: {other:?}"),
+        };
+        let failure = match stream
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::ProtectedReference {
+                    reference: "opaque-ref".into(),
+                    digest: payload_digest,
+                },
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip lease: {other:?}"),
+        };
+        let checkpoint = match stream
+            .apply_async(CommitIntent::Skip {
+                lease: skip_lease,
+                expected,
+                expected_failure_version: failure.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected skip result: {other:?}"),
+        };
+        let skipped = stream
+            .failure_async(&failure.identity)
+            .await
+            .unwrap()
+            .expect("skipped failure");
+        let grant = match stream
+            .apply_async(CommitIntent::Replay {
+                failure: failure.identity,
+                expected_version: skipped.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::ReplayGranted { grant } => grant,
+            other => panic!("unexpected replay grant: {other:?}"),
+        };
+        (grant, checkpoint, delivery)
+    }
+
     struct TestSource {
         key: CheckpointKey,
         item: Option<StreamItem>,
@@ -4199,6 +4405,21 @@ mod tests {
             self.result
                 .take()
                 .expect("replay handler result is configured")
+        }
+    }
+
+    struct ReplayProvider {
+        payload: Vec<u8>,
+    }
+
+    impl StreamFailurePayloadProvider for ReplayProvider {
+        type Error = ();
+
+        fn refetch<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Self::Error>> + 'a>> {
+            Box::pin(ready(Ok(self.payload.clone())))
         }
     }
 
@@ -6530,6 +6751,99 @@ mod tests {
             SafeDiagnostic {
                 code: DiagnosticCode::ProviderUnavailable,
                 class: DiagnosticClass::Transient,
+            }
+        );
+        assert!(handler.payload.is_empty());
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_reference_provider_replay_verifies_and_executes_payload() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let payload = b"refetched-payload".to_vec();
+        let payload_digest: [u8; 32] = Sha256::digest(&payload).into();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "replay-provider", payload_digest).await;
+        let provider = ReplayProvider {
+            payload: payload.clone(),
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(13)],
+                next_digest: digest(14),
+            })),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async_with_provider(grant, &provider, &mut handler)
+            .await
+            .unwrap();
+        let replayed = match result {
+            CommitResult::ReplayCompleted { failure } => failure,
+            other => panic!("unexpected provider replay result: {other:?}"),
+        };
+        assert_eq!(replayed.status, FailureStatus::Replayed);
+        assert_eq!(handler.payload, payload);
+        assert_eq!(state.pending().await.unwrap(), vec![mutation(13)]);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_reference_provider_digest_mismatch_fails_closed() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let expected_payload = b"expected-payload".to_vec();
+        let payload_digest: [u8; 32] = Sha256::digest(&expected_payload).into();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "replay-tampered", payload_digest).await;
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(15)],
+                next_digest: digest(16),
+            })),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async_with_provider(
+                grant,
+                &ReplayProvider {
+                    payload: b"tampered-payload".to_vec(),
+                },
+                &mut handler,
+            )
+            .await
+            .unwrap();
+        let failed = match result {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected tampered replay result: {other:?}"),
+        };
+        assert_eq!(failed.status, FailureStatus::Skipped);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(
+            failed.diagnostic,
+            SafeDiagnostic {
+                code: DiagnosticCode::Internal,
+                class: DiagnosticClass::Permanent,
             }
         );
         assert!(handler.payload.is_empty());
