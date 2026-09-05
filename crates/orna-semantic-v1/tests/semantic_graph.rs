@@ -496,6 +496,26 @@ fn secret_values_reject_display_after_authoritative_open() {
 }
 
 #[test]
+fn computed_fields_reject_effectful_initializers() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "contact.orna",
+            r#"
+                pub table Contact(id: Str) {
+                    name: Str,
+                    remote: Str => std.net.http.get("https://example.com"),
+                }
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "computed field must be deterministic and row-local"
+    }));
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
