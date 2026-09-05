@@ -2,11 +2,12 @@
 
 use std::{fs, io::Write, os::unix::fs::OpenOptionsExt};
 
+#[cfg(test)]
+use orna_compiler::{CheckedClientBodyKind, CheckedFunctionId};
 use orna_compiler::{
     NewApplicationCheckError, check_new_application, check_standard_library_source,
 };
-#[cfg(test)]
-use orna_compiler::{CheckedClientBodyKind, CheckedFunctionId};
+use orna_core::source::{SourceBundle, SourceUnit};
 #[cfg(test)]
 use orna_core::system::{
     SYS_INSPECT_CALLS_FUNCTION_ID, SYS_INSPECT_CALLS_TYPE_ID,
@@ -19,7 +20,6 @@ use orna_core::system::{
     SYS_INSPECT_STATE_CELLS_FUNCTION_ID, SYS_INSPECT_STATE_CELLS_TYPE_ID,
     SYS_INSPECT_UI_NODES_FUNCTION_ID, SYS_INSPECT_UI_NODES_TYPE_ID,
 };
-use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::retained_standard_library_v11_snapshot;
 use orna_standard::verify_standard_library_v11_snapshot;
 
@@ -114,7 +114,10 @@ mod tests {
             .client_functions()
             .find(|function| function.name().to_string() == "inspector_app.inspector_renderer")
             .expect("client Inspector renderer function is missing");
-        assert_eq!(renderer.body_kind(), CheckedClientBodyKind::ExternalContract);
+        assert_eq!(
+            renderer.body_kind(),
+            CheckedClientBodyKind::ExternalContract
+        );
         let expected_carriers = [
             ("p_snapshot", SYS_INSPECT_SNAPSHOT_TYPE_ID),
             ("p_invocation_nodes", SYS_INSPECT_INVOCATION_NODES_TYPE_ID),
@@ -138,8 +141,8 @@ mod tests {
             assert_eq!(
                 parameter
                     .resolved_type()
-                    .value()
-                    .map(|value| value.type_id()),
+                    .named_type()
+                    .and_then(|id| id.existing()),
                 Some(type_id)
             );
         }
