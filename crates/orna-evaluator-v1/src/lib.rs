@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    rc::Rc,
 };
 
 use num_bigint::{BigInt, Sign};
@@ -169,7 +170,8 @@ pub fn evaluate_function(
         functions: &functions,
     };
     let supplied = Scope::from_environment(arguments, &mut context)?;
-    invoke_pure(&mut context, parameters, body, environment, supplied, 0).and_then(Value::canonical)
+    let captured = Scope::from_environment(environment, &mut context)?;
+    invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
 }
 
 /// Invoke an admitted named function with canonical host-provided arguments.
@@ -189,11 +191,12 @@ pub fn invoke_named(
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = Scope::from_environment(arguments, &mut context)?;
+    let captured = Scope::from_environment(&function.environment, &mut context)?;
     invoke_pure(
         &mut context,
         &function.parameters,
         &function.body,
-        &function.environment,
+        captured,
         supplied,
         0,
     )
@@ -204,7 +207,7 @@ fn invoke_pure(
     context: &mut Context,
     parameters: &[Parameter],
     body: &Expr,
-    environment: &Environment,
+    mut scope: Scope,
     supplied: Scope,
     depth: usize,
 ) -> Result<Value, EvaluationError> {
@@ -228,7 +231,6 @@ fn invoke_pure(
     if supplied.0.keys().any(|name| !names.contains(name.as_str())) {
         return Err(error("ORNA-EVAL-ARGUMENT"));
     }
-    let mut scope = Scope::from_environment(environment, context)?;
     for parameter in parameters {
         let Pattern::Name(name, _) = &parameter.pattern else {
             unreachable!("parameter patterns were admitted above");
@@ -246,6 +248,7 @@ fn invoke_pure(
             )?
         };
         scope.0.insert(name.clone(), value);
+        scope.1.remove(name);
         context.items(scope.0.len())?;
     }
     context.evaluate(body, &mut scope, depth)
@@ -309,6 +312,15 @@ enum Value {
         payload: Option<Box<Value>>,
     },
     Option(Option<Box<Value>>),
+    Function(String),
+    Closure(Rc<Closure>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Closure {
+    parameters: Vec<Parameter>,
+    body: Expr,
+    captured: Scope,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -400,11 +412,26 @@ impl DecimalValue {
 }
 
 impl Value {
-    fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
-        CanonicalValue::new(self.raw()).map_err(|_| error("ORNA-EVAL-VALUE"))
-    }
-    fn raw(self) -> Raw {
+    fn contains_callable(&self) -> bool {
         match self {
+            Self::Function(_) | Self::Closure(_) => true,
+            Self::List(values) | Self::Tuple(values) => values.iter().any(Self::contains_callable),
+            Self::Record(values) => values.values().any(Self::contains_callable),
+            Self::NominalRecord { fields, .. } => {
+                fields.iter().any(|(_, value)| value.contains_callable())
+            }
+            Self::Enum { payload, .. } | Self::Option(payload) => payload
+                .as_ref()
+                .is_some_and(|value| value.contains_callable()),
+            _ => false,
+        }
+    }
+    fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
+        CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+    fn raw(self) -> Result<Raw, EvaluationError> {
+        Ok(match self {
+            Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Null => Raw::Null,
             Self::Bool(value) => Raw::Bool(value),
             Self::Int(value) => Raw::Int(value),
@@ -417,9 +444,12 @@ impl Value {
             ),
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
-            Self::List(values) | Self::Tuple(values) => {
-                Raw::Array(values.into_iter().map(Value::raw).collect())
-            }
+            Self::List(values) | Self::Tuple(values) => Raw::Array(
+                values
+                    .into_iter()
+                    .map(Value::raw)
+                    .collect::<Result<_, _>>()?,
+            ),
             Self::Record(values) => {
                 // OVB map keys are ordered by their canonical text encoding:
                 // text length first, then bytewise lexical order.
@@ -430,8 +460,8 @@ impl Value {
                 Raw::Map(
                     fields
                         .into_iter()
-                        .map(|(key, value)| (Raw::Text(key), value.raw()))
-                        .collect(),
+                        .map(|(key, value)| value.raw().map(|value| (Raw::Text(key), value)))
+                        .collect::<Result<_, _>>()?,
                 )
             }
             Self::NominalRecord { type_id, fields } => Raw::Tag(
@@ -441,8 +471,10 @@ impl Value {
                     Raw::Array(
                         fields
                             .into_iter()
-                            .map(|(key, value)| Raw::Array(vec![key, value.raw()]))
-                            .collect(),
+                            .map(|(key, value)| {
+                                value.raw().map(|value| Raw::Array(vec![key, value]))
+                            })
+                            .collect::<Result<_, _>>()?,
                     ),
                 ])),
             ),
@@ -455,17 +487,20 @@ impl Value {
                 Box::new(Raw::Array(vec![
                     type_id,
                     variant_id,
-                    payload.map_or(Raw::Null, |value| value.raw()),
+                    payload
+                        .map(|value| value.raw())
+                        .transpose()?
+                        .unwrap_or(Raw::Null),
                 ])),
             ),
             Self::Option(value) => Raw::Tag(
                 60013,
                 Box::new(match value {
-                    Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()]),
+                    Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
                     None => Raw::Array(vec![Raw::Int(0.into())]),
                 }),
             ),
-        }
+        })
     }
     fn from_canonical(
         value: &CanonicalValue,
@@ -595,8 +630,8 @@ impl Value {
     }
 }
 
-#[derive(Clone)]
-struct Scope(BTreeMap<String, Value>);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Scope(BTreeMap<String, Value>, BTreeSet<String>);
 impl Scope {
     fn from_environment(
         environment: &Environment,
@@ -610,7 +645,7 @@ impl Scope {
             }
             values.insert(name.clone(), Value::from_canonical(value, context, 0)?);
         }
-        Ok(Self(values))
+        Ok(Self(values, BTreeSet::new()))
     }
 }
 
@@ -672,7 +707,33 @@ impl Context<'_> {
                 .0
                 .get(text)
                 .cloned()
+                .or_else(|| {
+                    self.functions
+                        .contains_key(text)
+                        .then(|| Value::Function(text.clone()))
+                })
                 .ok_or_else(|| error("ORNA-EVAL-NAME")),
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                self.items(parameters.len())?;
+                self.items(scope.0.len())?;
+                let mut captured = scope.clone();
+                captured.1.extend(captured.0.keys().cloned());
+                Ok(Value::Closure(Rc::new(Closure {
+                    parameters: parameters
+                        .iter()
+                        .map(|parameter| Parameter {
+                            pattern: parameter.pattern.clone(),
+                            annotation: parameter.annotation.clone(),
+                            default: None,
+                            span: parameter.span.clone(),
+                        })
+                        .collect(),
+                    body: body.as_ref().clone(),
+                    captured,
+                })))
+            }
             Expr::Literal { text, kind, .. } => self.literal(text, *kind),
             Expr::InterpolatedString { segments, .. } => {
                 self.interpolated_string(segments, scope, depth)
@@ -916,6 +977,9 @@ impl Context<'_> {
         let AssignmentTarget::Name { name, .. } = target else {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         };
+        if scope.1.contains(name) {
+            return Err(error("ORNA-EVAL-IMMUTABLE-CAPTURE"));
+        }
         let current = scope
             .0
             .get(name)
@@ -993,6 +1057,9 @@ impl Context<'_> {
     }
     fn apply_binary(&self, op: &str, left: Value, right: Value) -> Result<Value, EvaluationError> {
         if matches!(op, "==" | "!=") {
+            if left.contains_callable() || right.contains_callable() {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
             let equal = left == right;
             return Ok(Value::Bool(if op == "==" { equal } else { !equal }));
         }
@@ -1068,12 +1135,23 @@ impl Context<'_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if let Expr::Name { text, .. } = callee {
-            if scope.0.contains_key(text) {
-                return Err(error("ORNA-EVAL-TYPE"));
-            }
+        if math_name(callee).is_none() {
+            let callable = self.evaluate(callee, scope, depth + 1)?;
             let functions = self.functions;
-            let function = functions.get(text).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+            let (parameters, body, captured) = match &callable {
+                Value::Function(name) => {
+                    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                    (
+                        &function.parameters,
+                        &function.body,
+                        Scope::from_environment(&function.environment, self)?,
+                    )
+                }
+                Value::Closure(closure) => {
+                    (&closure.parameters, &closure.body, closure.captured.clone())
+                }
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            };
             self.depth(depth + 1)?;
             self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
@@ -1082,7 +1160,7 @@ impl Context<'_> {
                 let Some(Parameter {
                     pattern: Pattern::Name(name, _),
                     ..
-                }) = function.parameters.first()
+                }) = parameters.first()
                 else {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 };
@@ -1101,7 +1179,7 @@ impl Context<'_> {
                     let Some(Parameter {
                         pattern: Pattern::Name(name, _),
                         ..
-                    }) = function.parameters.get(positional)
+                    }) = parameters.get(positional)
                     else {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     };
@@ -1116,10 +1194,10 @@ impl Context<'_> {
             }
             return invoke_pure(
                 self,
-                &function.parameters,
-                &function.body,
-                &function.environment,
-                Scope(supplied),
+                parameters,
+                body,
+                captured,
+                Scope(supplied, BTreeSet::new()),
                 depth + 1,
             );
         }
@@ -1252,6 +1330,7 @@ fn bind(
     match pattern {
         Pattern::Name(name, _) => {
             scope.0.insert(name.clone(), value);
+            scope.1.remove(name);
             Ok(true)
         }
         Pattern::Wildcard(_) => Ok(true),
@@ -1297,6 +1376,7 @@ fn bind(
                         }
                     } else {
                         scope.0.insert(name.clone(), value);
+                        scope.1.remove(name);
                     }
                 }
                 Ok(true)
@@ -1394,6 +1474,7 @@ fn bind_pattern_fields(
             }
         } else {
             scope.0.insert(field.name.clone(), value.clone());
+            scope.1.remove(&field.name);
         }
     }
     Ok(true)
