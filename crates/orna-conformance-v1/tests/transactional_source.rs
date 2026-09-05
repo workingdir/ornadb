@@ -93,3 +93,18 @@ fn parsed_rekey_moves_the_row_atomically() {
             .is_some()
     );
 }
+
+#[test]
+fn parsed_rekey_collision_rolls_back_all_activation_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        "Note.insert({ id: 8, text: \"competing\" }); Note.rekey(7, 8);",
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
