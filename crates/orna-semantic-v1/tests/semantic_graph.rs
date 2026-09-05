@@ -966,6 +966,13 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                 "#,
             ),
         ),
+        (
+            "snapshot attached table",
+            ModuleInput::new(
+                "snapshot_table.orna",
+                "pub fn counts() = { cwd: contacts.Contact.as_of(CWD) | count, head: contacts.Contact.as_of(HEAD) | count, };",
+            ),
+        ),
     ];
     for (name, source) in sources {
         let result = analyze_with_catalogue(&[source], &Catalogue::authoritative_fixture());
