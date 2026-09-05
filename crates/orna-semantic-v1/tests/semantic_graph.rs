@@ -244,6 +244,39 @@ fn catalogue_does_not_relax_reserved_source_roots() {
 }
 
 #[test]
+fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
+    let result = analyze(&[ModuleInput::new(
+        "literals.orna",
+        r#"
+            pub protocol Currency { static code: Str; static minor_digits: Int; }
+            pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }
+            pub fn decimal_value() = 3.1415;
+            pub fn float_value(): Float = 3.1415;
+            pub fn explicit_float() = 3.1415f;
+            pub fn amount(): Money<GBP> = 12.34.GBP;
+            pub fn converted(speed: Float<mph>) = speed.mph;
+            pub fn duration() = 90.min;
+            pub table Tariff(effective_from: Date) { rate: Money<GBP> / kWh, }
+            pub fn cost(energy: Decimal<kWh>, tariff: Tariff) = energy * tariff.rate;
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+
+    let non_currency = analyze(&[ModuleInput::new(
+        "literals.orna",
+        "type NotCurrency; fn bad(): Money<NotCurrency> = 12.34.NotCurrency;",
+    )]);
+    assert!(has(&non_currency, DIAG_TYPE));
+
+    let unsupported = analyze(&[ModuleInput::new(
+        "rates.orna",
+        "fn bad(energy: Decimal<kWh>, rate: Money<GBP> / hour) = energy * rate;",
+    )]);
+    assert!(has(&unsupported, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
