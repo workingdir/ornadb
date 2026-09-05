@@ -234,6 +234,7 @@ impl FaultInjector for NoFault {
 pub enum RuntimeError {
     InvalidIdentity,
     InvalidDigest,
+    StreamIdentityMismatch,
     LeaseHeld,
     OwnerLost,
     StaleCapture { current: Box<CwdCapture> },
@@ -254,6 +255,7 @@ impl fmt::Display for RuntimeError {
         f.write_str(match self {
             Self::InvalidIdentity => "invalid runtime identity",
             Self::InvalidDigest => "invalid durable digest",
+            Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::LeaseHeld => "runtime writer is held",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -285,6 +287,69 @@ pub struct StreamDeliveryCommit<'a> {
     pub expected_stream: CheckpointPrecondition,
     pub faults: &'a dyn FaultInjector,
 }
+
+/// A provider result for one scheduler turn. Provider-specific positions stay
+/// inside [`DeliveryIdentity`]; this boundary only admits opaque values.
+pub enum StreamSourcePoll {
+    Item(Box<StreamItem>),
+    Waiting,
+    Exhausted,
+}
+
+pub struct StreamItem {
+    pub delivery: DeliveryIdentity,
+    pub payload: Vec<u8>,
+}
+
+pub struct StreamMutationBatch {
+    pub mutations: Vec<Mutation>,
+    pub next_digest: [u8; 32],
+}
+
+pub enum StreamHandlerResult {
+    Commit(StreamMutationBatch),
+    Fail(SafeDiagnostic),
+    Cancelled,
+}
+
+pub trait StreamSource {
+    type NextFuture<'a>: Future<Output = Result<StreamSourcePoll, SafeDiagnostic>> + 'a
+    where
+        Self: 'a;
+
+    fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a>;
+}
+
+pub trait StreamHandler {
+    fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamStep {
+    Waiting,
+    Exhausted,
+    Committed { checkpoint: StreamCheckpoint },
+    Failed { failure: FailureRecord },
+    Cancelled { checkpoint: StreamCheckpoint },
+    Rejected(RejectReason),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum StreamStepError {
+    Provider(SafeDiagnostic),
+    Runtime(RuntimeError),
+}
+
+impl fmt::Display for StreamStepError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(_) => formatter.write_str("stream provider failed"),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for StreamStepError {}
 
 /// Writer-fenced stream administration backed by one runtime state.
 pub struct RuntimeStreamBackend<'a> {
@@ -338,6 +403,137 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    async fn release_stream_lease(
+        &self,
+        writer: WriterLease,
+        lease: DeliveryLease,
+    ) -> Result<(), StreamStepError> {
+        let result = self
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Cancel { lease })
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        match result {
+            CommitResult::Cancelled { .. } | CommitResult::Rejected(RejectReason::LeaseFenced) => {
+                Ok(())
+            }
+            _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+        }
+    }
+
+    /// Runs at most one provider delivery. Polling, handler execution and
+    /// durable publication stay separated: only a successful handler result
+    /// reaches the atomic mutation/checkpoint boundary.
+    pub async fn run_stream_once<S, H>(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        source: &mut S,
+        handler: &mut H,
+    ) -> Result<StreamStep, StreamStepError>
+    where
+        S: StreamSource,
+        H: StreamHandler,
+    {
+        let checkpoint = self
+            .stream_backend(writer)
+            .checkpoint_async(key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        let poll = source
+            .next(&checkpoint)
+            .await
+            .map_err(StreamStepError::Provider)?;
+        let StreamSourcePoll::Item(item) = poll else {
+            return Ok(match poll {
+                StreamSourcePoll::Waiting => StreamStep::Waiting,
+                StreamSourcePoll::Exhausted => StreamStep::Exhausted,
+                StreamSourcePoll::Item(_) => unreachable!(),
+            });
+        };
+        if item.delivery.checkpoint_key() != *key {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch,
+            ));
+        }
+        let expected = CheckpointPrecondition::from(&checkpoint);
+        let lease = {
+            let mut stream = self.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: item.delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .map_err(StreamStepError::Runtime)?
+            {
+                CommitResult::Acquired { lease } => lease,
+                CommitResult::Rejected(reason) => return Ok(StreamStep::Rejected(reason)),
+                _ => {
+                    return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
+                }
+            }
+        };
+
+        match handler.handle(&item) {
+            StreamHandlerResult::Commit(batch) => {
+                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+                let faults = NoFault;
+                let lease_for_cleanup = lease.clone();
+                let result = self
+                    .commit_stream_delivery(StreamDeliveryCommit {
+                        writer,
+                        expected_capture: &capture,
+                        mutations: &batch.mutations,
+                        next_digest: batch.next_digest,
+                        delivery: lease_for_cleanup.clone(),
+                        expected_stream: expected,
+                        faults: &faults,
+                    })
+                    .await
+                    .map_err(StreamStepError::Runtime)?
+                    .1;
+                match result {
+                    CommitResult::CheckpointAdvanced { checkpoint } => {
+                        Ok(StreamStep::Committed { checkpoint })
+                    }
+                    CommitResult::Rejected(reason) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
+            StreamHandlerResult::Fail(diagnostic) => {
+                let result = self
+                    .stream_backend(writer)
+                    .apply_async(CommitIntent::Fail { lease, diagnostic })
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
+                match result {
+                    CommitResult::Failed { failure } => Ok(StreamStep::Failed { failure }),
+                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
+            StreamHandlerResult::Cancelled => {
+                let result = self
+                    .stream_backend(writer)
+                    .apply_async(CommitIntent::Cancel { lease })
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
+                match result {
+                    CommitResult::Cancelled { checkpoint, .. } => {
+                        Ok(StreamStep::Cancelled { checkpoint })
+                    }
+                    CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
+        }
     }
 
     async fn initialize(
@@ -538,12 +734,15 @@ impl RuntimeState {
             faults,
         } = request;
         validate_id(writer.owner_id)?;
-        validate_mutations(mutations, next_digest)?;
+        validate_stream_mutations(mutations, next_digest)?;
         let current = self.capture().await?;
         if &current != expected_capture {
             return Err(RuntimeError::StaleCapture {
                 current: Box::new(current),
             });
+        }
+        if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
+            return Err(RuntimeError::InvalidDigest);
         }
         let tx = self
             .connection
@@ -563,8 +762,11 @@ impl RuntimeState {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
         }
-        let next =
-            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?;
+        let next = if mutations.is_empty() {
+            capture_tx(&tx).await?
+        } else {
+            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
+        };
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -2148,6 +2350,13 @@ fn validate_mutations(mutations: &[Mutation], next_digest: [u8; 32]) -> Result<(
     if mutations.is_empty() {
         return Err(RuntimeError::EmptyMutationBatch);
     }
+    validate_stream_mutations(mutations, next_digest)
+}
+
+fn validate_stream_mutations(
+    mutations: &[Mutation],
+    next_digest: [u8; 32],
+) -> Result<(), RuntimeError> {
     for mutation in mutations {
         validate_id(mutation.id)?;
         validate_digest(mutation.digest)?;
@@ -2260,7 +2469,11 @@ fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{path::Path, process::Command};
+    use std::{
+        future::{Ready, ready},
+        path::Path,
+        process::Command,
+    };
     use tempfile::TempDir;
 
     struct Fail(FaultPoint);
@@ -2348,6 +2561,40 @@ mod tests {
             successor: Position {
                 token: Component::new(successor).unwrap(),
             },
+        }
+    }
+
+    struct TestSource {
+        item: Option<StreamItem>,
+        polls: usize,
+    }
+
+    impl StreamSource for TestSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            ready(Ok(self
+                .item
+                .take()
+                .map_or(StreamSourcePoll::Exhausted, |item| {
+                    StreamSourcePoll::Item(Box::new(item))
+                })))
+        }
+    }
+
+    struct TestHandler {
+        result: Option<StreamHandlerResult>,
+        calls: usize,
+    }
+
+    impl StreamHandler for TestHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            self.result.take().unwrap_or(StreamHandlerResult::Cancelled)
         }
     }
 
@@ -2549,6 +2796,145 @@ mod tests {
                 .unwrap(),
             CommitResult::Acquired { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_stream_scheduler_commits_noop_and_keeps_failures_unadvanced() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+
+        let committed_delivery = stream_delivery("scheduler:commit", "scheduler:next");
+        let committed_key = committed_delivery.checkpoint_key();
+        let mut source = TestSource {
+            item: Some(StreamItem {
+                delivery: committed_delivery,
+                payload: vec![1, 2, 3],
+            }),
+            polls: 0,
+        };
+        let mut handler = TestHandler {
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: digest(3),
+            })),
+            calls: 0,
+        };
+        let committed = state
+            .run_stream_once(writer, &committed_key, &mut source, &mut handler)
+            .await
+            .unwrap();
+        assert!(matches!(
+            committed,
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint {
+                    version: 1,
+                    committed: Some(Position { .. }),
+                    ..
+                }
+            }
+        ));
+        assert_eq!(source.polls, 1);
+        assert_eq!(handler.calls, 1);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state
+                .run_stream_once(writer, &committed_key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Exhausted
+        );
+
+        let failed_delivery = stream_delivery("scheduler:fail", "scheduler:after-fail");
+        let failed_key = failed_delivery.checkpoint_key();
+        let mut failing_source = TestSource {
+            item: Some(StreamItem {
+                delivery: failed_delivery.clone(),
+                payload: vec![9],
+            }),
+            polls: 0,
+        };
+        let mut failing_handler = TestHandler {
+            result: Some(StreamHandlerResult::Fail(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })),
+            calls: 0,
+        };
+        let before_failure = state
+            .stream_backend(writer)
+            .checkpoint_async(&failed_key)
+            .await
+            .unwrap();
+        let failed = state
+            .run_stream_once(
+                writer,
+                &failed_key,
+                &mut failing_source,
+                &mut failing_handler,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(failed, StreamStep::Failed { .. }));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&failed_key)
+                .await
+                .unwrap(),
+            before_failure
+        );
+        assert_eq!(failing_handler.calls, 1);
+
+        let cancelled_delivery = stream_delivery("scheduler:cancel", "scheduler:after-cancel");
+        let cancelled_key = cancelled_delivery.checkpoint_key();
+        let mut cancelled_source = TestSource {
+            item: Some(StreamItem {
+                delivery: cancelled_delivery,
+                payload: vec![7],
+            }),
+            polls: 0,
+        };
+        let mut cancelled_handler = TestHandler {
+            result: Some(StreamHandlerResult::Cancelled),
+            calls: 0,
+        };
+        let before_cancel = state
+            .stream_backend(writer)
+            .checkpoint_async(&cancelled_key)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state
+                .run_stream_once(
+                    writer,
+                    &cancelled_key,
+                    &mut cancelled_source,
+                    &mut cancelled_handler,
+                )
+                .await
+                .unwrap(),
+            StreamStep::Cancelled { .. }
+        ));
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&cancelled_key)
+                .await
+                .unwrap(),
+            before_cancel
+        );
+        assert!(
+            state
+                .stream_backend(writer)
+                .failure_async(&FailureIdentity(stream_delivery(
+                    "scheduler:cancel",
+                    "scheduler:after-cancel"
+                )))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
