@@ -2004,7 +2004,11 @@ fn infer(
                 let value = infer(element, scope, local, diagnostics);
                 effects.join(&value.effects);
                 if let Some(prior) = &ty {
-                    require_same(prior, &value.ty, diagnostics);
+                    if let Some(merged) = merge_list_element_types(prior, &value.ty) {
+                        ty = Some(merged);
+                    } else {
+                        require_same(prior, &value.ty, diagnostics);
+                    }
                 } else {
                     ty = Some(value.ty);
                 }
@@ -3434,6 +3438,43 @@ fn infer_case_arm_body(
     } else {
         *result = Some(body.ty);
     }
+}
+
+fn merge_list_element_types(left: &Type, right: &Type) -> Option<Type> {
+    let (
+        Type::Function {
+            parameters: left_parameters,
+            parameter_names: left_names,
+            result: left_result,
+        },
+        Type::Function {
+            parameters: right_parameters,
+            parameter_names: right_names,
+            result: right_result,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if left_parameters.len() != right_parameters.len()
+        || left_parameters
+            .iter()
+            .zip(right_parameters)
+            .any(|(left, right)| left != right)
+    {
+        return None;
+    }
+    Some(Type::Function {
+        parameters: left_parameters.clone(),
+        parameter_names: (left_names == right_names)
+            .then(|| left_names.clone())
+            .flatten(),
+        result: Box::new(if left_result == right_result {
+            (**left_result).clone()
+        } else {
+            Type::Error
+        }),
+    })
 }
 
 fn infer_nominal(
