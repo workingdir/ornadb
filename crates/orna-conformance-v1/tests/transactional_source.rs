@@ -38,3 +38,15 @@ fn parsed_nested_insert_commits_when_parent_returns_successfully() {
             .is_some()
     );
 }
+
+#[test]
+fn parsed_duplicate_insert_rolls_back_the_complete_activation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source("Note.insert({ id: 7, text: \"duplicate\" });"));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+}
