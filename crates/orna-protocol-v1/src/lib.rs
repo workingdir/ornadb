@@ -816,37 +816,17 @@ impl Diagnostic {
 }
 impl ResultBody {
     fn decode(node: &Node) -> Result<Self> {
-        if map(node).is_none() {
-            return Err(Error::InvalidValue);
-        }
+        let body = map(node).ok_or(Error::InvalidValue)?;
+        let _ = Message::decode(18, Some([0; 16]), None, body)?;
         Ok(Self(ValueNode(node.clone())))
     }
 }
 
 fn validate_present(node: &Node) -> Result<()> {
-    let Node::Tag(60012, body) = node else {
-        return Err(Error::InvalidValue);
-    };
-    let a = array(body).ok_or(Error::InvalidValue)?;
-    if a.len() != 4 {
+    if !matches!(node, Node::Tag(60012, _)) {
         return Err(Error::InvalidValue);
     }
-    if !matches!(&a[0], Node::Text(_) | Node::Tag(37, _)) {
-        return Err(Error::InvalidValue);
-    }
-    if !matches!(&a[1], Node::Null | Node::Array(_)) {
-        return Err(Error::InvalidValue);
-    }
-    let properties = map(&a[2]).ok_or(Error::InvalidValue)?;
-    for (key, value) in properties {
-        if !matches!(key, Node::Text(_) | Node::Tag(37, _)) {
-            return Err(Error::InvalidValue);
-        }
-        let _ = canonical_value(value)?;
-    }
-    for child in array(&a[3]).ok_or(Error::InvalidValue)? {
-        validate_present(child)?;
-    }
+    let _ = canonical_value(node)?;
     Ok(())
 }
 fn validate_patches(node: &Node) -> Result<()> {
@@ -884,37 +864,10 @@ fn validate_path(node: &Node) -> Result<()> {
     Ok(())
 }
 fn validate_diagnostic(node: &Node) -> Result<()> {
-    let Node::Tag(60011, body) = node else {
-        return Err(Error::InvalidValue);
-    };
-    let m = map(body).ok_or(Error::InvalidValue)?;
-    for key in 0..=6 {
-        let _ = field(m, key)?;
-    }
-    if !matches!(field(m, 0)?, Node::Text(_)) || !matches!(field(m, 2)?, Node::Text(_)) {
-        return Err(Error::InvalidValue);
-    }
-    if u64_value(field(m, 1)?)? > 4 || !matches!(field(m, 6)?, Node::Bool(_)) {
-        return Err(Error::InvalidValue);
-    }
-    let _ = array(field(m, 3)?).ok_or(Error::InvalidValue)?;
-    let notes = array(field(m, 4)?).ok_or(Error::InvalidValue)?;
-    if notes.iter().any(|x| !matches!(x, Node::Text(_))) {
-        return Err(Error::InvalidValue);
-    }
-    for cause in array(field(m, 5)?).ok_or(Error::InvalidValue)? {
-        validate_diagnostic(cause)?;
-    }
-    if let Some(id) = optional_field(m, 7) {
-        let _ = uuid(id)?;
-    }
-    for (key, _) in m {
-        let number = u64_value(key)?;
-        if number > 7 {
-            return Err(Error::InvalidValue);
-        }
-    }
-    Ok(())
+    let bytes = encode_node(node)?;
+    orna_foundation_v1::Diagnostic::decode_ovb(&bytes)
+        .map(|_| ())
+        .map_err(|_| Error::InvalidValue)
 }
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
@@ -1344,31 +1297,48 @@ mod tests {
         CanonicalSnapshot::cwd(id(1), id(2), 0.into()).unwrap()
     }
     fn present() -> PresentNode {
-        PresentNode::decode(&Node::Tag(
+        PresentNode::decode(&present_node(Node::Null, vec![])).unwrap()
+    }
+    fn present_node(key: Node, children: Vec<Node>) -> Node {
+        Node::Tag(
             60012,
             Box::new(Node::Array(vec![
                 Node::Text("text".into()),
-                Node::Null,
+                key,
                 Node::Map(vec![]),
-                Node::Array(vec![]),
+                Node::Array(children),
             ])),
-        ))
-        .unwrap()
+        )
     }
     fn diagnostic() -> Diagnostic {
-        Diagnostic::decode(&Node::Tag(
+        Diagnostic::decode(&diagnostic_node(vec![])).unwrap()
+    }
+    fn diagnostic_node(spans: Vec<Node>) -> Node {
+        Node::Tag(
             60011,
             Box::new(Node::Map(vec![
                 (uint(0), Node::Text("wire.invalid_message".into())),
                 (uint(1), uint(3)),
                 (uint(2), Node::Text("invalid message".into())),
-                (uint(3), Node::Array(vec![])),
+                (uint(3), Node::Array(spans)),
                 (uint(4), Node::Array(vec![])),
                 (uint(5), Node::Array(vec![])),
                 (uint(6), Node::Bool(true)),
             ])),
-        ))
-        .unwrap()
+        )
+    }
+    fn result_body(result: Node) -> Vec<u8> {
+        wire(
+            20,
+            Some(id(1)),
+            None,
+            Node::Map(vec![
+                (uint(0), Node::Bytes(id(3).to_vec())),
+                (uint(1), uint(RequestState::Terminal.code())),
+                (uint(2), Node::Bytes(digest(1).to_vec())),
+                (uint(3), result),
+            ]),
+        )
     }
     fn messages() -> Vec<Envelope> {
         vec![
@@ -1666,6 +1636,121 @@ mod tests {
             ..Limits::default()
         };
         assert_eq!(Envelope::decode(&nested, low), Err(Error::Limit));
+    }
+    #[test]
+    fn request_status_result_rejects_malformed_result_body_maps() {
+        let missing_required_fields = [
+            Node::Map(vec![]),
+            Node::Map(vec![
+                (uint(0), uint(ResultStatus::Failure.code())),
+                (uint(1), Node::Null),
+                (uint(2), Node::Bytes(digest(1).to_vec())),
+            ]),
+        ];
+        for body in missing_required_fields {
+            assert_eq!(
+                Envelope::decode(&result_body(body), Limits::default()),
+                Err(Error::InvalidValue)
+            );
+        }
+
+        let malformed_required_field = Node::Map(vec![
+            (uint(0), uint(ResultStatus::Failure.code())),
+            (uint(1), Node::Null),
+            (uint(2), Node::Bytes(vec![1; 31])),
+            (uint(3), Node::Null),
+        ]);
+        assert_eq!(
+            Envelope::decode(&result_body(malformed_required_field), Limits::default()),
+            Err(Error::InvalidValue)
+        );
+    }
+    #[test]
+    fn request_status_result_accepts_and_preserves_a_valid_result_body() {
+        let retained = Node::Map(vec![
+            (uint(0), uint(ResultStatus::Failure.code())),
+            (uint(1), Node::Null),
+            (uint(2), Node::Bytes(digest(1).to_vec())),
+            (uint(3), diagnostic().0.0),
+            (uint(11), Node::Text("retained extension".into())),
+        ]);
+        let bytes = result_body(retained);
+        let decoded = Envelope::decode(&bytes, Limits::default()).unwrap();
+        assert_eq!(decoded.encode(Limits::default()).unwrap(), bytes);
+    }
+    #[test]
+    fn diagnostics_validate_each_span_shape_and_value() {
+        let valid_span = Node::Array(vec![
+            snapshot_node(&snapshot()).unwrap(),
+            Node::Text("src/main.orna".into()),
+            uint(1),
+            uint(3),
+        ]);
+        assert!(Diagnostic::decode(&diagnostic_node(vec![valid_span])).is_ok());
+
+        let malformed_spans = [
+            Node::Null,
+            Node::Array(vec![
+                Node::Null,
+                Node::Text("src/main.orna".into()),
+                uint(1),
+            ]),
+            Node::Array(vec![
+                Node::Null,
+                Node::Text("src/main.orna".into()),
+                uint(1),
+                uint(3),
+            ]),
+            Node::Array(vec![
+                snapshot_node(&snapshot()).unwrap(),
+                Node::Text("../main.orna".into()),
+                uint(1),
+                uint(3),
+            ]),
+            Node::Array(vec![
+                snapshot_node(&snapshot()).unwrap(),
+                Node::Text("src/main.orna".into()),
+                Node::Int((-1).into()),
+                uint(3),
+            ]),
+            Node::Array(vec![
+                snapshot_node(&snapshot()).unwrap(),
+                Node::Text("src/main.orna".into()),
+                uint(4),
+                uint(3),
+            ]),
+        ];
+        for span in malformed_spans {
+            assert_eq!(
+                Diagnostic::decode(&diagnostic_node(vec![span])),
+                Err(Error::InvalidValue)
+            );
+        }
+    }
+    #[test]
+    fn present_rejects_duplicate_sibling_stable_keys() {
+        let stable_key = Node::Array(vec![uint(0), Node::Text("same".into())]);
+        let root = present_node(
+            Node::Null,
+            vec![
+                present_node(stable_key.clone(), vec![]),
+                present_node(stable_key, vec![]),
+            ],
+        );
+        let bytes = wire(
+            16,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), root),
+                (uint(2), snapshot_node(&snapshot()).unwrap()),
+            ]),
+        );
+        assert_eq!(
+            Envelope::decode(&bytes, Limits::default()),
+            Err(Error::InvalidValue)
+        );
     }
     #[test]
     fn diagnostics_do_not_disclose_payloads() {
