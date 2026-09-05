@@ -1715,6 +1715,7 @@ dependencies = [
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-stream-v1",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "uuid",
