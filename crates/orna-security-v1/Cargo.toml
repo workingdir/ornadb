@@ -1,0 +1,17 @@
+[package]
+name = "orna-security-v1"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded, adapter-owned session security boundary for Orna"
+
+[dependencies]
+subtle = "2.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
