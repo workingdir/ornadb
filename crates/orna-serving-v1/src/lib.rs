@@ -368,6 +368,13 @@ impl Serving {
         Ok(())
     }
 
+    /// Closing a watch is idempotent so repeated unsubscribe or cancellation
+    /// delivery cannot create a new serving-side effect.
+    pub fn close_watch(&mut self, session_id: Id, watch_id: Id) -> Result<()> {
+        self.session_mut(session_id)?.watches.remove(&watch_id);
+        Ok(())
+    }
+
     pub fn action(
         &mut self,
         session_id: Id,
@@ -413,6 +420,21 @@ impl Serving {
             return Err(Error::RequestTerminal);
         }
         *state = RequestState::Running;
+        Ok(())
+    }
+
+    /// Completion is terminal and may conclude either a reserved request that
+    /// never began execution or a running request.
+    pub fn complete_request(&mut self, session_id: Id, request_id: Id) -> Result<()> {
+        let state = self
+            .session_mut(session_id)?
+            .requests
+            .get_mut(&request_id)
+            .ok_or(Error::RequestUnknown)?;
+        if !matches!(*state, RequestState::Reserved | RequestState::Running) {
+            return Err(Error::RequestTerminal);
+        }
+        *state = RequestState::Completed;
         Ok(())
     }
 
@@ -637,6 +659,33 @@ mod tests {
     }
 
     #[test]
+    fn completion_is_terminal_from_reserved_or_running() {
+        let mut state = admitted();
+        state.reserve_request(id(1), id(4)).unwrap();
+        state.complete_request(id(1), id(4)).unwrap();
+        assert_eq!(
+            state.request_state(id(1), id(4)).unwrap(),
+            RequestState::Completed
+        );
+        assert_eq!(
+            state.complete_request(id(1), id(4)),
+            Err(Error::RequestTerminal)
+        );
+
+        state.reserve_request(id(1), id(5)).unwrap();
+        state.start_request(id(1), id(5)).unwrap();
+        state.complete_request(id(1), id(5)).unwrap();
+        assert_eq!(
+            state.request_state(id(1), id(5)).unwrap(),
+            RequestState::Completed
+        );
+        assert_eq!(
+            state.complete_request(id(1), id(6)),
+            Err(Error::RequestUnknown)
+        );
+    }
+
+    #[test]
     fn patch_failures_never_publish_a_partial_page() {
         let mut state = admitted();
         state
@@ -685,6 +734,16 @@ mod tests {
             state.action(id(1), id(5), 2, 1),
             Err(Error::RevisionMismatch)
         );
+    }
+
+    #[test]
+    fn closing_a_watch_is_idempotent() {
+        let mut state = admitted();
+        state.apply_patch(id(1), 0, 1, &[], pin(1)).unwrap();
+        state.open_watch(id(1), id(5), 1).unwrap();
+        state.close_watch(id(1), id(5)).unwrap();
+        state.close_watch(id(1), id(5)).unwrap();
+        assert_eq!(state.action(id(1), id(5), 1, 0), Err(Error::WatchUnknown));
     }
 
     #[test]
