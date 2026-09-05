@@ -291,9 +291,9 @@ impl LiveHost {
         Ok(outcome)
     }
 
-    /// Rotates an authenticated session credential without changing its
-    /// attachment or serving state.  HTTP resume uses this before the later
-    /// cookie-authenticated WebSocket upgrade.
+    /// Rotates an authenticated session credential across both security and
+    /// serving state without changing its attachment. HTTP resume uses this
+    /// before the later cookie-authenticated WebSocket upgrade.
     ///
     /// # Errors
     ///
@@ -315,6 +315,9 @@ impl LiveHost {
             .last_issued()
             .map(ServingCredential::new)
             .ok_or(Error::Denied)?;
+        self.serving
+            .rotate_credential(id, &credential.serving, serving.clone())
+            .map_err(map_serving)?;
         Ok(SessionCredential { security, serving })
     }
 
@@ -709,19 +712,16 @@ impl LiveTransport {
                 else {
                     return wire_error(401, "live.unauthenticated");
                 };
-                if !self.sessions.contains_key(&id) {
-                    return wire_error(410, "live.expired");
-                }
                 let credential = SessionCredential {
                     security: OpaqueCredential::from_bytes(token),
                     serving: ServingCredential::new(token),
                 };
-                if let Err(error) = self
-                    .host
-                    .rotate(id, &origin, &credential, now, issuer)
-                    .await
-                {
-                    return host_error(error);
+                let authorised = self
+                    .sessions
+                    .get(&id)
+                    .is_some_and(|record| record.credential == credential);
+                if !authorised {
+                    return wire_error(410, "live.expired");
                 }
                 match self.host.delete(DeleteRequest { id }, deletion).await {
                     Ok(()) => {
