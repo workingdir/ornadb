@@ -116,12 +116,12 @@ fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
 }
 
 #[test]
-fn bounded_evaluator_executes_pure_modules_and_projects_without_effects() {
+fn bounded_evaluator_lazily_loads_zero_argument_functions_and_evaluates_lets() {
     let pure_module = SourceUnit {
         fixture_id: "test-module".into(),
         source_id: "logical/pure.orna".into(),
         parse_as: "module_unit".into(),
-        source: "pub fn answer() = 40 + 2;".into(),
+        source: "pub fn secret() = missing;".into(),
     };
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
@@ -130,15 +130,14 @@ fn bounded_evaluator_executes_pure_modules_and_projects_without_effects() {
         StageOutcome::Passed
     );
 
-    let failure = SourceUnit {
+    let invalid_let = SourceUnit {
         fixture_id: "test-module-failure".into(),
         source_id: "logical/failure.orna".into(),
-        parse_as: "module_unit".into(),
-        source: "pub fn secret() = missing;".into(),
+        parse_as: "expression_unit".into(),
+        source: "if true { let answer = missing; answer } else { 0 }".into(),
     };
-    let StageOutcome::Failed(diagnostic) = evaluator.evaluate_project(&pure_project(vec![failure]))
-    else {
-        panic!("unknown pure function value must fail");
+    let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid_let) else {
+        panic!("unknown immutable let binding must fail");
     };
     assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
     assert_eq!(diagnostic.message(), "<redacted>");
