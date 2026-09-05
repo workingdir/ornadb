@@ -397,6 +397,7 @@ fn error(code: &'static str) -> EvaluationError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     Null,
+    Unit,
     Bool(bool),
     Int(BigInt),
     Decimal(DecimalValue),
@@ -536,6 +537,7 @@ impl Value {
         Ok(match self {
             Self::Function(_) | Self::Closure(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             Self::Null => Raw::Null,
+            Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
             Self::Bool(value) => Raw::Bool(value),
             Self::Int(value) => Raw::Int(value),
             Self::Decimal(value) => Raw::Tag(
@@ -613,6 +615,9 @@ impl Value {
         context.depth(depth)?;
         match value.raw() {
             Raw::Null => Ok(Self::Null),
+            Raw::Tag(60014, boxed) if matches!(boxed.as_ref(), Raw::Array(values) if values.is_empty()) => {
+                Ok(Self::Unit)
+            }
             Raw::Bool(value) => Ok(Self::Bool(*value)),
             Raw::Int(value) => context.integer(value.clone()).map(Self::Int),
             Raw::Float(bits) if f64::from_bits(*bits).is_finite() => Ok(Self::Float(*bits)),

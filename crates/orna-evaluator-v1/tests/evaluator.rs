@@ -92,6 +92,42 @@ impl EffectHandler for NoteEffects {
     }
 }
 
+struct UnitEffects;
+
+impl EffectHandler for UnitEffects {
+    fn handle(&mut self, callee: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        let Expr::Field { base, name, .. } = callee else {
+            return Ok(None);
+        };
+        let Expr::Name { text, .. } = base.as_ref() else {
+            return Ok(None);
+        };
+        if text == "Note" && name == "delete" {
+            Ok(Some(Value::unit()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[test]
+fn effect_handler_can_return_unit_values() {
+    let functions = functions_from_source("fn entry() = Note.delete(1);");
+    let mut effects = UnitEffects;
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "entry",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        Value::unit()
+    );
+}
+
 #[test]
 fn admission_limits_reject_zero_configuration_and_count_source_bytes() {
     let limits = Limits {
