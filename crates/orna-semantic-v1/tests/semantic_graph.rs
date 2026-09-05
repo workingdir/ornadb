@@ -1,6 +1,7 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE,
-    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze, analyze_with_catalogue,
+    DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, Type, analyze,
+    analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -342,4 +343,131 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
             .contains("database write")
     );
     assert!(main.symbols["run"].effects.may_fail);
+}
+
+#[test]
+fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases() {
+    let result = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            pub type Score = Int {
+                assert >= 0;
+                assert <= 100;
+            }
+
+            pub enum Availability {
+                ready,
+                waiting { reason: Str },
+            }
+
+            pub fn describe(value: Availability): Str = case value {
+                Availability.ready: "ready",
+                Availability.waiting { reason }: "waiting: {reason}",
+            };
+
+            pub fn optional_name(value: Str?): Str = case value {
+                Some(name): name,
+                null: "anonymous",
+            };
+
+            pub fn add(left: Int, right: Int): Int = left + right;
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let values = result.modules.values().next().unwrap();
+    assert!(matches!(
+        &values.symbols["describe"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Text
+    ));
+    assert!(matches!(
+        &values.symbols["optional_name"].ty,
+        Type::Function { parameters, result, .. }
+            if parameters == &[Type::Optional(Box::new(Type::Text))]
+                && result.as_ref() == &Type::Text
+    ));
+}
+
+#[test]
+fn case_inference_rejects_non_exhaustive_and_malformed_reference_patterns() {
+    let non_exhaustive = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            enum Availability { ready, waiting { reason: Str }, }
+            fn describe(value: Availability): Str = case value {
+                Availability.ready: "ready",
+            };
+        "#,
+    )]);
+    assert!(has(&non_exhaustive, DIAG_TYPE));
+
+    let malformed_enum = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            enum Availability { ready, waiting { reason: Str }, }
+            fn describe(value: Availability): Str = case value {
+                Availability.ready: "ready",
+                Availability.waiting(reason): reason,
+            };
+        "#,
+    )]);
+    assert!(has(&malformed_enum, DIAG_UNSUPPORTED));
+
+    let malformed_optional = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            fn optional_name(value: Str?): Str = case value {
+                Some(): "missing",
+                null: "anonymous",
+            };
+        "#,
+    )]);
+    assert!(has(&malformed_optional, DIAG_TYPE));
+
+    let non_text_interpolation = analyze(&[ModuleInput::new(
+        "values.orna",
+        "fn label(): Str = \"value: {1}\";",
+    )]);
+    assert!(has(&non_text_interpolation, DIAG_TYPE));
+}
+
+#[test]
+fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names() {
+    let result = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            table Reading(id: Str) { value: Int, }
+            enum Availability { ready, waiting { reason: Str }, }
+
+            fn touch(value: Str): Str {
+                Reading.count();
+                value
+            }
+            fn describe(value: Availability): Str = case value {
+                Availability.ready: touch(value: "ready"),
+                Availability.waiting { reason }: touch(value: reason),
+            };
+            fn add(left: Int, right: Int): Int = left + right;
+            fn total(): Int = add(right: 2, left: 1);
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let values = result.modules.values().next().unwrap();
+    assert!(
+        values.symbols["describe"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(values.symbols["describe"].effects.may_fail);
+
+    let malformed = analyze(&[ModuleInput::new(
+        "values.orna",
+        r#"
+            fn add(left: Int, right: Int): Int = left + right;
+            fn bad(): Int = add(left: 1, left: 2);
+        "#,
+    )]);
+    assert!(has(&malformed, DIAG_TYPE));
 }
