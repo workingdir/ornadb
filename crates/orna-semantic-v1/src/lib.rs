@@ -1716,6 +1716,11 @@ fn infer(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
+                && let Some(inferred) = infer_system_path(&path)
+            {
+                return inferred;
+            }
+            if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
             {
                 if let Some(table) = table_symbol(expr, scope, local) {
@@ -3680,8 +3685,30 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "now" => Some(function(Vec::new(), Type::Instant)),
         "log" => Some(function(vec![Type::Text], Type::Null)),
         "half_even" => Some(Type::Named("std.Rounding".into())),
+        "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,
     }
+}
+
+fn infer_system_path(path: &[&str]) -> Option<Inferred> {
+    let inferred = match path {
+        ["sys", "Checkpoint"] => Inferred {
+            ty: Type::Named("sys.Checkpoint".into()),
+            effects: EffectSummary::default(),
+        },
+        ["sys", "Checkpoint", "as_of"] => Inferred {
+            ty: function(
+                vec![Type::Named("sys.SnapshotRef".into())],
+                Type::Relation(Box::new(Type::Named("sys.Checkpoint".into()))),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
+                may_fail: true,
+            },
+        },
+        _ => return None,
+    };
+    Some(inferred)
 }
 
 fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> {

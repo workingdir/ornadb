@@ -73,6 +73,16 @@ fn qualified_module_member_calls_resolve_only_public_imported_exports() {
 }
 
 #[test]
+fn system_checkpoint_history_selectors_resolve_from_intrinsic_surface() {
+    let result = analyze(&[ModuleInput::new(
+        "sys-checkpoint.orna",
+        "pub fn published() = sys.Checkpoint.as_of(HEAD);",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
