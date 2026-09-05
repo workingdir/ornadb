@@ -173,6 +173,19 @@ pub struct Checkpoint {
     pub committed: Option<Position>,
 }
 
+/// Durable admission state for one ordered stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamStatus {
+    Running,
+    Paused,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamState {
+    pub key: CheckpointKey,
+    pub status: StreamStatus,
+}
+
 /// The expected checkpoint version and position for a write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckpointPrecondition {
@@ -262,6 +275,17 @@ pub struct ReplayGrant {
 /// Atomic administration mutations. They do not initiate provider I/O or execute tables/functions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitIntent {
+    Pause {
+        key: CheckpointKey,
+    },
+    Resume {
+        key: CheckpointKey,
+    },
+    Reset {
+        key: CheckpointKey,
+        expected: CheckpointPrecondition,
+        to: Position,
+    },
     Acquire {
         delivery: DeliveryIdentity,
         expected: CheckpointPrecondition,
@@ -310,6 +334,13 @@ pub enum CommitIntent {
 /// Results expose what an owner may safely commit around this administrative transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitResult {
+    StreamStatusChanged {
+        state: StreamState,
+        changed: bool,
+    },
+    CheckpointReset {
+        checkpoint: Checkpoint,
+    },
     Acquired {
         lease: DeliveryLease,
     },
@@ -343,6 +374,10 @@ pub enum CommitResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectReason {
+    StreamPaused,
+    StreamNotPaused,
+    StreamBusy,
+    BlockingFailure,
     StaleCheckpoint,
     StaleFailure,
     LeaseFenced,
@@ -398,6 +433,7 @@ pub trait AsyncCheckpointBackend {
 #[derive(Default)]
 pub struct InMemoryCheckpointBackend {
     checkpoints: BTreeMap<CheckpointKey, Checkpoint>,
+    streams: BTreeMap<CheckpointKey, StreamStatus>,
     failures: BTreeMap<FailureIdentity, FailureRecord>,
     leases: BTreeMap<CheckpointKey, DeliveryLease>,
     next_fence: BTreeMap<CheckpointKey, u64>,
@@ -450,11 +486,88 @@ impl InMemoryCheckpointBackend {
             checkpoint: checkpoint.clone(),
         }
     }
+
+    fn stream_status(&self, key: &CheckpointKey) -> StreamStatus {
+        self.streams
+            .get(key)
+            .copied()
+            .unwrap_or(StreamStatus::Running)
+    }
+
+    fn stream_state(&self, key: &CheckpointKey) -> StreamState {
+        StreamState {
+            key: key.clone(),
+            status: self.stream_status(key),
+        }
+    }
+
+    fn has_blocking_failure(&self, key: &CheckpointKey) -> bool {
+        self.failures.values().any(|failure| {
+            &failure.identity.0.checkpoint_key() == key
+                && matches!(
+                    failure.status,
+                    FailureStatus::Failed | FailureStatus::Retrying | FailureStatus::Replaying
+                )
+        })
+    }
 }
 
 impl CheckpointBackend for InMemoryCheckpointBackend {
     fn apply(&mut self, intent: CommitIntent) -> CommitResult {
         match intent {
+            CommitIntent::Pause { key } => {
+                self.checkpoint_mut(&key);
+                if self.leases.contains_key(&key) {
+                    return CommitResult::Rejected(RejectReason::StreamBusy);
+                }
+                let changed = self.stream_status(&key) != StreamStatus::Paused;
+                self.streams.insert(key.clone(), StreamStatus::Paused);
+                CommitResult::StreamStatusChanged {
+                    state: self.stream_state(&key),
+                    changed,
+                }
+            }
+            CommitIntent::Resume { key } => {
+                self.checkpoint_mut(&key);
+                if self.stream_status(&key) == StreamStatus::Running {
+                    return CommitResult::StreamStatusChanged {
+                        state: self.stream_state(&key),
+                        changed: false,
+                    };
+                }
+                if self.leases.contains_key(&key) {
+                    return CommitResult::Rejected(RejectReason::StreamBusy);
+                }
+                if self.has_blocking_failure(&key) {
+                    return CommitResult::Rejected(RejectReason::BlockingFailure);
+                }
+                self.streams.insert(key.clone(), StreamStatus::Running);
+                CommitResult::StreamStatusChanged {
+                    state: self.stream_state(&key),
+                    changed: true,
+                }
+            }
+            CommitIntent::Reset { key, expected, to } => {
+                self.checkpoint_mut(&key);
+                if self.stream_status(&key) != StreamStatus::Paused {
+                    return CommitResult::Rejected(RejectReason::StreamNotPaused);
+                }
+                if self.leases.contains_key(&key) {
+                    return CommitResult::Rejected(RejectReason::StreamBusy);
+                }
+                if self.has_blocking_failure(&key) {
+                    return CommitResult::Rejected(RejectReason::BlockingFailure);
+                }
+                if !self.checkpoint_matches(&key, &expected) {
+                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
+                }
+                let checkpoint = self.checkpoint_mut(&key);
+                checkpoint.committed = Some(to);
+                checkpoint.version += 1;
+                CommitResult::CheckpointReset {
+                    checkpoint: checkpoint.clone(),
+                }
+            }
             CommitIntent::Acquire {
                 delivery,
                 expected,
@@ -467,9 +580,13 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if self.leases.contains_key(&key) {
                     return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
                 }
-                if let Some(failure) = self.failures.get(&FailureIdentity(delivery.clone())) {
+                let failure_status = self
+                    .failures
+                    .get(&FailureIdentity(delivery.clone()))
+                    .map(|failure| failure.status);
+                if let Some(status) = failure_status {
                     let allowed = matches!(
-                        (purpose, failure.status),
+                        (purpose, status),
                         (LeasePurpose::Deliver, FailureStatus::Retrying)
                             | (LeasePurpose::Skip, FailureStatus::Failed)
                     );
@@ -478,6 +595,12 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     }
                 } else if purpose == LeasePurpose::Skip {
                     return CommitResult::Rejected(RejectReason::FailureMissing);
+                }
+                if purpose == LeasePurpose::Deliver
+                    && self.stream_status(&key) == StreamStatus::Paused
+                    && failure_status != Some(FailureStatus::Retrying)
+                {
+                    return CommitResult::Rejected(RejectReason::StreamPaused);
                 }
                 let fence = self.next_fence.entry(key.clone()).or_insert(0);
                 *fence += 1;
@@ -1186,6 +1309,82 @@ mod tests {
                 purpose: LeasePurpose::Deliver,
             }),
             CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[test]
+    fn pause_blocks_fresh_delivery_and_reset_is_opaque_and_compare_and_set() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let active = acquire(&mut backend, item.clone());
+        assert_eq!(
+            backend.apply(CommitIntent::Pause {
+                key: item.checkpoint_key(),
+            }),
+            CommitResult::Rejected(RejectReason::StreamBusy)
+        );
+        assert!(matches!(
+            backend.apply(CommitIntent::Cancel { lease: active }),
+            CommitResult::Cancelled { .. }
+        ));
+
+        let key = item.checkpoint_key();
+        assert!(matches!(
+            backend.apply(CommitIntent::Pause { key: key.clone() }),
+            CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    status: StreamStatus::Paused,
+                    ..
+                },
+                changed: true,
+            }
+        ));
+        assert_eq!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: item.clone(),
+                expected: expected(&backend, &item),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Rejected(RejectReason::StreamPaused)
+        );
+
+        let before = backend.checkpoint(&key);
+        let rewound = position("opaque/provider-token");
+        assert!(matches!(
+            backend.apply(CommitIntent::Reset {
+                key: key.clone(),
+                expected: CheckpointPrecondition::from(&before),
+                to: rewound.clone(),
+            }),
+            CommitResult::CheckpointReset {
+                checkpoint: Checkpoint {
+                    committed: Some(ref position),
+                    version: 1,
+                    ..
+                }
+            } if position == &rewound
+        ));
+        assert_eq!(
+            backend.apply(CommitIntent::Reset {
+                key: key.clone(),
+                expected: CheckpointPrecondition::from(&before),
+                to: position("stale-token"),
+            }),
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert!(matches!(
+            backend.apply(CommitIntent::Resume { key: key.clone() }),
+            CommitResult::StreamStatusChanged {
+                state: StreamState {
+                    status: StreamStatus::Running,
+                    ..
+                },
+                changed: true,
+            }
+        ));
+        assert!(matches!(
+            backend.apply(CommitIntent::Resume { key }),
+            CommitResult::StreamStatusChanged { changed: false, .. }
         ));
     }
 
