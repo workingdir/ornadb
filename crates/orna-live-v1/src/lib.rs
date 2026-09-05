@@ -583,8 +583,17 @@ impl LiveHost {
                         response: None,
                     }));
                 }
+                if matches!(
+                    envelope.message,
+                    Message::Event { .. } | Message::Unsubscribe | Message::Resync
+                ) {
+                    let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+                    if !self.watches.contains(&(session, watch)) {
+                        return Err(Error::Denied);
+                    }
+                }
                 self.reserve_and_start(session, request, fingerprint)?;
-                match &envelope.message {
+                let dispatched: Result<DispatchOutcome> = (|| match &envelope.message {
                     Message::Subscribe { .. } => {
                         let response =
                             application.subscribe(session, request, &envelope.message)?;
@@ -599,9 +608,6 @@ impl LiveHost {
                     }
                     Message::Resync => {
                         let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                        if !self.watches.contains(&(session, watch)) {
-                            return Err(Error::Denied);
-                        }
                         let revisions = self.serving.resync(session, 0).map_err(map_serving)?.len();
                         let response =
                             application.resync(session, request, watch, &envelope.message)?;
@@ -617,9 +623,6 @@ impl LiveHost {
                     }
                     Message::Unsubscribe => {
                         let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                        if !self.watches.contains(&(session, watch)) {
-                            return Err(Error::Denied);
-                        }
                         let response = application.unsubscribe(
                             session,
                             request,
@@ -720,7 +723,11 @@ impl LiveHost {
                     | Message::Result { .. }
                     | Message::Diagnostic { .. }
                     | Message::RequestStatusResult { .. } => Err(Error::InvalidMessage),
+                })();
+                if dispatched.is_err() {
+                    self.abort_request(session, request);
                 }
+                dispatched
             }
         }
     }
@@ -775,6 +782,11 @@ impl LiveHost {
             .ok_or(Error::Denied)?
             .terminal = Some(outcome.clone());
         Ok(outcome)
+    }
+
+    fn abort_request(&mut self, session: [u8; 16], request: [u8; 16]) {
+        let _ = self.serving.cancel_request(session, request);
+        self.requests.remove(&(session, request));
     }
 
     fn open_watch(
