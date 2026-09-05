@@ -46,6 +46,8 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions" => {
             "ORNA100-E-SYS-STORAGE-CALL".into()
         }
+        "`std` is reserved" => "E1009".into(),
+        "`sys` is reserved" => "E1008".into(),
         "remove `self |`; the table already supplies its candidate relation"
         | "remove the repeated table owner before the assertion predicate" => {
             "ORNA-A091-002".into()
