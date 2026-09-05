@@ -297,6 +297,32 @@ fn catalogue_does_not_relax_reserved_source_roots() {
 }
 
 #[test]
+fn authoritative_ui_catalogue_checks_page_builder_contextually() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "page.orna",
+            r#"
+                use std.ui.*;
+                pub fn values_page(values: [Str]) =
+                    Page("/values", _ => List(values));
+            "#,
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("page module");
+    assert_eq!(
+        module.symbols.get("values_page").expect("page function").ty,
+        Type::Function {
+            parameters: vec![Type::List(Box::new(Type::Text))],
+            parameter_names: Some(vec!["values".into()]),
+            result: Box::new(Type::Named("std.UI".into())),
+        }
+    );
+}
+
+#[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",
