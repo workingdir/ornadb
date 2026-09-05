@@ -3,7 +3,8 @@ use orna_conformance_v1::{
     ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario, SemanticAdapter, SourceUnit,
     StageOutcome,
 };
-use orna_foundation_v1::Diagnostic;
+use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
+use std::collections::BTreeMap;
 
 #[test]
 fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
@@ -147,4 +148,60 @@ fn bounded_evaluator_invokes_a_function_with_its_earlier_immutable_binding() {
     let mut evaluator = BoundedEvaluator::default();
     assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
     assert_eq!(evaluator.invoke("incremented"), StageOutcome::Passed);
+}
+
+fn value(raw: OvbRaw) -> Value {
+    Value::new(raw).expect("test values are canonical")
+}
+
+#[test]
+fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_defaults() {
+    let pure_module = SourceUnit {
+        fixture_id: "test-module".into(),
+        source_id: "logical/pure.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn increment(number, label) = std.math.increment(number); pub fn add_one(value, increment = 1) = value + increment;".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
+
+    let arguments = BTreeMap::from([
+        ("label".into(), value(OvbRaw::Text("named".into()))),
+        ("number".into(), value(OvbRaw::Int(41.into()))),
+    ]);
+    assert_eq!(
+        evaluator.invoke_with("increment", &arguments),
+        StageOutcome::Passed
+    );
+    assert_eq!(
+        evaluator.invoke_with(
+            "add_one",
+            &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())))]),
+        ),
+        StageOutcome::Passed
+    );
+}
+
+#[test]
+fn bounded_evaluator_redacts_missing_and_unknown_retained_function_arguments() {
+    let pure_module = SourceUnit {
+        fixture_id: "test-module".into(),
+        source_id: "logical/pure.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn increment(value) = std.math.increment(value);".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
+
+    for arguments in [
+        BTreeMap::new(),
+        BTreeMap::from([("unknown".into(), value(OvbRaw::Int(41.into())))]),
+    ] {
+        let StageOutcome::Failed(diagnostic) = evaluator.invoke_with("increment", &arguments)
+        else {
+            panic!("missing and unknown arguments must fail");
+        };
+        assert_eq!(diagnostic.code(), "ORNA-EVAL-ARGUMENT");
+        assert_eq!(diagnostic.message(), "<redacted>");
+    }
 }
