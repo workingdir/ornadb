@@ -1,0 +1,10 @@
+[package]
+name = "orna-serving-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Bounded, fail-closed serving session state for Orna 1.0"
+
+[dependencies]
+orna-protocol-v1 = { path = "../orna-protocol-v1" }
