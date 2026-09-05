@@ -1180,10 +1180,16 @@ fn check_item(
             }
             for key in keys {
                 let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
-                if matches!(ty, Type::Float)
-                    || matches!(ty, Type::Applied { base, .. } if base == "Float")
-                {
-                    diagnostics.push(diag(DIAG_TYPE, "Float is not a valid primary-key type"));
+                let is_range = matches!(&ty, Type::Applied { base, .. } if base == "Range");
+                let is_float = matches!(&ty, Type::Float)
+                    || matches!(&ty, Type::Applied { base, .. } if base == "Float");
+                if is_range || is_float {
+                    let message = if is_range {
+                        "Range<T> is not a primary-key type in version 1.0"
+                    } else {
+                        "Float is not a valid primary-key type"
+                    };
+                    diagnostics.push(diag(DIAG_TYPE, message));
                 }
             }
             let row = table_row_type(item);
