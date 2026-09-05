@@ -6,7 +6,7 @@
 //! their parent's writes but cannot publish independently. Only the root
 //! [`Activation`] can publish its overlay.
 
-use std::{collections::BTreeMap, ops::RangeBounds};
+use std::{collections::BTreeMap, iter::Peekable, ops::RangeBounds};
 
 /// The committed relation for one table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +116,80 @@ enum ActivationState {
     RolledBack,
 }
 
+type CommittedRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Row)> + 'a>;
+type OverlayRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Option<Row>)> + 'a>;
+
+struct CandidateScan<'a, Key, Row> {
+    committed: Peekable<CommittedRows<'a, Key, Row>>,
+    overlay: Peekable<OverlayRows<'a, Key, Row>>,
+}
+
+impl<'a, Key, Row> CandidateScan<'a, Key, Row>
+where
+    Key: Clone + Ord,
+    Row: Clone,
+{
+    fn new<C, O>(committed: C, overlay: O) -> Self
+    where
+        C: Iterator<Item = (&'a Key, &'a Row)> + 'a,
+        O: Iterator<Item = (&'a Key, &'a Option<Row>)> + 'a,
+    {
+        let committed: CommittedRows<'a, Key, Row> = Box::new(committed);
+        let overlay: OverlayRows<'a, Key, Row> = Box::new(overlay);
+        Self {
+            committed: committed.peekable(),
+            overlay: overlay.peekable(),
+        }
+    }
+}
+
+impl<Key, Row> Iterator for CandidateScan<'_, Key, Row>
+where
+    Key: Clone + Ord,
+    Row: Clone,
+{
+    type Item = (Key, Row);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match (self.committed.peek(), self.overlay.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => {
+                    let (key, row) = self.committed.next().expect("peeked committed row");
+                    return Some((key.clone(), row.clone()));
+                }
+                (None, Some(_)) => {
+                    let (key, row) = self.overlay.next().expect("peeked overlay row");
+                    if let Some(row) = row {
+                        return Some((key.clone(), row.clone()));
+                    }
+                }
+                (Some((committed_key, _)), Some((overlay_key, _))) => {
+                    match committed_key.cmp(overlay_key) {
+                        std::cmp::Ordering::Less => {
+                            let (key, row) = self.committed.next().expect("peeked committed row");
+                            return Some((key.clone(), row.clone()));
+                        }
+                        std::cmp::Ordering::Equal => {
+                            self.committed.next();
+                            let (key, row) = self.overlay.next().expect("peeked overlay row");
+                            if let Some(row) = row {
+                                return Some((key.clone(), row.clone()));
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            let (key, row) = self.overlay.next().expect("peeked overlay row");
+                            if let Some(row) = row {
+                                return Some((key.clone(), row.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The root owner of a table activation.
 pub struct Activation<'runtime, Key, Row> {
     runtime: &'runtime mut TableRuntime<Key, Row>,
@@ -198,7 +272,8 @@ where
         &self,
         limit: usize,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
-        Ok(self.candidate_rows()?.into_iter().take(limit))
+        self.require_open()?;
+        Ok(CandidateScan::new(self.runtime.committed.iter(), self.overlay.iter()).take(limit))
     }
 
     /// Scans candidate rows in a canonical key range.
@@ -207,12 +282,13 @@ where
         range: R,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
     where
-        R: RangeBounds<Key>,
+        R: RangeBounds<Key> + Clone,
     {
-        Ok(self
-            .candidate_rows()?
-            .into_iter()
-            .filter(move |(key, _)| range.contains(key)))
+        self.require_open()?;
+        Ok(CandidateScan::new(
+            self.runtime.committed.range(range.clone()),
+            self.overlay.range(range),
+        ))
     }
 
     /// Publishes every staged change together. Nested scopes cannot call this.
@@ -308,7 +384,7 @@ where
         range: R,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
     where
-        R: RangeBounds<Key>,
+        R: RangeBounds<Key> + Clone,
     {
         self.activation.candidate_scan_range(range)
     }
@@ -507,22 +583,40 @@ where
         table: &Table,
         limit: usize,
     ) -> Result<impl Iterator<Item = (Key, Row)>, TableError> {
-        Ok(self.candidate_rows(table)?.into_iter().take(limit))
+        self.require_open()?;
+        let committed = self
+            .runtime
+            .committed
+            .get(table)
+            .into_iter()
+            .flat_map(BTreeMap::iter);
+        let overlay = self.overlay.get(table).into_iter().flat_map(BTreeMap::iter);
+        Ok(CandidateScan::new(committed, overlay).take(limit))
     }
 
     /// Scans one candidate relation in a canonical key range.
-    pub fn candidate_scan_range<R>(
-        &self,
+    pub fn candidate_scan_range<'a, R>(
+        &'a self,
         table: &Table,
         range: R,
-    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    ) -> Result<impl Iterator<Item = (Key, Row)> + 'a, TableError>
     where
-        R: RangeBounds<Key>,
+        R: RangeBounds<Key> + Clone + 'a,
     {
-        Ok(self
-            .candidate_rows(table)?
+        self.require_open()?;
+        let committed_range = range.clone();
+        let committed = self
+            .runtime
+            .committed
+            .get(table)
             .into_iter()
-            .filter(move |(key, _)| range.contains(key)))
+            .flat_map(move |relation| relation.range(committed_range.clone()));
+        let overlay = self
+            .overlay
+            .get(table)
+            .into_iter()
+            .flat_map(move |relation| relation.range(range.clone()));
+        Ok(CandidateScan::new(committed, overlay))
     }
 
     /// Publishes the overlays of every changed relation together.
@@ -620,13 +714,13 @@ where
         self.activation.candidate_scan_window(table, limit)
     }
 
-    pub fn candidate_scan_range<R>(
-        &self,
+    pub fn candidate_scan_range<'a, R>(
+        &'a self,
         table: &Table,
         range: R,
-    ) -> Result<impl Iterator<Item = (Key, Row)>, TableError>
+    ) -> Result<impl Iterator<Item = (Key, Row)> + 'a, TableError>
     where
-        R: RangeBounds<Key>,
+        R: RangeBounds<Key> + Clone + 'a,
     {
         self.activation.candidate_scan_range(table, range)
     }
