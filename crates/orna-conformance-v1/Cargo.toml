@@ -6,6 +6,10 @@ rust-version = "1.95"
 license = "Apache-2.0"
 publish = false
 
+[[bin]]
+name = "orna-conformance"
+path = "src/main.rs"
+
 [dependencies]
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
