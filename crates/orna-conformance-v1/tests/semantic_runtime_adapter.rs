@@ -7,6 +7,24 @@ use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use std::collections::BTreeMap;
 
 #[test]
+fn transactional_fixture_preserves_order_reference_types_without_runtime_claims() {
+    let report = Harness::new(Corpus::load_default().expect("reference corpus loads"))
+        .run(&mut SemanticAdapter::default());
+    let fixture = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "valid/transactional-scope.orna")
+        .expect("transactional fixture exists");
+    assert!(fixture.passed, "{:?}", fixture.stages);
+    assert!(
+        fixture
+            .stages
+            .iter()
+            .any(|stage| stage.status == EvidenceStatus::Skipped)
+    );
+}
+
+#[test]
 fn semantic_mail_fixture_distinguishes_stored_email_from_provider_messages() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
