@@ -6,9 +6,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Read-only first semantic slice for the frozen Orna 1.0 AST"
 
-# Kept outside the legacy workspace until this v1 boundary is explicitly adopted.
-[workspace]
-
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
