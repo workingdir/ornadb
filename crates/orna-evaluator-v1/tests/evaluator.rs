@@ -68,6 +68,38 @@ fn call_module(source: &str, expression: &str, limits: Limits) -> Result<Value, 
 }
 
 #[test]
+fn admission_limits_reject_zero_configuration_and_count_source_bytes() {
+    let limits = Limits {
+        max_source_bytes: 2,
+        max_collection_items: 2,
+        ..Limits::default()
+    };
+    assert!(limits.check_source("é").is_ok());
+    assert_eq!(
+        limits.check_source("éa").unwrap_err().code(),
+        "ORNA-EVAL-LIMIT"
+    );
+    assert!(limits.check_items(2).is_ok());
+    assert_eq!(limits.check_items(3).unwrap_err().code(), "ORNA-EVAL-LIMIT");
+    for index in 0..6 {
+        let mut limits = Limits::default();
+        match index {
+            0 => limits.max_source_bytes = 0,
+            1 => limits.max_steps = 0,
+            2 => limits.max_depth = 0,
+            3 => limits.max_collection_items = 0,
+            4 => limits.max_string_bytes = 0,
+            _ => limits.max_integer_digits = 0,
+        }
+        assert_eq!(
+            limits.check_source("").unwrap_err().code(),
+            "ORNA-EVAL-LIMIT"
+        );
+        assert_eq!(limits.check_items(0).unwrap_err().code(), "ORNA-EVAL-LIMIT");
+    }
+}
+
+#[test]
 fn source_namespace_entry_checks_values_and_limits_before_parsing() {
     let functions = functions_from_source("fn increment(value: Int) = value + 1;");
     let environment = Environment::from([("input".into(), Value::int(41.into()))]);

@@ -51,6 +51,23 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Validate configuration and source bytes before a caller parses source.
+    pub fn check_source(self, source: &str) -> Result<(), EvaluationError> {
+        check_limits(source, self)
+    }
+
+    /// Validate configuration and a retained collection's total item count.
+    pub fn check_items(self, count: usize) -> Result<(), EvaluationError> {
+        validate_limits(self)?;
+        if count > self.max_collection_items {
+            Err(error("ORNA-EVAL-LIMIT"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A deterministic name environment. Values must be canonical OVB-1 values.
 /// Qualified enum-label patterns resolve an exact `Type.variant` binding here;
 /// its enum type and variant identities are matched before payload fields bind.
