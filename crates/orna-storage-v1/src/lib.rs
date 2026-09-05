@@ -12,7 +12,9 @@ use std::{
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
 use orna_repository_v1::ManagedPath;
-use orna_value_v1::{path_encode_key_components, path_validate_relative_components};
+use orna_value_v1::{
+    path_decode_key_components, path_encode_key_components, path_validate_relative_components,
+};
 use sha2::{Digest, Sha256};
 
 /// An opaque, deterministic mutation identity supplied by the runtime.
@@ -45,6 +47,18 @@ impl RowHash {
 pub struct LoosePath(ManagedPath);
 
 impl LoosePath {
+    /// Admits a discovered table-relative encoded row path. The components
+    /// exclude the table root and include the final `.orna` extension.
+    /// Decoding rejects aliases before construction; this does not perform
+    /// filesystem I/O, resolve symlinks, or interpret the key's logical type.
+    pub fn from_encoded_key(
+        table_root: impl AsRef<str>,
+        components: &[String],
+    ) -> Result<Self, Error> {
+        let key = path_decode_key_components(components).map_err(|_| Error::InvalidKey)?;
+        Self::for_key(table_root, &key)
+    }
+
     pub fn for_key(table_root: impl AsRef<str>, key: &[String]) -> Result<Self, Error> {
         let root = table_root.as_ref();
         if root.is_empty() || root.starts_with('.') || root.contains('/') || root.contains('\\') {
@@ -501,6 +515,42 @@ mod tests {
         for root in ["", ".", "..", "../Contact", "/Contact", "a\\b"] {
             assert!(LoosePath::for_key(root, &["safe".into()]).is_err());
         }
+    }
+    #[test]
+    fn discovered_paths_must_be_canonical_before_admission() {
+        for (keys, components) in [
+            (vec![""], vec!["~ff.orna"]),
+            (vec!["..", "foo/bar"], vec!["~2e~2e", "foo~2fbar.orna"]),
+            (
+                vec!["first.orna", "last.orna"],
+                vec!["first.orna", "last.orna.orna"],
+            ),
+        ] {
+            let keys: Vec<String> = keys.into_iter().map(String::from).collect();
+            let components: Vec<String> = components.into_iter().map(String::from).collect();
+            let discovered = LoosePath::from_encoded_key("Contact", &components).unwrap();
+            assert_eq!(discovered, LoosePath::for_key("Contact", &keys).unwrap());
+            assert_eq!(
+                discovered.as_managed_path().as_path(),
+                std::path::Path::new(&format!("Contact/{}", components.join("/")))
+            );
+        }
+        for components in [
+            vec![],
+            vec!["alice"],
+            vec!["~61lice.orna"],
+            vec!["~FF.orna"],
+            vec!["..", "alice.orna"],
+            vec!["/alice.orna"],
+            vec!["a\\alice.orna"],
+        ] {
+            let components: Vec<String> = components.into_iter().map(String::from).collect();
+            assert_eq!(
+                LoosePath::from_encoded_key("Contact", &components),
+                Err(Error::InvalidKey)
+            );
+        }
+        assert!(LoosePath::from_encoded_key("../Contact", &["alice.orna".into()]).is_err());
     }
     fn id(text: &str) -> MutationId {
         MutationId::new(text).unwrap()
