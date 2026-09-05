@@ -1,6 +1,7 @@
 use orna_conformance_v1::{
-    BoundedEvaluator, Corpus, EvidenceStatus, Harness, ProjectUnit, RuntimeAdapter,
-    RuntimeEvaluator, Scenario, SemanticAdapter, SourceUnit, StageOutcome,
+    BoundedEvaluator, Corpus, EvidenceStatus, Harness, ProjectEnvironment, ProjectExpectations,
+    ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario, SemanticAdapter, SourceUnit,
+    StageOutcome,
 };
 use orna_foundation_v1::Diagnostic;
 
@@ -89,6 +90,55 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
     };
     let StageOutcome::Failed(diagnostic) = evaluator.evaluate(&invalid) else {
         panic!("unknown name must fail");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
+    ProjectUnit {
+        fixture_id: "test-project".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules,
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    }
+}
+
+#[test]
+fn bounded_evaluator_executes_pure_modules_and_projects_without_effects() {
+    let pure_module = SourceUnit {
+        fixture_id: "test-module".into(),
+        source_id: "logical/pure.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn answer() = 40 + 2;".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&pure_module), StageOutcome::Passed);
+    assert_eq!(
+        evaluator.evaluate_project(&pure_project(vec![pure_module])),
+        StageOutcome::Passed
+    );
+
+    let failure = SourceUnit {
+        fixture_id: "test-module-failure".into(),
+        source_id: "logical/failure.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn secret() = missing;".into(),
+    };
+    let StageOutcome::Failed(diagnostic) = evaluator.evaluate_project(&pure_project(vec![failure]))
+    else {
+        panic!("unknown pure function value must fail");
     };
     assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
     assert_eq!(diagnostic.message(), "<redacted>");
