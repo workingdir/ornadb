@@ -196,6 +196,22 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         }
     }
 
+    /// Returns whether every value satisfies the predicate, short-circuiting on false.
+    pub fn every<P>(mut self, mut predicate: P) -> bool
+    where
+        P: FnMut(&Item) -> bool,
+    {
+        self.source.all(|item| predicate(&item))
+    }
+
+    /// Returns whether any value satisfies the predicate, short-circuiting on true.
+    pub fn exists<P>(mut self, mut predicate: P) -> bool
+    where
+        P: FnMut(&Item) -> bool,
+    {
+        self.source.any(|item| predicate(&item))
+    }
+
     /// Takes a bounded prefix without enumerating later items.
     pub fn take(self, limit: usize) -> Self {
         Self::new(self.source.take(limit))
@@ -1333,6 +1349,21 @@ mod tests {
         assert_eq!(
             database.relation(&"notes").take(0).one(),
             Err(CardinalityError::Empty)
+        );
+        assert!(
+            database
+                .relation(&"notes")
+                .every(|(_, row)| !row.is_empty())
+        );
+        assert!(
+            database
+                .relation(&"notes")
+                .exists(|(_, row)| *row == "three")
+        );
+        assert!(
+            !database
+                .relation(&"notes")
+                .exists(|(_, row)| *row == "missing")
         );
 
         let mut activation = database.begin();
