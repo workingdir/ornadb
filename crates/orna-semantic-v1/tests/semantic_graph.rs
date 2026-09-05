@@ -83,6 +83,16 @@ fn system_checkpoint_history_selectors_resolve_from_intrinsic_surface() {
 }
 
 #[test]
+fn system_run_history_sorting_resolves_system_row_fields() {
+    let result = analyze(&[ModuleInput::new(
+        "sys-run-history.orna",
+        "pub fn committed_runs() = sys.Run.as_of(HEAD) | sort_by(run => -run.started);",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
