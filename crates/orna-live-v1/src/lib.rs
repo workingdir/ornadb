@@ -761,7 +761,7 @@ impl LiveHost {
                     | Message::RequestStatusResult { .. } => Err(Error::InvalidMessage),
                 })();
                 if dispatched.is_err() {
-                    self.abort_request(session, request);
+                    self.retain_failure(session, request, fingerprint);
                 }
                 dispatched
             }
@@ -820,7 +820,27 @@ impl LiveHost {
         Ok(outcome)
     }
 
-    fn abort_request(&mut self, session: [u8; 16], request: [u8; 16]) {
+    fn retain_failure(&mut self, session: [u8; 16], request: [u8; 16], fingerprint: [u8; 32]) {
+        let failure = DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Failure,
+                    value: None,
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            }),
+        };
+        if self.serving.complete_request(session, request).is_ok()
+            && let Some(record) = self.requests.get_mut(&(session, request))
+        {
+            record.terminal = Some(failure);
+            return;
+        }
         let _ = self.serving.cancel_request(session, request);
         self.requests.remove(&(session, request));
     }
