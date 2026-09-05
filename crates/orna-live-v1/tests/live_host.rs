@@ -11,7 +11,7 @@ use orna_protocol_v1::{
     canonical_request_fingerprint,
 };
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RequestIdentity, RuntimeIdentity, RuntimeState, TerminalOutcome};
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
     SessionDeletionAdapter,
@@ -164,6 +164,11 @@ fn open_durable_state(repository: &Repository) -> RuntimeState {
         [8; 32],
     ))
     .unwrap()
+}
+
+fn request_fingerprint(bytes: &[u8], session: [u8; 16]) -> [u8; 32] {
+    let envelope = Envelope::decode(bytes, Limits::default().protocol).unwrap();
+    canonical_request_fingerprint(session, &envelope, Limits::default().protocol).unwrap()
 }
 
 fn remove_test_repository(root: &Path) {
@@ -541,6 +546,152 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
         Err(Error::RequestMismatch)
     );
     drop(second_host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_reclaims_a_reserved_request_after_host_reconstruction() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [24; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let runtime = open_durable_state(&repository);
+    block_on(runtime.reserve_request(
+        RequestIdentity {
+            session_id: [1; 16],
+            request_id: [24; 16],
+        },
+        fingerprint,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [7; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([7; 16], 2, Frame::Binary(request), &mut application,))
+            .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Accepted)
+    );
+    assert_eq!(application.calls, 1);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_cancels_a_recovered_running_request_and_replays_cancellation() {
+    let (root, repository) = durable_repository();
+    let target = eval([1; 16], [25; 16], "1");
+    let target_fingerprint = request_fingerprint(&target, [1; 16]);
+    let runtime = open_durable_state(&repository);
+    let target_identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [25; 16],
+    };
+    block_on(runtime.reserve_request(target_identity, target_fingerprint)).unwrap();
+    block_on(runtime.start_request(target_identity, target_fingerprint)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [8; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let cancel = Envelope {
+        request: Some([26; 16]),
+        watch: None,
+        message: Message::Cancel {
+            target_kind: TargetKind::Request,
+            target: [25; 16],
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([8; 16], 2, Frame::Binary(cancel), &mut application,))
+            .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Cancelled)
+    );
+    assert_eq!(application.calls, 1);
+    assert!(matches!(
+        block_on(host.dispatch_frame([8; 16], 3, Frame::Binary(target), &mut application,))
+            .unwrap()
+            .outcome,
+        FrameOutcome::Cancelled
+    ));
+    assert_eq!(application.calls, 1);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_rejects_a_retained_response_with_the_wrong_message_shape() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [27; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let retained = Envelope {
+        request: Some([27; 16]),
+        watch: None,
+        message: Message::RequestStatusResult {
+            target: [28; 16],
+            state: orna_protocol_v1::RequestState::Unknown,
+            fingerprint: None,
+            result: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [27; 16],
+    };
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request(identity, fingerprint)).unwrap();
+    block_on(runtime.complete_request(
+        identity,
+        fingerprint,
+        TerminalOutcome::new(retained).unwrap(),
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [9; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request), &mut application,)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
     remove_test_repository(&root);
 }
 
