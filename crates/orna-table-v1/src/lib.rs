@@ -188,6 +188,19 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         let mut seen = BTreeSet::new();
         Self::new(self.source.filter(move |item| seen.insert((*item).clone())))
     }
+
+    /// Groups values by key order while preserving input order in each group.
+    pub fn group_by<Key, F>(self, mut key: F) -> Relation<'a, (Key, Vec<Item>)>
+    where
+        Key: Ord + 'a,
+        F: FnMut(&Item) -> Key + 'a,
+    {
+        let mut groups = BTreeMap::<Key, Vec<Item>>::new();
+        for item in self.source {
+            groups.entry(key(&item)).or_default().push(item);
+        }
+        Relation::new(groups.into_iter())
+    }
 }
 
 impl<Item> Iterator for Relation<'_, Item> {
@@ -1206,6 +1219,17 @@ mod tests {
                 .distinct()
                 .collect::<Vec<_>>(),
             vec!['o', 't', 'f']
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .group_by(|(_, row)| row.chars().next().expect("nonempty row"))
+                .collect::<Vec<_>>(),
+            vec![
+                ('f', vec![(4, "four")]),
+                ('o', vec![(1, "one")]),
+                ('t', vec![(2, "two"), (3, "three")]),
+            ]
         );
 
         let mut activation = database.begin();
