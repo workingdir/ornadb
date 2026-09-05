@@ -121,6 +121,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/secret-display.orna",
         "invalid/assert-effectful-table.orna",
         "invalid/computed-field-effect.orna",
+        "invalid/mutate-sys-commit.orna",
     ] {
         let fixture = report
             .fixtures
