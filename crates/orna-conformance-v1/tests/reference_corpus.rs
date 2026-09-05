@@ -28,6 +28,13 @@ fn no_adapter_cannot_create_runtime_passes() {
             .iter()
             .all(|e| e.status == EvidenceStatus::Specified)
     );
+    assert_eq!(report.scenarios.len(), 144);
+    assert!(
+        report
+            .scenarios
+            .iter()
+            .all(|scenario| scenario.status == EvidenceStatus::Skipped)
+    );
 }
 
 struct ParseFail;
@@ -41,7 +48,7 @@ impl ConformanceAdapter for ParseFail {
     }
     fn parse(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
         StageOutcome::Failed(
-            serde_json::json!({"code": "WRONG", "message": "wrong", "span": {"start": 0}}),
+            serde_json::json!({"code": "WRONG", "message": "source-only-should-never-escape", "span": {"start": 0}}),
         )
     }
     fn resolve(&mut self, _: &SourceUnit) -> StageOutcome<Self::Diagnostic> {
@@ -178,6 +185,21 @@ fn normative_digest_mismatch_and_load_errors_do_not_expose_machine_paths() {
             .to_string(),
         "cannot read reference JSON: tests/conformance-manifest.json"
     );
+}
+
+#[test]
+fn report_redacts_adapter_diagnostics_even_when_an_adapter_returns_source() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let report = Harness::new(corpus).run(&mut ParseFail);
+    let serialized = serde_json::to_string(&report).expect("report serializes");
+    assert!(!serialized.contains("source-only-should-never-escape"));
+    assert!(!serialized.contains("/home/"));
+    let diagnostic = report.fixtures[0].stages[0]
+        .diagnostic
+        .as_ref()
+        .expect("failed stage has a redacted diagnostic");
+    assert_eq!(diagnostic["redacted"], true);
+    assert_eq!(diagnostic["spans"], serde_json::json!([]));
 }
 
 struct ProjectProbe {
