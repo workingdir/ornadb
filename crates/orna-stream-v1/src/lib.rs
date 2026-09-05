@@ -369,7 +369,7 @@ pub trait CheckpointBackend {
 pub struct InMemoryCheckpointBackend {
     checkpoints: BTreeMap<CheckpointKey, Checkpoint>,
     failures: BTreeMap<FailureIdentity, FailureRecord>,
-    leases: BTreeMap<DeliveryIdentity, DeliveryLease>,
+    leases: BTreeMap<CheckpointKey, DeliveryLease>,
     next_fence: BTreeMap<CheckpointKey, u64>,
 }
 
@@ -394,9 +394,10 @@ impl InMemoryCheckpointBackend {
     }
 
     fn consume_lease(&mut self, lease: &DeliveryLease) -> Result<(), RejectReason> {
-        match self.leases.get(&lease.delivery) {
+        let key = lease.delivery.checkpoint_key();
+        match self.leases.get(&key) {
             Some(current) if current == lease => {
-                self.leases.remove(&lease.delivery);
+                self.leases.remove(&key);
                 Ok(())
             }
             _ => Err(RejectReason::LeaseFenced),
@@ -433,7 +434,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
                 }
-                if self.leases.contains_key(&delivery) {
+                if self.leases.contains_key(&key) {
                     return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
                 }
                 if let Some(failure) = self.failures.get(&FailureIdentity(delivery.clone())) {
@@ -448,14 +449,14 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 } else if purpose == LeasePurpose::Skip {
                     return CommitResult::Rejected(RejectReason::FailureMissing);
                 }
-                let fence = self.next_fence.entry(key).or_insert(0);
+                let fence = self.next_fence.entry(key.clone()).or_insert(0);
                 *fence += 1;
                 let lease = DeliveryLease {
                     delivery: delivery.clone(),
                     fence: *fence,
                     purpose,
                 };
-                self.leases.insert(delivery, lease.clone());
+                self.leases.insert(key, lease.clone());
                 CommitResult::Acquired { lease }
             }
             CommitIntent::Fail { lease, diagnostic } => {
@@ -1043,6 +1044,37 @@ mod tests {
             }),
             CommitResult::Rejected(RejectReason::LeaseFenced)
         );
+    }
+
+    #[test]
+    fn ordered_stream_admits_only_one_provider_delivery_lease() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let first_delivery = delivery("receipt:first", "resume:after-first");
+        let first = acquire(&mut backend, first_delivery.clone());
+        let next_delivery = delivery("receipt:next", "resume:after-next");
+        let before = expected(&backend, &next_delivery);
+
+        assert_eq!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: next_delivery.clone(),
+                expected: before.clone(),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
+        );
+
+        assert!(matches!(
+            backend.apply(CommitIntent::Cancel { lease: first }),
+            CommitResult::Cancelled { .. }
+        ));
+        assert!(matches!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: next_delivery,
+                expected: before,
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Acquired { .. }
+        ));
     }
 
     #[test]
