@@ -1,0 +1,21 @@
+[package]
+name = "orna-value-v1"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Orna 1.0 OVB-1 canonical values, schemas and identities"
+
+# This vertical slice is intentionally isolated until the integration owner
+# elects it as a workspace member.
+[workspace]
+
+[dependencies]
+num-bigint = "0.4.6"
+num-integer = "0.1.47"
+num-traits = "0.2.19"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+hex = "0.4.3"
+serde_json = "1.0.151"
