@@ -1102,6 +1102,35 @@ fn generic_ordering_pipeline_keeps_element_and_optional_types() {
 }
 
 #[test]
+fn relation_pairs_preserve_element_type_in_overlapping_tuples() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "pairs.orna",
+            "pub fn paired() = sys.Failure | pairs();",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .get(&orna_semantic_v1::Namespace(vec!["pairs".into()]))
+        .expect("pairs module");
+    assert_eq!(
+        module.exports.get("paired").expect("paired function").ty,
+        Type::Function {
+            parameters: Vec::new(),
+            parameter_names: Some(Vec::new()),
+            result: Box::new(Type::Relation(Box::new(Type::Tuple(vec![
+                Type::Named("sys.Failure".into()),
+                Type::Named("sys.Failure".into()),
+            ])))),
+            default_parameters: Default::default(),
+        }
+    );
+}
+
+#[test]
 fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
         "inferred.orna",
