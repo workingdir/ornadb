@@ -1563,6 +1563,7 @@ name = "orna-conformance-v1"
 version = "1.0.0"
 dependencies = [
  "num-bigint",
+ "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
