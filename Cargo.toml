@@ -18,6 +18,7 @@ members = [
     "crates/orna-project-v1",
     "crates/orna-repository-v1",
     "crates/orna-runtime-v1",
+    "crates/orna-table-v1",
     "crates/orna-runtime-tty",
     "crates/orna-serving-v1",
     "crates/orna-security-v1",
