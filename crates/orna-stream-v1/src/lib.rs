@@ -567,6 +567,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Skipped;
                 record.diagnostic = diagnostic;
                 CommitResult::ReplayFailed {
@@ -900,6 +901,40 @@ mod tests {
             backend.failure(&failure.identity).unwrap().status,
             FailureStatus::Replayed
         );
+    }
+
+    #[test]
+    fn replay_failure_updates_the_stable_failure_attempt_count() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let failure = acquire_and_fail(&mut backend, item.clone());
+        let lease = acquire_skip(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Skip {
+                lease,
+                expected: expected(&backend, &item),
+                expected_failure_version: failure.version,
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let replay = match backend.apply(CommitIntent::Replay {
+            failure: failure.identity.clone(),
+            expected_version: failure.version + 1,
+        }) {
+            CommitResult::ReplayGranted { grant } => grant,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        let failed_again = match backend.apply(CommitIntent::ReplayFail {
+            failure: replay.failure,
+            expected_version: replay.version,
+            diagnostic: diagnostic(),
+        }) {
+            CommitResult::ReplayFailed { failure } => failure,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert_eq!(failed_again.identity, failure.identity);
+        assert_eq!(failed_again.attempts, 2);
+        assert_eq!(failed_again.status, FailureStatus::Skipped);
     }
 
     #[test]
