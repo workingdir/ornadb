@@ -354,6 +354,24 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn retained_functions_admit_structured_parameters_and_wildcards() {
+    let module = SourceUnit {
+        fixture_id: "parameter-patterns".into(),
+        source_id: "logical/parameter-patterns.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn add((a, b) = (1, 2)) = a + b; fn ignore(_, _) = 7; fn verify() = if add((10, 20)) == 30 && ignore(1, 2) == 7 { 1 } else { 1 / 0 }; fn reject() = add(1);".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("verify"), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("add"), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("reject") else {
+        panic!("parameter patterns must match the supplied values");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-TYPE");
+}
+
+#[test]
 fn retained_functions_execute_closures_without_mutating_captures() {
     let module = SourceUnit {
         fixture_id: "closure-capture".into(),

@@ -333,16 +333,14 @@ impl BoundedEvaluator {
     }
 
     fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
-        items.iter().all(|item| match &item.declaration {
-            Declaration::Let {
-                pattern: Pattern::Name(_, _),
-                ..
-            } => true,
-            Declaration::Function { signature, .. } => signature
-                .parameters
-                .iter()
-                .all(|parameter| matches!(parameter.pattern, Pattern::Name(_, _))),
-            _ => false,
+        items.iter().all(|item| {
+            matches!(
+                &item.declaration,
+                Declaration::Let {
+                    pattern: Pattern::Name(_, _),
+                    ..
+                } | Declaration::Function { .. }
+            )
         })
     }
 
@@ -358,13 +356,13 @@ impl BoundedEvaluator {
 
     fn unsupported_module() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
-            reason: "module execution requires an effect-free module with immutable bindings and named-parameter functions".into(),
+            reason: "module execution requires an effect-free module with immutable bindings and pure functions".into(),
         }
     }
 
     fn unsupported_project() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
-            reason: "project execution requires an offline empty-state project whose every module has only immutable bindings and named-parameter functions; tables, effects, and streams require the integrated runtime".into(),
+            reason: "project execution requires an offline empty-state project whose every module has only immutable bindings and pure functions; tables, effects, and streams require the integrated runtime".into(),
         }
     }
 }
