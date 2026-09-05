@@ -53,6 +53,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "Display and Present implementations must be read-only" => "E7201".into(),
         "secret values cannot be displayed" => "E7002".into(),
         "computed field must be deterministic and row-local" => "E3012".into(),
+        "sys.Commit is read-only" => "E7001".into(),
         "remove `self |`; the table already supplies its candidate relation"
         | "remove the repeated table owner before the assertion predicate" => {
             "ORNA-A091-002".into()
