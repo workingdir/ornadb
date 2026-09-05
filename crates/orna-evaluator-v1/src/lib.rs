@@ -169,7 +169,7 @@ pub fn evaluate_function(
         steps: 0,
         functions: &functions,
     };
-    let supplied = Scope::from_environment(arguments, &mut context)?;
+    let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
 }
@@ -190,7 +190,7 @@ pub fn invoke_named(
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-    let supplied = Scope::from_environment(arguments, &mut context)?;
+    let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(&function.environment, &mut context)?;
     invoke_pure(
         &mut context,
@@ -203,39 +203,67 @@ pub fn invoke_named(
     .and_then(Value::canonical)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ArgumentKey {
+    Name(String),
+    Position(usize),
+}
+
+fn parameter_key(parameter: &Parameter, index: usize) -> ArgumentKey {
+    match &parameter.pattern {
+        Pattern::Name(name, _) if name != "_" => ArgumentKey::Name(name.clone()),
+        _ => ArgumentKey::Position(index),
+    }
+}
+
+fn supplied_arguments(
+    arguments: &Environment,
+    context: &mut Context,
+) -> Result<BTreeMap<ArgumentKey, Value>, EvaluationError> {
+    Ok(Scope::from_environment(arguments, context)?
+        .0
+        .into_iter()
+        .map(|(name, value)| (ArgumentKey::Name(name), value))
+        .collect())
+}
+
 fn invoke_pure(
     context: &mut Context,
     parameters: &[Parameter],
     body: &Expr,
     mut scope: Scope,
-    supplied: Scope,
+    supplied: BTreeMap<ArgumentKey, Value>,
     depth: usize,
 ) -> Result<Value, EvaluationError> {
     context.depth(depth)?;
     context.items(parameters.len())?;
-    context.items(supplied.0.len())?;
-    let mut names = BTreeSet::new();
-    for parameter in parameters {
-        let Pattern::Name(name, _) = &parameter.pattern else {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        };
-        if name.len() > context.limits.max_string_bytes {
-            return Err(error("ORNA-EVAL-LIMIT"));
+    context.items(supplied.len())?;
+    let mut keys = BTreeSet::new();
+    let mut bound_names = BTreeSet::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let key = parameter_key(parameter, index);
+        for name in pattern_names(&parameter.pattern) {
+            if name == "_" {
+                continue;
+            }
+            if name.len() > context.limits.max_string_bytes {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            if !bound_names.insert(name) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
         }
-        if !names.insert(name.as_str())
-            || (!supplied.0.contains_key(name) && parameter.default.is_none())
+        if !keys.insert(key.clone())
+            || (!supplied.contains_key(&key) && parameter.default.is_none())
         {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         }
     }
-    if supplied.0.keys().any(|name| !names.contains(name.as_str())) {
+    if supplied.keys().any(|key| !keys.contains(key)) {
         return Err(error("ORNA-EVAL-ARGUMENT"));
     }
-    for parameter in parameters {
-        let Pattern::Name(name, _) = &parameter.pattern else {
-            unreachable!("parameter patterns were admitted above");
-        };
-        let value = if let Some(value) = supplied.0.get(name) {
+    for (index, parameter) in parameters.iter().enumerate() {
+        let value = if let Some(value) = supplied.get(&parameter_key(parameter, index)) {
             value.clone()
         } else {
             context.evaluate(
@@ -247,8 +275,9 @@ fn invoke_pure(
                 depth,
             )?
         };
-        scope.0.insert(name.clone(), value);
-        scope.1.remove(name);
+        if !bind(&parameter.pattern, value, &mut scope, context, depth + 1)? {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
         context.items(scope.0.len())?;
     }
     context.evaluate(body, &mut scope, depth)
@@ -1157,49 +1186,35 @@ impl Context<'_> {
             let mut supplied = BTreeMap::new();
             let mut positional = 0;
             if let Some(input) = input {
-                let Some(Parameter {
-                    pattern: Pattern::Name(name, _),
-                    ..
-                }) = parameters.first()
-                else {
+                let Some(parameter) = parameters.first() else {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 };
-                supplied.insert(name.clone(), input);
+                supplied.insert(parameter_key(parameter, 0), input);
                 positional = 1;
             }
             let mut named_started = false;
             for argument in arguments {
-                let name = if let Some(name) = &argument.name {
+                let key = if let Some(name) = &argument.name {
                     named_started = true;
-                    name
+                    ArgumentKey::Name(name.clone())
                 } else {
                     if named_started {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     }
-                    let Some(Parameter {
-                        pattern: Pattern::Name(name, _),
-                        ..
-                    }) = parameters.get(positional)
-                    else {
+                    let Some(parameter) = parameters.get(positional) else {
                         return Err(error("ORNA-EVAL-ARGUMENT"));
                     };
+                    let key = parameter_key(parameter, positional);
                     positional += 1;
-                    name
+                    key
                 };
-                if supplied.contains_key(name) {
+                if supplied.contains_key(&key) {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 }
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                supplied.insert(name.clone(), value);
+                supplied.insert(key, value);
             }
-            return invoke_pure(
-                self,
-                parameters,
-                body,
-                captured,
-                Scope(supplied, BTreeSet::new()),
-                depth + 1,
-            );
+            return invoke_pure(self, parameters, body, captured, supplied, depth + 1);
         }
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -1329,6 +1344,9 @@ fn bind(
     context.depth(depth)?;
     match pattern {
         Pattern::Name(name, _) => {
+            if name == "_" {
+                return Ok(true);
+            }
             scope.0.insert(name.clone(), value);
             scope.1.remove(name);
             Ok(true)
