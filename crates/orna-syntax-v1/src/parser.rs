@@ -481,6 +481,7 @@ pub enum LiteralKind {
     Null,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum StringSegment {
     Text { text: String, span: SourceSpan },
     Expression { value: Expr, span: SourceSpan },
@@ -532,6 +533,7 @@ pub enum AssignmentOperator {
     Divide,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AssignmentTarget {
     Name {
         name: String,
