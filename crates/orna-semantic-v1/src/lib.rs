@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
-    Declaration, Expr, FieldInitializer, Item, LiteralKind, Pattern, Statement, SyntaxTree,
-    TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
+    ControlKind, Declaration, Expr, FieldInitializer, Item, LiteralKind, Pattern, Statement,
+    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
+    parse_module_with_file,
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -83,8 +84,13 @@ pub enum Type {
     Stream(Box<Type>),
     Record(BTreeMap<String, Type>),
     Tuple(Vec<Type>),
+    Optional(Box<Type>),
     Function {
         parameters: Vec<Type>,
+        /// Source parameter names when every declaration pattern is a name.
+        /// Function type expressions and catalogue summaries do not invent
+        /// names, so named invocation of those summaries fails closed.
+        parameter_names: Option<Vec<String>>,
         result: Box<Type>,
     },
     Named(String),
@@ -351,6 +357,7 @@ where
 fn function(parameters: Vec<Type>, result: Type) -> Type {
     Type::Function {
         parameters,
+        parameter_names: None,
         result: Box::new(result),
     }
 }
@@ -642,11 +649,20 @@ fn declared_symbol(
                     })
                 })
                 .collect();
+            let parameter_names = signature
+                .parameters
+                .iter()
+                .map(|parameter| match &parameter.pattern {
+                    Pattern::Name(name, _) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
             Some((
                 signature.name.clone(),
                 SymbolKind::Function,
                 Type::Function {
                     parameters,
+                    parameter_names,
                     result: Box::new(
                         signature
                             .result
@@ -708,9 +724,10 @@ fn type_of(ty: &TypeExpr) -> Type {
             parameters, result, ..
         } => Type::Function {
             parameters: parameters.iter().map(type_of).collect(),
+            parameter_names: None,
             result: Box::new(type_of(result)),
         },
-        TypeExpr::Optional { inner, .. } => Type::Named(format!("Optional<{:?}>", type_of(inner))),
+        TypeExpr::Optional { inner, .. } => Type::Optional(Box::new(type_of(inner))),
         TypeExpr::Product { .. } => Type::Error,
     }
 }
@@ -764,6 +781,8 @@ struct Scope {
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     nominal_rows: BTreeMap<String, Type>,
+    /// Local enum payloads retained for closed constructor-pattern checking.
+    enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -786,6 +805,7 @@ fn resolve_imports(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
+        enum_variants: enum_variant_types(tree, diagnostics),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -1064,6 +1084,20 @@ fn infer(
             },
             effects: EffectSummary::default(),
         },
+        Expr::InterpolatedString { segments, .. } => {
+            let mut effects = EffectSummary::default();
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    let value = infer(value, scope, local, diagnostics);
+                    effects.join(&value.effects);
+                    require_same(&Type::Text, &value.ty, diagnostics);
+                }
+            }
+            Inferred {
+                ty: Type::Text,
+                effects,
+            }
+        }
         Expr::Name { text, .. } => {
             if scope.ambiguous.contains(text) {
                 diagnostics.push(diag(
@@ -1213,6 +1247,13 @@ fn infer(
             Inferred {
                 ty: Type::Function {
                     parameters: types,
+                    parameter_names: parameters
+                        .iter()
+                        .map(|parameter| match &parameter.pattern {
+                            Pattern::Name(name, _) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>(),
                     result: Box::new(value.ty),
                 },
                 effects: value.effects,
@@ -1249,16 +1290,18 @@ fn infer(
                 })
                 .collect::<Vec<_>>();
             match callee.ty {
-                Type::Function { parameters, result } => {
-                    if parameters.len() != values.len() {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "function argument count does not match its static signature",
-                        ));
-                    }
-                    for (a, b) in parameters.iter().zip(&values) {
-                        require_same(a, b, diagnostics);
-                    }
+                Type::Function {
+                    parameters,
+                    parameter_names,
+                    result,
+                } => {
+                    check_call_arguments(
+                        &parameters,
+                        parameter_names.as_deref(),
+                        arguments,
+                        &values,
+                        diagnostics,
+                    );
                     Inferred {
                         ty: *result,
                         effects,
@@ -1339,6 +1382,24 @@ fn infer(
                 effects,
             }
         }
+        Expr::Control {
+            kind: ControlKind::Case,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => infer_case(
+            binding.as_ref(),
+            condition.as_deref(),
+            body.as_deref(),
+            arms,
+            alternate.as_deref(),
+            scope,
+            local,
+            diagnostics,
+        ),
         _ => {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -1349,6 +1410,379 @@ fn infer(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+fn check_call_arguments(
+    parameters: &[Type],
+    parameter_names: Option<&[String]>,
+    arguments: &[orna_syntax_v1::Argument],
+    values: &[Type],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let named = arguments
+        .iter()
+        .filter(|argument| argument.name.is_some())
+        .count();
+    if named == 0 {
+        if parameters.len() != values.len() {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "function argument count does not match its static signature",
+            ));
+        }
+        for (expected, actual) in parameters.iter().zip(values) {
+            require_same(expected, actual, diagnostics);
+        }
+        return;
+    }
+    if named != arguments.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "function call cannot mix named and positional arguments",
+        ));
+        return;
+    }
+    let Some(parameter_names) = parameter_names.filter(|names| names.len() == parameters.len())
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "named arguments require declared parameter names",
+        ));
+        return;
+    };
+    let mut seen = BTreeSet::new();
+    let mut malformed = parameters.len() != values.len();
+    for (argument, actual) in arguments.iter().zip(values) {
+        let name = argument.name.as_deref().expect("all arguments are named");
+        let Some(index) = parameter_names
+            .iter()
+            .position(|parameter| parameter == name)
+        else {
+            malformed = true;
+            continue;
+        };
+        if !seen.insert(index) {
+            malformed = true;
+            continue;
+        }
+        require_same(&parameters[index], actual, diagnostics);
+    }
+    if seen.len() != parameters.len() {
+        malformed = true;
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "named function arguments do not match its static signature",
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_case(
+    binding: Option<&Pattern>,
+    condition: Option<&Expr>,
+    body: Option<&Expr>,
+    arms: &[orna_syntax_v1::CaseArm],
+    alternate: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let mut effects = EffectSummary::default();
+    if binding.is_some() || body.is_some() || alternate.is_some() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "malformed case control shape is outside this semantic slice",
+        ));
+    }
+    if let Some(body) = body {
+        effects.join(&infer(body, scope, local, diagnostics).effects);
+    }
+    if let Some(alternate) = alternate {
+        effects.join(&infer(alternate, scope, local, diagnostics).effects);
+    }
+    let Some(condition) = condition else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "case expression requires a value"));
+        let mut discarded_result = None;
+        for arm in arms {
+            infer_case_arm_body(
+                arm,
+                local,
+                scope,
+                diagnostics,
+                &mut effects,
+                &mut discarded_result,
+            );
+        }
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    };
+    let scrutinee = infer(condition, scope, local, diagnostics);
+    effects.join(&scrutinee.effects);
+    if arms.is_empty() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "case expression requires at least one arm",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
+
+    let mut result = None;
+    match &scrutinee.ty {
+        Type::Named(name) if scope.enum_variants.contains_key(name) => {
+            let variants = &scope.enum_variants[name];
+            let mut covered = BTreeSet::new();
+            for arm in arms {
+                let mut arm_locals = local.clone();
+                if let Some(variant) = bind_enum_case_pattern(
+                    &arm.pattern,
+                    name,
+                    variants,
+                    &mut arm_locals,
+                    diagnostics,
+                ) && !covered.insert(variant)
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "case enum variant is duplicated"));
+                }
+                infer_case_arm_body(
+                    arm,
+                    &arm_locals,
+                    scope,
+                    diagnostics,
+                    &mut effects,
+                    &mut result,
+                );
+            }
+            if covered.len() != variants.len() {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "case expression does not cover every enum variant",
+                ));
+            }
+        }
+        Type::Optional(inner) => {
+            let mut covered = BTreeSet::new();
+            for arm in arms {
+                let mut arm_locals = local.clone();
+                if let Some(part) =
+                    bind_optional_case_pattern(&arm.pattern, inner, &mut arm_locals, diagnostics)
+                    && !covered.insert(part)
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "case optional arm is duplicated"));
+                }
+                infer_case_arm_body(
+                    arm,
+                    &arm_locals,
+                    scope,
+                    diagnostics,
+                    &mut effects,
+                    &mut result,
+                );
+            }
+            if covered != BTreeSet::from(["Some", "null"]) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "case expression must cover Some and null exactly once",
+                ));
+            }
+        }
+        Type::Error => {
+            for arm in arms {
+                infer_case_arm_body(arm, local, scope, diagnostics, &mut effects, &mut result);
+            }
+        }
+        _ => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "case inference supports only local enums and optional values",
+            ));
+            for arm in arms {
+                infer_case_arm_body(arm, local, scope, diagnostics, &mut effects, &mut result);
+            }
+        }
+    }
+    Inferred {
+        ty: result.unwrap_or(Type::Error),
+        effects,
+    }
+}
+
+fn bind_enum_case_pattern(
+    pattern: &Pattern,
+    enum_name: &str,
+    variants: &BTreeMap<String, BTreeMap<String, Type>>,
+    local: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let Pattern::Constructor {
+        path,
+        arguments,
+        fields,
+        ..
+    } = pattern
+    else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "enum case arm requires a qualified constructor pattern",
+        ));
+        return None;
+    };
+    let [owner, variant] = path.as_slice() else {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "enum case constructor must be exactly Enum.variant",
+        ));
+        return None;
+    };
+    if owner.text != enum_name {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "enum case constructor does not match the scrutinee type",
+        ));
+        return None;
+    }
+    let Some(expected) = variants.get(&variant.text) else {
+        diagnostics.push(diag(
+            DIAG_UNRESOLVED,
+            "enum case variant cannot be resolved",
+        ));
+        return None;
+    };
+    if !arguments.is_empty() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "enum case payload requires named record fields",
+        ));
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    let mut valid = true;
+    for field in fields {
+        let Some(ty) = expected.get(&field.name) else {
+            diagnostics.push(diag(
+                DIAG_UNRESOLVED,
+                "enum case payload field cannot be resolved",
+            ));
+            valid = false;
+            continue;
+        };
+        if !seen.insert(field.name.as_str()) {
+            diagnostics.push(diag(DIAG_TYPE, "enum case payload field is duplicated"));
+            valid = false;
+            continue;
+        }
+        match &field.pattern {
+            None => insert_case_binding(&field.name, ty.clone(), local),
+            Some(Pattern::Name(name, _)) => insert_case_binding(name, ty.clone(), local),
+            Some(Pattern::Wildcard(_)) => {}
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_UNSUPPORTED,
+                    "nested enum payload patterns are outside this semantic slice",
+                ));
+                valid = false;
+            }
+        }
+    }
+    if seen.len() != expected.len() {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "enum case payload fields do not match the declared variant",
+        ));
+        valid = false;
+    }
+    valid.then(|| variant.text.clone())
+}
+
+fn bind_optional_case_pattern(
+    pattern: &Pattern,
+    inner: &Type,
+    local: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<&'static str> {
+    match pattern {
+        Pattern::Constructor {
+            path,
+            arguments,
+            fields,
+            ..
+        } if path.len() == 1 && path[0].text == "Some" && fields.is_empty() => {
+            let [binding] = arguments.as_slice() else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "Some case pattern requires exactly one payload binding",
+                ));
+                return None;
+            };
+            match binding {
+                Pattern::Name(name, _) => insert_case_binding(name, inner.clone(), local),
+                Pattern::Wildcard(_) => {}
+                _ => {
+                    diagnostics.push(diag(
+                        DIAG_UNSUPPORTED,
+                        "nested optional payload patterns are outside this semantic slice",
+                    ));
+                    return None;
+                }
+            }
+            Some("Some")
+        }
+        Pattern::Literal {
+            kind: LiteralKind::Null,
+            ..
+        } => Some("null"),
+        _ => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "optional case arm must be Some(binding) or null",
+            ));
+            None
+        }
+    }
+}
+
+fn insert_case_binding(name: &str, ty: Type, local: &mut BTreeMap<String, Symbol>) {
+    local.insert(
+        name.to_owned(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty,
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
+}
+
+fn infer_case_arm_body(
+    arm: &orna_syntax_v1::CaseArm,
+    local: &BTreeMap<String, Symbol>,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+    effects: &mut EffectSummary,
+    result: &mut Option<Type>,
+) {
+    if let Some(guard) = &arm.guard {
+        let guard = infer(guard, scope, local, diagnostics);
+        effects.join(&guard.effects);
+        require_same(&Type::Bool, &guard.ty, diagnostics);
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "guarded case arms are outside this semantic slice",
+        ));
+    }
+    let body = infer(&arm.body, scope, local, diagnostics);
+    effects.join(&body.effects);
+    if let Some(expected) = result.as_ref() {
+        require_same(expected, &body.ty, diagnostics);
+    } else {
+        *result = Some(body.ty);
     }
 }
 
@@ -1672,7 +2106,7 @@ fn infer_table_operation(
         "count" => (0, Type::Int, Some("database read")),
         "first" => (
             0,
-            Type::Named(format!("Optional<{:?}>", table.ty)),
+            Type::Optional(Box::new(table.ty.clone())),
             Some("database read"),
         ),
         "one" => (0, table.ty.clone(), Some("database read")),
@@ -2033,12 +2467,51 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
     Some((name.clone(), Type::Record(fields)))
 }
 
+fn enum_variant_types(
+    tree: &SyntaxTree,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>> {
+    let mut enums = BTreeMap::new();
+    for item in &tree.items {
+        let Declaration::Enum { name, variants, .. } = &item.declaration else {
+            continue;
+        };
+        let mut typed_variants = BTreeMap::new();
+        for variant in variants {
+            let mut fields = BTreeMap::new();
+            for field in &variant.fields {
+                if fields
+                    .insert(field.name.clone(), type_of(&field.ty))
+                    .is_some()
+                {
+                    diagnostics.push(diag(DIAG_DUPLICATE, "duplicate enum payload field"));
+                }
+            }
+            if typed_variants
+                .insert(variant.name.clone(), fields)
+                .is_some()
+            {
+                diagnostics.push(diag(DIAG_DUPLICATE, "duplicate enum variant"));
+            }
+        }
+        enums.insert(name.clone(), typed_variants);
+    }
+    enums
+}
+
 fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     fn visit(e: &Expr, names: &mut BTreeSet<String>) {
         match e {
             Expr::Name { text, .. } if text.chars().next().is_some_and(char::is_uppercase) => {
                 names.insert(text.clone());
+            }
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let StringSegment::Expression { value, .. } = segment {
+                        visit(value, names);
+                    }
+                }
             }
             Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => visit(rhs, names),
             Expr::Binary { lhs, rhs, .. } => {
@@ -2073,6 +2546,7 @@ fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
             Expr::Control {
                 condition,
                 body,
+                arms,
                 alternate,
                 ..
             } => {
@@ -2084,6 +2558,12 @@ fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
                 }
                 if let Some(x) = alternate {
                     visit(x, names)
+                }
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        visit(guard, names);
+                    }
+                    visit(&arm.body, names);
                 }
             }
             _ => {}
@@ -2189,6 +2669,7 @@ mod tests {
             m.symbols.get("record").expect("record is collected").ty,
             Type::Function {
                 parameters: vec![],
+                parameter_names: Some(vec![]),
                 result: Box::new(Type::Record(BTreeMap::from([("a".into(), Type::Int)])))
             }
         );
@@ -2196,6 +2677,7 @@ mod tests {
             m.symbols.get("list").expect("list is collected").ty,
             Type::Function {
                 parameters: vec![],
+                parameter_names: Some(vec![]),
                 result: Box::new(Type::List(Box::new(Type::Int)))
             }
         );
