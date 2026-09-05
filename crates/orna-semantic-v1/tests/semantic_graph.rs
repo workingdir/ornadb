@@ -60,6 +60,29 @@ fn table_assertion_rejects_owner_type_mismatch() {
     )]);
 
     assert!(has(&result, DIAG_ASSERTION));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == DIAG_ASSERTION
+            && diagnostic.message() == "table assertion must be a predicate over Relation<User>"
+    }));
+}
+
+#[test]
+fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator() {
+    let result = analyze(&[ModuleInput::new(
+        "library.orna",
+        r#"
+            pub table Book(id: Str) {
+                title: Str,
+                assert every(book => book.title != "");
+            }
+            pub table Loan(book_id: Str) {
+                borrower: Str,
+                assert all_unique(loan => loan.borrower);
+            }
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
 }
 
 #[test]
