@@ -9,6 +9,7 @@ members = [
     "crates/orna-lsp",
     "crates/orna-postgres",
     "crates/orna-protocol",
+    "crates/orna-protocol-v1",
     "crates/orna-repository-v1",
     "crates/orna-runtime-v1",
     "crates/orna-runtime-tty",
@@ -17,8 +18,11 @@ members = [
     "crates/orna-sqlite",
     "crates/orna-standard",
     "crates/orna-storage",
+    "crates/orna-stream-v1",
     "crates/orna-syntax",
     "crates/orna-syntax-v1",
+    "crates/orna-sys-v1",
+    "crates/orna-traceability-v1",
     "crates/orna-value-v1",
 ]
 resolver = "3"
