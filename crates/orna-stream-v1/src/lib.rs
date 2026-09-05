@@ -61,7 +61,7 @@ impl ConsumerIdentity {
     }
 }
 
-/// Identifies a source, partition, and ordered opaque provider position format.
+/// Identifies one provider delivery and its explicit checkpoint transition.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DeliveryIdentity {
     pub consumer: ConsumerIdentity,
@@ -70,7 +70,10 @@ pub struct DeliveryIdentity {
     pub partition_format: Component,
     pub partition: Component,
     pub position_format: Component,
+    /// The opaque provider position that identifies this delivery.
     pub position: Position,
+    /// The provider-selected checkpoint position after this delivery commits.
+    pub successor: Position,
 }
 
 impl DeliveryIdentity {
@@ -87,23 +90,21 @@ impl DeliveryIdentity {
 
     pub fn canonical(&self) -> String {
         format!(
-            "delivery/v1|{}|{}|{}|{}|{}|{}|{}|{}",
+            "delivery/v1|{}|{}|{}|{}|{}|{}|{}",
             self.consumer.canonical(),
             self.source_format.as_str(),
             self.source.as_str(),
             self.partition_format.as_str(),
             self.partition.as_str(),
             self.position_format.as_str(),
-            self.position.ordinal,
             self.position.token.as_str(),
         )
     }
 }
 
-/// A provider token coupled to a monotonically ordered ordinal.
+/// An opaque provider-defined position.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Position {
-    pub ordinal: u64,
     pub token: Component,
 }
 
@@ -123,18 +124,8 @@ pub struct CheckpointKey {
 pub struct Checkpoint {
     pub key: CheckpointKey,
     pub version: u64,
-    /// `None` means no item has been committed. The first delivery is ordinal zero.
+    /// `None` means no item has been committed.
     pub committed: Option<Position>,
-}
-
-impl Checkpoint {
-    fn accepts_next(&self, position: &Position) -> bool {
-        self.committed
-            .as_ref()
-            .map_or(position.ordinal == 0, |prior| {
-                position.ordinal == prior.ordinal.saturating_add(1)
-            })
-    }
 }
 
 /// The expected checkpoint version and position for a write.
@@ -308,7 +299,6 @@ pub enum CommitResult {
 pub enum RejectReason {
     StaleCheckpoint,
     StaleFailure,
-    PositionNotNext,
     LeaseFenced,
     LeaseAlreadyHeld,
     FailureMissing,
@@ -378,10 +368,7 @@ impl InMemoryCheckpointBackend {
             return CommitResult::Rejected(RejectReason::StaleCheckpoint);
         }
         let checkpoint = self.checkpoint_mut(&key);
-        if !checkpoint.accepts_next(&delivery.position) {
-            return CommitResult::Rejected(RejectReason::PositionNotNext);
-        }
-        checkpoint.committed = Some(delivery.position.clone());
+        checkpoint.committed = Some(delivery.successor.clone());
         checkpoint.version += 1;
         CommitResult::CheckpointAdvanced {
             checkpoint: checkpoint.clone(),
@@ -400,9 +387,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 let key = delivery.checkpoint_key();
                 if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                if !self.checkpoint_mut(&key).accepts_next(&delivery.position) {
-                    return CommitResult::Rejected(RejectReason::PositionNotNext);
                 }
                 if self.leases.contains_key(&delivery) {
                     return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
@@ -482,12 +466,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
                 }
-                if !self
-                    .checkpoint_mut(&key)
-                    .accepts_next(&lease.delivery.position)
-                {
-                    return CommitResult::Rejected(RejectReason::PositionNotNext);
-                }
                 if let Err(reason) = self.consume_lease(&lease) {
                     return CommitResult::Rejected(reason);
                 }
@@ -521,12 +499,6 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 let key = lease.delivery.checkpoint_key();
                 if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
-                }
-                if !self
-                    .checkpoint_mut(&key)
-                    .accepts_next(&lease.delivery.position)
-                {
-                    return CommitResult::Rejected(RejectReason::PositionNotNext);
                 }
                 if let Err(reason) = self.consume_lease(&lease) {
                     return CommitResult::Rejected(reason);
@@ -665,7 +637,13 @@ mod tests {
     fn component(value: &str) -> Component {
         Component::new(value).unwrap()
     }
-    fn delivery(ordinal: u64, token: &str) -> DeliveryIdentity {
+    fn position(token: &str) -> Position {
+        Position {
+            token: component(token),
+        }
+    }
+
+    fn delivery(token: &str, successor: &str) -> DeliveryIdentity {
         DeliveryIdentity {
             consumer: ConsumerIdentity {
                 principal: component("principal-a"),
@@ -678,10 +656,8 @@ mod tests {
             partition_format: component("partition-format"),
             partition: component("partition-a"),
             position_format: component("offset-v1"),
-            position: Position {
-                ordinal,
-                token: component(token),
-            },
+            position: position(token),
+            successor: position(successor),
         }
     }
     fn expected(
@@ -741,15 +717,15 @@ mod tests {
 
     #[test]
     fn identity_is_canonical_and_stable() {
-        let first = delivery(7, "opaque-7");
-        let second = delivery(7, "opaque-7");
+        let first = delivery("receipt:opaque-a", "resume:opaque-b");
+        let second = delivery("receipt:opaque-a", "resume:different");
         assert_eq!(first.canonical(), second.canonical());
         assert_eq!(first.checkpoint_key(), second.checkpoint_key());
         assert!(Component::new("bad|identity").is_err());
     }
 
     #[test]
-    fn diagnostics_exclude_secrets() {
+    fn diagnostics_are_redacted() {
         let printed = format!("{:?}", diagnostic());
         assert!(!printed.contains("password"));
         assert!(!printed.contains("token="));
@@ -759,7 +735,7 @@ mod tests {
     #[test]
     fn repeated_failures_update_one_stable_row() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let first = acquire_and_fail(&mut backend, item.clone());
         let retry = backend.apply(CommitIntent::Retry {
             failure: first.identity.clone(),
@@ -776,42 +752,63 @@ mod tests {
     }
 
     #[test]
-    fn stale_version_and_position_are_rejected() {
+    fn provider_selected_successor_advances_opaque_positions() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let first = delivery(0, "zero");
-        let old = expected(&backend, &first);
+        let first = delivery("receipt/first", "resume::after-first");
+        let expected_before = expected(&backend, &first);
+        let lease = acquire(&mut backend, first.clone());
+        let committed = match backend.apply(CommitIntent::Complete {
+            lease,
+            expected: expected_before,
+        }) {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert_eq!(committed.committed, Some(position("resume::after-first")));
+
+        let next = delivery("receipt/second", "resume::final");
+        assert!(matches!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: next,
+                expected: expected(&backend, &first),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[test]
+    fn divergent_checkpoint_position_is_rejected() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let first = delivery("receipt/first", "resume::after-first");
+        let expected_before = expected(&backend, &first);
         let lease = acquire(&mut backend, first.clone());
         assert!(matches!(
             backend.apply(CommitIntent::Complete {
                 lease,
-                expected: old.clone()
+                expected: expected_before
             }),
             CommitResult::CheckpointAdvanced { .. }
         ));
-        let next = delivery(1, "one");
+        let next = delivery("receipt/second", "resume::final");
+        let divergent = CheckpointPrecondition {
+            version: backend.checkpoint(&next.checkpoint_key()).version,
+            committed: Some(position("resume::elsewhere")),
+        };
         assert_eq!(
             backend.apply(CommitIntent::Acquire {
-                delivery: next.clone(),
-                expected: old,
+                delivery: next,
+                expected: divergent,
                 purpose: LeasePurpose::Deliver,
             }),
             CommitResult::Rejected(RejectReason::StaleCheckpoint)
-        );
-        let gap = delivery(2, "two");
-        assert_eq!(
-            backend.apply(CommitIntent::Acquire {
-                delivery: gap.clone(),
-                expected: expected(&backend, &gap),
-                purpose: LeasePurpose::Deliver,
-            }),
-            CommitResult::Rejected(RejectReason::PositionNotNext)
         );
     }
 
     #[test]
     fn retry_can_succeed_or_fail() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let failed = acquire_and_fail(&mut backend, item.clone());
         let scheduled = match backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
@@ -833,7 +830,7 @@ mod tests {
             FailureStatus::Succeeded
         );
 
-        let second = delivery(1, "one");
+        let second = delivery("receipt:one", "resume:two");
         let failed = acquire_and_fail(&mut backend, second.clone());
         let _ = backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
@@ -848,7 +845,7 @@ mod tests {
     #[test]
     fn skip_advances_exactly_one_position() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let failure = acquire_and_fail(&mut backend, item.clone());
         let lease = acquire_skip(&mut backend, item.clone());
         let result = backend.apply(CommitIntent::Skip {
@@ -857,7 +854,7 @@ mod tests {
             expected_failure_version: failure.version,
         });
         assert!(
-            matches!(result, CommitResult::CheckpointAdvanced { ref checkpoint } if checkpoint.committed == Some(item.position))
+            matches!(result, CommitResult::CheckpointAdvanced { ref checkpoint } if checkpoint.committed == Some(item.successor))
         );
         assert_eq!(
             backend.failure(&failure.identity).unwrap().status,
@@ -868,7 +865,7 @@ mod tests {
     #[test]
     fn replay_does_not_move_live_checkpoint() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let failure = acquire_and_fail(&mut backend, item.clone());
         let lease = acquire_skip(&mut backend, item.clone());
         assert!(matches!(
@@ -908,7 +905,7 @@ mod tests {
     #[test]
     fn resolve_requires_success_or_skip() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let failure = acquire_and_fail(&mut backend, item.clone());
         assert_eq!(
             backend.apply(CommitIntent::Resolve {
@@ -940,7 +937,7 @@ mod tests {
     #[test]
     fn lease_fencing_rejects_stale_holder() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let first = acquire(&mut backend, item.clone());
         assert!(matches!(
             backend.apply(CommitIntent::Cancel {
@@ -962,7 +959,7 @@ mod tests {
     #[test]
     fn cancellation_is_rollback_shaped_and_does_not_create_a_failure() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let item = delivery(0, "zero");
+        let item = delivery("receipt:zero", "resume:one");
         let lease = acquire(&mut backend, item.clone());
         let before = backend.checkpoint(&item.checkpoint_key());
         assert_eq!(
