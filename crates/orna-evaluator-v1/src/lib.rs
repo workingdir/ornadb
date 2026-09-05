@@ -1,17 +1,21 @@
 //! A deliberately small, deterministic Orna 1.0 expression evaluator.
 //!
 //! The public boundary admits and returns only OVB-1 canonical values. It has
-//! no I/O, mutation, clock, random, module-loading, or host-call capability.
+//! no I/O, external mutation, clock, random, module-loading, or host-call
+//! capability.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
-    ControlKind, Expr, LiteralKind, Pattern, PatternField, ReplInput, Statement, StringSegment,
-    parse_expression, parse_repl,
+    AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Pattern, PatternField,
+    ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::Raw;
 
@@ -607,6 +611,45 @@ impl Context {
                 arms,
                 ..
             } => self.case(condition, arms, scope, depth),
+            Expr::Control {
+                kind: ControlKind::For,
+                binding: Some(binding),
+                condition: Some(iterable),
+                body: Some(body),
+                arms,
+                alternate: None,
+                ..
+            } => {
+                if arms.len() != 1
+                    || arms[0].guard.is_some()
+                    || arms[0].pattern != *binding
+                    || arms[0].body != **body
+                {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
+                let Value::List(values) = self.evaluate(iterable, scope, depth + 1)? else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                self.items(values.len())?;
+                let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
+                let bound_names = pattern_names(binding);
+                for value in values {
+                    let mut iteration = scope.clone();
+                    if !bind(binding, value, &mut iteration, self, depth + 1)? {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
+                    self.evaluate(body, &mut iteration, depth + 1)?;
+                    for name in &outer_names {
+                        if bound_names.contains(name) {
+                            continue;
+                        }
+                        if let Some(value) = iteration.0.get(name).cloned() {
+                            scope.0.insert(name.clone(), value);
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -684,29 +727,81 @@ impl Context {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         self.items(statements.len())?;
+        let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
+        let mut declared_names = BTreeSet::new();
         let mut local = scope.clone();
         for statement in statements {
             match statement {
-                Statement::Let {
-                    pattern,
-                    annotation: None,
-                    value,
-                    ..
-                } => {
+                Statement::Let { pattern, value, .. } => {
                     let value = self.evaluate(value, &mut local, depth + 1)?;
                     if !bind(pattern, value, &mut local, self, depth + 1)? {
                         return Err(error("ORNA-EVAL-TYPE"));
                     }
+                    declared_names.extend(pattern_names(pattern));
+                }
+                Statement::Assert { value, .. } => {
+                    match self.evaluate(value, &mut local, depth + 1)? {
+                        Value::Bool(true) => {}
+                        Value::Bool(false) => return Err(error("ORNA-EVAL-ASSERT")),
+                        _ => return Err(error("ORNA-EVAL-TYPE")),
+                    }
+                }
+                Statement::Assignment {
+                    target,
+                    operator,
+                    value,
+                    ..
+                } => {
+                    self.assignment(target, *operator, value, &mut local, depth + 1)?;
                 }
                 Statement::Expression { value, .. } => {
+                    self.evaluate(value, &mut local, depth + 1)?;
+                }
+                Statement::Control { value, .. } => {
                     self.evaluate(value, &mut local, depth + 1)?;
                 }
                 _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             }
         }
-        tail.map_or(Ok(Value::Null), |value| {
+        let result = tail.map_or(Ok(Value::Null), |value| {
             self.evaluate(value, &mut local, depth + 1)
-        })
+        })?;
+        for name in outer_names {
+            if declared_names.contains(&name) {
+                continue;
+            }
+            if let Some(value) = local.0.get(&name).cloned() {
+                scope.0.insert(name, value);
+            }
+        }
+        Ok(result)
+    }
+    fn assignment(
+        &mut self,
+        target: &AssignmentTarget,
+        operator: AssignmentOperator,
+        expression: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<(), EvaluationError> {
+        let AssignmentTarget::Name { name, .. } = target else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        let current = scope
+            .0
+            .get(name)
+            .cloned()
+            .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+        let value = self.evaluate(expression, scope, depth + 1)?;
+        let value = match operator {
+            AssignmentOperator::Set => value,
+            AssignmentOperator::Add => self.apply_binary("+", current, value)?,
+            AssignmentOperator::Subtract => self.apply_binary("-", current, value)?,
+            AssignmentOperator::Multiply => self.apply_binary("*", current, value)?,
+            AssignmentOperator::Divide => self.apply_binary("/", current, value)?,
+        };
+        scope.0.insert(name.clone(), value);
+        Ok(())
     }
     fn unary(&self, op: &str, value: Value) -> Result<Value, EvaluationError> {
         match (op, value) {
@@ -902,6 +997,49 @@ impl Context {
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+}
+
+fn pattern_names(pattern: &Pattern) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_pattern_names(pattern, &mut names);
+    names
+}
+
+fn collect_pattern_names(pattern: &Pattern, names: &mut BTreeSet<String>) {
+    match pattern {
+        Pattern::Name(name, _) => {
+            names.insert(name.clone());
+        }
+        Pattern::Record { fields, .. } => {
+            for (name, pattern, _) in fields {
+                if let Some(pattern) = pattern {
+                    collect_pattern_names(pattern, names);
+                } else {
+                    names.insert(name.clone());
+                }
+            }
+        }
+        Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+            for pattern in elements {
+                collect_pattern_names(pattern, names);
+            }
+        }
+        Pattern::Constructor {
+            arguments, fields, ..
+        } => {
+            for pattern in arguments {
+                collect_pattern_names(pattern, names);
+            }
+            for field in fields {
+                if let Some(pattern) = &field.pattern {
+                    collect_pattern_names(pattern, names);
+                } else {
+                    names.insert(field.name.clone());
+                }
+            }
+        }
+        Pattern::Wildcard(_) | Pattern::Literal { .. } => {}
     }
 }
 

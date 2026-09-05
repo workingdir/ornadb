@@ -160,6 +160,35 @@ fn evaluates_selection_indexing_named_calls_and_case_patterns() {
     );
 }
 
+#[test]
+fn evaluates_local_assignments_and_finite_list_for_mutations() {
+    assert_eq!(
+        evaluate("if true { let total = 0; for value in [1, 2, 3] { total += value; }; total }"),
+        Value::int(6.into())
+    );
+    assert_eq!(
+        evaluate("if true { let total = 0; if true { total = 4; }; total }"),
+        Value::int(4.into())
+    );
+    assert_eq!(evaluate("if true { assert true; 5 }"), Value::int(5.into()));
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { assert false; 5 }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-ASSERT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { let total = 0; for value in 1 { total += value; }; total }",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+}
+
 fn object_id(byte: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
 }
