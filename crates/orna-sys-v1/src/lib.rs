@@ -521,6 +521,8 @@ impl Runtime {
     pub fn expire<T>(&mut self, handle: &InvocationHandle<T>) -> Result<(), AdmissionError> {
         self.check_handle(handle)?;
         self.invocations.remove(&handle.invocation);
+        self.idempotency
+            .retain(|_, entry| entry.invocation != handle.invocation);
         Ok(())
     }
     fn handle<T>(&self, invocation: &InvocationId, result_type: TypeId) -> InvocationHandle<T> {
@@ -959,6 +961,25 @@ mod tests {
             ),
             Err(AdmissionError::ExpiredHandle)
         );
+    }
+    #[test]
+    fn expiration_releases_idempotency_key_with_its_invocation() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let first = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime.expire(&first).unwrap();
+
+        let second = match runtime.admit(request).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => panic!("expired work must not replay as active or terminal"),
+        };
+        assert_ne!(second.invocation(), first.invocation());
+        assert_eq!(runtime.check_handle(&second), Ok(()));
     }
     #[test]
     fn cancellation_is_not_ordinary_failure() {
