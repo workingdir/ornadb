@@ -13,7 +13,7 @@ use orna_evaluator_v1::{
 };
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
-use orna_syntax_v1::{Declaration, Pattern, parse_module};
+use orna_syntax_v1::{Declaration, Expr, Pattern, parse_module};
 use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
@@ -124,6 +124,7 @@ pub trait RuntimeEvaluator {
 pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
+    functions: BTreeMap<String, Expr>,
 }
 
 impl BoundedEvaluator {
@@ -132,6 +133,7 @@ impl BoundedEvaluator {
         Self {
             environment: BTreeMap::new(),
             limits,
+            functions: BTreeMap::new(),
         }
     }
 
@@ -140,10 +142,11 @@ impl BoundedEvaluator {
         Self {
             environment,
             limits,
+            functions: BTreeMap::new(),
         }
     }
 
-    fn evaluate_unit(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+    fn evaluate_unit(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         match unit.parse_as.as_str() {
             "row_unit" | "expression_unit" | "repl_unit" => {
                 match evaluate_expression(&unit.source, &self.environment, self.limits) {
@@ -156,7 +159,7 @@ impl BoundedEvaluator {
         }
     }
 
-    fn evaluate_module(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+    fn evaluate_module(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         let parsed = parse_module(&unit.source);
         if !parsed.is_ok() {
             let mut syntax = SyntaxAdapter;
@@ -190,10 +193,11 @@ impl BoundedEvaluator {
                     }
                     Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
                 },
-                Declaration::Function { body, .. } => {
-                    if let Err(error) = evaluate_parsed(&body, &environment, self.limits) {
-                        return StageOutcome::Failed(error.diagnostic().clone());
-                    }
+                Declaration::Function { signature, body } => {
+                    // The bounded evaluator has no function-invocation seam.
+                    // Loading therefore retains a supported declaration without
+                    // evaluating its body.
+                    self.functions.insert(signature.name, body);
                 }
                 _ => return Self::unsupported_module(),
             }
