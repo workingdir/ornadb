@@ -775,15 +775,21 @@ impl LiveHost {
                                 }
                                 TargetKind::Watch => self.watches.contains(&(session, *target)),
                             };
-                            let target_cancelled =
-                                if target_active && *target_kind == TargetKind::Request {
-                                    self.cancel_target_request(session, *target).await?
-                                } else {
-                                    false
-                                };
-                            let response = if target_active
-                                && (target_cancelled || *target_kind == TargetKind::Watch)
-                            {
+                            let durable_request =
+                                *target_kind == TargetKind::Request && self.runtime.is_some();
+                            let target_cancelled = if target_active && durable_request {
+                                self.cancel_target_request(session, *target).await?
+                            } else {
+                                false
+                            };
+                            let callback_allowed = target_active
+                                && (*target_kind == TargetKind::Watch
+                                    || if durable_request {
+                                        target_cancelled
+                                    } else {
+                                        true
+                                    });
+                            let response = if callback_allowed {
                                 let response = application.cancel(
                                     session,
                                     request,
@@ -806,6 +812,12 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
+                            if target_active
+                                && *target_kind == TargetKind::Request
+                                && !durable_request
+                            {
+                                self.cancel_target_request(session, *target).await?;
+                            }
                             self.complete(
                                 session,
                                 request,
