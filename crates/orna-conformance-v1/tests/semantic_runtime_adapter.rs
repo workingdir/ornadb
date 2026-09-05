@@ -70,6 +70,22 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
     ));
 }
 
+#[test]
+fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
+    let unit = SourceUnit {
+        fixture_id: "type-error".into(),
+        source_id: "logical/type-error.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub table Bad(value: Float) { text: Str, }".into(),
+    };
+    let mut adapter = SemanticAdapter::default();
+    assert!(matches!(adapter.resolve(&unit), StageOutcome::Passed));
+    let StageOutcome::Failed(diagnostic) = adapter.typecheck(&unit) else {
+        panic!("type errors must be reported by typecheck");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-S021-TYPE");
+}
+
 #[derive(Default)]
 struct RecordingRuntime {
     calls: usize,
