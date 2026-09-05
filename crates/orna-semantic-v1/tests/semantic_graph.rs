@@ -318,6 +318,31 @@ fn catalogue_does_not_relax_reserved_source_roots() {
 }
 
 #[test]
+fn reserved_table_names_keep_typecheck_diagnostics() {
+    let std_table = analyze(&[ModuleInput::new(
+        "reserved-std.orna",
+        "pub table std { value: Int, }",
+    )]);
+    assert!(
+        std_table
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "`std` is reserved" })
+    );
+
+    let sys_table = analyze(&[ModuleInput::new(
+        "reserved-sys.orna",
+        "pub table sys { value: Int, }",
+    )]);
+    assert!(
+        sys_table
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "`sys` is reserved" })
+    );
+}
+
+#[test]
 fn authoritative_ui_catalogue_checks_page_builder_contextually() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
