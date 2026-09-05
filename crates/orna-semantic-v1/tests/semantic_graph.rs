@@ -516,6 +516,21 @@ fn computed_fields_reject_effectful_initializers() {
 }
 
 #[test]
+fn system_commit_rows_reject_mutation() {
+    let result = analyze(&[ModuleInput::new(
+        "commit.orna",
+        "pub fn bad() = sys.Commit.insert({ hash: \"x\" });",
+    )]);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "sys.Commit is read-only" })
+    );
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
