@@ -49,6 +49,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "`std` is reserved" => "E1009".into(),
         "`sys` is reserved" => "E1008".into(),
         "Range<T> is not a primary-key type in version 1.0" => "E3010".into(),
+        "an automatic-key table cannot be explicitly re-keyed" => "E3013".into(),
         "remove `self |`; the table already supplies its candidate relation"
         | "remove the repeated table owner before the assertion predicate" => {
             "ORNA-A091-002".into()
