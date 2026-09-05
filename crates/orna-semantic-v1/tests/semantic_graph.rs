@@ -323,6 +323,32 @@ fn authoritative_ui_catalogue_checks_page_builder_contextually() {
 }
 
 #[test]
+fn generic_ordering_pipeline_keeps_element_and_optional_types() {
+    let result = analyze(&[ModuleInput::new(
+        "generic.orna",
+        r#"
+            pub protocol Order {
+                fn compare(self, other: Self): Ordering;
+            }
+
+            pub fn maximum<T impl Order>(values: [T]): T? =
+                values | sort_by(value => value) | last();
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("generic module");
+    assert_eq!(
+        module.symbols.get("maximum").expect("maximum function").ty,
+        Type::Function {
+            parameters: vec![Type::List(Box::new(Type::Named("T".into())))],
+            parameter_names: Some(vec!["values".into()]),
+            result: Box::new(Type::Optional(Box::new(Type::Named("T".into())))),
+        }
+    );
+}
+
+#[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",
