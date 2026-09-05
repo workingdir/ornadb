@@ -291,6 +291,33 @@ impl LiveHost {
         Ok(outcome)
     }
 
+    /// Rotates an authenticated session credential without changing its
+    /// attachment or serving state.  HTTP resume uses this before the later
+    /// cookie-authenticated WebSocket upgrade.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error when the credential, origin, session lease, or
+    /// trusted credential issuer is not admissible.
+    pub async fn rotate(
+        &mut self,
+        id: [u8; 16],
+        origin: &Origin,
+        credential: &SessionCredential,
+        now: u64,
+        issuer: &mut impl LiveCredentialIssuer,
+    ) -> Result<SessionCredential> {
+        let security = self
+            .security
+            .rotate(session_id(id), origin, &credential.security, now, issuer)
+            .map_err(map_boundary)?;
+        let serving = issuer
+            .last_issued()
+            .map(ServingCredential::new)
+            .ok_or(Error::Denied)?;
+        Ok(SessionCredential { security, serving })
+    }
+
     /// HTTP WebSocket upgrade `POST /v1/live/sessions/{id}/attachments`:
     /// `101`, headers `upgrade: websocket` and `sec-websocket-protocol:
     /// orna.present.v1`, empty body. The actual HTTP server performs the
@@ -456,4 +483,826 @@ fn map_serving(error: ServingError) -> Error {
         ServingError::SessionClosed => Error::Closed,
         _ => Error::Denied,
     }
+}
+
+/// UUID and admission data supplied by the trusted database/runtime owner.
+/// The transport never accepts filesystem paths or runtime identities from a
+/// client request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionMetadata {
+    pub session: [u8; 16],
+    pub database: [u8; 16],
+    pub runtime: [u8; 16],
+    pub expires_at: u64,
+    pub subscribe: Vec<u8>,
+}
+
+/// The application-specific admission seam required by the HTTP boundary.
+/// Implementations allocate IDs and select exposed database/runtime state;
+/// they do not expose credentials to callers.
+pub trait LiveSessionAuthority {
+    /// # Errors
+    ///
+    /// Returns a redacted error when the named exposed database cannot admit a
+    /// new live session.
+    fn create_session(&mut self, database: [u8; 16], now: u64) -> Result<SessionMetadata>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransportLimits {
+    pub max_request_bytes: usize,
+    pub max_header_bytes: usize,
+    pub max_frame_bytes: usize,
+    pub lease_ms: u64,
+    pub max_outgoing_bytes: usize,
+    pub request_retention_ms: u64,
+    pub tls: bool,
+}
+
+impl Default for TransportLimits {
+    fn default() -> Self {
+        Self {
+            max_request_bytes: 16 * 1024,
+            max_header_bytes: 16 * 1024,
+            max_frame_bytes: 16 * 1024 * 1024,
+            lease_ms: 30_000,
+            max_outgoing_bytes: 16 * 1024 * 1024,
+            request_retention_ms: 30_000,
+            tls: true,
+        }
+    }
+}
+
+impl TransportLimits {
+    fn validate(self, protocol: ProtocolLimits) -> Result<Self> {
+        if self.max_request_bytes == 0
+            || self.max_header_bytes == 0
+            || self.max_frame_bytes == 0
+            || self.max_frame_bytes < protocol.max_message_bytes
+            || self.lease_ms == 0
+            || self.lease_ms > 300_000
+            || self.max_outgoing_bytes == 0
+            || self.request_retention_ms == 0
+        {
+            return Err(Error::Limit);
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WireRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WireResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSocketOutput {
+    Accepted(FrameOutcome),
+    Pong,
+    Close,
+}
+
+#[derive(Clone)]
+struct SessionRecord {
+    metadata: SessionMetadata,
+    credential: SessionCredential,
+}
+
+/// A bounded HTTP/RFC-6455 parser and adapter. It deliberately has no listener,
+/// socket, clock, TLS or authentication implementation; those stay at the
+/// executable host edge.
+pub struct LiveTransport {
+    host: LiveHost,
+    limits: TransportLimits,
+    sessions: BTreeMap<[u8; 16], SessionRecord>,
+}
+
+impl LiveTransport {
+    /// # Errors
+    ///
+    /// Returns [`Error::Limit`] for an invalid transport bound.
+    pub fn new(host: LiveHost, limits: TransportLimits) -> Result<Self> {
+        Ok(Self {
+            limits: limits.validate(host.limits.protocol)?,
+            host,
+            sessions: BTreeMap::new(),
+        })
+    }
+
+    /// Parses exactly the three live-session HTTP endpoint shapes.
+    #[allow(clippy::too_many_lines)]
+    pub async fn handle(
+        &mut self,
+        request: WireRequest,
+        now: u64,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> WireResponse {
+        if request.body.len() > self.limits.max_request_bytes
+            || header_size(&request.headers) > self.limits.max_header_bytes
+        {
+            return wire_error(413, "live.limit");
+        }
+        let Ok(origin) = required_origin(&request.headers) else {
+            return wire_error(403, "live.origin_denied");
+        };
+        if request.method == "POST"
+            && !header_eq(&request.headers, "content-type", "application/json")
+        {
+            return wire_error(400, "live.malformed_request");
+        }
+        match (request.method.as_str(), session_path(&request.path)) {
+            ("POST", SessionPath::Create) => {
+                let Some((database, protocol)) =
+                    parse_json_pair(&request.body, "database", "protocol")
+                else {
+                    return wire_error(400, "live.malformed_request");
+                };
+                if protocol != SUBPROTOCOL {
+                    return wire_error(409, "live.incompatible");
+                }
+                let Some(database) = parse_uuid(&database) else {
+                    return wire_error(400, "live.malformed_request");
+                };
+                let metadata = match authority.create_session(database, now) {
+                    Ok(metadata) if metadata.database == database && metadata.expires_at > now => {
+                        metadata
+                    }
+                    Err(Error::Denied) => return wire_error(404, "live.database_unavailable"),
+                    Ok(_) | Err(_) => return wire_error(503, "live.unavailable"),
+                };
+                let credential = match self
+                    .host
+                    .create(
+                        CreateRequest {
+                            id: metadata.session,
+                            origin,
+                            expires_at: metadata.expires_at,
+                            now,
+                            subscribe: &metadata.subscribe,
+                        },
+                        issuer,
+                    )
+                    .await
+                {
+                    Ok(credential) => credential,
+                    Err(error) => return host_error(error),
+                };
+                let Some(token) = issuer.last_issued() else {
+                    return wire_error(503, "live.unavailable");
+                };
+                let record = SessionRecord {
+                    metadata,
+                    credential,
+                };
+                let response = session_response(&record.metadata, token, self.limits, 201);
+                self.sessions.insert(record.metadata.session, record);
+                response
+            }
+            ("POST", SessionPath::Resume(id)) => {
+                let Some((token, protocol)) =
+                    parse_json_pair(&request.body, "resume_token", "protocol")
+                else {
+                    return wire_error(400, "live.malformed_request");
+                };
+                if protocol != SUBPROTOCOL {
+                    return wire_error(409, "live.incompatible");
+                }
+                let Some(token) = decode_token(&token) else {
+                    return wire_error(400, "live.malformed_request");
+                };
+                let Some(record) = self.sessions.get_mut(&id) else {
+                    return wire_error(410, "live.expired");
+                };
+                let supplied = SessionCredential {
+                    security: OpaqueCredential::from_bytes(token),
+                    serving: ServingCredential::new(token),
+                };
+                match self.host.rotate(id, &origin, &supplied, now, issuer).await {
+                    Ok(credential) => {
+                        let Some(replacement) = issuer.last_issued() else {
+                            return wire_error(503, "live.unavailable");
+                        };
+                        record.credential = credential;
+                        session_response(&record.metadata, replacement, self.limits, 200)
+                    }
+                    Err(Error::Closed | Error::Denied) => wire_error(410, "live.expired"),
+                    Err(error) => host_error(error),
+                }
+            }
+            ("DELETE", SessionPath::Session(id)) => {
+                if !request.body.is_empty() {
+                    return wire_error(400, "live.malformed_request");
+                }
+                let Some(token) = bearer(&request.headers).and_then(|value| decode_token(&value))
+                else {
+                    return wire_error(401, "live.unauthenticated");
+                };
+                if !self.sessions.contains_key(&id) {
+                    return wire_error(410, "live.expired");
+                }
+                let credential = SessionCredential {
+                    security: OpaqueCredential::from_bytes(token),
+                    serving: ServingCredential::new(token),
+                };
+                if let Err(error) = self
+                    .host
+                    .rotate(id, &origin, &credential, now, issuer)
+                    .await
+                {
+                    return host_error(error);
+                }
+                match self.host.delete(DeleteRequest { id }, deletion).await {
+                    Ok(()) => {
+                        self.sessions.remove(&id);
+                        WireResponse {
+                            status: 204,
+                            headers: Vec::new(),
+                            body: Vec::new(),
+                        }
+                    }
+                    Err(error) => host_error(error),
+                }
+            }
+            _ => wire_error(400, "live.malformed_request"),
+        }
+    }
+
+    /// Validates the RFC 6455 handshake and attaches the cookie-authenticated
+    /// session. The caller supplies its socket identity after accepting bytes.
+    pub async fn upgrade(
+        &mut self,
+        request: WireRequest,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> WireResponse {
+        if !request.body.is_empty() || header_size(&request.headers) > self.limits.max_header_bytes
+        {
+            return wire_error(400, "live.malformed_request");
+        }
+        let SessionPath::Live(id) = session_path(&request.path) else {
+            return wire_error(400, "live.malformed_request");
+        };
+        let Ok(origin) = required_origin(&request.headers) else {
+            return wire_error(403, "live.origin_denied");
+        };
+        let Some(record) = self.sessions.get(&id) else {
+            return wire_error(410, "live.expired");
+        };
+        let Some(cookie) =
+            cookie(&request.headers, "orna_session").and_then(|value| decode_token(&value))
+        else {
+            return wire_error(401, "live.unauthenticated");
+        };
+        if request.method != "GET"
+            || !header_token(&request.headers, "connection", "upgrade")
+            || !header_eq(&request.headers, "upgrade", "websocket")
+            || !header_eq(&request.headers, "sec-websocket-version", "13")
+            || !header_token(&request.headers, "sec-websocket-protocol", SUBPROTOCOL)
+        {
+            return wire_error(400, "live.malformed_request");
+        }
+        let Some(key) = header(&request.headers, "sec-websocket-key").and_then(decode_base64)
+        else {
+            return wire_error(400, "live.malformed_request");
+        };
+        if key.len() != 16 {
+            return wire_error(400, "live.malformed_request");
+        }
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes(cookie),
+            serving: ServingCredential::new(cookie),
+        };
+        if credential != record.credential {
+            return wire_error(401, "live.unauthenticated");
+        }
+        match self
+            .host
+            .resume(ResumeRequest {
+                id,
+                origin: &origin,
+                credential: &credential,
+                attachment,
+                now,
+            })
+            .await
+        {
+            Ok(_) => WireResponse {
+                status: 101,
+                headers: vec![
+                    ("connection".into(), "Upgrade".into()),
+                    ("upgrade".into(), "websocket".into()),
+                    (
+                        "sec-websocket-accept".into(),
+                        websocket_accept(
+                            header(&request.headers, "sec-websocket-key").unwrap_or_default(),
+                        ),
+                    ),
+                    ("sec-websocket-protocol".into(), SUBPROTOCOL.into()),
+                ],
+                body: Vec::new(),
+            },
+            Err(Error::Closed | Error::Denied) => wire_error(410, "live.expired"),
+            Err(error) => host_error(error),
+        }
+    }
+
+    /// Reassembles client RFC 6455 frames and forwards only complete binary
+    /// canonical envelopes into [`LiveHost`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error for malformed, unmasked, oversized, text, or
+    /// noncanonical application input; no partial message is forwarded.
+    pub async fn receive(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        bytes: &[u8],
+    ) -> Result<Vec<WebSocketOutput>> {
+        let events = socket.push(bytes, self.limits.max_frame_bytes)?;
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                SocketEvent::Binary(message) => output.push(WebSocketOutput::Accepted(
+                    self.host
+                        .handle_frame(socket.attachment, now, Frame::Binary(message))
+                        .await?,
+                )),
+                SocketEvent::Text => return Err(Error::InvalidFrame),
+                SocketEvent::Ping => output.push(WebSocketOutput::Pong),
+                SocketEvent::Pong => {}
+                SocketEvent::Close => {
+                    output.push(WebSocketOutput::Accepted(
+                        self.host
+                            .handle_frame(socket.attachment, now, Frame::Close)
+                            .await?,
+                    ));
+                    output.push(WebSocketOutput::Close);
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionPath {
+    Create,
+    Session([u8; 16]),
+    Resume([u8; 16]),
+    Live([u8; 16]),
+    Invalid,
+}
+fn session_path(path: &str) -> SessionPath {
+    if path == "/orna/session" {
+        return SessionPath::Create;
+    }
+    let Some(rest) = path.strip_prefix("/orna/session/") else {
+        return path
+            .strip_prefix("/orna/live/")
+            .and_then(parse_uuid)
+            .map_or(SessionPath::Invalid, SessionPath::Live);
+    };
+    if let Some(id) = rest.strip_suffix("/resume").and_then(parse_uuid) {
+        SessionPath::Resume(id)
+    } else {
+        parse_uuid(rest).map_or(SessionPath::Invalid, SessionPath::Session)
+    }
+}
+fn parse_uuid(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 36
+        || ![8, 13, 18, 23]
+            .into_iter()
+            .all(|index| value.as_bytes()[index] == b'-')
+    {
+        return None;
+    }
+    let mut out = [0; 16];
+    let mut chars = value.bytes().filter(|byte| *byte != b'-');
+    for target in &mut out {
+        *target = (hex(chars.next()?)? << 4) | hex(chars.next()?)?;
+    }
+    chars.next().is_none().then_some(out)
+}
+const fn hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+fn uuid(value: [u8; 16]) -> String {
+    let mut out = String::with_capacity(36);
+    for (index, byte) in value.into_iter().enumerate() {
+        if [4, 6, 8, 10].contains(&index) {
+            out.push('-');
+        }
+        out.push(nibble(byte >> 4));
+        out.push(nibble(byte & 15));
+    }
+    out
+}
+const fn nibble(value: u8) -> char {
+    b"0123456789abcdef"[value as usize] as char
+}
+fn header_size(headers: &[(String, String)]) -> usize {
+    headers
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()).saturating_add(4))
+        .sum()
+}
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let mut found = None;
+    for (candidate, value) in headers {
+        if candidate.eq_ignore_ascii_case(name) && found.replace(value.as_str()).is_some() {
+            return None;
+        }
+    }
+    found
+}
+fn header_eq(headers: &[(String, String)], name: &str, expected: &str) -> bool {
+    header(headers, name).is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+fn header_token(headers: &[(String, String)], name: &str, expected: &str) -> bool {
+    header(headers, name).is_some_and(|value| {
+        value
+            .split(',')
+            .any(|token| token.trim().eq_ignore_ascii_case(expected))
+    })
+}
+fn required_origin(headers: &[(String, String)]) -> std::result::Result<Origin, ()> {
+    header(headers, "origin")
+        .ok_or(())
+        .and_then(|value| Origin::parse(value).map_err(|_| ()))
+}
+fn bearer(headers: &[(String, String)]) -> Option<String> {
+    header(headers, "authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty() && !value.contains(char::is_whitespace))
+        .map(str::to_owned)
+}
+fn cookie(headers: &[(String, String)], name: &str) -> Option<String> {
+    let mut found = None;
+    for part in header(headers, "cookie")?.split(';') {
+        let (key, value) = part.trim().split_once('=')?;
+        if key == name && found.replace(value).is_some() {
+            return None;
+        }
+    }
+    found.map(str::to_owned)
+}
+fn parse_json_pair(bytes: &[u8], first: &str, second: &str) -> Option<(String, String)> {
+    let text = core::str::from_utf8(bytes).ok()?;
+    let mut input = text.trim();
+    input = input.strip_prefix('{')?.trim_start();
+    let mut values = BTreeMap::new();
+    while !input.starts_with('}') {
+        let (key, rest) = json_string(input)?;
+        input = rest.trim_start();
+        input = input.strip_prefix(':')?.trim_start();
+        let (value, rest) = json_string(input)?;
+        if values.insert(key, value).is_some() {
+            return None;
+        }
+        input = rest.trim_start();
+        if input.starts_with(',') {
+            input = input[1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    if input.strip_prefix('}')?.trim().is_empty() && values.len() == 2 {
+        Some((values.remove(first)?, values.remove(second)?))
+    } else {
+        None
+    }
+}
+fn json_string(input: &str) -> Option<(String, &str)> {
+    let input = input.strip_prefix('"')?;
+    let end = input.find('"')?;
+    let value = &input[..end];
+    (!value.contains(['\\', '\n', '\r']) && value.chars().all(|ch| ch >= ' '))
+        .then(|| (value.to_owned(), &input[end + 1..]))
+}
+fn wire_error(status: u16, code: &'static str) -> WireResponse {
+    WireResponse {
+        status,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: format!(r#"{{"code":"{code}","message":"request rejected"}}"#).into_bytes(),
+    }
+}
+fn host_error(error: Error) -> WireResponse {
+    let (status, code) = match error {
+        Error::Limit => (413, "live.limit"),
+        Error::Closed => (410, "live.expired"),
+        Error::Denied => (403, "live.denied"),
+        _ => (400, "live.malformed_request"),
+    };
+    wire_error(status, code)
+}
+fn session_response(
+    metadata: &SessionMetadata,
+    token: [u8; 32],
+    limits: TransportLimits,
+    status: u16,
+) -> WireResponse {
+    let path = format!("/orna/live/{}", uuid(metadata.session));
+    let body = format!(
+        "{{\"session\":\"{}\",\"database\":\"{}\",\"runtime\":\"{}\",\"resume_token\":\"{}\",\"websocket_path\":\"{}\",\"lease_ms\":{},\"limits\":{{\"max_message_bytes\":{},\"max_depth\":64,\"max_nodes\":100000,\"max_collection_items\":100000,\"max_outgoing_bytes\":{},\"request_retention_ms\":{}}}}}",
+        uuid(metadata.session),
+        uuid(metadata.database),
+        uuid(metadata.runtime),
+        encode_token(token),
+        path,
+        limits.lease_ms,
+        limits.max_frame_bytes,
+        limits.max_outgoing_bytes,
+        limits.request_retention_ms
+    );
+    let mut cookie = format!(
+        "orna_session={}; Path={path}; HttpOnly; SameSite=Strict",
+        encode_token(token)
+    );
+    if limits.tls {
+        cookie.push_str("; Secure");
+    }
+    WireResponse {
+        status,
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("set-cookie".into(), cookie),
+        ],
+        body: body.into_bytes(),
+    }
+}
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+fn encode_token(token: [u8; 32]) -> String {
+    let mut out = String::with_capacity(43);
+    for chunk in token.chunks(3) {
+        out.push(B64[(chunk[0] >> 2) as usize] as char);
+        out.push(
+            B64[(((chunk[0] & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4)) as usize]
+                as char,
+        );
+        if chunk.len() > 1 {
+            out.push(
+                B64[(((chunk[1] & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6)) as usize]
+                    as char,
+            );
+        }
+        if chunk.len() > 2 {
+            out.push(B64[(chunk[2] & 63) as usize] as char);
+        }
+    }
+    out
+}
+fn decode_token(value: &str) -> Option<[u8; 32]> {
+    (value.len() == 43)
+        .then(|| decode_base64url(value))
+        .flatten()
+        .and_then(|bytes| bytes.try_into().ok())
+}
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim_end_matches('=');
+    (!value.contains('='))
+        .then(|| decode_base64url(value))
+        .flatten()
+}
+#[allow(clippy::cast_possible_truncation)]
+fn decode_base64url(value: &str) -> Option<Vec<u8>> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for byte in value.bytes() {
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(digit);
+        count += 6;
+        while count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    (count == 0 || bits == 0).then_some(out)
+}
+
+#[derive(Debug)]
+pub struct WebSocketState {
+    attachment: [u8; 16],
+    fragment: Option<(u8, Vec<u8>)>,
+    pending: Vec<u8>,
+}
+impl WebSocketState {
+    #[must_use]
+    pub fn new(attachment: [u8; 16]) -> Self {
+        Self {
+            attachment,
+            fragment: None,
+            pending: Vec::new(),
+        }
+    }
+    fn push(&mut self, bytes: &[u8], limit: usize) -> Result<Vec<SocketEvent>> {
+        self.pending.extend_from_slice(bytes);
+        if self.pending.len() > limit.saturating_add(14) {
+            return Err(Error::Limit);
+        }
+        let mut events = Vec::new();
+        while let Some((used, fin, opcode, payload)) = ws_frame(&self.pending, limit)? {
+            self.pending.drain(..used);
+            match opcode {
+                0 => {
+                    let Some((kind, mut whole)) = self.fragment.take() else {
+                        return Err(Error::InvalidFrame);
+                    };
+                    whole.extend(payload);
+                    if whole.len() > limit {
+                        return Err(Error::Limit);
+                    }
+                    if fin {
+                        events.push(if kind == 2 {
+                            SocketEvent::Binary(whole)
+                        } else {
+                            SocketEvent::Text
+                        });
+                    } else {
+                        self.fragment = Some((kind, whole));
+                    }
+                }
+                1 | 2 => {
+                    if self.fragment.is_some() {
+                        return Err(Error::InvalidFrame);
+                    }
+                    if fin {
+                        events.push(if opcode == 2 {
+                            SocketEvent::Binary(payload)
+                        } else {
+                            SocketEvent::Text
+                        });
+                    } else {
+                        self.fragment = Some((opcode, payload));
+                    }
+                }
+                8 => events.push(SocketEvent::Close),
+                9 => events.push(SocketEvent::Ping),
+                10 => events.push(SocketEvent::Pong),
+                _ => return Err(Error::InvalidFrame),
+            }
+        }
+        Ok(events)
+    }
+}
+enum SocketEvent {
+    Binary(Vec<u8>),
+    Text,
+    Ping,
+    Pong,
+    Close,
+}
+type ParsedFrame = (usize, bool, u8, Vec<u8>);
+
+fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
+    if bytes.len() < 2 {
+        return Ok(None);
+    }
+    let first = bytes[0];
+    let second = bytes[1];
+    let fin = first & 128 != 0;
+    let opcode = first & 15;
+    if first & 0x70 != 0 || second & 0x80 == 0 {
+        return Err(Error::InvalidFrame);
+    }
+    let mut at: usize = 2;
+    let mut len = usize::from(second & 127);
+    if len == 126 {
+        if bytes.len() < 4 {
+            return Ok(None);
+        }
+        len = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+        at = 4;
+    } else if len == 127 {
+        if bytes.len() < 10 {
+            return Ok(None);
+        }
+        let size = u64::from_be_bytes(bytes[2..10].try_into().map_err(|_| Error::InvalidFrame)?);
+        len = usize::try_from(size).map_err(|_| Error::Limit)?;
+        at = 10;
+    }
+    if len > limit || matches!(opcode, 8..=10) && (!fin || len > 125) {
+        return Err(Error::InvalidFrame);
+    }
+    let total = at.saturating_add(4).saturating_add(len);
+    if bytes.len() < total {
+        return Ok(None);
+    }
+    let key = &bytes[at..at + 4];
+    let payload = bytes[at + 4..total]
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ key[index % 4])
+        .collect();
+    Ok(Some((total, fin, opcode, payload)))
+}
+fn websocket_accept(key: &str) -> String {
+    base64_standard(&sha1(
+        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+    ))
+}
+fn base64_standard(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for part in bytes.chunks(3) {
+        out.push(TABLE[(part[0] >> 2) as usize] as char);
+        out.push(
+            TABLE[(((part[0] & 3) << 4) | (part.get(1).copied().unwrap_or(0) >> 4)) as usize]
+                as char,
+        );
+        out.push(if part.len() > 1 {
+            TABLE[(((part[1] & 15) << 2) | (part.get(2).copied().unwrap_or(0) >> 6)) as usize]
+                as char
+        } else {
+            '='
+        });
+        out.push(if part.len() > 2 {
+            TABLE[(part[2] & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+#[allow(clippy::many_single_char_names)]
+fn sha1(input: &[u8]) -> [u8; 20] {
+    let mut data = input.to_vec();
+    let bits = (data.len() as u64) * 8;
+    data.push(128);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&bits.to_be_bytes());
+    let (mut h0, mut h1, mut h2, mut h3, mut h4) = (
+        0x6745_2301_u32,
+        0xefcd_ab89,
+        0x98ba_dcfe,
+        0x1032_5476,
+        0xc3d2_e1f0,
+    );
+    for block in data.chunks(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in w[..16].iter_mut().enumerate() {
+            *word = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for (i, word) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5a82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+    let mut out = [0; 20];
+    for (i, value) in [h0, h1, h2, h3, h4].into_iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    out
 }
