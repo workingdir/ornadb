@@ -15,6 +15,7 @@ members = [
     "crates/orna-postgres",
     "crates/orna-protocol",
     "crates/orna-protocol-v1",
+    "crates/orna-project-v1",
     "crates/orna-repository-v1",
     "crates/orna-runtime-v1",
     "crates/orna-runtime-tty",
