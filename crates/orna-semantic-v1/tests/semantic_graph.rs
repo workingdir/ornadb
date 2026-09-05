@@ -69,6 +69,30 @@ fn failure_skip_requires_a_typed_version_precondition() {
 }
 
 #[test]
+fn failure_replay_requires_a_typed_version_precondition() {
+    for arguments in [
+        "failure.reference, expected_status: failure.status",
+        "failure.reference, expected_version: 1, expected_status: failure.status",
+        "failure.reference, expected_version: failure.version, expected_status: true",
+    ] {
+        let source =
+            format!("pub fn replay(failure: sys.Failure) = sys.admin.replay_failure({arguments});");
+        let result = analyze(&[ModuleInput::new("replay.orna", source)]);
+        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+    }
+    let valid = analyze(&[ModuleInput::new(
+        "replay.orna",
+        "pub fn replay(failure: sys.Failure) = sys.admin.replay_failure(failure.reference, expected_version: failure.version, expected_status: failure.status);",
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let symbol =
+        &valid.modules[&orna_semantic_v1::Namespace(vec!["replay".into()])].exports["replay"];
+    assert!(symbol.effects.effects.contains("admin"));
+    assert!(!symbol.effects.effects.contains("database write"));
+    assert!(symbol.effects.may_fail);
+}
+
+#[test]
 fn unicode_nfkc_casefold_sibling_collision_is_rejected() {
     let result = analyze(&[
         ModuleInput::new("ff/left.orna", ""),
@@ -1043,7 +1067,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                             && failure.position_format == position_format
                             && failure.position == position
                         );
-                        sys.admin.replay_failure(failure.reference, expected_status: failure.status)
+                        sys.admin.replay_failure(failure.reference, expected_version: failure.version, expected_status: failure.status)
                     }
                 "#,
             ),
