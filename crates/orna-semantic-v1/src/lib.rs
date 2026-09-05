@@ -696,6 +696,10 @@ fn primitive(name: &str) -> Option<Type> {
 struct Scope {
     names: BTreeMap<String, Symbol>,
     ambiguous: BTreeSet<String>,
+    /// Direct `use module [as alias]` bindings. These are deliberately kept
+    /// apart from ordinary values so only `alias.public_export` receives
+    /// module-member lookup; nested paths and arbitrary nominal values do not.
+    modules: BTreeMap<String, ModuleHeader>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -707,6 +711,7 @@ fn resolve_imports(
     let mut scope = Scope {
         names: header.symbols.clone(),
         ambiguous: BTreeSet::new(),
+        modules: BTreeMap::new(),
     };
     let mut explicit = BTreeMap::<String, Symbol>::new();
     let mut glob = BTreeMap::<String, Vec<Symbol>>::new();
@@ -750,6 +755,10 @@ fn resolve_imports(
                     diagnostics.push(diag(DIAG_IMPORT, "root namespace requires an alias"));
                     continue;
                 };
+                scope
+                    .modules
+                    .entry(name.clone())
+                    .or_insert_with(|| module.clone());
                 insert_explicit(
                     &mut explicit,
                     name.clone(),
@@ -771,17 +780,23 @@ fn resolve_imports(
                     }
                 }
             }
-            UseTail::Alias { name, .. } => insert_explicit(
-                &mut explicit,
-                name.clone(),
-                Symbol {
-                    kind: SymbolKind::Let,
-                    ty: Type::Named(target.display()),
-                    public: true,
-                    effects: EffectSummary::default(),
-                },
-                diagnostics,
-            ),
+            UseTail::Alias { name, .. } => {
+                scope
+                    .modules
+                    .entry(name.clone())
+                    .or_insert_with(|| module.clone());
+                insert_explicit(
+                    &mut explicit,
+                    name.clone(),
+                    Symbol {
+                        kind: SymbolKind::Let,
+                        ty: Type::Named(target.display()),
+                        public: true,
+                        effects: EffectSummary::default(),
+                    },
+                    diagnostics,
+                );
+            }
             UseTail::Names(names) => {
                 for import in names {
                     if let Some(symbol) = module.exports.get(&import.name) {
@@ -1044,6 +1059,23 @@ fn infer(
             }
         }
         Expr::Field { base, name, .. } => {
+            if let Expr::Name { text, .. } = base.as_ref()
+                && let Some(module) = scope.modules.get(text)
+            {
+                return match module.exports.get(name) {
+                    Some(symbol) => Inferred {
+                        ty: symbol.ty.clone(),
+                        effects: symbol.effects.clone(),
+                    },
+                    None => {
+                        diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
+                        Inferred {
+                            ty: Type::Error,
+                            effects: EffectSummary::default(),
+                        }
+                    }
+                };
+            }
             let base = infer(base, scope, local, diagnostics);
             let ty = match &base.ty {
                 Type::Record(fields) => fields.get(name).cloned().unwrap_or_else(|| {
