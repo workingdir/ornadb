@@ -187,6 +187,27 @@ fn bounded_adapter_keeps_the_reference_project_effects_skipped_but_validates_emp
     );
 }
 
+#[test]
+fn harness_does_not_turn_unexpected_evaluation_into_fixture_failure() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let report = Harness::new(corpus).run(&mut RuntimeAdapter::new(BoundedEvaluator::default()));
+    for fixture_id in [
+        "valid/coalesce-precedence.orna",
+        "valid/question-coalesce-parenthesized.orna",
+    ] {
+        let fixture = report
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.fixture == fixture_id)
+            .expect("coalesce fixture");
+        assert!(fixture.passed, "{fixture_id}: {:?}", fixture.stages);
+        assert_eq!(
+            fixture.stages.last().expect("evaluation stage").status,
+            EvidenceStatus::Skipped
+        );
+    }
+}
+
 fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
     ProjectUnit {
         fixture_id: "test-project".into(),
