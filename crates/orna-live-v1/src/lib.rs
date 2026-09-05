@@ -836,18 +836,59 @@ impl LiveHost {
                             if retained.is_some_and(|record| record.fingerprint != *expected) {
                                 return Err(Error::RequestMismatch);
                             }
-                            let state = match self.serving.request_state(session, *target) {
-                                Ok(orna_serving_v1::RequestState::Reserved) => {
-                                    RequestState::Reserved
-                                }
-                                Ok(orna_serving_v1::RequestState::Running) => RequestState::Running,
-                                Ok(
-                                    orna_serving_v1::RequestState::Cancelled
-                                    | orna_serving_v1::RequestState::Completed,
-                                ) => RequestState::Terminal,
-                                Err(ServingError::RequestUnknown) => RequestState::Unknown,
-                                Err(error) => return Err(map_serving(error)),
-                            };
+                            let (state, fingerprint) =
+                                match self.serving.request_state(session, *target) {
+                                    Ok(orna_serving_v1::RequestState::Reserved) => (
+                                        RequestState::Reserved,
+                                        retained.map(|record| record.fingerprint),
+                                    ),
+                                    Ok(orna_serving_v1::RequestState::Running) => (
+                                        RequestState::Running,
+                                        retained.map(|record| record.fingerprint),
+                                    ),
+                                    Ok(
+                                        orna_serving_v1::RequestState::Cancelled
+                                        | orna_serving_v1::RequestState::Completed,
+                                    ) => (
+                                        RequestState::Terminal,
+                                        retained.map(|record| record.fingerprint),
+                                    ),
+                                    Err(ServingError::RequestUnknown) => match &self.runtime {
+                                        Some(runtime) => {
+                                            let status = runtime
+                                                .request_status(
+                                                    RequestIdentity {
+                                                        session_id: session,
+                                                        request_id: *target,
+                                                    },
+                                                    *expected,
+                                                )
+                                                .await
+                                                .map_err(|error| map_runtime(&error))?;
+                                            match status {
+                                                Some(status) => (
+                                                    match status.state {
+                                                        DurableRequestState::Reserved => {
+                                                            RequestState::Reserved
+                                                        }
+                                                        DurableRequestState::Running => {
+                                                            RequestState::Running
+                                                        }
+                                                        DurableRequestState::Completed
+                                                        | DurableRequestState::Cancelled
+                                                        | DurableRequestState::Orphaned => {
+                                                            RequestState::Terminal
+                                                        }
+                                                    },
+                                                    Some(status.fingerprint),
+                                                ),
+                                                None => (RequestState::Unknown, None),
+                                            }
+                                        }
+                                        None => (RequestState::Unknown, None),
+                                    },
+                                    Err(error) => return Err(map_serving(error)),
+                                };
                             let outcome = DispatchOutcome {
                                 outcome: FrameOutcome::Accepted,
                                 response: Some(Envelope {
@@ -856,7 +897,7 @@ impl LiveHost {
                                     message: Message::RequestStatusResult {
                                         target: *target,
                                         state,
-                                        fingerprint: retained.map(|record| record.fingerprint),
+                                        fingerprint,
                                         result: None,
                                     },
                                     extensions: BTreeMap::new(),
