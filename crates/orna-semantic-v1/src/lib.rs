@@ -1779,6 +1779,15 @@ fn infer(
                     };
                 }
             }
+            if op == "+"
+                && let Some(message) = incompatible_addition_message(&left.ty, &right.ty)
+            {
+                diagnostics.push(diag(DIAG_TYPE, message));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
+            }
             if op == "+" && left.ty == right.ty && is_absolute_affine_temperature(&left.ty) {
                 diagnostics.push(diag(
                     DIAG_TYPE,
@@ -3409,10 +3418,14 @@ fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
 
 fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
     match base {
-        Type::Decimal if scope.currency_types.contains(name) => Some(Type::Applied {
-            base: "Money".into(),
-            arguments: vec![Type::Named(name.into())],
-        }),
+        Type::Int | Type::Decimal
+            if scope.currency_types.contains(name) || is_currency_code(name) =>
+        {
+            Some(Type::Applied {
+                base: "Money".into(),
+                arguments: vec![Type::Named(name.into())],
+            })
+        }
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
         Type::Int | Type::Decimal | Type::Float => Some(Type::Applied {
             base: numeric_base(base)?.into(),
@@ -3429,6 +3442,55 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
                 arguments: arguments.clone(),
             })
         }
+        _ => None,
+    }
+}
+
+fn is_currency_code(name: &str) -> bool {
+    name.len() == 3 && name.bytes().all(|byte| byte.is_ascii_uppercase())
+}
+
+fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static str> {
+    if let (Some(left), Some(right)) = (money_currency(left), money_currency(right))
+        && left != right
+    {
+        return Some("cannot add different currencies without conversion");
+    }
+    let (Some(left), Some(right)) = (numeric_unit(left), numeric_unit(right)) else {
+        return None;
+    };
+    let (Some(left), Some(right)) = (unit_dimension(left), unit_dimension(right)) else {
+        return None;
+    };
+    (matches!((left, right), ("Time", "Energy") | ("Energy", "Time")))
+        .then_some("cannot add Time and Energy")
+}
+
+fn money_currency(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Applied { base, arguments } if base == "Money" => arguments.first(),
+        _ => None,
+    }
+}
+
+fn numeric_unit(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Applied { base, arguments }
+            if matches!(base.as_str(), "Int" | "Decimal" | "Float") && arguments.len() == 1 =>
+        {
+            match arguments.first() {
+                Some(Type::Named(unit)) => Some(unit),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unit_dimension(unit: &str) -> Option<&'static str> {
+    match unit.rsplit('.').next().unwrap_or(unit) {
+        "day" | "days" | "hour" | "hours" | "minute" | "minutes" => Some("Time"),
+        "kWh" => Some("Energy"),
         _ => None,
     }
 }
