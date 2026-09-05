@@ -6,7 +6,7 @@
 
 use std::{
     fmt,
-    future::Future,
+    future::{Future, Ready, ready},
     path::Path,
     pin::Pin,
     sync::{
@@ -378,6 +378,118 @@ pub trait StreamSource {
     /// Waits until the source can be polled again or the supplied control is
     /// cancelled. Connectors must wake this future for either event.
     fn wait<'a>(&'a mut self, control: &'a dyn StreamRunControl) -> Self::WaitFuture<'a>;
+}
+
+/// A finite, replayable source for the built-in list stream contract.
+///
+/// The source is stateless between polls: the durable checkpoint selects the
+/// next item, so reconstructing the connector after a restart resumes from the
+/// same opaque position without relying on process-local cursor state.
+pub struct ListStreamSource {
+    key: CheckpointKey,
+    payloads: Vec<Vec<u8>>,
+}
+
+impl ListStreamSource {
+    pub fn new(key: CheckpointKey, payloads: Vec<Vec<u8>>) -> Self {
+        Self { key, payloads }
+    }
+
+    fn next_item(&self, checkpoint: &StreamCheckpoint) -> Result<StreamSourcePoll, SafeDiagnostic> {
+        if checkpoint.key != self.key {
+            return Err(SafeDiagnostic {
+                code: DiagnosticCode::DecodeRejected,
+                class: DiagnosticClass::Permanent,
+            });
+        }
+        let index = match &checkpoint.committed {
+            None => 0,
+            Some(position) => {
+                let token = position.token.as_str();
+                let canonical = token == "0"
+                    || (token.as_bytes().first().is_some_and(|first| *first != b'0')
+                        && token.bytes().all(|byte| byte.is_ascii_digit()));
+                if !canonical {
+                    return Err(SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    });
+                }
+                token.parse::<usize>().map_err(|_| SafeDiagnostic {
+                    code: DiagnosticCode::DecodeRejected,
+                    class: DiagnosticClass::Permanent,
+                })?
+            }
+        };
+        if index > self.payloads.len() {
+            return Err(SafeDiagnostic {
+                code: DiagnosticCode::DecodeRejected,
+                class: DiagnosticClass::Permanent,
+            });
+        }
+        let Some(payload) = self.payloads.get(index) else {
+            return Ok(StreamSourcePoll::Exhausted);
+        };
+        let position = Position {
+            token: Component::new(index.to_string()).map_err(|_| SafeDiagnostic {
+                code: DiagnosticCode::Internal,
+                class: DiagnosticClass::Permanent,
+            })?,
+        };
+        let successor_index = index.checked_add(1).ok_or(SafeDiagnostic {
+            code: DiagnosticCode::Internal,
+            class: DiagnosticClass::Permanent,
+        })?;
+        let successor = Position {
+            token: Component::new(successor_index.to_string()).map_err(|_| SafeDiagnostic {
+                code: DiagnosticCode::Internal,
+                class: DiagnosticClass::Permanent,
+            })?,
+        };
+        Ok(StreamSourcePoll::Item(Box::new(StreamItem {
+            delivery: DeliveryIdentity {
+                consumer: self.key.consumer.clone(),
+                source_format: self.key.source_format.clone(),
+                source: self.key.source.clone(),
+                partition_format: self.key.partition_format.clone(),
+                partition: self.key.partition.clone(),
+                position_format: self.key.position_format.clone(),
+                position,
+                successor,
+            },
+            payload: payload.clone(),
+        })))
+    }
+}
+
+impl StreamSource for ListStreamSource {
+    type NextFuture<'a>
+        = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+    where
+        Self: 'a;
+    type WaitFuture<'a>
+        = Ready<Result<(), SafeDiagnostic>>
+    where
+        Self: 'a;
+
+    fn descriptor(&self) -> StreamSourceDescriptor {
+        StreamSourceDescriptor {
+            kind: StreamSourceKind::Finite,
+            replayable: true,
+        }
+    }
+
+    fn checkpoint_key(&self) -> Option<CheckpointKey> {
+        Some(self.key.clone())
+    }
+
+    fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+        ready(self.next_item(checkpoint))
+    }
+
+    fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+        ready(Ok(()))
+    }
 }
 
 pub trait StreamHandler {
@@ -3683,6 +3795,90 @@ mod tests {
         ));
         assert_eq!(raced_source.polls, 1);
         assert_eq!(raced_handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn list_stream_source_reopens_from_the_durable_successor() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("list:one", "list:two").checkpoint_key();
+        let payloads = vec![vec![1], vec![2], vec![3]];
+        let mut source = ListStreamSource::new(key.clone(), payloads.clone());
+        let mut handler = CommitHandler { calls: 0 };
+        let outcome = state
+            .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            StreamRunOutcome::Exhausted {
+                delivered: 3,
+                checkpoint: StreamCheckpoint {
+                    version: 3,
+                    committed: Some(Position { .. }),
+                    ..
+                }
+            }
+        ));
+        assert_eq!(handler.calls, 3);
+        assert!(source.descriptor().replayable);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let mut source = ListStreamSource::new(key.clone(), payloads);
+        let mut handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            reopened
+                .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled)
+                .await
+                .unwrap(),
+            StreamRunOutcome::Exhausted {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 3, .. }
+            }
+        ));
+        assert_eq!(handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn list_stream_source_rejects_noncanonical_and_future_positions() {
+        let delivery = stream_delivery("list:one", "list:two");
+        let key = delivery.checkpoint_key();
+        let mut source = ListStreamSource::new(key.clone(), vec![vec![1], vec![2], vec![3]]);
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        for token in ["01", "+1", "4"] {
+            let checkpoint = StreamCheckpoint {
+                key: key.clone(),
+                version: 1,
+                committed: Some(Position {
+                    token: Component::new(token).unwrap(),
+                }),
+            };
+            assert!(matches!(
+                source.next(&checkpoint).await,
+                Err(actual) if actual == diagnostic
+            ));
+        }
+
+        let wrong_key = CheckpointKey {
+            source: Component::new("other-source").unwrap(),
+            ..key.clone()
+        };
+        assert!(matches!(
+            source
+                .next(&StreamCheckpoint {
+                    key: wrong_key,
+                    version: 0,
+                    committed: None,
+                })
+                .await,
+            Err(actual) if actual == diagnostic
+        ));
     }
 
     #[tokio::test]
