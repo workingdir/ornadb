@@ -875,9 +875,11 @@ impl LiveHost {
                                                             RequestState::Running
                                                         }
                                                         DurableRequestState::Completed
-                                                        | DurableRequestState::Cancelled
-                                                        | DurableRequestState::Orphaned => {
+                                                        | DurableRequestState::Cancelled => {
                                                             RequestState::Terminal
+                                                        }
+                                                        DurableRequestState::Orphaned => {
+                                                            RequestState::Orphaned
                                                         }
                                                     },
                                                     Some(status.fingerprint),
@@ -952,6 +954,18 @@ impl LiveHost {
                     Err(error) => return Err(map_runtime(&error)),
                 }
             }
+            if reserved.state == DurableRequestState::Running {
+                return self
+                    .admit_running_request(
+                        runtime,
+                        identity,
+                        session,
+                        request,
+                        fingerprint,
+                        envelope,
+                    )
+                    .await;
+            }
             return self.durable_admission(reserved, envelope);
         }
         match reserved.state {
@@ -969,10 +983,54 @@ impl LiveHost {
                     Err(error) => Err(map_runtime(&error)),
                 }
             }
-            DurableRequestState::Running => Ok(DurableAdmission::Active),
+            DurableRequestState::Running => {
+                self.admit_running_request(
+                    runtime,
+                    identity,
+                    session,
+                    request,
+                    fingerprint,
+                    envelope,
+                )
+                .await
+            }
             DurableRequestState::Completed
             | DurableRequestState::Cancelled
             | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope),
+        }
+    }
+
+    async fn admit_running_request(
+        &self,
+        runtime: &RuntimeState,
+        identity: RequestIdentity,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        envelope: &Envelope,
+    ) -> Result<DurableAdmission> {
+        if self
+            .requests
+            .get(&(session, request))
+            .is_some_and(|record| record.terminal.is_none())
+        {
+            return Ok(DurableAdmission::Active);
+        }
+        let outcome = retained_without_value_outcome(request, fingerprint);
+        match runtime
+            .orphan_request(identity, fingerprint, self.terminal_outcome(&outcome)?)
+            .await
+        {
+            Ok(status) => self.durable_admission(status, envelope),
+            Err(RuntimeError::RequestStateConflict) => {
+                let current = runtime
+                    .request_status_for_identity(identity)
+                    .await
+                    .map_err(|error| map_runtime(&error))?
+                    .ok_or(Error::RuntimeUnavailable)?;
+                self.durable_admission(current, envelope)
+            }
+            Err(error) => Err(map_runtime(&error)),
         }
     }
 
@@ -1344,6 +1402,23 @@ impl LiveHost {
         self.serving
             .start_request(session, request)
             .map_err(map_serving)
+    }
+}
+
+fn retained_without_value_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> DispatchOutcome {
+    DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        }),
     }
 }
 
