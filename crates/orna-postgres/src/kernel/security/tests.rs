@@ -2,14 +2,23 @@ use super::audit_writer::resource_parent_invocation_unavailable;
 use super::raw_call::{classify_raw_server_insert_error, validate_raw_call_argument_shape};
 use super::resource::MAX_RESOURCE_CREDIT;
 use super::resource_producer::ResourceProducerStartGuard;
+use super::sealed_dispatch::{
+    CheckedStandardArtifactExecutor, execute_checked_standard_artifact,
+    select_checked_standard_artifact_executor,
+};
 use super::*;
 use orna_core::{
     CatalogueRevisionId, FieldId, ObjectId, ParameterId, TypeId,
-    catalogue::{CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition},
+    catalogue::{
+        CatalogueSnapshot, EnumTypeDefinition, FunctionTransaction, FunctionVolatility,
+        QualifiedSemanticName, SchemaDefinition,
+    },
+    revision::{ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord},
     security::PrivilegeDecision,
     system::{SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID},
     value::{EnumValue, ResultColumn, ResultRow, ResultRows, RuntimeFloat},
 };
+use orna_standard::{STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID};
 use std::time::UNIX_EPOCH;
 
 const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
@@ -761,6 +770,173 @@ fn sealed_test_operation(
         outcome,
     )
     .expect("sealed invocation test operation")
+}
+
+fn sealed_standard_revision_with_artifact(
+    function: FunctionId,
+    artifact: ExecutableArtifact,
+) -> FunctionRevisionRecord {
+    let standard = orna_standard::verify_standard_library_v2_snapshot(
+        orna_standard::retained_standard_library_v2_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let template = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == STD_INVOKE_ECHO_FUNCTION_ID)
+        .expect("standard echo executable")
+        .revision();
+    FunctionRevisionRecord::new(
+        function,
+        FunctionRevisionId::from_bytes([0xd1; 16]),
+        template.revision_number(),
+        template.declaration_origin(),
+        template.declaration_content_hash(),
+        template.semantic_hash(),
+        template.language_version(),
+        artifact,
+    )
+    .expect("test executable revision")
+    .with_semantic_hash_version(template.semantic_hash_version())
+}
+
+fn sealed_parameter_echo_definition(function: FunctionId) -> FunctionDefinition {
+    FunctionDefinition::new(
+        function,
+        QualifiedSemanticName::new(["test", "artifact_echo"]).expect("function name"),
+        FunctionDomain::Server,
+        vec![orna_core::catalogue::ParameterDefinition::new(
+            STD_INVOKE_ECHO_PARAMETER_ID,
+            "p_value",
+            0,
+            orna_core::types::ResolvedType::scalar(orna_core::types::StandardScalar::Integer),
+            None,
+        )],
+        FunctionReturn::Single(orna_core::types::ResolvedType::scalar(
+            orna_core::types::StandardScalar::Integer,
+        )),
+        FunctionRevisionId::from_bytes([0xd1; 16]),
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    )
+}
+
+#[test]
+fn sealed_standard_dispatch_uses_parameter_echo_artifact_not_function_identity() {
+    let function = FunctionId::from_bytes([0xd0; 16]);
+    let standard = orna_standard::verify_standard_library_v2_snapshot(
+        orna_standard::retained_standard_library_v2_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let artifact = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == STD_INVOKE_ECHO_FUNCTION_ID)
+        .expect("standard echo executable")
+        .revision()
+        .artifact()
+        .clone();
+    let definition = sealed_parameter_echo_definition(function);
+    let revision = sealed_standard_revision_with_artifact(function, artifact);
+    let arguments =
+        [
+            FunctionArgument::new(STD_INVOKE_ECHO_PARAMETER_ID, RuntimeValue::Integer(41))
+                .expect("integer echo argument"),
+        ];
+    let active = sealed_test_active_revision(RevisionPair::new(
+        SourceRevisionId::from_bytes([0xd3; 16]),
+        CatalogueRevisionId::from_bytes([0xd4; 16]),
+    ));
+
+    assert_eq!(
+        select_checked_standard_artifact_executor(&active, &revision)
+            .expect("the parameter-echo artifact must select its executor"),
+        CheckedStandardArtifactExecutor::ParameterEcho
+    );
+
+    assert_eq!(
+        execute_checked_standard_artifact(
+            &active,
+            &sealed_test_registry(),
+            &definition,
+            &revision,
+            &arguments,
+        )
+        .expect("a checked parameter-echo artifact must execute for any function identity"),
+        RuntimeValue::Integer(41)
+    );
+}
+
+#[test]
+fn sealed_standard_dispatch_rejects_unsupported_artifact_before_execution() {
+    let function = FunctionId::from_bytes([0xd2; 16]);
+    let standard = orna_standard::verify_standard_library_v2_snapshot(
+        orna_standard::retained_standard_library_v2_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let artifact = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == STD_INVOKE_ECHO_FUNCTION_ID)
+        .expect("standard echo executable")
+        .revision()
+        .artifact();
+    let active = sealed_test_active_revision(RevisionPair::new(
+        SourceRevisionId::from_bytes([0xd5; 16]),
+        CatalogueRevisionId::from_bytes([0xd6; 16]),
+    ));
+
+    for (kind, format, version) in [
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::server_parameter_echo::FORMAT_IDENTITY,
+            artifact.version(),
+        ),
+        (
+            ExecutableArtifactKind::Server,
+            "test.unsupported",
+            artifact.version(),
+        ),
+        (
+            ExecutableArtifactKind::Server,
+            orna_artifact::server_parameter_echo::FORMAT_IDENTITY,
+            artifact.version() + 1,
+        ),
+    ] {
+        let unsupported = ExecutableArtifact::new(
+            kind,
+            format,
+            version,
+            artifact.payload().to_vec(),
+            artifact.content_hash(),
+        )
+        .expect("unsupported test artifact");
+        let revision = sealed_standard_revision_with_artifact(function, unsupported);
+
+        assert!(matches!(
+            select_checked_standard_artifact_executor(&active, &revision),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "active catalogue",
+                rule: "verified standard executable artifact is unsupported",
+                ..
+            })
+        ));
+        assert!(matches!(
+            execute_checked_standard_artifact(
+                &active,
+                &sealed_test_registry(),
+                &sealed_parameter_echo_definition(function),
+                &revision,
+                &[],
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "active catalogue",
+                rule: "verified standard executable artifact is unsupported",
+                ..
+            })
+        ));
+    }
 }
 
 #[test]
