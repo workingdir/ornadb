@@ -873,10 +873,11 @@ fn check_item(
             assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
         }
         Declaration::Table { name, members, .. } => {
+            let row = table_row_type(item);
             for member in members {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
-                        let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
+                        let inferred = infer_table_assertion(value, &row, scope, diagnostics);
                         assertion(
                             AssertionOwner::Table(name.clone()),
                             value,
@@ -1237,10 +1238,13 @@ fn assertion(
 ) {
     let dependencies = tables_referenced(value);
     if inferred.ty != Type::Bool {
-        diagnostics.push(diag(
-            DIAG_ASSERTION,
-            "assertion does not have the required Boolean form",
-        ));
+        let message = match &owner {
+            AssertionOwner::Table(name) => {
+                format!("table assertion must be a predicate over Relation<{name}>")
+            }
+            _ => "assertion does not have the required Boolean form".into(),
+        };
+        diagnostics.push(diag(DIAG_ASSERTION, message));
     }
     if inferred.effects.forbidden_for_assertion() {
         diagnostics.push(diag(
@@ -1259,6 +1263,89 @@ fn assertion(
         dependencies,
         effects: inferred.effects,
     });
+}
+
+/// Elaborates the two owner-local relational predicate constructors used by
+/// the frozen reference corpus. They are not evaluator functions: the table
+/// supplies the unpublished `Relation<Row>` subject, and the lambda receives
+/// one statically shaped row. All other assertion forms retain ordinary
+/// inference and therefore remain unsupported unless the general checker can
+/// prove them.
+fn infer_table_assertion(
+    value: &Expr,
+    row: &Type,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Expr::Call {
+        callee, arguments, ..
+    } = value
+    else {
+        return infer(value, scope, &BTreeMap::new(), diagnostics);
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        return infer(value, scope, &BTreeMap::new(), diagnostics);
+    };
+    if !matches!(text.as_str(), "every" | "all_unique") || arguments.len() != 1 {
+        return infer(value, scope, &BTreeMap::new(), diagnostics);
+    }
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &arguments[0].value
+    else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let [parameter] = parameters.as_slice() else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Pattern::Name(name, _) = &parameter.pattern else {
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let local = BTreeMap::from([(
+        name.clone(),
+        Symbol {
+            kind: SymbolKind::Let,
+            ty: row.clone(),
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    )]);
+    let inferred = infer(body, scope, &local, diagnostics);
+    let valid = text == "all_unique" || inferred.ty == Type::Bool;
+    Inferred {
+        ty: if valid { Type::Bool } else { Type::Error },
+        effects: inferred.effects,
+    }
+}
+
+fn table_row_type(item: &Item) -> Type {
+    let Declaration::Table { keys, members, .. } = &item.declaration else {
+        unreachable!("table row type requested for a non-table declaration");
+    };
+    let mut fields = BTreeMap::new();
+    for key in keys {
+        if let Pattern::Name(name, _) = &key.pattern {
+            fields.insert(
+                name.clone(),
+                key.annotation.as_ref().map(type_of).unwrap_or(Type::Error),
+            );
+        }
+    }
+    for member in members {
+        if let orna_syntax_v1::TableMember::Field { name, ty, .. } = member {
+            fields.insert(name.clone(), type_of(ty));
+        }
+    }
+    Type::Record(fields)
 }
 fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
@@ -1319,11 +1406,11 @@ fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
     visit(expr, &mut names);
     names
 }
-fn diag(code: &'static str, message: &'static str) -> Diagnostic {
+fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
         SafeText::new(code).expect("static code"),
         DiagnosticSeverity::Error,
-        SafeText::new(message).expect("static message"),
+        SafeText::new(message.into()).expect("valid diagnostic message"),
     )
     .expect("valid diagnostic")
 }
