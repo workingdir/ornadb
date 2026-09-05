@@ -133,6 +133,13 @@ pub struct Relation<'a, Item> {
     source: Box<dyn Iterator<Item = Item> + 'a>,
 }
 
+/// Cardinality failure returned when a relation is required to contain one value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardinalityError {
+    Empty,
+    Multiple,
+}
+
 impl<'a, Item: 'a> Relation<'a, Item> {
     fn new<I>(source: I) -> Self
     where
@@ -172,6 +179,21 @@ impl<'a, Item: 'a> Relation<'a, Item> {
     /// Concatenates two relations, retaining the complete left sequence first.
     pub fn union(self, other: Relation<'a, Item>) -> Self {
         Self::new(self.source.chain(other.source))
+    }
+
+    /// Returns the first value, or `None` when the relation is empty.
+    pub fn first(mut self) -> Option<Item> {
+        self.next()
+    }
+
+    /// Returns the only value, failing without enumerating beyond the second.
+    pub fn one(mut self) -> Result<Item, CardinalityError> {
+        let first = self.next().ok_or(CardinalityError::Empty)?;
+        if self.next().is_some() {
+            Err(CardinalityError::Multiple)
+        } else {
+            Ok(first)
+        }
     }
 
     /// Takes a bounded prefix without enumerating later items.
@@ -912,7 +934,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivationError, DatabaseRuntime, TableError, TableRuntime};
+    use super::{ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime};
     use std::panic::AssertUnwindSafe;
 
     #[test]
@@ -1301,6 +1323,16 @@ mod tests {
                 .map(|(key, _)| key)
                 .collect::<Vec<_>>(),
             vec![1, 2, 1]
+        );
+        assert_eq!(database.relation(&"notes").first(), Some((1, "one")));
+        assert_eq!(database.relation(&"notes").take(1).one(), Ok((1, "one")));
+        assert_eq!(
+            database.relation(&"notes").one(),
+            Err(CardinalityError::Multiple)
+        );
+        assert_eq!(
+            database.relation(&"notes").take(0).one(),
+            Err(CardinalityError::Empty)
         );
 
         let mut activation = database.begin();
