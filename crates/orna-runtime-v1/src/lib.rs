@@ -766,6 +766,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_faults_roll_back_every_mutation_and_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let batch = vec![mutation(5), mutation(6)];
+        for point in [
+            FaultPoint::AfterMutation,
+            FaultPoint::AfterCheckpoint,
+            FaultPoint::AfterCapture,
+        ] {
+            assert_eq!(
+                state
+                    .commit_batch(lease, &capture, &batch, digest(9), &Fail(point))
+                    .await,
+                Err(RuntimeError::FaultInjected(point))
+            );
+            assert!(state.pending().await.unwrap().is_empty());
+            assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+            assert_eq!(state.capture().await.unwrap(), capture);
+        }
+    }
+
+    #[tokio::test]
     async fn stale_capture_and_competing_owner_are_distinct() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
