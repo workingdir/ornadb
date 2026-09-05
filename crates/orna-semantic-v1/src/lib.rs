@@ -2301,6 +2301,7 @@ fn infer(
                         parameter_names.as_deref(),
                         arguments,
                         &values,
+                        None,
                         diagnostics,
                     );
                     Inferred {
@@ -3064,8 +3065,10 @@ fn check_call_arguments(
     parameter_names: Option<&[String]>,
     arguments: &[orna_syntax_v1::Argument],
     values: &[Type],
+    input: Option<&Type>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let argument_count = values.len() + usize::from(input.is_some());
     let Some(parameter_names) = parameter_names.filter(|names| names.len() == parameters.len())
     else {
         if arguments.iter().any(|argument| argument.name.is_some()) {
@@ -3074,24 +3077,30 @@ fn check_call_arguments(
                 "named arguments require declared parameter names",
             ));
         } else {
-            if parameters.len() != values.len() {
+            if parameters.len() != argument_count {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "function argument count does not match its static signature",
                 ));
             }
-            for (expected, actual) in parameters.iter().zip(values) {
+            for (expected, actual) in parameters.iter().zip(input.into_iter().chain(values)) {
                 require_same(expected, actual, diagnostics);
             }
         }
         return;
     };
     let mut seen = BTreeSet::new();
-    let mut malformed = parameters.len() != values.len();
+    let mut malformed = parameters.len() != argument_count;
     let mut positional = 0usize;
     let mut named_started = false;
-    for (argument, actual) in arguments.iter().zip(values) {
-        let index = if let Some(name) = argument.name.as_deref() {
+    let supplied = input.into_iter().map(|value| (None, value)).chain(
+        arguments
+            .iter()
+            .zip(values)
+            .map(|(argument, value)| (argument.name.as_deref(), value)),
+    );
+    for (name, actual) in supplied {
+        let index = if let Some(name) = name {
             named_started = true;
             parameter_names
                 .iter()
@@ -4090,89 +4099,17 @@ fn infer_named_pipeline_stage(
             effects,
         };
     };
-    check_pipeline_arguments(
+    check_call_arguments(
         &parameters,
         parameter_names.as_deref(),
-        &values,
         arguments,
+        &values[1..],
+        values.first(),
         diagnostics,
     );
     Inferred {
         ty: *result,
         effects,
-    }
-}
-
-fn check_pipeline_arguments(
-    parameters: &[Type],
-    parameter_names: Option<&[String]>,
-    values: &[Type],
-    arguments: &[orna_syntax_v1::Argument],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(parameter_names) = parameter_names.filter(|names| names.len() == parameters.len())
-    else {
-        if arguments.iter().any(|argument| argument.name.is_some()) {
-            diagnostics.push(diag(
-                DIAG_UNSUPPORTED,
-                "named arguments require declared parameter names",
-            ));
-        } else {
-            if parameters.len() != values.len() {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "function argument count does not match its static signature",
-                ));
-            }
-            for (expected, actual) in parameters.iter().zip(values) {
-                require_same(expected, actual, diagnostics);
-            }
-        }
-        return;
-    };
-
-    let mut seen = BTreeSet::new();
-    let mut malformed = parameters.len() != values.len();
-    if let Some((expected, actual)) = parameters.first().zip(values.first()) {
-        seen.insert(0);
-        require_same(expected, actual, diagnostics);
-    } else {
-        malformed = true;
-    }
-    let mut positional = 1usize;
-    let mut named_started = false;
-    for (argument, actual) in arguments.iter().zip(values.iter().skip(1)) {
-        let index = if let Some(name) = argument.name.as_deref() {
-            named_started = true;
-            parameter_names
-                .iter()
-                .position(|parameter| parameter == name)
-        } else if named_started {
-            malformed = true;
-            None
-        } else {
-            let index = (positional < parameters.len()).then_some(positional);
-            positional += 1;
-            index
-        };
-        let Some(index) = index else {
-            malformed = true;
-            continue;
-        };
-        if !seen.insert(index) {
-            malformed = true;
-            continue;
-        }
-        require_same(&parameters[index], actual, diagnostics);
-    }
-    if seen.len() != parameters.len() {
-        malformed = true;
-    }
-    if malformed {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "named function arguments do not match its static signature",
-        ));
     }
 }
 
