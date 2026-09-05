@@ -14,7 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod semantic_adapter;
 mod syntax_adapter;
+pub use semantic_adapter::{RuntimeAdapter, RuntimeEvaluator, SemanticAdapter};
 pub use syntax_adapter::SyntaxAdapter;
 
 /// The only shared diagnostic carrier accepted by new Orna 1.0 integration.
@@ -71,6 +73,7 @@ impl Stage {
 pub enum EvidenceClass {
     Static,
     Model,
+    Semantic,
     Runtime,
     Skipped,
 }
@@ -99,6 +102,18 @@ impl<D> StageOutcome<D> {
     fn class(&self) -> EvidenceClass {
         if matches!(self, Self::Skipped { .. }) {
             EvidenceClass::Skipped
+        } else {
+            EvidenceClass::Runtime
+        }
+    }
+    fn stage_class(&self, stage: &Stage) -> EvidenceClass {
+        if matches!(self, Self::Skipped { .. }) {
+            EvidenceClass::Skipped
+        } else if matches!(
+            stage,
+            Stage::Resolve | Stage::Typecheck | Stage::RowValidation
+        ) {
+            EvidenceClass::Semantic
         } else {
             EvidenceClass::Runtime
         }
@@ -160,6 +175,20 @@ pub struct ProjectManifest {
     pub expected: String,
 }
 
+/// A requirement-linked scenario from the authoritative corpus.  Scenarios
+/// are prose obligations, so an adapter must not claim one passed unless it
+/// has an executable runtime contract for it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Scenario {
+    pub id: String,
+    pub title: String,
+    pub given: Vec<String>,
+    pub when: Vec<String>,
+    pub then: Vec<String>,
+    pub requirements: Vec<String>,
+    pub evidence_level: String,
+}
+
 /// Integration seam for `orna-syntax`, compiler semantic analysis and runtime.
 /// Each method is deliberately separate so evidence preserves the first actual
 /// failing stage instead of collapsing compiler errors into a generic failure.
@@ -187,6 +216,14 @@ pub trait ConformanceAdapter {
     /// Validates a loose row unit after its table schema has been resolved.
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Self::Diagnostic>;
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Self::Diagnostic>;
+    /// Execute a corpus scenario only when the adapter has an executable
+    /// contract for its prose fixture.  The default is deliberately a
+    /// justified gap, never a model-derived pass.
+    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Self::Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "authoritative scenario is prose-only; adapter exposes no scenario execution contract".into(),
+        }
+    }
 }
 
 /// Safe default: it records lack of an integrated implementation explicitly.
@@ -622,11 +659,22 @@ pub struct RunReport {
     pub implementation_claim: ImplementationClaim,
     pub publication_digests: BTreeMap<String, String>,
     pub fixtures: Vec<FixtureResult>,
+    pub scenarios: Vec<ScenarioResult>,
     pub static_evidence: Vec<Evidence>,
     pub model_evidence: Vec<Evidence>,
+    pub semantic_evidence: Vec<Evidence>,
     pub runtime_evidence: Vec<Evidence>,
     pub skipped_evidence: Vec<Evidence>,
     pub coverage: CoverageReport,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ScenarioResult {
+    pub scenario: String,
+    pub requirements: Vec<String>,
+    pub class: EvidenceClass,
+    pub status: EvidenceStatus,
+    pub detail: String,
+    pub diagnostic: Option<Value>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ImplementationClaim {
@@ -665,17 +713,41 @@ impl Harness {
         self
     }
     pub fn run<A: ConformanceAdapter>(&self, adapter: &mut A) -> RunReport {
-        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
+        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
         for fixture in &self.corpus.manifest.fixtures {
             let result = self.run_fixture(fixture, adapter);
             for stage in &result.stages {
                 match stage.class {
+                    EvidenceClass::Semantic => report.semantic_evidence.push(stage.clone()),
                     EvidenceClass::Runtime => report.runtime_evidence.push(stage.clone()),
                     EvidenceClass::Skipped => report.skipped_evidence.push(stage.clone()),
                     _ => {}
                 }
             }
             report.fixtures.push(result);
+        }
+        let scenarios = self.corpus.scenarios["scenarios"]
+            .as_array()
+            .expect("validated scenarios");
+        for value in scenarios {
+            let scenario: Scenario =
+                serde_json::from_value(value.clone()).expect("validated scenario shape");
+            let outcome = adapter.run_scenario(&scenario);
+            let class = outcome.class();
+            let status = outcome.status();
+            let detail = match &outcome {
+                StageOutcome::Passed => "scenario execution satisfied its adapter contract".into(),
+                StageOutcome::Failed(_) => "scenario execution failed its adapter contract".into(),
+                StageOutcome::Skipped { reason } => format!("scenario execution skipped: {reason}"),
+            };
+            report.scenarios.push(ScenarioResult {
+                scenario: scenario.id,
+                requirements: scenario.requirements,
+                class,
+                status,
+                detail,
+                diagnostic: failed_diagnostic(&outcome),
+            });
         }
         let stages = report.fixtures.iter().flat_map(|fixture| &fixture.stages);
         report.coverage.mapped_stage_evidence = stages
@@ -761,10 +833,11 @@ impl Harness {
             if !matches!(outcome, StageOutcome::Passed) {
                 halted = true;
             }
+            let class = outcome.stage_class(&stage);
             evidence.push(Evidence {
                 subject: fixture.id.clone(),
                 stage: Some(stage),
-                class: outcome.class(),
+                class,
                 status: outcome.status(),
                 detail: format!(
                     "expected {expected}; {}",
@@ -774,10 +847,7 @@ impl Harness {
                         "expectation NOT satisfied"
                     }
                 ),
-                diagnostic: match &outcome {
-                    StageOutcome::Failed(d) => serde_json::to_value(d).ok(),
-                    _ => None,
-                },
+                diagnostic: failed_diagnostic(&outcome),
                 requirements: requirements.clone(),
                 requirement_mapping: requirement_mapping.clone(),
             });
@@ -842,6 +912,21 @@ impl Harness {
             expectations: self.corpus.project_expectations.clone(),
         }
     }
+}
+
+/// Reports expose only the diagnostic identity.  Adapter diagnostics may have
+/// spans, labels or native payloads containing source observations; preserving
+/// any of those would let a source-bearing adapter bypass the logical-only
+/// conformance boundary.
+fn failed_diagnostic<D: Serialize>(outcome: &StageOutcome<D>) -> Option<Value> {
+    let StageOutcome::Failed(diagnostic) = outcome else {
+        return None;
+    };
+    let code = serde_json::to_value(diagnostic)
+        .ok()
+        .and_then(|value| value.get("code").cloned())
+        .unwrap_or(Value::String("ORNA-CONFORMANCE-REDACTED".into()));
+    Some(serde_json::json!({"code": code, "spans": [], "redacted": true}))
 }
 
 fn discover_loose_rows(
