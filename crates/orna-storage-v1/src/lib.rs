@@ -50,8 +50,10 @@ impl LoosePath {
         if root.is_empty() || root.starts_with('.') || root.contains('/') || root.contains('\\') {
             return Err(Error::InvalidTableRoot);
         }
-        path_validate_relative_components(key).map_err(|_| Error::InvalidKey)?;
         let components = path_encode_key_components(key).map_err(|_| Error::InvalidKey)?;
+        // Logical keys may contain separators, traversal spellings, or empty
+        // strings. Only their encoded filesystem components require this check.
+        path_validate_relative_components(&components).map_err(|_| Error::InvalidKey)?;
         let path = format!("{root}/{}", components.join("/"));
         ManagedPath::new(path)
             .map(Self)
@@ -467,6 +469,38 @@ mod tests {
     }
     fn row(text: &str) -> LooseRow {
         LooseRow::new(text.as_bytes().to_vec()).unwrap()
+    }
+    #[test]
+    fn logical_keys_are_encoded_before_path_safety_validation() {
+        for (key, encoded) in [
+            ("", "~ff"),
+            (".", "~2e"),
+            ("..", "~2e~2e"),
+            ("foo/bar", "foo~2fbar"),
+            ("foo\\bar", "foo~5cbar"),
+            ("/outside", "~2foutside"),
+            (".git", "~2egit"),
+            ("con", "~63on"),
+            ("é", "~c3~a9"),
+        ] {
+            let path = LoosePath::for_key("Contact", &[key.into()]).unwrap();
+            assert_eq!(
+                path.as_managed_path().as_path(),
+                std::path::Path::new(&format!("Contact/{encoded}.orna"))
+            );
+            assert_eq!(orna_value_v1::path_decode_component(encoded).unwrap(), key);
+        }
+        let composite = LoosePath::for_key("Contact", &["..".into(), "a/b".into()]).unwrap();
+        assert_eq!(
+            composite.as_managed_path().as_path(),
+            std::path::Path::new("Contact/~2e~2e/a~2fb.orna")
+        );
+        assert!(LoosePath::for_key("Contact", &[]).is_err());
+        assert!(LoosePath::for_key("Contact", &["a".repeat(201)]).is_err());
+        assert!(LoosePath::for_key("Contact", &vec!["a".repeat(200); 6]).is_err());
+        for root in ["", ".", "..", "../Contact", "/Contact", "a\\b"] {
+            assert!(LoosePath::for_key(root, &["safe".into()]).is_err());
+        }
     }
     fn id(text: &str) -> MutationId {
         MutationId::new(text).unwrap()
