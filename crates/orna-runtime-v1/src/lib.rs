@@ -367,6 +367,13 @@ pub trait StreamSource {
         Self: 'a;
 
     fn descriptor(&self) -> StreamSourceDescriptor;
+    /// Returns the exact durable stream key served by this connector when it
+    /// can declare one. The default preserves compatibility with legacy
+    /// connectors; keyed connectors are rejected before provider polling when
+    /// their declaration does not match the requested durable stream.
+    fn checkpoint_key(&self) -> Option<CheckpointKey> {
+        None
+    }
     fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a>;
     /// Waits until the source can be polled again or the supplied control is
     /// cancelled. Connectors must wake this future for either event.
@@ -783,6 +790,15 @@ impl RuntimeState {
         H: StreamHandler,
         C: StreamRunControl,
     {
+        if source
+            .checkpoint_key()
+            .as_ref()
+            .is_some_and(|source_key| source_key != key)
+        {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch,
+            ));
+        }
         let checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -920,6 +936,15 @@ impl RuntimeState {
         H: StreamHandler,
         C: StreamRunControl,
     {
+        if source
+            .checkpoint_key()
+            .as_ref()
+            .is_some_and(|source_key| source_key != key)
+        {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch,
+            ));
+        }
         let mut checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -3162,11 +3187,105 @@ mod tests {
     }
 
     struct TestSource {
+        key: CheckpointKey,
         item: Option<StreamItem>,
         polls: usize,
     }
 
     impl StreamSource for TestSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> Option<CheckpointKey> {
+            Some(self.key.clone())
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            ready(Ok(self
+                .item
+                .take()
+                .map_or(StreamSourcePoll::Exhausted, |item| {
+                    StreamSourcePoll::Item(Box::new(item))
+                })))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
+        }
+    }
+
+    struct TestHandler {
+        result: Option<StreamHandlerResult>,
+        calls: usize,
+    }
+
+    impl StreamHandler for TestHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            self.result.take().unwrap_or(StreamHandlerResult::Cancelled)
+        }
+    }
+
+    struct SequenceSource {
+        key: CheckpointKey,
+        descriptor: StreamSourceDescriptor,
+        polls: usize,
+        waits: usize,
+        steps: VecDeque<StreamSourcePoll>,
+    }
+
+    impl StreamSource for SequenceSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            self.descriptor
+        }
+
+        fn checkpoint_key(&self) -> Option<CheckpointKey> {
+            Some(self.key.clone())
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            ready(Ok(self
+                .steps
+                .pop_front()
+                .unwrap_or(StreamSourcePoll::Exhausted)))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            self.waits += 1;
+            ready(Ok(()))
+        }
+    }
+
+    struct LegacySource {
+        item: Option<StreamItem>,
+        polls: usize,
+    }
+
+    impl StreamSource for LegacySource {
         type NextFuture<'a>
             = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
         where
@@ -3198,54 +3317,8 @@ mod tests {
         }
     }
 
-    struct TestHandler {
-        result: Option<StreamHandlerResult>,
-        calls: usize,
-    }
-
-    impl StreamHandler for TestHandler {
-        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
-            self.calls += 1;
-            self.result.take().unwrap_or(StreamHandlerResult::Cancelled)
-        }
-    }
-
-    struct SequenceSource {
-        descriptor: StreamSourceDescriptor,
-        polls: usize,
-        waits: usize,
-        steps: VecDeque<StreamSourcePoll>,
-    }
-
-    impl StreamSource for SequenceSource {
-        type NextFuture<'a>
-            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
-        where
-            Self: 'a;
-        type WaitFuture<'a>
-            = Ready<Result<(), SafeDiagnostic>>
-        where
-            Self: 'a;
-
-        fn descriptor(&self) -> StreamSourceDescriptor {
-            self.descriptor
-        }
-
-        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
-            self.polls += 1;
-            ready(Ok(self
-                .steps
-                .pop_front()
-                .unwrap_or(StreamSourcePoll::Exhausted)))
-        }
-
-        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
-            self.waits += 1;
-            ready(Ok(()))
-        }
-    }
-
     struct FailingSource {
+        key: CheckpointKey,
         diagnostic: Option<SafeDiagnostic>,
     }
 
@@ -3266,6 +3339,10 @@ mod tests {
             }
         }
 
+        fn checkpoint_key(&self) -> Option<CheckpointKey> {
+            Some(self.key.clone())
+        }
+
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
             ready(
                 self.diagnostic
@@ -3280,6 +3357,7 @@ mod tests {
     }
 
     struct WaitingFailureSource {
+        key: CheckpointKey,
         diagnostic: Option<SafeDiagnostic>,
     }
 
@@ -3298,6 +3376,10 @@ mod tests {
                 kind: StreamSourceKind::Unbounded,
                 replayable: true,
             }
+        }
+
+        fn checkpoint_key(&self) -> Option<CheckpointKey> {
+            Some(self.key.clone())
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -3405,7 +3487,71 @@ mod tests {
         let first = stream_delivery("runner:one", "runner:two");
         let second = stream_delivery("runner:two", "runner:three");
         let key = first.checkpoint_key();
+        let mut mismatch_source = SequenceSource {
+            key: CheckpointKey {
+                source: Component::new("other-source").unwrap(),
+                ..key.clone()
+            },
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::new(),
+        };
+        let mut mismatch_handler = CommitHandler { calls: 0 };
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut mismatch_source, &mut mismatch_handler,)
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch
+            ))
+        );
+        assert_eq!(mismatch_source.polls, 0);
+        let mut long_mismatch_handler = CommitHandler { calls: 0 };
+        assert_eq!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut mismatch_source,
+                    &mut long_mismatch_handler,
+                    &NeverCancelled,
+                )
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch
+            ))
+        );
+        assert_eq!(mismatch_source.polls, 0);
+        assert_eq!(mismatch_source.waits, 0);
+        assert_eq!(long_mismatch_handler.calls, 0);
+
+        let mut legacy_delivery = stream_delivery("legacy:one", "legacy:two");
+        legacy_delivery.source = Component::new("legacy-source").unwrap();
+        let legacy_key = legacy_delivery.checkpoint_key();
+        let mut legacy_source = LegacySource {
+            item: Some(StreamItem {
+                delivery: legacy_delivery,
+                payload: vec![8],
+            }),
+            polls: 0,
+        };
+        let mut legacy_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &legacy_key, &mut legacy_source, &mut legacy_handler,)
+                .await
+                .unwrap(),
+            StreamStep::Committed { .. }
+        ));
+        assert_eq!(legacy_source.polls, 1);
+        assert_eq!(legacy_handler.calls, 1);
+
         let mut source = SequenceSource {
+            key: key.clone(),
             descriptor: StreamSourceDescriptor {
                 kind: StreamSourceKind::Finite,
                 replayable: true,
@@ -3445,6 +3591,7 @@ mod tests {
         assert_eq!(handler.calls, 2);
 
         let mut closed_source = SequenceSource {
+            key: key.clone(),
             descriptor: StreamSourceDescriptor {
                 kind: StreamSourceKind::Unbounded,
                 replayable: true,
@@ -3472,6 +3619,7 @@ mod tests {
         ));
 
         let mut cancelled_source = SequenceSource {
+            key: key.clone(),
             descriptor: StreamSourceDescriptor {
                 kind: StreamSourceKind::Finite,
                 replayable: true,
@@ -3504,6 +3652,7 @@ mod tests {
         assert_eq!(cancelled_handler.calls, 0);
 
         let mut raced_source = SequenceSource {
+            key: key.clone(),
             descriptor: StreamSourceDescriptor {
                 kind: StreamSourceKind::Finite,
                 replayable: true,
@@ -3550,6 +3699,7 @@ mod tests {
 
         for expected_attempts in 1..=2 {
             let mut source = FailingSource {
+                key: key.clone(),
                 diagnostic: Some(diagnostic),
             };
             let mut handler = TestHandler {
@@ -3576,6 +3726,7 @@ mod tests {
         drop(state);
         let state = open_state(&repo).await;
         let mut source = TestSource {
+            key: key.clone(),
             item: Some(StreamItem {
                 delivery,
                 payload: vec![1],
@@ -3611,6 +3762,7 @@ mod tests {
             class: DiagnosticClass::Transient,
         };
         let mut source = FailingSource {
+            key: key.clone(),
             diagnostic: Some(diagnostic),
         };
         let mut handler = TestHandler {
@@ -3643,6 +3795,7 @@ mod tests {
             class: DiagnosticClass::Cancellation,
         };
         let mut source = FailingSource {
+            key: key.clone(),
             diagnostic: Some(cancellation),
         };
         let mut handler = TestHandler {
@@ -3665,6 +3818,7 @@ mod tests {
         );
 
         let mut source = WaitingFailureSource {
+            key: key.clone(),
             diagnostic: Some(cancellation),
         };
         let mut handler = TestHandler {
@@ -3687,6 +3841,7 @@ mod tests {
         );
 
         let mut source = WaitingFailureSource {
+            key: key.clone(),
             diagnostic: Some(diagnostic),
         };
         let mut handler = TestHandler {
@@ -3728,6 +3883,7 @@ mod tests {
         let delivery = stream_delivery("corrupt:one", "corrupt:two");
         let key = delivery.checkpoint_key();
         let mut source = FailingSource {
+            key: key.clone(),
             diagnostic: Some(SafeDiagnostic {
                 code: DiagnosticCode::ProviderUnavailable,
                 class: DiagnosticClass::Transient,
@@ -3980,6 +4136,7 @@ mod tests {
         let committed_delivery = stream_delivery("scheduler:commit", "scheduler:next");
         let committed_key = committed_delivery.checkpoint_key();
         let mut source = TestSource {
+            key: committed_key.clone(),
             item: Some(StreamItem {
                 delivery: committed_delivery,
                 payload: vec![1, 2, 3],
@@ -4021,6 +4178,7 @@ mod tests {
         let failed_delivery = stream_delivery("scheduler:fail", "scheduler:after-fail");
         let failed_key = failed_delivery.checkpoint_key();
         let mut failing_source = TestSource {
+            key: failed_key.clone(),
             item: Some(StreamItem {
                 delivery: failed_delivery.clone(),
                 payload: vec![9],
@@ -4062,6 +4220,7 @@ mod tests {
         let cancelled_delivery = stream_delivery("scheduler:cancel", "scheduler:after-cancel");
         let cancelled_key = cancelled_delivery.checkpoint_key();
         let mut cancelled_source = TestSource {
+            key: cancelled_key.clone(),
             item: Some(StreamItem {
                 delivery: cancelled_delivery,
                 payload: vec![7],
