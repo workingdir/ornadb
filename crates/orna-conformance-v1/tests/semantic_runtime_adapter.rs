@@ -1,7 +1,7 @@
 use orna_conformance_v1::{
-    BoundedEvaluator, Corpus, EvidenceStatus, Harness, ProjectEnvironment, ProjectExpectations,
-    ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario, SemanticAdapter, SourceUnit,
-    StageOutcome,
+    BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceStatus, Harness, ProjectEnvironment,
+    ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario, SemanticAdapter,
+    SourceUnit, StageOutcome,
 };
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use std::collections::BTreeMap;
@@ -32,6 +32,46 @@ fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
     assert!(report.scenarios.iter().all(|scenario| {
         scenario.detail.contains("runtime-v1") && !scenario.detail.contains("/home/")
     }));
+}
+
+#[test]
+fn semantic_project_resolution_uses_project_relative_module_names() {
+    let mut adapter = SemanticAdapter::default();
+    let project = ProjectUnit {
+        fixture_id: "project".into(),
+        project_id: "examples/reference".into(),
+        environment_id: None,
+        modules: vec![
+            SourceUnit {
+                fixture_id: "project".into(),
+                source_id: "examples/reference/main.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "use library;".into(),
+            },
+            SourceUnit {
+                fixture_id: "project".into(),
+                source_id: "examples/reference/library.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "pub fn pick(value: Int): Int = value;".into(),
+            },
+        ],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+
+    assert!(matches!(
+        adapter.resolve_project(&project),
+        StageOutcome::Passed
+    ));
 }
 
 #[derive(Default)]
