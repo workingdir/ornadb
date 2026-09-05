@@ -449,6 +449,18 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
 }
 
 #[test]
+fn distinct_nominal_types_require_named_conversions() {
+    let result = analyze(&[ModuleInput::new(
+        "conversion.orna",
+        "pub fn bad(value: A): C = value;",
+    )]);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "implicit conversion chains are not searched; name each conversion explicitly"
+    }));
+}
+
+#[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
     let currencies = analyze(&[ModuleInput::new(
         "currency.orna",
