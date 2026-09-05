@@ -85,6 +85,13 @@ pub enum Type {
     Record(BTreeMap<String, Type>),
     Tuple(Vec<Type>),
     Optional(Box<Type>),
+    /// A named type constructor with its statically resolved arguments.  This
+    /// retains enough identity for closed collection rules without treating a
+    /// parameterized type as an untyped nominal name.
+    Applied {
+        base: String,
+        arguments: Vec<Type>,
+    },
     Function {
         parameters: Vec<Type>,
         /// Source parameter names when every declaration pattern is a name.
@@ -709,9 +716,17 @@ fn declared_symbol(
 }
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
-        TypeExpr::Name { path, .. } => {
+        TypeExpr::Name {
+            path, arguments, ..
+        } if arguments.is_empty() => {
             primitive(&path.join(".")).unwrap_or_else(|| Type::Named(path.join(".")))
         }
+        TypeExpr::Name {
+            path, arguments, ..
+        } => Type::Applied {
+            base: path.join("."),
+            arguments: arguments.iter().map(type_of).collect(),
+        },
         TypeExpr::List { inner, .. } => Type::List(Box::new(type_of(inner))),
         TypeExpr::Record { fields, .. } => Type::Record(
             fields
@@ -1957,6 +1972,15 @@ fn infer_success_pipeline(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let input = infer(lhs, scope, local, diagnostics);
+    if let Expr::Name { text, .. } = rhs
+        && let Type::List(element) = &input.ty
+        && let Some(ty) = infer_affine_collection_aggregate(text, element, diagnostics)
+    {
+        return Inferred {
+            ty,
+            effects: input.effects,
+        };
+    }
     let Expr::Call {
         callee, arguments, ..
     } = rhs
@@ -2024,6 +2048,38 @@ fn infer_success_pipeline(
         effects.may_fail = true;
     }
     Inferred { ty, effects }
+}
+
+/// Applies the closed affine-absolute aggregation matrix from the core
+/// intrinsic environment.  This is deliberately limited to the core Celsius
+/// identity: user-defined unit declaration resolution remains outside this
+/// read-only slice, and unrecognised collection pipelines retain their prior
+/// conservative diagnostics.
+fn infer_affine_collection_aggregate(
+    operation: &str,
+    element: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let is_celsius = matches!(
+        element,
+        Type::Applied { base, arguments }
+            if base == "Float"
+                && matches!(arguments.as_slice(), [Type::Named(unit)] if unit == "C")
+    );
+    if !is_celsius {
+        return None;
+    }
+    match operation {
+        "max" | "mean" => Some(Type::Optional(Box::new(element.clone()))),
+        "sum" => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "sum is invalid for absolute affine quantities",
+            ));
+            Some(Type::Error)
+        }
+        _ => None,
+    }
 }
 
 fn infer_callback(
