@@ -1268,14 +1268,30 @@ impl LiveTransport {
         now: u64,
         bytes: &[u8],
     ) -> Result<Vec<WebSocketOutput>> {
+        let mut application = RejectApplication;
+        self.receive_with_application(socket, now, bytes, &mut application)
+            .await
+    }
+
+    /// Reassembles and dispatches complete application messages through the
+    /// supplied runtime/presentation host. The compatibility [`Self::receive`]
+    /// method remains fail-closed for callers that have not supplied one.
+    pub async fn receive_with_application(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        bytes: &[u8],
+        application: &mut impl LiveApplication,
+    ) -> Result<Vec<WebSocketOutput>> {
         let events = socket.push(bytes, self.limits.max_frame_bytes)?;
         let mut output = Vec::new();
         for event in events {
             match event {
                 SocketEvent::Binary(message) => output.push(WebSocketOutput::Accepted(
                     self.host
-                        .handle_frame(socket.attachment, now, Frame::Binary(message))
-                        .await?,
+                        .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
+                        .await?
+                        .outcome,
                 )),
                 SocketEvent::Text => return Err(Error::InvalidFrame),
                 SocketEvent::Ping => output.push(WebSocketOutput::Pong),
@@ -1283,8 +1299,9 @@ impl LiveTransport {
                 SocketEvent::Close => {
                     output.push(WebSocketOutput::Accepted(
                         self.host
-                            .handle_frame(socket.attachment, now, Frame::Close)
-                            .await?,
+                            .dispatch_frame(socket.attachment, now, Frame::Close, application)
+                            .await?
+                            .outcome,
                     ));
                     output.push(WebSocketOutput::Close);
                 }
