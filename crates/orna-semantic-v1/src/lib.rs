@@ -3370,7 +3370,13 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
-        diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+        let message = match (expected, actual) {
+            (Type::Named(expected), Type::Named(actual)) if expected != actual => {
+                "implicit conversion chains are not searched; name each conversion explicitly"
+            }
+            _ => "static types are incompatible",
+        };
+        diagnostics.push(diag(DIAG_TYPE, message));
     }
 }
 
