@@ -2138,6 +2138,15 @@ fn infer_success_pipeline(
             effects: input.effects,
         };
     }
+    if let Expr::Name { text, .. } = rhs
+        && text == "count"
+        && matches!(input.ty, Type::List(_))
+    {
+        return Inferred {
+            ty: Type::Int,
+            effects: input.effects,
+        };
+    }
     if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
         return match rhs {
             Expr::Call {
