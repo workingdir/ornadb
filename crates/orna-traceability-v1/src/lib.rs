@@ -11,6 +11,7 @@ use std::{
 };
 
 const VERSION: &str = "1.0.0";
+const NORMATIVE_PAYLOAD_COUNT: usize = 46;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -29,11 +30,22 @@ pub struct Report {
     pub format: String,
     pub specification_version: String,
     pub publication_digests: BTreeMap<String, String>,
+    pub normative_payloads: Vec<NormativePayloadTrace>,
     pub requirements: Vec<RequirementTrace>,
     pub named_algorithms: Vec<InventoryEntry>,
     pub schema_profile_members: Vec<InventoryEntry>,
     pub fixture_classes: Vec<FixtureClass>,
     pub behavioral_scenarios: Vec<ScenarioTrace>,
+}
+/// A release-payload disposition. This inventory does not establish execution;
+/// missing implementation and test references remain explicit coverage gaps.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct NormativePayloadTrace {
+    pub logical_id: String,
+    pub requirement_ids: Vec<String>,
+    pub implementation_refs: Vec<String>,
+    pub test_refs: Vec<String>,
+    pub status: Status,
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RequirementTrace {
@@ -159,7 +171,9 @@ struct Model {
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
     let root = root.as_ref();
     let release: Release = read_json(root, "release.json")?;
-    if release.version != VERSION || release.normative_payload_sha256.is_empty() {
+    if release.version != VERSION
+        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
+    {
         return Err(err("release version or digest inventory is invalid"));
     }
     verify_digests(root, &release.normative_payload_sha256)?;
@@ -206,6 +220,7 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
     Ok(Report {
         format: "orna.traceability.v1".into(),
         specification_version: VERSION.into(),
+        normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
         publication_digests: release.normative_payload_sha256,
         requirements: requirement_traces,
         named_algorithms: models
@@ -342,6 +357,51 @@ fn validate(
     }
     Ok(())
 }
+fn normative_payloads(
+    digests: &BTreeMap<String, String>,
+    requirements: &[Requirement],
+) -> Result<Vec<NormativePayloadTrace>> {
+    let requirements_by_source = requirements.iter().fold(
+        BTreeMap::<&str, Vec<&Requirement>>::new(),
+        |mut grouped, requirement| {
+            grouped
+                .entry(requirement.source.as_str())
+                .or_default()
+                .push(requirement);
+            grouped
+        },
+    );
+    let mut payloads = Vec::with_capacity(digests.len());
+    for logical_id in digests.keys() {
+        let linked = requirements_by_source
+            .get(logical_id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let requirement_ids = linked
+            .iter()
+            .map(|requirement| requirement.id.clone())
+            .collect::<Vec<_>>();
+        let payload = NormativePayloadTrace {
+            logical_id: logical_id.clone(),
+            requirement_ids,
+            implementation_refs: Vec::new(),
+            test_refs: Vec::new(),
+            status: Status::JustifiedGap,
+        };
+        validate_payload(&payload)?;
+        payloads.push(payload);
+    }
+    if payloads.len() != NORMATIVE_PAYLOAD_COUNT {
+        return Err(err("normative payload report is incomplete"));
+    }
+    Ok(payloads)
+}
+fn validate_payload(payload: &NormativePayloadTrace) -> Result<()> {
+    if payload.logical_id.is_empty() {
+        return Err(err("normative payload lacks a logical identifier"));
+    }
+    Ok(())
+}
 fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
     let sys: Value = read_json(root, "api/sys.json")?;
     let live: Value = read_json(root, "profiles/live-messages.json")?;
@@ -426,9 +486,7 @@ fn fixture_classes(manifest: &Manifest) -> Vec<FixtureClass> {
 }
 fn test_status(test: &Test, implementation_result: &str) -> Status {
     let value = format!("{} {}", test.status, implementation_result).to_ascii_lowercase();
-    if value.contains("executed") && !value.contains("not executed") && !value.contains("model") {
-        Status::Executed
-    } else if value.contains("model") || value.contains("specified") {
+    if value.contains("model") || value.contains("specified") {
         Status::SpecifiedModelOnly
     } else {
         Status::JustifiedGap
@@ -552,6 +610,28 @@ mod tests {
         );
     }
     #[test]
+    fn covers_every_normative_release_payload() {
+        let report = generate(corpus()).expect("valid corpus");
+        assert_eq!(report.normative_payloads.len(), NORMATIVE_PAYLOAD_COUNT);
+        assert_eq!(
+            report
+                .normative_payloads
+                .iter()
+                .map(|payload| payload.logical_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            report
+                .publication_digests
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(report.normative_payloads.iter().all(|payload| {
+            payload.status == Status::JustifiedGap
+                && payload.implementation_refs.is_empty()
+                && payload.test_refs.is_empty()
+        }));
+    }
+    #[test]
     fn model_and_skipped_entries_never_pass() {
         let report = generate(corpus()).expect("valid corpus");
         assert!(
@@ -619,20 +699,51 @@ mod tests {
             1,
         );
         fs::write(&evidence, changed).expect("write");
-        refresh_digest(&root, "tests/requirement-evidence.json");
         assert!(generate(&root).is_err());
         let _ = fs::remove_dir_all(root);
     }
-    fn refresh_digest(root: &Path, logical: &str) {
+    #[test]
+    fn rejects_omitted_normative_payload() {
+        let root = copy_corpus();
         let release = root.join("release.json");
         let mut value: Value =
             serde_json::from_str(&fs::read_to_string(&release).expect("release")).expect("json");
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(fs::read(root.join(logical)).expect("member"))
+        value["normative_payload_sha256"]
+            .as_object_mut()
+            .expect("digest inventory")
+            .remove("profiles/key-path.md");
+        fs::write(&release, serde_json::to_vec(&value).expect("json")).expect("write");
+        assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn frozen_evidence_cannot_promote_fake_execution_references() {
+        let root = copy_corpus();
+        let evidence = root.join("tests/requirement-evidence.json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&evidence).expect("evidence")).expect("json");
+        let entry = &mut value["requirements"][0];
+        entry["implementation_result"] = Value::String("executed".into());
+        entry["implementation_ref"] = Value::String("crates/orna-runtime-v1/src/lib.rs".into());
+        entry["tests"][0]["status"] = Value::String("unexecuted".into());
+        entry["tests"][0]["evidence_ref"] =
+            Value::String("crates/orna-runtime-v1/tests/conformance.rs".into());
+        fs::write(&evidence, serde_json::to_vec(&value).expect("json")).expect("write");
+        let report = generate(&root).expect("frozen evidence remains a gap");
+        assert_eq!(report.requirements[0].status, Status::JustifiedGap);
+        assert!(
+            report
+                .requirements
+                .iter()
+                .all(|requirement| requirement.status != Status::Executed)
         );
-        value["normative_payload_sha256"][logical] = Value::String(digest);
-        fs::write(release, serde_json::to_vec(&value).expect("json")).expect("write");
+        assert!(
+            report
+                .normative_payloads
+                .iter()
+                .all(|payload| payload.status == Status::JustifiedGap)
+        );
+        let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn reproducible() {
