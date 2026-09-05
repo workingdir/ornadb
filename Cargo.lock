@@ -1629,6 +1629,7 @@ name = "orna-live-v1"
 version = "1.0.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
  "orna-foundation-v1",
  "orna-protocol-v1",
  "orna-repository-v1",
