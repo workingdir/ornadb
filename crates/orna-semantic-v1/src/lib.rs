@@ -397,6 +397,30 @@ impl Catalogue {
                 std::iter::empty::<&str>(),
             ),
         );
+        let secret_ref = Type::Named("std.SecretRef".into());
+        modules.insert(
+            Namespace(vec!["std".into(), "secret".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "secret".into()]),
+                [
+                    (
+                        "ref",
+                        named_function(vec![("name", Type::Text)], secret_ref.clone()),
+                    ),
+                    (
+                        "open",
+                        named_function(
+                            vec![("reference", secret_ref), ("as", Type::Error)],
+                            Type::Applied {
+                                base: "Secret".into(),
+                                arguments: vec![Type::Error],
+                            },
+                        ),
+                    ),
+                ],
+                std::iter::empty::<&str>(),
+            ),
+        );
         let ui = Type::Named("std.UI".into());
         let page_builder = Type::Function {
             parameters: vec![Type::Error],
@@ -1705,6 +1729,15 @@ fn infer(
             let base = infer(base, scope, local, diagnostics);
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_TYPE, message));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: base.effects,
+                };
+            }
+            if name == "display"
+                && matches!(&base.ty, Type::Applied { base, .. } if base == "Secret")
+            {
+                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
