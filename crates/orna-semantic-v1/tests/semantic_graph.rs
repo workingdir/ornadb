@@ -383,6 +383,28 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
 }
 
 #[test]
+fn closed_literal_addition_diagnostics_preserve_published_meaning() {
+    let currencies = analyze(&[ModuleInput::new(
+        "currency.orna",
+        "pub fn bad() = 10.GBP + 5.EUR;",
+    )]);
+    assert!(currencies.diagnostics.iter().any(|diagnostic| {
+        diagnostic.message() == "cannot add different currencies without conversion"
+    }));
+
+    let dimensions = analyze(&[ModuleInput::new(
+        "dimensions.orna",
+        "pub fn bad() = 90.days + 4.kWh;",
+    )]);
+    assert!(
+        dimensions
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "cannot add Time and Energy")
+    );
+}
+
+#[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",
