@@ -28,6 +28,28 @@ fn closure_lists_do_not_erase_incompatible_return_types() {
 }
 
 #[test]
+fn failure_skip_requires_a_typed_version_precondition() {
+    for arguments in [
+        "failure.reference, expected_status: failure.status, reason: reason",
+        "failure.reference, expected_version: 1, expected_status: failure.status, reason: reason",
+    ] {
+        let source = format!(
+            "pub fn skip(failure: sys.Failure, reason: Str) = sys.admin.skip_failure({arguments});"
+        );
+        let result = analyze(&[ModuleInput::new("skip.orna", source)]);
+        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+    }
+    let valid = analyze(&[ModuleInput::new(
+        "skip.orna",
+        "pub fn skip(failure: sys.Failure, reason: Str) = sys.admin.skip_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);",
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let symbol = &valid.modules[&orna_semantic_v1::Namespace(vec!["skip".into()])].exports["skip"];
+    assert!(symbol.effects.effects.contains("admin"));
+    assert!(symbol.effects.may_fail);
+}
+
+#[test]
 fn unicode_nfkc_casefold_sibling_collision_is_rejected() {
     let result = analyze(&[
         ModuleInput::new("ff/left.orna", ""),
@@ -1015,7 +1037,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                     pub fn skip_blocked_mail(reason: Str) {
                         let stream = sys.rt.streams | one(stream => stream.consumer == mail.google.sync);
                         let failure = sys.Failure | one(failure => failure.reference == stream.last_failure);
-                        sys.admin.skip_failure(failure.reference, expected_status: failure.status, reason: reason)
+                        sys.admin.skip_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason)
                     }
                 "#,
             ),

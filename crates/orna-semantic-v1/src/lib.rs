@@ -4626,13 +4626,14 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             ty: named_function(
                 vec![
                     ("failure", Type::Named("sys.FailureRef".into())),
+                    ("expected_version", Type::Named("sys.FailureVersion".into())),
                     ("expected_status", Type::Named("sys.FailureStatus".into())),
                     ("reason", Type::Text),
                 ],
                 Type::Named("sys.Checkpoint".into()),
             ),
             effects: EffectSummary {
-                effects: BTreeSet::from(["database write".into()]),
+                effects: BTreeSet::from(["admin".into()]),
                 may_fail: true,
             },
         },
