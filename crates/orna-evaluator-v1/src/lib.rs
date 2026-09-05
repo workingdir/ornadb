@@ -172,6 +172,34 @@ pub fn evaluate_function(
     invoke_pure(&mut context, parameters, body, environment, supplied, 0).and_then(Value::canonical)
 }
 
+/// Invoke an admitted named function with canonical host-provided arguments.
+/// Its body and defaults can call other admitted functions within one budget.
+pub fn invoke_named(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
+    validate_limits(limits)?;
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+    };
+    context.items(functions.len())?;
+    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+    let supplied = Scope::from_environment(arguments, &mut context)?;
+    invoke_pure(
+        &mut context,
+        &function.parameters,
+        &function.body,
+        &function.environment,
+        supplied,
+        0,
+    )
+    .and_then(Value::canonical)
+}
+
 fn invoke_pure(
     context: &mut Context,
     parameters: &[Parameter],
