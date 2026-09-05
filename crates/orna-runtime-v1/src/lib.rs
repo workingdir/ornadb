@@ -25,7 +25,7 @@ use orna_stream_v1::{
     Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition, CommitIntent,
     CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DeliveryLease, DiagnosticClass,
     DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
-    RejectReason, SafeDiagnostic, StreamState, StreamStatus,
+    RejectReason, ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
 };
 use uuid::Uuid;
 
@@ -338,6 +338,15 @@ pub struct StreamDeliveryCommit<'a> {
     pub next_digest: [u8; 32],
     pub delivery: DeliveryLease,
     pub expected_stream: CheckpointPrecondition,
+    pub faults: &'a dyn FaultInjector,
+}
+
+pub struct StreamReplayCommit<'a> {
+    pub writer: WriterLease,
+    pub expected_capture: &'a CwdCapture,
+    pub mutations: &'a [Mutation],
+    pub next_digest: [u8; 32],
+    pub grant: ReplayGrant,
     pub faults: &'a dyn FaultInjector,
 }
 
@@ -1564,6 +1573,176 @@ impl RuntimeState {
         Ok((next, result))
     }
 
+    /// Commits replay mutations and the terminal replay transition without
+    /// moving the live stream checkpoint. A rejected replay precondition
+    /// leaves both the activation capture and failure row unchanged.
+    pub async fn commit_stream_replay(
+        &self,
+        request: StreamReplayCommit<'_>,
+    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
+        let StreamReplayCommit {
+            writer,
+            expected_capture,
+            mutations,
+            next_digest,
+            grant,
+            faults,
+        } = request;
+        validate_id(writer.owner_id)?;
+        validate_stream_mutations(mutations, next_digest)?;
+        let current = self.capture().await?;
+        if &current != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        if mutations.is_empty() && next_digest != expected_capture.generation_digest() {
+            return Err(RuntimeError::InvalidDigest);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::ReplayComplete {
+                failure: grant.failure,
+                expected_version: grant.version,
+            },
+        )
+        .await?;
+        if matches!(result, CommitResult::Rejected(_)) {
+            let current = capture_tx(&tx).await?;
+            return Ok((current, result));
+        }
+        let next = if mutations.is_empty() {
+            capture_tx(&tx).await?
+        } else {
+            append_mutations_tx(&tx, expected_capture, mutations, next_digest, faults).await?
+        };
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok((next, result))
+    }
+
+    async fn fail_stream_replay(
+        &self,
+        writer: WriterLease,
+        grant: &ReplayGrant,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<CommitResult, RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let result = apply_stream_intent_tx(
+            &tx,
+            CommitIntent::ReplayFail {
+                failure: grant.failure.clone(),
+                expected_version: grant.version,
+                diagnostic,
+            },
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
+    }
+
+    /// Executes one replay grant against its retained plaintext payload. A
+    /// protected reference remains explicitly unavailable until its connector
+    /// supplies a refetch implementation; it is returned to `Skipped` rather
+    /// than exposing the reference or leaving the row stuck in `Replaying`.
+    pub async fn replay_stream_failure<H>(
+        &self,
+        writer: WriterLease,
+        grant: ReplayGrant,
+        handler: &mut H,
+    ) -> Result<CommitResult, StreamStepError>
+    where
+        H: StreamHandler,
+    {
+        self.require_owner(&self.connection, writer)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        let payload = match load_stored_stream_failure_payload(&self.connection, &grant.failure)
+            .await
+            .map_err(StreamStepError::Runtime)?
+        {
+            Some(StoredStreamFailurePayload {
+                payload: Some(payload),
+                retention: 1,
+                ..
+            }) => payload,
+            Some(StoredStreamFailurePayload { retention: 2, .. }) => {
+                return self
+                    .fail_stream_replay(
+                        writer,
+                        &grant,
+                        SafeDiagnostic {
+                            code: DiagnosticCode::ProviderUnavailable,
+                            class: DiagnosticClass::Transient,
+                        },
+                    )
+                    .await
+                    .map_err(StreamStepError::Runtime);
+            }
+            Some(_) | None => {
+                return self
+                    .fail_stream_replay(
+                        writer,
+                        &grant,
+                        SafeDiagnostic {
+                            code: DiagnosticCode::Internal,
+                            class: DiagnosticClass::Permanent,
+                        },
+                    )
+                    .await
+                    .map_err(StreamStepError::Runtime);
+            }
+        };
+        let expected_capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+        let item = StreamItem {
+            delivery: grant.failure.0.clone(),
+            payload,
+        };
+        match handler.handle(&item) {
+            StreamHandlerResult::Commit(batch) => self
+                .commit_stream_replay(StreamReplayCommit {
+                    writer,
+                    expected_capture: &expected_capture,
+                    mutations: &batch.mutations,
+                    next_digest: batch.next_digest,
+                    grant,
+                    faults: &NoFault,
+                })
+                .await
+                .map(|(_, result)| result)
+                .map_err(StreamStepError::Runtime),
+            StreamHandlerResult::Fail(diagnostic) => self
+                .fail_stream_replay(writer, &grant, diagnostic)
+                .await
+                .map_err(StreamStepError::Runtime),
+            StreamHandlerResult::Cancelled => self
+                .fail_stream_replay(
+                    writer,
+                    &grant,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::Cancelled,
+                        class: DiagnosticClass::Cancellation,
+                    },
+                )
+                .await
+                .map_err(StreamStepError::Runtime),
+        }
+    }
+
     pub async fn pending(&self) -> Result<Vec<Mutation>, RuntimeError> {
         let mut rows = self
             .connection
@@ -2219,6 +2398,20 @@ impl RuntimeStreamBackend<'_> {
     ) -> Result<CommitResult, RuntimeError> {
         self.state
             .fail_stream_delivery(self.lease, lease, diagnostic, payload)
+            .await
+    }
+
+    /// Replays one granted failure without changing the live checkpoint.
+    pub async fn replay_async<H>(
+        &self,
+        grant: ReplayGrant,
+        handler: &mut H,
+    ) -> Result<CommitResult, StreamStepError>
+    where
+        H: StreamHandler,
+    {
+        self.state
+            .replay_stream_failure(self.lease, grant, handler)
             .await
     }
 
@@ -3992,6 +4185,20 @@ mod tests {
                 mutations: Vec::new(),
                 next_digest: digest(3),
             })
+        }
+    }
+
+    struct ReplayHandler {
+        payload: Vec<u8>,
+        result: Option<StreamHandlerResult>,
+    }
+
+    impl StreamHandler for ReplayHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.payload = item.payload.clone();
+            self.result
+                .take()
+                .expect("replay handler result is configured")
         }
     }
 
@@ -5990,6 +6197,350 @@ mod tests {
                 .expect("resolved failure")
                 .status,
             FailureStatus::Resolved
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_executes_retained_payload_without_advancing_live_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("replay", "replay-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let (grant, checkpoint) = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failure = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![7, 8]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failure.identity,
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            (grant, checkpoint)
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(9)],
+                next_digest: digest(10),
+            })),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async(grant, &mut handler)
+            .await
+            .unwrap();
+        let replayed = match result {
+            CommitResult::ReplayCompleted { failure } => failure,
+            other => panic!("unexpected replay result: {other:?}"),
+        };
+        assert_eq!(replayed.status, FailureStatus::Replayed);
+        assert_eq!(handler.payload, vec![7, 8]);
+        assert_eq!(state.pending().await.unwrap(), vec![mutation(9)]);
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_handler_failure_returns_to_skipped_without_checkpoint_movement() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("replay-fail", "replay-fail-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let (grant, checkpoint) = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failure = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![4, 5]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failure.identity,
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            (grant, checkpoint)
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::DecodeRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Fail(diagnostic)),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async(grant, &mut handler)
+            .await
+            .unwrap();
+        let failed = match result {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected replay failure result: {other:?}"),
+        };
+        assert_eq!(failed.status, FailureStatus::Skipped);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(failed.diagnostic, diagnostic);
+        assert_eq!(handler.payload, vec![4, 5]);
+        assert_eq!(state.pending().await.unwrap(), Vec::<Mutation>::new());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_reference_replay_fails_closed_without_invoking_handler() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("replay-ref", "replay-ref-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let (grant, checkpoint) = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failure = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::ProtectedReference {
+                        reference: "opaque-ref".into(),
+                        digest: digest(8),
+                    },
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failure.identity,
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            (grant, checkpoint)
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: vec![mutation(11)],
+                next_digest: digest(12),
+            })),
+        };
+        let result = state
+            .stream_backend(writer)
+            .replay_async(grant, &mut handler)
+            .await
+            .unwrap();
+        let failed = match result {
+            CommitResult::ReplayFailed { failure } => failure,
+            other => panic!("unexpected protected replay result: {other:?}"),
+        };
+        assert_eq!(failed.status, FailureStatus::Skipped);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(
+            failed.diagnostic,
+            SafeDiagnostic {
+                code: DiagnosticCode::ProviderUnavailable,
+                class: DiagnosticClass::Transient,
+            }
+        );
+        assert!(handler.payload.is_empty());
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
         );
     }
 
