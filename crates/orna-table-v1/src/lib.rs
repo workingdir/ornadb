@@ -65,6 +65,11 @@ where
     pub fn committed_rows(&self) -> &BTreeMap<Key, Row> {
         &self.committed
     }
+
+    /// Scans committed rows in ascending canonical key order.
+    pub fn scan(&self) -> impl Iterator<Item = (&Key, &Row)> {
+        self.committed.iter()
+    }
 }
 
 /// An error raised by a table mutation or transaction lifecycle operation.
@@ -317,6 +322,14 @@ where
     /// Returns one committed relation, if it has published rows.
     pub fn committed_rows(&self, table: &Table) -> Option<&BTreeMap<Key, Row>> {
         self.committed.get(table)
+    }
+
+    /// Scans one committed relation in ascending canonical key order.
+    pub fn scan(&self, table: &Table) -> impl Iterator<Item = (&Key, &Row)> + '_ {
+        self.committed
+            .get(table)
+            .into_iter()
+            .flat_map(BTreeMap::iter)
     }
 }
 
@@ -672,5 +685,40 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(database.committed(&"orders", &1), None);
         assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn committed_scans_are_in_ascending_key_order() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        table
+            .activate(|activation| {
+                activation.insert(3, "three")?;
+                activation.insert(1, "one")?;
+                activation.insert(2, "two")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let keys = table.scan().map(|(key, _)| *key).collect::<Vec<_>>();
+        assert_eq!(keys, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn committed_database_scans_are_in_ascending_key_order() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                activation.insert("notes", 3, "three")?;
+                activation.insert("notes", 1, "one")?;
+                activation.insert("notes", 2, "two")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let keys = database
+            .scan(&"notes")
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![1, 2, 3]);
     }
 }
