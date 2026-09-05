@@ -7,6 +7,25 @@ use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use std::collections::BTreeMap;
 
 #[test]
+fn semantic_mail_fixture_distinguishes_stored_email_from_provider_messages() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
+    let fixture = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "valid/unbounded-stream.orna")
+        .expect("mail fixture exists");
+    assert!(fixture.passed, "{:?}", fixture.stages);
+    // This verifies the frozen static contract, not connector execution.
+    assert!(
+        fixture
+            .stages
+            .iter()
+            .any(|stage| stage.status == EvidenceStatus::Skipped)
+    );
+}
+
+#[test]
 fn semantic_adapter_executes_the_v1_analyzer_with_logical_fixture_names() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let report = Harness::new(corpus).run(&mut SemanticAdapter::default());
