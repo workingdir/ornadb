@@ -1,0 +1,587 @@
+//! A bounded Orna 1.0 storage/publication slice.
+//!
+//! This crate models the deterministic portion of loose-row materialisation
+//! and PUB-1.  It deliberately performs neither provider nor Git I/O: an
+//! adapter must supply observations and enact returned plans.  Unknown or
+//! changed external state is a typed conflict, never permission to overwrite.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
+
+use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
+use orna_repository_v1::ManagedPath;
+use orna_value_v1::{path_encode_key_components, path_validate_relative_components};
+use sha2::{Digest, Sha256};
+
+/// An opaque, deterministic mutation identity supplied by the runtime.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MutationId(String);
+
+impl MutationId {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 128 || !value.is_ascii() {
+            return Err(Error::InvalidMutationId);
+        }
+        Ok(Self(value))
+    }
+}
+
+/// A content digest; this is used only for equality/revalidation, not as a
+/// substitute for an adapter's durable Git object validation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RowHash([u8; 32]);
+
+impl RowHash {
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+}
+
+/// A validated ordinary loose-row path derived with the v1 path codec.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct LoosePath(ManagedPath);
+
+impl LoosePath {
+    pub fn for_key(table_root: impl AsRef<str>, key: &[String]) -> Result<Self, Error> {
+        let root = table_root.as_ref();
+        if root.is_empty() || root.starts_with('.') || root.contains('/') || root.contains('\\') {
+            return Err(Error::InvalidTableRoot);
+        }
+        path_validate_relative_components(key).map_err(|_| Error::InvalidKey)?;
+        let components = path_encode_key_components(key).map_err(|_| Error::InvalidKey)?;
+        let path = format!("{root}/{}", components.join("/"));
+        ManagedPath::new(path)
+            .map(Self)
+            .map_err(|_| Error::UnsafePath)
+    }
+
+    pub fn as_managed_path(&self) -> &ManagedPath {
+        &self.0
+    }
+}
+
+impl Ord for LoosePath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.as_path().cmp(other.0.as_path())
+    }
+}
+
+impl PartialOrd for LoosePath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LooseRow {
+    bytes: Vec<u8>,
+    hash: RowHash,
+}
+impl LooseRow {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, Error> {
+        if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+            return Err(Error::InvalidRow);
+        }
+        let hash = RowHash::of(&bytes);
+        Ok(Self { bytes, hash })
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub const fn hash(&self) -> RowHash {
+        self.hash
+    }
+}
+
+/// One final, already-folded runtime mutation.  `expected` is the captured
+/// loose projection state and prevents an editor's later change being replaced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LooseMutation {
+    pub id: MutationId,
+    pub path: LoosePath,
+    pub expected: Option<RowHash>,
+    pub next: Option<LooseRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrozenBatch {
+    pub id: MutationId,
+    pub mutations: Vec<LooseMutation>,
+    pub watermark: u64,
+}
+
+impl FrozenBatch {
+    /// Enforces the complete staging gate before any materialisation can begin.
+    pub fn new(
+        id: MutationId,
+        mutations: Vec<LooseMutation>,
+        watermark: u64,
+    ) -> Result<Self, Error> {
+        if mutations.is_empty() || watermark == 0 {
+            return Err(Error::IncompleteStaging);
+        }
+        let mut paths = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for mutation in &mutations {
+            if mutation.id == id
+                || !paths.insert(mutation.path.clone())
+                || !ids.insert(mutation.id.clone())
+            {
+                return Err(Error::IncompleteStaging);
+            }
+            if mutation.next.is_none() && mutation.expected.is_none() {
+                return Err(Error::IncompleteStaging);
+            }
+        }
+        Ok(Self {
+            id,
+            mutations,
+            watermark,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LooseProjection {
+    rows: BTreeMap<LoosePath, LooseRow>,
+    applied: BTreeMap<MutationId, LooseMutation>,
+}
+
+impl LooseProjection {
+    pub fn row(&self, path: &LoosePath) -> Option<&LooseRow> {
+        self.rows.get(path)
+    }
+    pub fn contains_applied(&self, id: &MutationId) -> bool {
+        self.applied.contains_key(id)
+    }
+
+    /// Applies all of the frozen batch or none of it. A repeated, identical
+    /// application is a no-op; a reused id with differing intent fails closed.
+    pub fn project(&mut self, batch: &FrozenBatch) -> Result<(), Error> {
+        let mut candidate = self.clone();
+        for mutation in &batch.mutations {
+            candidate.apply(mutation)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply(&mut self, mutation: &LooseMutation) -> Result<(), Error> {
+        if let Some(previous) = self.applied.get(&mutation.id) {
+            return if previous == mutation {
+                Ok(())
+            } else {
+                Err(Error::MutationReplayConflict {
+                    id: mutation.id.clone(),
+                })
+            };
+        }
+        let actual = self.rows.get(&mutation.path).map(LooseRow::hash);
+        if actual != mutation.expected {
+            return Err(Error::ExternalConflict {
+                path: mutation.path.clone(),
+                expected: mutation.expected,
+                actual,
+            });
+        }
+        match &mutation.next {
+            Some(row) => {
+                self.rows.insert(mutation.path.clone(), row.clone());
+            }
+            None => {
+                self.rows.remove(&mutation.path);
+            }
+        }
+        self.applied.insert(mutation.id.clone(), mutation.clone());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefName(String);
+impl RefName {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.is_empty() || !value.starts_with("refs/") {
+            Err(Error::InvalidRef)
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitObjectId(String);
+impl GitObjectId {
+    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        if value.len() < 4 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Err(Error::InvalidObjectId)
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+/// A byte-exact, simplified ordinary index image. Its map representation makes
+/// the carry-forward rule observable without claiming to implement Git's file format.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexImage(BTreeMap<LoosePath, Option<LooseRow>>);
+impl IndexImage {
+    pub fn entry(&self, path: LoosePath, row: Option<LooseRow>) -> Self {
+        let mut next = self.clone();
+        next.0.insert(path, row);
+        next
+    }
+    pub fn get(&self, path: &LoosePath) -> Option<&Option<LooseRow>> {
+        self.0.get(path)
+    }
+}
+
+/// Carry the staged difference from H to the private candidate N. Any staged
+/// managed-path difference is an overlap and must have been rejected at capture.
+pub fn reconcile_index(
+    base: &IndexImage,
+    ordinary: &IndexImage,
+    publication: &FrozenBatch,
+) -> Result<IndexImage, Error> {
+    let mut result = ordinary.clone();
+    for mutation in &publication.mutations {
+        if ordinary.get(&mutation.path) != base.get(&mutation.path) {
+            return Err(Error::IndexConflict {
+                path: mutation.path.clone(),
+            });
+        }
+        result
+            .0
+            .insert(mutation.path.clone(), mutation.next.clone());
+    }
+    Ok(result)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PubJournal {
+    pub batch: FrozenBatch,
+    pub target: RefName,
+    pub old: GitObjectId,
+    pub new: GitObjectId,
+    pub base_index: IndexImage,
+    pub reconciled_index: IndexImage,
+    pub stage: JournalStage,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalStage {
+    Journaled,
+    RefAdvanced,
+    IndexReconciled,
+    Cleaned,
+    Complete,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Publication {
+    journal: PubJournal,
+}
+impl Publication {
+    pub fn prepare(
+        batch: FrozenBatch,
+        target: RefName,
+        old: GitObjectId,
+        new: GitObjectId,
+        base: IndexImage,
+        ordinary: IndexImage,
+    ) -> Result<Self, Error> {
+        let reconciled_index = reconcile_index(&base, &ordinary, &batch)?;
+        Ok(Self {
+            journal: PubJournal {
+                batch,
+                target,
+                old,
+                new,
+                base_index: ordinary,
+                reconciled_index,
+                stage: JournalStage::Journaled,
+            },
+        })
+    }
+    pub fn journal(&self) -> &PubJournal {
+        &self.journal
+    }
+    pub fn advance_ref(&mut self, observed: &GitObjectId) -> Result<(), Error> {
+        if observed != &self.journal.old {
+            return Err(Error::RefConflict);
+        }
+        self.journal.stage = JournalStage::RefAdvanced;
+        Ok(())
+    }
+    pub fn install_index(&mut self, observed: &IndexImage) -> Result<(), Error> {
+        if observed != &self.journal.base_index {
+            return Err(Error::RecoveryIndexConflict);
+        }
+        self.journal.stage = JournalStage::IndexReconciled;
+        Ok(())
+    }
+    pub fn cleanup(&mut self) -> Result<(), Error> {
+        if self.journal.stage != JournalStage::IndexReconciled {
+            return Err(Error::InvalidTransition);
+        }
+        self.journal.stage = JournalStage::Cleaned;
+        Ok(())
+    }
+    pub fn complete(&mut self) -> Result<(), Error> {
+        if self.journal.stage != JournalStage::Cleaned {
+            return Err(Error::InvalidTransition);
+        }
+        self.journal.stage = JournalStage::Complete;
+        Ok(())
+    }
+
+    /// Computes the only safe recovery action; Git/filesystem effects remain
+    /// unsupported adapter responsibilities.
+    pub fn recover(
+        &mut self,
+        observed_ref: &GitObjectId,
+        observed_index: &IndexImage,
+    ) -> Result<Recovery, Error> {
+        if observed_ref == &self.journal.old {
+            if observed_index != &self.journal.base_index {
+                return Err(Error::RecoveryIndexConflict);
+            }
+            self.journal.stage = JournalStage::Journaled;
+            return Ok(Recovery::KeepPending);
+        }
+        if observed_ref != &self.journal.new {
+            return Err(Error::RefConflict);
+        }
+        if observed_index == &self.journal.base_index {
+            self.journal.stage = JournalStage::IndexReconciled;
+            return Ok(Recovery::InstallIndex(
+                self.journal.reconciled_index.clone(),
+            ));
+        }
+        if observed_index == &self.journal.reconciled_index {
+            self.journal.stage = JournalStage::Cleaned;
+            return Ok(Recovery::FinishCleanup);
+        }
+        Err(Error::RecoveryIndexConflict)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Recovery {
+    KeepPending,
+    InstallIndex(IndexImage),
+    FinishCleanup,
+}
+
+/// Explicitly unsupported I/O boundary. Consumers may provide an adapter only
+/// after separately meeting PUB-1's locking, flushing and Git CAS obligations.
+pub trait PublicationProvider {
+    type Error: std::error::Error + Send + Sync + 'static;
+    fn unsupported_git_io(&self) -> Result<(), Self::Error>;
+}
+
+/// A compile-time bridge to the existing v1 repository/runtime direction-only
+/// contract, without assuming a provider can perform publication I/O.
+pub fn capture_runtime<A: RepositoryGenerationAdapter>(
+    adapter: &A,
+) -> Result<(RepositoryIdentity, CwdCapture), Error> {
+    let identity = adapter
+        .require_cwd()
+        .map_err(|_| Error::RuntimeUnavailable)?;
+    let capture = adapter
+        .capture_cwd(identity)
+        .map_err(|_| Error::RuntimeUnavailable)?;
+    Ok((identity, capture))
+}
+
+/// Binds a journal entry to the existing runtime's durable freeze identity.
+/// The caller retains responsibility for reading and consuming the frozen range.
+pub const fn runtime_freeze_id(freeze: &orna_runtime_v1::PublicationFreeze) -> [u8; 16] {
+    freeze.intent_id
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Error {
+    InvalidMutationId,
+    InvalidTableRoot,
+    InvalidKey,
+    UnsafePath,
+    InvalidRow,
+    IncompleteStaging,
+    InvalidRef,
+    InvalidObjectId,
+    MutationReplayConflict {
+        id: MutationId,
+    },
+    ExternalConflict {
+        path: LoosePath,
+        expected: Option<RowHash>,
+        actual: Option<RowHash>,
+    },
+    IndexConflict {
+        path: LoosePath,
+    },
+    RecoveryIndexConflict,
+    RefConflict,
+    InvalidTransition,
+    RuntimeUnavailable,
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidMutationId => "invalid mutation id",
+            Self::InvalidTableRoot => "invalid table root",
+            Self::InvalidKey => "invalid loose row key",
+            Self::UnsafePath => "unsafe loose row path",
+            Self::InvalidRow => "invalid loose row",
+            Self::IncompleteStaging => "incomplete publication staging",
+            Self::InvalidRef => "invalid ref",
+            Self::InvalidObjectId => "invalid object id",
+            Self::MutationReplayConflict { .. } => "mutation replay conflicts",
+            Self::ExternalConflict { .. } => "external loose-row conflict",
+            Self::IndexConflict { .. } => "managed path conflicts with ordinary index",
+            Self::RecoveryIndexConflict => "recovery index conflict",
+            Self::RefConflict => "publication ref conflict",
+            Self::InvalidTransition => "invalid publication transition",
+            Self::RuntimeUnavailable => "runtime contract unavailable",
+        })
+    }
+}
+impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn path() -> LoosePath {
+        LoosePath::for_key("tables", &["sensor".into(), "one".into()]).unwrap()
+    }
+    fn row(text: &str) -> LooseRow {
+        LooseRow::new(text.as_bytes().to_vec()).unwrap()
+    }
+    fn id(text: &str) -> MutationId {
+        MutationId::new(text).unwrap()
+    }
+    fn batch(expected: Option<RowHash>, next: Option<LooseRow>) -> FrozenBatch {
+        FrozenBatch::new(
+            id("batch"),
+            vec![LooseMutation {
+                id: id("mutation"),
+                path: path(),
+                expected,
+                next,
+            }],
+            1,
+        )
+        .unwrap()
+    }
+    fn objects() -> (GitObjectId, GitObjectId) {
+        (
+            GitObjectId::new("aaaa").unwrap(),
+            GitObjectId::new("bbbb").unwrap(),
+        )
+    }
+    fn publication(base: IndexImage, ordinary: IndexImage) -> Publication {
+        let (old, new) = objects();
+        Publication::prepare(
+            batch(None, Some(row("published"))),
+            RefName::new("refs/heads/main").unwrap(),
+            old,
+            new,
+            base,
+            ordinary,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn projection_is_idempotent_under_fault_retry() {
+        let mut projection = LooseProjection::default();
+        let frozen = batch(None, Some(row("one")));
+        projection.project(&frozen).unwrap();
+        projection.project(&frozen).unwrap();
+        assert_eq!(projection.row(&path()).unwrap().bytes(), b"one");
+    }
+    #[test]
+    fn external_edit_is_a_typed_conflict() {
+        let mut projection = LooseProjection::default();
+        projection
+            .project(&batch(None, Some(row("editor"))))
+            .unwrap();
+        let later = FrozenBatch::new(
+            id("batch-two"),
+            vec![LooseMutation {
+                id: id("mutation-two"),
+                path: path(),
+                expected: None,
+                next: Some(row("runtime")),
+            }],
+            2,
+        )
+        .unwrap();
+        let error = projection.project(&later).unwrap_err();
+        assert!(matches!(error, Error::ExternalConflict { .. }));
+    }
+    #[test]
+    fn complete_staging_gate_rejects_ambiguous_delete() {
+        assert!(matches!(
+            FrozenBatch::new(
+                id("batch"),
+                vec![LooseMutation {
+                    id: id("mutation"),
+                    path: path(),
+                    expected: None,
+                    next: None
+                }],
+                1
+            ),
+            Err(Error::IncompleteStaging)
+        ));
+    }
+    #[test]
+    fn recovery_before_ref_advance_keeps_pending() {
+        let base = IndexImage::default();
+        let mut publication = publication(base.clone(), base.clone());
+        let (old, _) = objects();
+        assert_eq!(
+            publication.recover(&old, &base).unwrap(),
+            Recovery::KeepPending
+        );
+        assert_eq!(publication.journal().stage, JournalStage::Journaled);
+    }
+    #[test]
+    fn recovery_after_ref_advance_reinstalls_reconciled_index() {
+        let base = IndexImage::default();
+        let mut publication = publication(base.clone(), base.clone());
+        let (_, new) = objects();
+        let Recovery::InstallIndex(index) = publication.recover(&new, &base).unwrap() else {
+            panic!("expected index recovery")
+        };
+        assert_eq!(
+            index.get(&path()).unwrap().as_ref().unwrap().bytes(),
+            b"published"
+        );
+    }
+    #[test]
+    fn reconciliation_preserves_unrelated_partially_staged_entry() {
+        let managed = path();
+        let other = LoosePath::for_key("tables", &["other".into()]).unwrap();
+        let base = IndexImage::default()
+            .entry(managed.clone(), None)
+            .entry(other.clone(), Some(row("head")));
+        let ordinary = base.clone().entry(other.clone(), Some(row("staged-only")));
+        let result =
+            reconcile_index(&base, &ordinary, &batch(None, Some(row("published")))).unwrap();
+        assert_eq!(
+            result.get(&other).unwrap().as_ref().unwrap().bytes(),
+            b"staged-only"
+        );
+        assert_eq!(
+            result.get(&managed).unwrap().as_ref().unwrap().bytes(),
+            b"published"
+        );
+    }
+}
