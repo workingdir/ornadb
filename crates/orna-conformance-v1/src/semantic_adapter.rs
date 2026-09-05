@@ -567,21 +567,19 @@ impl RuntimeEvaluator for BoundedEvaluator {
         StageOutcome::Passed
     }
 
-    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        self.evaluate_unit(unit)
+    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "row validation requires a resolved table schema and path-derived key; expression evaluation alone is not row validation".into(),
+        }
     }
 
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         if project.loose_rows.is_empty() {
             return StageOutcome::Passed;
         }
-        for row in &project.loose_rows {
-            match self.evaluate_unit(row) {
-                StageOutcome::Passed => {}
-                outcome => return outcome,
-            }
-        }
-        StageOutcome::Passed
+        // A nonempty project needs the owning table and key context for every
+        // row. Do not turn successful expression execution into schema proof.
+        self.validate_row(&project.loose_rows[0])
     }
 
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
