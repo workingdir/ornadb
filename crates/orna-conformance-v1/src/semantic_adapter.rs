@@ -741,6 +741,62 @@ impl TransactionalEvaluator {
             }
         }
     }
+
+    fn run_transaction_scenario(&self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
+        let (entry, source) = match scenario.id.as_str() {
+            "TXN-001" => (
+                "parent",
+                "pub table Note(id: Int) { text: Str, } fn child() { Note.insert({ id: 7, text: \"nested\" }); } fn parent() { child(); assert false; }",
+            ),
+            "TXN-002" => (
+                "main",
+                "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+            ),
+            _ => {
+                return StageOutcome::Skipped {
+                    reason: "scenario has no implemented execution contract in the bounded runtime"
+                        .into(),
+                };
+            }
+        };
+        let unit = SourceUnit {
+            fixture_id: scenario.id.clone(),
+            source_id: format!("{}.orna", scenario.id.to_lowercase()),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        };
+        let mut evaluator = TransactionalEvaluator::new(entry, self.limits);
+        match scenario.id.as_str() {
+            "TXN-001" => match evaluator.execute_source(&unit) {
+                StageOutcome::Failed(diagnostic)
+                    if diagnostic.code() == "ORNA-EVAL-ASSERT"
+                        && evaluator
+                            .committed_row("Note", &Value::int(7.into()))
+                            .is_none() =>
+                {
+                    StageOutcome::Passed
+                }
+                _ => scenario_mismatch(),
+            },
+            "TXN-002" => match evaluator.execute_source(&unit) {
+                StageOutcome::Passed
+                    if evaluator
+                        .committed_row("Order", &Value::int(1.into()))
+                        .is_some()
+                        && evaluator
+                            .committed_row("Payment", &Value::int(1.into()))
+                            .is_some()
+                        && evaluator
+                            .committed_row("Audit", &Value::int(1.into()))
+                            .is_some() =>
+                {
+                    StageOutcome::Passed
+                }
+                _ => scenario_mismatch(),
+            },
+            _ => unreachable!("transaction scenario contract admitted only known IDs"),
+        }
+    }
 }
 
 impl Default for TransactionalEvaluator {
@@ -768,7 +824,10 @@ impl RuntimeEvaluator for TransactionalEvaluator {
         }
     }
 
-    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Diagnostic> {
+    fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
+        if transaction_contract(scenario) {
+            return self.run_transaction_scenario(scenario);
+        }
         StageOutcome::Skipped {
             reason: "source transaction execution is exposed as an explicit module seam; no corpus scenario is claimed yet".into(),
         }
@@ -1075,6 +1134,26 @@ fn let_rebinding_contract(scenario: &Scenario) -> bool {
                 "ORNA-CFLOW-006",
                 "ORNA-CFLOW-011",
             ]
+}
+
+fn transaction_contract(scenario: &Scenario) -> bool {
+    match scenario.id.as_str() {
+        "TXN-001" => {
+            scenario.title == "Activation rolls back nested writes"
+                && scenario.given == ["parent calls child; child inserts Note"]
+                && scenario.when == ["parent later propagates error"]
+                && scenario.then == ["child insert is rolled back"]
+                && scenario.requirements == ["ORNA-TXN-001", "ORNA-TXN-002", "ORNA-TXN-003"]
+        }
+        "TXN-002" => {
+            scenario.title == "Successful activation commits together"
+                && scenario.given == ["activation inserts Order, Payment, Audit"]
+                && scenario.when == ["activation returns success"]
+                && scenario.then == ["all three appear together in CWD"]
+                && scenario.requirements == ["ORNA-TXN-001"]
+        }
+        _ => false,
+    }
 }
 
 fn scenario_mismatch() -> StageOutcome<Diagnostic> {
