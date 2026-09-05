@@ -408,6 +408,19 @@ fn live_http_routes_are_exact_origin_checked_and_rotate_scoped_tokens() {
     assert_eq!(resumed.status, 200);
     let second = token(&resumed);
     assert_ne!(first, second);
+    let mut upgrade = wire("GET", "/orna/live/01010101-0101-0101-0101-010101010101", "");
+    upgrade.headers.extend([
+        ("connection".into(), "Upgrade".into()),
+        ("upgrade".into(), "websocket".into()),
+        ("sec-websocket-version".into(), "13".into()),
+        (
+            "sec-websocket-key".into(),
+            "dGhlIHNhbXBsZSBub25jZQ==".into(),
+        ),
+        ("sec-websocket-protocol".into(), SUBPROTOCOL.into()),
+        ("cookie".into(), format!("orna_session={second}")),
+    ]);
+    assert_eq!(block_on(transport.upgrade(upgrade, [5; 16], 2)).status, 101);
     let replay = block_on(transport.handle(
         wire(
             "POST",
