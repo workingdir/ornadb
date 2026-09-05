@@ -609,6 +609,19 @@ impl RuntimeState {
         identity: RequestIdentity,
         fingerprint: [u8; 32],
     ) -> Result<RequestStatus, RuntimeError> {
+        self.reserve_request_with_admission(identity, fingerprint)
+            .await
+            .map(|(status, _)| status)
+    }
+
+    /// Atomically reserves a REQUEST-1 identity and reports whether this call
+    /// inserted the reservation. The boolean prevents a caller from treating
+    /// an existing `Reserved` row as permission to execute after a restart.
+    pub async fn reserve_request_with_admission(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<(RequestStatus, bool), RuntimeError> {
         validate_request_identity(identity)?;
         let tx = self
             .connection
@@ -620,7 +633,7 @@ impl RuntimeState {
             tx.commit()
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok(status);
+            return Ok((status, false));
         }
         tx.execute(
             "INSERT INTO request_ledger (session_id, request_id, fingerprint, state, terminal_outcome) VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -636,12 +649,15 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(RequestStatus {
-            identity,
-            fingerprint,
-            state: RequestState::Reserved,
-            terminal_outcome: None,
-        })
+        Ok((
+            RequestStatus {
+                identity,
+                fingerprint,
+                state: RequestState::Reserved,
+                terminal_outcome: None,
+            },
+            true,
+        ))
     }
 
     pub async fn start_request(
@@ -1242,12 +1258,18 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let identity = request(4, 5);
-        let first = state.reserve_request(identity, digest(6)).await.unwrap();
+        let (first, inserted) = state
+            .reserve_request_with_admission(identity, digest(6))
+            .await
+            .unwrap();
+        assert!(inserted);
 
-        assert_eq!(
-            state.reserve_request(identity, digest(6)).await.unwrap(),
-            first
-        );
+        let (second, inserted) = state
+            .reserve_request_with_admission(identity, digest(6))
+            .await
+            .unwrap();
+        assert!(!inserted);
+        assert_eq!(second, first);
         assert_eq!(
             state.request_status(identity, digest(6)).await.unwrap(),
             Some(first)
