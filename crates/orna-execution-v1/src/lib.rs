@@ -433,8 +433,10 @@ mod tests {
             partition: component("0"),
             position_format: component("offset"),
             position: Position {
-                ordinal: 0,
                 token: component("0"),
+            },
+            successor: Position {
+                token: component("1"),
             },
         };
         CheckpointIntent::complete(
