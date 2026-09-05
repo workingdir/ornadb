@@ -6,9 +6,10 @@
 //! boundary.  A delivery can advance a checkpoint only through `Complete` or `Skip`.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 
 /// A non-empty, separator-free typed identity component.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -211,6 +212,17 @@ pub struct FailureIdentity(pub DeliveryIdentity);
 pub struct SafeDiagnostic {
     pub code: DiagnosticCode,
     pub class: DiagnosticClass,
+}
+
+/// Connector-selected retention for a failed delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamFailurePayload {
+    /// The connector has not declared a safe retention mechanism.
+    Unavailable,
+    /// Retain source bytes behind the runtime's redacted failure boundary.
+    Plaintext(Vec<u8>),
+    /// Retain only a protected connector reference and its validation digest.
+    ProtectedReference { reference: String, digest: [u8; 32] },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -429,6 +441,22 @@ pub trait AsyncCheckpointBackend {
     fn failure_async<'a>(&'a self, identity: &'a FailureIdentity) -> Self::FailureFuture<'a>;
 }
 
+/// Additive async seam for connector-selected failed-delivery retention.
+///
+/// The original checkpoint intent enum remains source-compatible; durable
+/// runtimes implement this companion seam when a failure carries retained
+/// plaintext or a protected refetch reference.
+pub trait AsyncFailurePayloadBackend {
+    type Error;
+
+    fn fail_with_payload_async<'a>(
+        &'a mut self,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+    ) -> Pin<Box<dyn Future<Output = Result<CommitResult, Self::Error>> + 'a>>;
+}
+
 /// Deterministic in-memory backend for runtime integration and focused tests.
 #[derive(Default)]
 pub struct InMemoryCheckpointBackend {
@@ -437,6 +465,7 @@ pub struct InMemoryCheckpointBackend {
     failures: BTreeMap<FailureIdentity, FailureRecord>,
     leases: BTreeMap<CheckpointKey, DeliveryLease>,
     next_fence: BTreeMap<CheckpointKey, u64>,
+    retry_claims: BTreeSet<CheckpointKey>,
 }
 
 impl InMemoryCheckpointBackend {
@@ -464,6 +493,7 @@ impl InMemoryCheckpointBackend {
         match self.leases.get(&key) {
             Some(current) if current == lease => {
                 self.leases.remove(&key);
+                self.retry_claims.remove(&key);
                 Ok(())
             }
             _ => Err(RejectReason::LeaseFenced),
@@ -577,13 +607,25 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
                 }
-                if self.leases.contains_key(&key) {
-                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
-                }
                 let failure_status = self
                     .failures
                     .get(&FailureIdentity(delivery.clone()))
                     .map(|failure| failure.status);
+                if let Some(existing) = self.leases.get(&key).cloned() {
+                    if purpose == LeasePurpose::Deliver
+                        && failure_status == Some(FailureStatus::Retrying)
+                        && self.retry_claims.remove(&key)
+                    {
+                        return CommitResult::Acquired {
+                            lease: DeliveryLease {
+                                delivery,
+                                fence: existing.fence,
+                                purpose: existing.purpose,
+                            },
+                        };
+                    }
+                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
+                }
                 if let Some(status) = failure_status {
                     let allowed = matches!(
                         (purpose, status),
@@ -643,10 +685,11 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 expected_version,
                 expected,
             } => {
-                if !self.checkpoint_matches(&failure.0.checkpoint_key(), &expected) {
+                let key = failure.0.checkpoint_key();
+                if !self.checkpoint_matches(&key, &expected) {
                     return CommitResult::Rejected(RejectReason::StaleCheckpoint);
                 }
-                let Some(record) = self.failures.get_mut(&failure) else {
+                let Some(record) = self.failures.get(&failure) else {
                     return CommitResult::Rejected(RejectReason::FailureMissing);
                 };
                 if record.version != expected_version {
@@ -655,6 +698,19 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 if record.status != FailureStatus::Failed {
                     return CommitResult::Rejected(RejectReason::RetryNotAllowed);
                 }
+                if self.leases.contains_key(&key) {
+                    return CommitResult::Rejected(RejectReason::LeaseAlreadyHeld);
+                }
+                let fence = self.next_fence.entry(key.clone()).or_insert(0);
+                *fence += 1;
+                let lease = DeliveryLease {
+                    delivery: failure.0.clone(),
+                    fence: *fence,
+                    purpose: LeasePurpose::Deliver,
+                };
+                self.leases.insert(key.clone(), lease);
+                self.retry_claims.insert(key);
+                let record = self.failures.get_mut(&failure).expect("checked above");
                 record.version += 1;
                 record.status = FailureStatus::Retrying;
                 CommitResult::RetryScheduled {
@@ -1121,11 +1177,14 @@ mod tests {
 
         let second = delivery("receipt:one", "resume:two");
         let failed = acquire_and_fail(&mut backend, second.clone());
-        let _ = backend.apply(CommitIntent::Retry {
+        match backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
             expected_version: failed.version,
             expected: expected(&backend, &second),
-        });
+        }) {
+            CommitResult::RetryScheduled { .. } => (),
+            _ => panic!(),
+        };
         let failed_again = acquire_and_fail(&mut backend, second);
         assert_eq!(failed_again.status, FailureStatus::Failed);
         assert_eq!(failed_again.attempts, 2);
@@ -1238,11 +1297,14 @@ mod tests {
             }),
             CommitResult::Rejected(RejectReason::ResolveBlocked)
         );
-        let _ = backend.apply(CommitIntent::Retry {
+        match backend.apply(CommitIntent::Retry {
             failure: failure.identity.clone(),
             expected_version: failure.version,
             expected: expected(&backend, &item),
-        });
+        }) {
+            CommitResult::RetryScheduled { .. } => (),
+            result => panic!("unexpected result: {result:?}"),
+        };
         let lease = acquire(&mut backend, item.clone());
         let advanced = backend.apply(CommitIntent::Complete {
             lease,
@@ -1393,16 +1455,15 @@ mod tests {
         let mut backend = InMemoryCheckpointBackend::default();
         let first = delivery("receipt:stable", "resume:first");
         let failed = acquire_and_fail(&mut backend, first.clone());
-        assert!(matches!(
-            backend.apply(CommitIntent::Retry {
-                failure: failed.identity.clone(),
-                expected_version: failed.version,
-                expected: expected(&backend, &first),
-            }),
-            CommitResult::RetryScheduled { .. }
-        ));
-
         let same_delivery = delivery("receipt:stable", "resume:changed");
+        match backend.apply(CommitIntent::Retry {
+            failure: FailureIdentity(same_delivery.clone()),
+            expected_version: failed.version,
+            expected: expected(&backend, &same_delivery),
+        }) {
+            CommitResult::RetryScheduled { .. } => (),
+            _ => panic!(),
+        };
         let failed_again = acquire_and_fail(&mut backend, same_delivery);
         assert_eq!(failed_again.identity, failed.identity);
         assert_eq!(failed_again.attempts, 2);
