@@ -72,11 +72,16 @@ pub struct CheckpointIntent {
 }
 
 impl CheckpointIntent {
-    pub fn retry(failure: FailureIdentity, expected_version: u64) -> Self {
+    pub fn retry(
+        failure: FailureIdentity,
+        expected_version: u64,
+        expected: CheckpointPrecondition,
+    ) -> Self {
         Self {
             commit: CommitIntent::Retry {
                 failure,
                 expected_version,
+                expected,
             },
         }
     }
@@ -502,7 +507,8 @@ mod tests {
         let CommitIntent::Complete { lease, expected } = intent.commit else {
             unreachable!()
         };
-        let retry = CheckpointIntent::retry(FailureIdentity(lease.delivery.clone()), 2);
+        let retry =
+            CheckpointIntent::retry(FailureIdentity(lease.delivery.clone()), 2, expected.clone());
         assert!(matches!(retry.commit, CommitIntent::Retry { .. }));
         let skip = CheckpointIntent::skip(
             DeliveryLease {
