@@ -736,7 +736,7 @@ fn collect_header(
 ) -> ModuleHeader {
     let mut symbols = BTreeMap::new();
     for item in &tree.items {
-        let Some((name, kind, ty)) = declared_symbol(item, diagnostics) else {
+        let Some((name, kind, ty)) = declared_symbol(item) else {
             continue;
         };
         let public = matches!(item.visibility, Visibility::Public { .. });
@@ -767,22 +767,15 @@ fn collect_header(
         prelude_exports: prelude.clone(),
     }
 }
-fn declared_symbol(
-    item: &Item,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<(String, SymbolKind, Type)> {
+fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
     match &item.declaration {
-        Declaration::Function { signature, .. } => {
+        Declaration::Function { signature, body } => {
             let parameters = signature
                 .parameters
                 .iter()
                 .map(|p| {
                     p.annotation.as_ref().map(type_of).unwrap_or_else(|| {
-                        diagnostics.push(diag(
-                            DIAG_ANNOTATION,
-                            "function parameter needs a static annotation",
-                        ));
-                        Type::Error
+                        inferred_function_parameter_type(body, p).unwrap_or(Type::Error)
                     })
                 })
                 .collect();
@@ -1230,13 +1223,20 @@ fn check_function(
     };
     let mut local = BTreeMap::new();
     for parameter in &signature.parameters {
+        let ty = parameter
+            .annotation
+            .as_ref()
+            .map(type_of)
+            .or_else(|| inferred_function_parameter_type(body, parameter));
+        if ty.is_none() {
+            diagnostics.push(diag(
+                DIAG_ANNOTATION,
+                "function parameter needs a static annotation",
+            ));
+        }
         bind_pattern(
             &parameter.pattern,
-            parameter
-                .annotation
-                .as_ref()
-                .map(type_of)
-                .unwrap_or(Type::Error),
+            ty.unwrap_or(Type::Error),
             &mut local,
             diagnostics,
         );
@@ -1968,6 +1968,16 @@ fn lambda_numeric_parameter_usage(expression: &Expr, name: &str) -> bool {
         }
     }
     visit(expression, name)
+}
+
+fn inferred_function_parameter_type(
+    body: &Expr,
+    parameter: &orna_syntax_v1::Parameter,
+) -> Option<Type> {
+    let Pattern::Name(name, _) = &parameter.pattern else {
+        return None;
+    };
+    lambda_numeric_parameter_usage(body, name).then_some(Type::Int)
 }
 
 fn infer_assignment(
