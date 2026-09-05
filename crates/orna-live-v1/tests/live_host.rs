@@ -728,3 +728,56 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         Err(Error::InvalidFrame)
     );
 }
+
+#[test]
+fn application_responses_reach_the_websocket_as_canonical_binary() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let cookie = token(&created);
+    let mut upgrade = wire("GET", "/orna/live/01010101-0101-0101-0101-010101010101", "");
+    upgrade.headers.extend([
+        ("connection".into(), "Upgrade".into()),
+        ("upgrade".into(), "websocket".into()),
+        ("sec-websocket-version".into(), "13".into()),
+        (
+            "sec-websocket-key".into(),
+            "dGhlIHNhbXBsZSBub25jZQ==".into(),
+        ),
+        ("sec-websocket-protocol".into(), SUBPROTOCOL.into()),
+        ("cookie".into(), format!("orna_session={cookie}")),
+    ]);
+    assert_eq!(block_on(transport.upgrade(upgrade, [5; 16], 1)).status, 101);
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let mut application = UnitApplication::default();
+    let output = block_on(transport.receive_with_application(
+        &mut socket,
+        2,
+        &masked(true, 2, &unsubscribe()),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(output.len(), 1);
+    let WebSocketOutput::Binary { outcome, payload } = &output[0] else {
+        panic!("application response must be a binary WebSocket output");
+    };
+    assert_eq!(*outcome, FrameOutcome::Accepted);
+    let response = Envelope::decode(payload, Limits::default().protocol).unwrap();
+    assert!(matches!(response.message, Message::Result { .. }));
+}

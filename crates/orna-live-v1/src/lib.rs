@@ -1077,9 +1077,14 @@ pub struct WireResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WebSocketOutput {
     Accepted(FrameOutcome),
+    /// A canonical host response ready to send as one binary WebSocket frame.
+    Binary {
+        outcome: FrameOutcome,
+        payload: Vec<u8>,
+    },
     Pong,
     Close,
 }
@@ -1364,12 +1369,13 @@ impl LiveTransport {
         let mut output = Vec::new();
         for event in events {
             match event {
-                SocketEvent::Binary(message) => output.push(WebSocketOutput::Accepted(
-                    self.host
+                SocketEvent::Binary(message) => {
+                    let dispatched = self
+                        .host
                         .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
-                        .await?
-                        .outcome,
-                )),
+                        .await?;
+                    output.push(self.websocket_output(dispatched)?);
+                }
                 SocketEvent::Text => return Err(Error::InvalidFrame),
                 SocketEvent::Ping => output.push(WebSocketOutput::Pong),
                 SocketEvent::Pong => {}
@@ -1385,6 +1391,17 @@ impl LiveTransport {
             }
         }
         Ok(output)
+    }
+
+    fn websocket_output(&self, dispatched: DispatchOutcome) -> Result<WebSocketOutput> {
+        let DispatchOutcome { outcome, response } = dispatched;
+        let Some(response) = response else {
+            return Ok(WebSocketOutput::Accepted(outcome));
+        };
+        let payload = response
+            .encode(self.host.limits.protocol)
+            .map_err(|_| Error::ApplicationRejected)?;
+        Ok(WebSocketOutput::Binary { outcome, payload })
     }
 }
 
