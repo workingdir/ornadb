@@ -815,6 +815,10 @@ impl Harness {
                 StageOutcome::Skipped {
                     reason: "earlier stage did not pass".into(),
                 }
+            } else if expected == "not-run" {
+                StageOutcome::Skipped {
+                    reason: "stage is outside the fixture execution expectation".into(),
+                }
             } else {
                 match stage {
                     Stage::Parse if project => {
