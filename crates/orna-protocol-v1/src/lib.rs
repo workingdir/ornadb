@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fmt};
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw};
+use sha2::{Digest, Sha256};
 
 pub const PROFILE: &str = "orna.present.v1";
 pub const VERSION: u64 = 1;
@@ -75,6 +76,41 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Computes the canonical REQUEST-1 fingerprint for an envelope.
+///
+/// The digest covers the session identity, message type, watch identity, and
+/// complete body. For `Event` and `Eval`, their redundant transmitted
+/// fingerprint field is omitted; every retained extension remains covered.
+pub fn canonical_request_fingerprint(
+    session_id: [u8; 16],
+    envelope: &Envelope,
+    limits: Limits,
+) -> Result<[u8; 32]> {
+    // Keep the helper's accepted public values identical to envelope encoding,
+    // including bounds and validation of opaque typed fields and extensions.
+    let _ = envelope.encode(limits)?;
+    let mut body = envelope.message.body(&envelope.extensions)?;
+    if matches!(
+        envelope.message,
+        Message::Event { .. } | Message::Eval { .. }
+    ) {
+        let Node::Map(fields) = &mut body else {
+            return Err(Error::InvalidMessage);
+        };
+        fields.retain(|(key, _)| u64_value(key).ok() != Some(3));
+    }
+    let input = encode_node(&Node::Array(vec![
+        Node::Bytes(session_id.to_vec()),
+        uint(envelope.message.code()),
+        option_bytes(envelope.watch),
+        body,
+    ]))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.request.v1\0");
+    hasher.update(input);
+    Ok(hasher.finalize().into())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Envelope {
@@ -1484,7 +1520,39 @@ mod tests {
                 message
             );
             assert_eq!(message.encode(Limits::default()).unwrap(), bytes);
+            assert!(canonical_request_fingerprint(id(9), &message, Limits::default()).is_ok());
         }
+    }
+    #[test]
+    fn request_fingerprint_omits_event_and_eval_redundant_fields() {
+        let session_id = id(9);
+        for index in [3, 4] {
+            let envelope = messages().remove(index);
+            let mut changed = envelope.clone();
+            match &mut changed.message {
+                Message::Event { fingerprint, .. } | Message::Eval { fingerprint, .. } => {
+                    *fingerprint = digest(2);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                canonical_request_fingerprint(session_id, &envelope, Limits::default()),
+                canonical_request_fingerprint(session_id, &changed, Limits::default()),
+            );
+        }
+    }
+    #[test]
+    fn request_fingerprint_covers_extensions() {
+        let session_id = id(9);
+        let envelope = messages().remove(3);
+        let mut extended = envelope.clone();
+        extended
+            .extensions
+            .insert(11, ValueNode(Node::Text("extension".into())));
+        assert_ne!(
+            canonical_request_fingerprint(session_id, &envelope, Limits::default()),
+            canonical_request_fingerprint(session_id, &extended, Limits::default()),
+        );
     }
     #[test]
     fn rejects_malformed_envelopes_and_extensions() {
