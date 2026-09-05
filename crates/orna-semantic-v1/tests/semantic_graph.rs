@@ -576,7 +576,7 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
 }
 
 #[test]
-fn control_flow_fixture_infers_typed_if_else_and_keeps_other_control_fail_closed() {
+fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_closed() {
     let fixture = analyze(&[ModuleInput::new(
         "control-flow.orna",
         r#"
@@ -600,14 +600,7 @@ fn control_flow_fixture_infers_typed_if_else_and_keeps_other_control_fail_closed
         &module.symbols["describe"].ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Text
     ));
-    assert_eq!(
-        fixture
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code())
-            .collect::<Vec<_>>(),
-        vec![DIAG_UNSUPPORTED]
-    );
+    assert!(fixture.is_ok(), "{:?}", fixture.diagnostics);
 
     let mismatched_branches = analyze(&[ModuleInput::new(
         "mismatched-if.orna",
@@ -621,11 +614,33 @@ fn control_flow_fixture_infers_typed_if_else_and_keeps_other_control_fail_closed
     )]);
     assert!(has(&missing_else, DIAG_UNSUPPORTED));
 
-    let assignment = analyze(&[ModuleInput::new(
-        "assignment.orna",
-        "fn update() { let value = 0; value = 1; }",
+    let compound_assignment = analyze(&[ModuleInput::new(
+        "compound-assignment.orna",
+        "fn update() { let value = 0; value += 1; }",
     )]);
-    assert!(has(&assignment, DIAG_UNSUPPORTED));
+    assert!(
+        compound_assignment.is_ok(),
+        "{:?}",
+        compound_assignment.diagnostics
+    );
+
+    let mismatched_compound = analyze(&[ModuleInput::new(
+        "mismatched-compound-assignment.orna",
+        "fn update() { let value = 0; value += true; }",
+    )]);
+    assert!(has(&mismatched_compound, DIAG_TYPE));
+
+    let field_assignment = analyze(&[ModuleInput::new(
+        "field-assignment.orna",
+        "fn update() { let value = { count: 0 }; value.count = 1; }",
+    )]);
+    assert!(has(&field_assignment, DIAG_UNSUPPORTED));
+
+    let non_list_for = analyze(&[ModuleInput::new(
+        "non-list-for.orna",
+        "fn update() { for value in 1 { value } }",
+    )]);
+    assert!(has(&non_list_for, DIAG_UNSUPPORTED));
 }
 
 #[test]

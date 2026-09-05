@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_syntax_v1::{
-    ControlKind, Declaration, Expr, FieldInitializer, Item, LiteralKind, Pattern, Statement,
-    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
-    parse_module_with_file,
+    AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
+    LiteralKind, Pattern, Statement, StringSegment, SyntaxTree, TypeExpr, TypeMember,
+    TypeRepresentation, UseTail, Visibility, parse_module_with_file,
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -1428,9 +1428,22 @@ fn infer(
                             final_control = Some(x);
                         }
                     }
+                    Statement::Assignment {
+                        target,
+                        operator,
+                        value,
+                        ..
+                    } => effects.join(&infer_assignment(
+                        target,
+                        operator,
+                        value,
+                        scope,
+                        &mut locals,
+                        diagnostics,
+                    )),
                     _ => diagnostics.push(diag(
                         DIAG_UNSUPPORTED,
-                        "control or assignment statement is outside this semantic slice",
+                        "control statement is outside this semantic slice",
                     )),
                 }
             }
@@ -1484,6 +1497,24 @@ fn infer(
             local,
             diagnostics,
         ),
+        Expr::Control {
+            kind: ControlKind::For,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => infer_for(
+            binding.as_ref(),
+            condition.as_deref(),
+            body.as_deref(),
+            arms,
+            alternate.as_deref(),
+            scope,
+            local,
+            diagnostics,
+        ),
         _ => {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -1494,6 +1525,110 @@ fn infer(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+fn infer_assignment(
+    target: &AssignmentTarget,
+    operator: &AssignmentOperator,
+    value: &Expr,
+    scope: &Scope,
+    local: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> EffectSummary {
+    let value = infer(value, scope, local, diagnostics);
+    match (target, operator) {
+        (AssignmentTarget::Name { name, .. }, AssignmentOperator::Set) => match local.get(name) {
+            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
+            None => diagnostics.push(diag(
+                DIAG_UNRESOLVED,
+                "assignment target cannot be resolved",
+            )),
+        },
+        (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
+            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
+            None => diagnostics.push(diag(
+                DIAG_UNRESOLVED,
+                "assignment target cannot be resolved",
+            )),
+        },
+        _ => diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "only local-name assignment targets are supported in this semantic slice",
+        )),
+    }
+    value.effects
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_for(
+    binding: Option<&Pattern>,
+    iterable: Option<&Expr>,
+    body: Option<&Expr>,
+    arms: &[orna_syntax_v1::CaseArm],
+    alternate: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Some(binding) = binding else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a binding"));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Some(iterable) = iterable else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires an iterable"));
+        return Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        };
+    };
+    let Some(body) = body else {
+        diagnostics.push(diag(DIAG_UNSUPPORTED, "for control requires a body"));
+        return Inferred {
+            ty: Type::Error,
+            effects: infer(iterable, scope, local, diagnostics).effects,
+        };
+    };
+    if alternate.is_some()
+        || arms.len() != 1
+        || arms[0].guard.is_some()
+        || arms[0].pattern != *binding
+        || arms[0].body != *body
+    {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "malformed for control shape is outside this semantic slice",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: infer(iterable, scope, local, diagnostics).effects,
+        };
+    }
+
+    let iterable = infer(iterable, scope, local, diagnostics);
+    let Type::List(element) = iterable.ty else {
+        if !matches!(iterable.ty, Type::Error) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "for control supports only list iteration in this semantic slice",
+            ));
+        }
+        return Inferred {
+            ty: Type::Error,
+            effects: iterable.effects,
+        };
+    };
+    let mut body_locals = local.clone();
+    bind_pattern(binding, *element, &mut body_locals, diagnostics);
+    let body = infer(body, scope, &body_locals, diagnostics);
+    let mut effects = iterable.effects;
+    effects.join(&body.effects);
+    Inferred {
+        ty: Type::Null,
+        effects,
     }
 }
 
