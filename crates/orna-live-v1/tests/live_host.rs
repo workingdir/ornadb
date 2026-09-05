@@ -10,12 +10,20 @@ use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
     canonical_request_fingerprint,
 };
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
     SessionDeletionAdapter,
 };
 use orna_serving_v1::{Limits as ServingLimits, Serving};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 struct Issuer(u8, Option<[u8; 32]>);
 impl CredentialIssuer for Issuer {
@@ -116,6 +124,50 @@ fn host() -> LiveHost {
         Serving::new(ServingLimits::default()).unwrap(),
     )
     .unwrap()
+}
+
+fn durable_host(runtime: RuntimeState) -> LiveHost {
+    let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
+    LiveHost::with_runtime_state(
+        Limits::default(),
+        boundary,
+        Serving::new(ServingLimits::default()).unwrap(),
+        runtime,
+    )
+    .unwrap()
+}
+
+fn durable_repository() -> (PathBuf, Repository) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("orna-live-v1-{nonce}"));
+    fs::create_dir(&root).unwrap();
+    let status = Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let repository = Repository::discover(&root).unwrap();
+    (root, repository)
+}
+
+fn open_durable_state(repository: &Repository) -> RuntimeState {
+    block_on(RuntimeState::open(
+        repository,
+        RuntimeIdentity {
+            database_id: [6; 16],
+            repository_id: [7; 16],
+        },
+        [8; 32],
+    ))
+    .unwrap()
+}
+
+fn remove_test_repository(root: &Path) {
+    fs::remove_dir_all(root).unwrap();
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
@@ -429,6 +481,67 @@ fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
         }
     ));
     assert_eq!(application.calls, 1);
+}
+
+#[test]
+fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
+    let (root, repository) = durable_repository();
+    let mut first_host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut first_host, &mut issuer);
+    block_on(first_host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let request = eval([1; 16], [23; 16], "1");
+    let mut first_application = UnitApplication::default();
+    let first = block_on(first_host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut first_application,
+    ))
+    .unwrap();
+    assert_eq!(first_application.calls, 1);
+    drop(first_host);
+
+    let mut second_host = durable_host(open_durable_state(&repository));
+    let mut second_issuer = Issuer(1, None);
+    let second_credential = create(&mut second_host, &mut second_issuer);
+    block_on(second_host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &second_credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+    let mut second_application = UnitApplication::default();
+    assert_eq!(
+        block_on(second_host.dispatch_frame(
+            [6; 16],
+            4,
+            Frame::Binary(request),
+            &mut second_application,
+        )),
+        Ok(first)
+    );
+    assert_eq!(second_application.calls, 0);
+    assert_eq!(
+        block_on(second_host.dispatch_frame(
+            [6; 16],
+            4,
+            Frame::Binary(eval([1; 16], [23; 16], "2")),
+            &mut second_application,
+        )),
+        Err(Error::RequestMismatch)
+    );
+    drop(second_host);
+    remove_test_repository(&root);
 }
 
 #[test]
