@@ -3,13 +3,15 @@
 //! `orna-semantic-v1` is a real, deterministic analyzer, but intentionally
 //! exposes one combined analysis result rather than separate compiler phases.
 //! This adapter executes it and only reports a phase result where that result
-//! is meaningful.  `RuntimeEvaluator` is similarly an explicit seam: the
-//! current `orna-runtime-v1` state contract has no source-evaluation entry
-//! point, so it must remain a justified skip until an evaluator is supplied.
+//! is meaningful. `RuntimeEvaluator` remains an explicit seam: the bounded
+//! evaluator below handles pure expression units, while the durable runtime
+//! still owns module execution, effects, and scenario lifecycles.
 
 use crate::{ConformanceAdapter, ProjectUnit, Scenario, SourceUnit, StageOutcome, SyntaxAdapter};
+use orna_evaluator_v1::{Environment, Limits as EvaluatorLimits, evaluate_expression};
 use orna_foundation_v1::Diagnostic;
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use std::collections::BTreeMap;
 
 pub struct SemanticAdapter {
     syntax: SyntaxAdapter,
@@ -100,6 +102,78 @@ pub trait RuntimeEvaluator {
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic>;
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic>;
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic>;
+}
+
+/// Runs the bounded, side-effect-free evaluator for row/expression units.
+///
+/// Module execution, table access, mutations, external effects, and prose
+/// scenarios remain explicit skips until their owning runtime contracts exist.
+#[derive(Default)]
+pub struct BoundedEvaluator {
+    environment: Environment,
+    limits: EvaluatorLimits,
+}
+
+impl BoundedEvaluator {
+    #[must_use]
+    pub fn new(limits: EvaluatorLimits) -> Self {
+        Self {
+            environment: BTreeMap::new(),
+            limits,
+        }
+    }
+
+    #[must_use]
+    pub fn with_environment(limits: EvaluatorLimits, environment: Environment) -> Self {
+        Self {
+            environment,
+            limits,
+        }
+    }
+
+    fn evaluate_unit(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        match unit.parse_as.as_str() {
+            "row_unit" | "expression_unit" | "repl_unit" => {
+                match evaluate_expression(&unit.source, &self.environment, self.limits) {
+                    Ok(_) => StageOutcome::Passed,
+                    Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
+                }
+            }
+            _ => StageOutcome::Skipped {
+                reason: "module execution requires the integrated Orna runtime".into(),
+            },
+        }
+    }
+}
+
+impl RuntimeEvaluator for BoundedEvaluator {
+    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        self.evaluate_unit(unit)
+    }
+
+    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        self.evaluate_unit(unit)
+    }
+
+    fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        if project.loose_rows.is_empty() {
+            return StageOutcome::Skipped {
+                reason: "project has no executable loose row units".into(),
+            };
+        }
+        for row in &project.loose_rows {
+            if let outcome @ StageOutcome::Failed(_) = self.evaluate_unit(row) {
+                return outcome;
+            }
+        }
+        StageOutcome::Passed
+    }
+
+    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "scenario requires the integrated Orna runtime and durable test fixture".into(),
+        }
+    }
 }
 
 pub struct RuntimeAdapter<R> {
