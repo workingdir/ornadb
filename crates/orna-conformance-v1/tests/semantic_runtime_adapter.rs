@@ -120,6 +120,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/effectful-display.orna",
         "invalid/secret-display.orna",
         "invalid/assert-effectful-table.orna",
+        "invalid/computed-field-effect.orna",
     ] {
         let fixture = report
             .fixtures
