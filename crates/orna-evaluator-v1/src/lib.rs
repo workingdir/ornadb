@@ -457,6 +457,20 @@ impl Context {
             Expr::Call {
                 callee, arguments, ..
             } => self.call(callee, arguments, scope, depth),
+            Expr::Index { base, index, .. } => {
+                let base = self.evaluate(base, scope, depth + 1)?;
+                let index = self.evaluate(index, scope, depth + 1)?;
+                self.index(base, index)
+            }
+            Expr::Field { base, name, .. } => {
+                let Value::Record(fields) = self.evaluate(base, scope, depth + 1)? else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                fields
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| error("ORNA-EVAL-FIELD"))
+            }
             Expr::Control {
                 kind: ControlKind::If,
                 condition: Some(condition),
@@ -470,6 +484,12 @@ impl Context {
                 }),
                 _ => Err(error("ORNA-EVAL-TYPE")),
             },
+            Expr::Control {
+                kind: ControlKind::Case,
+                condition: Some(condition),
+                arms,
+                ..
+            } => self.case(condition, arms, scope, depth),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -533,7 +553,9 @@ impl Context {
                     ..
                 } => {
                     let value = self.evaluate(value, &mut local, depth + 1)?;
-                    bind(pattern, value, &mut local, self.limits.max_collection_items)?;
+                    if !bind(pattern, value, &mut local, self)? {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    }
                 }
                 Statement::Expression { value, .. } => {
                     self.evaluate(value, &mut local, depth + 1)?;
@@ -666,15 +688,50 @@ impl Context {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        if arguments.iter().any(|argument| argument.name.is_some()) {
-            return Err(error("ORNA-EVAL-UNSUPPORTED"));
-        }
         self.items(arguments.len())?;
         let values = arguments
             .iter()
             .map(|argument| self.evaluate(&argument.value, scope, depth + 1))
             .collect::<Result<Vec<_>, _>>()?;
-        self.math(name, values)
+        self.math(name, named_arguments(name, arguments, values)?)
+    }
+    fn index(&self, base: Value, index: Value) -> Result<Value, EvaluationError> {
+        let Value::Int(index) = index else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let index = index.to_usize().ok_or_else(|| error("ORNA-EVAL-INDEX"))?;
+        match base {
+            Value::List(values) | Value::Tuple(values) => values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| error("ORNA-EVAL-INDEX")),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
+    fn case(
+        &mut self,
+        condition: &Expr,
+        arms: &[orna_syntax_v1::CaseArm],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let value = self.evaluate(condition, scope, depth + 1)?;
+        self.items(arms.len())?;
+        for arm in arms {
+            let mut local = scope.clone();
+            if !bind(&arm.pattern, value.clone(), &mut local, self)? {
+                continue;
+            }
+            if let Some(guard) = &arm.guard {
+                match self.evaluate(guard, &mut local, depth + 1)? {
+                    Value::Bool(true) => {}
+                    Value::Bool(false) => continue,
+                    _ => return Err(error("ORNA-EVAL-TYPE")),
+                }
+            }
+            return self.evaluate(&arm.body, &mut local, depth + 1);
+        }
+        Err(error("ORNA-EVAL-NO-MATCH"))
     }
     fn math(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
@@ -706,25 +763,93 @@ fn bind(
     pattern: &Pattern,
     value: Value,
     scope: &mut Scope,
-    max_items: usize,
-) -> Result<(), EvaluationError> {
+    context: &Context,
+) -> Result<bool, EvaluationError> {
     match pattern {
         Pattern::Name(name, _) => {
             scope.0.insert(name.clone(), value);
-            Ok(())
+            Ok(true)
         }
-        Pattern::Wildcard(_) => Ok(()),
+        Pattern::Wildcard(_) => Ok(true),
+        Pattern::Literal { text, kind, .. } => Ok(context.literal(text, *kind)? == value),
         Pattern::Tuple { elements, .. } => match value {
-            Value::Tuple(values) if values.len() == elements.len() && values.len() <= max_items => {
+            Value::Tuple(values) if values.len() == elements.len() => {
+                context.items(values.len())?;
                 for (pattern, value) in elements.iter().zip(values) {
-                    bind(pattern, value, scope, max_items)?;
+                    if !bind(pattern, value, scope, context)? {
+                        return Ok(false);
+                    }
                 }
-                Ok(())
+                Ok(true)
             }
-            _ => Err(error("ORNA-EVAL-TYPE")),
+            _ => Ok(false),
         },
-        _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        Pattern::List { elements, .. } => match value {
+            Value::List(values) if values.len() == elements.len() => {
+                context.items(values.len())?;
+                for (pattern, value) in elements.iter().zip(values) {
+                    if !bind(pattern, value, scope, context)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Pattern::Record { fields, .. } => match value {
+            Value::Record(values) => {
+                context.items(fields.len())?;
+                for (name, pattern, _) in fields {
+                    let Some(value) = values.get(name).cloned() else {
+                        return Ok(false);
+                    };
+                    if let Some(pattern) = pattern {
+                        if !bind(pattern, value, scope, context)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        scope.0.insert(name.clone(), value);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Pattern::Constructor { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
     }
+}
+fn named_arguments(
+    function: &str,
+    arguments: &[orna_syntax_v1::Argument],
+    values: Vec<Value>,
+) -> Result<Vec<Value>, EvaluationError> {
+    if arguments.iter().all(|argument| argument.name.is_none()) {
+        return Ok(values);
+    }
+    if arguments.iter().any(|argument| argument.name.is_none()) {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    let expected: &[&str] = match function {
+        "increment" | "decrement" | "is_zero" => &["value"],
+        "min" | "max" => &["left", "right"],
+        "clamp" => &["value", "min", "max"],
+        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    };
+    if arguments.len() != expected.len() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    expected
+        .iter()
+        .map(|expected_name| {
+            arguments
+                .iter()
+                .zip(values.iter())
+                .find_map(|(argument, value)| {
+                    (argument.name.as_deref() == Some(*expected_name)).then(|| value.clone())
+                })
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+        })
+        .collect()
 }
 fn math_name(expression: &Expr) -> Option<&str> {
     let Expr::Field { base, name, .. } = expression else {
