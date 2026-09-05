@@ -243,22 +243,7 @@ impl BoundedEvaluator {
             let mut syntax = SyntaxAdapter;
             return syntax.parse(unit);
         }
-        if !parsed
-            .value
-            .items
-            .iter()
-            .all(|item| match &item.declaration {
-                Declaration::Let {
-                    pattern: Pattern::Name(_, _),
-                    ..
-                } => true,
-                Declaration::Function { signature, .. } => signature
-                    .parameters
-                    .iter()
-                    .all(|parameter| matches!(parameter.pattern, Pattern::Name(_, _))),
-                _ => false,
-            })
-        {
+        if !Self::supports_pure_declarations(&parsed.value.items) {
             return Self::unsupported_module();
         }
         let mut environment = self.environment.clone();
@@ -293,9 +278,44 @@ impl BoundedEvaluator {
         StageOutcome::Passed
     }
 
+    fn supports_pure_module(unit: &SourceUnit) -> bool {
+        let parsed = parse_module(&unit.source);
+        parsed.is_ok() && Self::supports_pure_declarations(&parsed.value.items)
+    }
+
+    fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
+        items.iter().all(|item| match &item.declaration {
+            Declaration::Let {
+                pattern: Pattern::Name(_, _),
+                ..
+            } => true,
+            Declaration::Function { signature, .. } => signature
+                .parameters
+                .iter()
+                .all(|parameter| matches!(parameter.pattern, Pattern::Name(_, _))),
+            _ => false,
+        })
+    }
+
+    fn supports_pure_project(project: &ProjectUnit) -> bool {
+        let environment = &project.expectations.environment;
+        !environment.network
+            && !environment.credentials
+            && environment.intrinsics == "Orna 1.0.0 core"
+            && environment.stdlib.is_none()
+            && environment.initial_tables == "empty"
+            && project.modules.iter().all(Self::supports_pure_module)
+    }
+
     fn unsupported_module() -> StageOutcome<Diagnostic> {
         StageOutcome::Skipped {
             reason: "module execution requires an effect-free module with immutable bindings and named-parameter functions".into(),
+        }
+    }
+
+    fn unsupported_project() -> StageOutcome<Diagnostic> {
+        StageOutcome::Skipped {
+            reason: "project execution requires an offline empty-state project whose every module has only immutable bindings and named-parameter functions; tables, effects, and streams require the integrated runtime".into(),
         }
     }
 
@@ -318,6 +338,12 @@ impl RuntimeEvaluator for BoundedEvaluator {
     }
 
     fn evaluate_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
+        // Preflight the complete project before loading any module.  This
+        // leaves evaluator state unchanged when a later module needs tables,
+        // effects, streams, or another integrated-runtime feature.
+        if !Self::supports_pure_project(project) {
+            return Self::unsupported_project();
+        }
         for module in &project.modules {
             match self.evaluate_module(module) {
                 StageOutcome::Passed => {}
@@ -333,13 +359,12 @@ impl RuntimeEvaluator for BoundedEvaluator {
 
     fn validate_rows(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         if project.loose_rows.is_empty() {
-            return StageOutcome::Skipped {
-                reason: "project has no executable loose row units".into(),
-            };
+            return StageOutcome::Passed;
         }
         for row in &project.loose_rows {
-            if let outcome @ StageOutcome::Failed(_) = self.evaluate_unit(row) {
-                return outcome;
+            match self.evaluate_unit(row) {
+                StageOutcome::Passed => {}
+                outcome => return outcome,
             }
         }
         StageOutcome::Passed

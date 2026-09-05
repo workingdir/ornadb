@@ -1,7 +1,7 @@
 use orna_conformance_v1::{
-    BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceStatus, Harness, ProjectEnvironment,
-    ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator, Scenario, SemanticAdapter,
-    SourceUnit, StageOutcome,
+    BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceClass, EvidenceStatus, Harness,
+    ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter, RuntimeEvaluator,
+    Scenario, SemanticAdapter, SourceUnit, StageOutcome,
 };
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use std::collections::BTreeMap;
@@ -134,6 +134,57 @@ fn bounded_evaluator_executes_expression_units_and_redacts_failures() {
     };
     assert_eq!(diagnostic.code(), "ORNA-EVAL-NAME");
     assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
+fn bounded_adapter_keeps_the_reference_project_effects_skipped_but_validates_empty_rows() {
+    let corpus = Corpus::load_default().expect("reference corpus loads");
+    let report = Harness::new(corpus).run(&mut RuntimeAdapter::new(BoundedEvaluator::default()));
+    let project = report
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture == "PROJECT-REFERENCE")
+        .expect("reference project result");
+
+    assert!(project.passed);
+    assert_eq!(
+        project
+            .stages
+            .iter()
+            .map(|stage| (
+                stage.stage.clone(),
+                stage.status.clone(),
+                stage.class.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Some(orna_conformance_v1::Stage::Parse),
+                EvidenceStatus::Passed,
+                EvidenceClass::Runtime
+            ),
+            (
+                Some(orna_conformance_v1::Stage::Resolve),
+                EvidenceStatus::Passed,
+                EvidenceClass::Semantic
+            ),
+            (
+                Some(orna_conformance_v1::Stage::Typecheck),
+                EvidenceStatus::Passed,
+                EvidenceClass::Semantic
+            ),
+            (
+                Some(orna_conformance_v1::Stage::Evaluate),
+                EvidenceStatus::Skipped,
+                EvidenceClass::Skipped
+            ),
+            (
+                Some(orna_conformance_v1::Stage::RowValidation),
+                EvidenceStatus::Passed,
+                EvidenceClass::Semantic
+            ),
+        ]
+    );
 }
 
 fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
