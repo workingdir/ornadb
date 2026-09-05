@@ -250,6 +250,41 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
 }
 
 #[test]
+fn dispatches_request_status_and_rejects_unsupported_client_operations() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    host.reserve_request([1; 16], [8; 16]).unwrap();
+    let status = Envelope {
+        request: Some([9; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [8; 16],
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    assert_eq!(
+        block_on(host.handle_frame([5; 16], 2, Frame::Binary(status))),
+        Ok(FrameOutcome::Accepted)
+    );
+    assert_eq!(
+        block_on(host.handle_frame([5; 16], 2, Frame::Binary(subscribe()))),
+        Err(Error::UnsupportedOperation)
+    );
+}
+
+#[test]
 fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
     let mut host = host();
     let mut issuer = Issuer(0x5a, None);
