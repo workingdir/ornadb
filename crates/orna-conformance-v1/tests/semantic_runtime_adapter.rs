@@ -354,6 +354,26 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn retained_function_defaults_cannot_reset_the_invocation_budget() {
+    let module = SourceUnit {
+        fixture_id: "default-budget".into(),
+        source_id: "logical/default-budget.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn compute(first = 1 + 2, second = 3 + 4) = first + second;".into(),
+    };
+    let mut evaluator = BoundedEvaluator::new(orna_evaluator_v1::Limits {
+        max_steps: 6,
+        ..Default::default()
+    });
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("compute") else {
+        panic!("defaults and body must share one invocation budget");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
 fn bounded_evaluator_redacts_missing_and_unknown_retained_function_arguments() {
     let pure_module = SourceUnit {
         fixture_id: "test-module".into(),
