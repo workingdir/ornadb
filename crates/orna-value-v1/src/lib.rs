@@ -579,6 +579,30 @@ pub fn path_encode_key_components(components: &[String]) -> Result<Vec<String>> 
     }
     Ok(output)
 }
+/// Decodes table-relative editable-row path components into canonical key text
+/// in declared component order. The owning schema must still interpret that
+/// text as typed keys. Filesystem containment and sibling collisions remain
+/// the responsibility of the repository adapter.
+pub fn path_decode_key_components(components: &[String]) -> Result<Vec<String>> {
+    let (last, parents) = components.split_last().ok_or(Error::InvalidPath)?;
+    let mut length = 0usize;
+    for (index, component) in components.iter().enumerate() {
+        length = length
+            .checked_add(component.len())
+            .and_then(|sum| sum.checked_add(usize::from(index != 0)))
+            .filter(|sum| *sum <= 1024)
+            .ok_or(Error::InvalidPath)?;
+    }
+    path_validate_relative_components(components)?;
+    let mut decoded = parents
+        .iter()
+        .map(|component| path_decode_component(component))
+        .collect::<Result<Vec<_>>>()?;
+    decoded.push(path_decode_component(
+        last.strip_suffix(".orna").ok_or(Error::InvalidPath)?,
+    )?);
+    Ok(decoded)
+}
 /// Rejects path traversal syntax before a repository layer performs a
 /// symlink/reparse-point-aware containment check at materialisation time.
 pub fn path_validate_relative_components(components: &[String]) -> Result<()> {
@@ -2007,6 +2031,51 @@ mod tests {
         assert!(path_validate_relative_components(&["..".into()]).is_err());
     }
     #[test]
+    fn composite_path_decoding_is_canonical_and_bounded() {
+        for keys in [
+            vec![""],
+            vec!["..", "foo/bar", "é"],
+            vec!["first.orna", "last.orna"],
+            vec!["con", "a\\b", ".git"],
+        ] {
+            let keys: Vec<String> = keys.into_iter().map(String::from).collect();
+            let encoded = path_encode_key_components(&keys).unwrap();
+            let decoded = path_decode_key_components(&encoded).unwrap();
+            assert_eq!(decoded, keys);
+            assert_eq!(path_encode_key_components(&decoded).unwrap(), encoded);
+        }
+        assert_eq!(
+            path_decode_key_components(&["first.orna".into(), "last.orna.orna".into()]).unwrap(),
+            vec!["first.orna", "last.orna"]
+        );
+        for encoded in [
+            vec![],
+            vec![""],
+            vec![".orna"],
+            vec!["a"],
+            vec!["a.ORNA"],
+            vec!["~61lice.orna"],
+            vec!["~FF.orna"],
+            vec!["x~ff.orna"],
+            vec!["~e.orna"],
+            vec!["..", "a.orna"],
+            vec!["", "a.orna"],
+            vec!["/a.orna"],
+            vec!["a/b.orna"],
+            vec!["a\\b.orna"],
+        ] {
+            let encoded: Vec<String> = encoded.into_iter().map(String::from).collect();
+            assert!(path_decode_key_components(&encoded).is_err(), "{encoded:?}");
+        }
+        let mut boundary = vec!["a".repeat(200); 5];
+        boundary.push(format!("{}.orna", "b".repeat(14)));
+        assert_eq!(boundary.join("/").len(), 1024);
+        assert!(path_decode_key_components(&boundary).is_ok());
+        boundary[5].insert(0, 'b');
+        assert!(path_decode_key_components(&boundary).is_err());
+        assert!(path_decode_key_components(&[format!("{}.orna", "a".repeat(201))]).is_err());
+    }
+    #[test]
     fn construction_and_safe_containers_reject_aliases() {
         assert!(Value::new(Raw::Float(0x7ff8_0000_0000_0001)).is_err());
         assert_eq!(
@@ -2129,9 +2198,20 @@ mod tests {
             let encoded = vector["encoded"].as_str().unwrap();
             assert_eq!(path_encode_component(source).unwrap(), encoded);
             assert_eq!(path_decode_component(encoded).unwrap(), source);
+            assert_eq!(
+                path_decode_key_components(&[format!("{encoded}.orna")]).unwrap(),
+                vec![source]
+            );
         }
         for vector in fixture["reject_encoded"].as_array().unwrap() {
             assert!(path_decode_component(vector["encoded"].as_str().unwrap()).is_err());
+            assert!(
+                path_decode_key_components(&[format!(
+                    "{}.orna",
+                    vector["encoded"].as_str().unwrap()
+                )])
+                .is_err()
+            );
         }
         for vector in fixture["portable_collisions"].as_array().unwrap() {
             let left = path_encode_component(vector["left"].as_str().unwrap()).unwrap();
