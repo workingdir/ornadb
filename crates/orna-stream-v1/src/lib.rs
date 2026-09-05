@@ -273,6 +273,7 @@ pub enum CommitIntent {
     Retry {
         failure: FailureIdentity,
         expected_version: u64,
+        expected: CheckpointPrecondition,
     },
     Complete {
         lease: DeliveryLease,
@@ -486,7 +487,11 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
             CommitIntent::Retry {
                 failure,
                 expected_version,
+                expected,
             } => {
+                if !self.checkpoint_matches(&failure.0.checkpoint_key(), &expected) {
+                    return CommitResult::Rejected(RejectReason::StaleCheckpoint);
+                }
                 let Some(record) = self.failures.get_mut(&failure) else {
                     return CommitResult::Rejected(RejectReason::FailureMissing);
                 };
@@ -786,6 +791,7 @@ mod tests {
         let retry = backend.apply(CommitIntent::Retry {
             failure: first.identity.clone(),
             expected_version: first.version,
+            expected: expected(&backend, &item),
         });
         let retry_version = match retry {
             CommitResult::RetryScheduled { failure } => failure.version,
@@ -859,6 +865,7 @@ mod tests {
         let scheduled = match backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
             expected_version: failed.version,
+            expected: expected(&backend, &item),
         }) {
             CommitResult::RetryScheduled { failure } => failure,
             _ => panic!(),
@@ -881,6 +888,7 @@ mod tests {
         let _ = backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
             expected_version: failed.version,
+            expected: expected(&backend, &second),
         });
         let failed_again = acquire_and_fail(&mut backend, second);
         assert_eq!(failed_again.status, FailureStatus::Failed);
@@ -997,6 +1005,7 @@ mod tests {
         let _ = backend.apply(CommitIntent::Retry {
             failure: failure.identity.clone(),
             expected_version: failure.version,
+            expected: expected(&backend, &item),
         });
         let lease = acquire(&mut backend, item.clone());
         let advanced = backend.apply(CommitIntent::Complete {
@@ -1045,6 +1054,7 @@ mod tests {
             backend.apply(CommitIntent::Retry {
                 failure: failed.identity.clone(),
                 expected_version: failed.version,
+                expected: expected(&backend, &first),
             }),
             CommitResult::RetryScheduled { .. }
         ));
@@ -1053,6 +1063,34 @@ mod tests {
         let failed_again = acquire_and_fail(&mut backend, same_delivery);
         assert_eq!(failed_again.identity, failed.identity);
         assert_eq!(failed_again.attempts, 2);
+    }
+
+    #[test]
+    fn retry_rejects_a_stale_blocking_checkpoint() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let failed_delivery = delivery("receipt:failed", "resume:after-failed");
+        let failure = acquire_and_fail(&mut backend, failed_delivery.clone());
+        let failed_expected = expected(&backend, &failed_delivery);
+
+        let later_delivery = delivery("receipt:later", "resume:after-later");
+        let lease = acquire(&mut backend, later_delivery.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Complete {
+                lease,
+                expected: expected(&backend, &later_delivery),
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+
+        assert_eq!(
+            backend.apply(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: failed_expected,
+            }),
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert_eq!(backend.failure(&failure.identity).unwrap(), &failure);
     }
 
     #[test]
