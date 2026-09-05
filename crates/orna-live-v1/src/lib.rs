@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_foundation_v1::OvbRaw;
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultStatus, TargetKind,
     canonical_request_fingerprint,
@@ -583,10 +583,7 @@ impl LiveHost {
                         response: None,
                     }));
                 }
-                if matches!(
-                    envelope.message,
-                    Message::Event { .. } | Message::Unsubscribe | Message::Resync
-                ) {
+                if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
                     let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
                     if !self.watches.contains(&(session, watch)) {
                         return Err(Error::Denied);
@@ -633,12 +630,16 @@ impl LiveHost {
                     }
                     Message::Unsubscribe => {
                         let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                        let response = application.unsubscribe(
-                            session,
-                            request,
-                            fingerprint,
-                            &envelope.message,
-                        )?;
+                        let response = if self.watches.contains(&(session, watch)) {
+                            application.unsubscribe(
+                                session,
+                                request,
+                                fingerprint,
+                                &envelope.message,
+                            )?
+                        } else {
+                            unit_result_response(request, fingerprint)
+                        };
                         let outcome = validate_control_response(
                             request,
                             fingerprint,
@@ -954,6 +955,20 @@ fn validate_control_response(
         .ok_or(Error::ApplicationRejected)
 }
 
+fn unit_result_response(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Result {
+            status: ResultStatus::Success,
+            value: Some(CanonicalValue::unit()),
+            fingerprint,
+            diagnostic: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+}
+
 /// Issuers that also expose the last *just issued* credential let a host bind
 /// the security and serving opaque wrappers without ever formatting bytes.
 pub trait LiveCredentialIssuer: CredentialIssuer {
@@ -1039,6 +1054,7 @@ impl TransportLimits {
             || self.lease_ms > 300_000
             || self.max_outgoing_bytes == 0
             || self.request_retention_ms == 0
+            || self.request_retention_ms < self.lease_ms
         {
             return Err(Error::Limit);
         }
