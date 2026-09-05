@@ -97,6 +97,7 @@ fn semantic_adapter_preserves_published_closed_type_diagnostics() {
         "invalid/currency-static-symbol.orna",
         "invalid/float-money-implicit.orna",
         "invalid/float-key.orna",
+        "invalid/relation-equality.orna",
         "invalid/legacy-checkpoint-reset-method.orna",
         "invalid/legacy-failure-replay-method.orna",
         "invalid/legacy-failure-resolve-method.orna",
