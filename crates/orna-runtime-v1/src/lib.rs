@@ -4,12 +4,18 @@
 //! location only from [`orna_repository_v1::Repository::runtime_paths`].
 //! This crate does not publish, project, compact, or contact a remote.
 
-use std::{fmt, path::Path};
+use std::{fmt, future::Future, path::Path, pin::Pin};
 
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot};
 use orna_repository_v1::Repository;
+use orna_stream_v1::{
+    AsyncCheckpointBackend, CancellationClassification, Checkpoint as StreamCheckpoint,
+    CheckpointKey, CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity,
+    DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus,
+    LeasePurpose, Position, RejectReason, SafeDiagnostic,
+};
 use uuid::Uuid;
 
 const SCHEMA: &str = r#"
@@ -59,6 +65,48 @@ CREATE TABLE IF NOT EXISTS request_ledger (
         OR (state IN (3, 4, 5) AND terminal_outcome IS NOT NULL)
     ),
     CHECK (terminal_outcome IS NULL OR length(terminal_outcome) <= 16777216)
+);
+CREATE TABLE IF NOT EXISTS stream_checkpoint (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+    consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+    consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+    consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+    source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+    source TEXT NOT NULL CHECK (length(source) > 0),
+    partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+    partition TEXT NOT NULL CHECK (length(partition) > 0),
+    position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    committed_position TEXT,
+    next_fence INTEGER NOT NULL CHECK (next_fence >= 0)
+);
+CREATE TABLE IF NOT EXISTS stream_failure (
+    identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
+    key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+    consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+    consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+    consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+    source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+    source TEXT NOT NULL CHECK (length(source) > 0),
+    partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+    partition TEXT NOT NULL CHECK (length(partition) > 0),
+    position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+    delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
+    successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 7),
+    diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+    diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
+);
+CREATE TABLE IF NOT EXISTS stream_lease (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
+    successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
+    fence INTEGER NOT NULL CHECK (fence > 0),
+    purpose INTEGER NOT NULL CHECK (purpose BETWEEN 1 AND 2)
 );
 "#;
 
@@ -995,6 +1043,824 @@ impl RuntimeState {
     }
 }
 
+impl AsyncCheckpointBackend for RuntimeState {
+    type Error = RuntimeError;
+    type ApplyFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<CommitResult, RuntimeError>> + 'a>>
+    where
+        Self: 'a;
+    type CheckpointFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<StreamCheckpoint, RuntimeError>> + 'a>>
+    where
+        Self: 'a;
+    type FailureFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<Option<FailureRecord>, RuntimeError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn apply_async<'a>(&'a mut self, intent: CommitIntent) -> Self::ApplyFuture<'a> {
+        Box::pin(async move { apply_stream_intent(self, intent).await })
+    }
+
+    fn checkpoint_async<'a>(&'a self, key: &'a CheckpointKey) -> Self::CheckpointFuture<'a> {
+        Box::pin(async move { load_stream_checkpoint(&self.connection, key).await })
+    }
+
+    fn failure_async<'a>(&'a self, identity: &'a FailureIdentity) -> Self::FailureFuture<'a> {
+        Box::pin(async move { load_stream_failure(&self.connection, identity).await })
+    }
+}
+
+const STREAM_CHECKPOINT_SELECT: &str =
+    "SELECT version, committed_position, next_fence FROM stream_checkpoint WHERE key_id = ?1";
+const STREAM_FAILURE_SELECT: &str = "SELECT \
+    consumer_principal, consumer_root, consumer_function, consumer_binding, \
+    source_format, source, partition_format, partition, position_format, \
+    delivery_position, successor_position, version, attempts, status, \
+    diagnostic_code, diagnostic_class \
+    FROM stream_failure WHERE identity_id = ?1";
+
+#[derive(Clone, Debug)]
+struct StoredStreamLease {
+    delivery_position: String,
+    successor_position: String,
+    fence: u64,
+    purpose: LeasePurpose,
+}
+
+fn stream_key_id(key: &CheckpointKey) -> String {
+    format!(
+        "checkpoint/v1|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        key.consumer.canonical(),
+        key.source_format.as_str(),
+        key.source.as_str(),
+        key.partition_format.as_str(),
+        key.partition.as_str(),
+        key.position_format.as_str(),
+        key.consumer.root.as_str(),
+        key.consumer.function.as_str(),
+        key.consumer.binding.as_str(),
+    )
+}
+
+fn stream_identity_id(identity: &FailureIdentity) -> String {
+    identity.0.canonical()
+}
+
+fn row_text(row: &libsql::Row, index: i32) -> Result<String, RuntimeError> {
+    row.get(index).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_component(value: String) -> Result<Component, RuntimeError> {
+    Component::new(value).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_position(value: String) -> Result<Position, RuntimeError> {
+    Ok(Position {
+        token: decode_component(value)?,
+    })
+}
+
+fn decode_u64(value: i64) -> Result<u64, RuntimeError> {
+    u64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_u32(value: i64) -> Result<u32, RuntimeError> {
+    u32::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn encode_status(status: FailureStatus) -> i64 {
+    match status {
+        FailureStatus::Failed => 1,
+        FailureStatus::Retrying => 2,
+        FailureStatus::Succeeded => 3,
+        FailureStatus::Skipped => 4,
+        FailureStatus::Replaying => 5,
+        FailureStatus::Replayed => 6,
+        FailureStatus::Resolved => 7,
+    }
+}
+
+fn decode_status(value: i64) -> Result<FailureStatus, RuntimeError> {
+    match value {
+        1 => Ok(FailureStatus::Failed),
+        2 => Ok(FailureStatus::Retrying),
+        3 => Ok(FailureStatus::Succeeded),
+        4 => Ok(FailureStatus::Skipped),
+        5 => Ok(FailureStatus::Replaying),
+        6 => Ok(FailureStatus::Replayed),
+        7 => Ok(FailureStatus::Resolved),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn encode_code(code: DiagnosticCode) -> i64 {
+    match code {
+        DiagnosticCode::ProviderUnavailable => 1,
+        DiagnosticCode::DecodeRejected => 2,
+        DiagnosticCode::ExecutionRejected => 3,
+        DiagnosticCode::Cancelled => 4,
+        DiagnosticCode::Internal => 5,
+    }
+}
+
+fn decode_code(value: i64) -> Result<DiagnosticCode, RuntimeError> {
+    match value {
+        1 => Ok(DiagnosticCode::ProviderUnavailable),
+        2 => Ok(DiagnosticCode::DecodeRejected),
+        3 => Ok(DiagnosticCode::ExecutionRejected),
+        4 => Ok(DiagnosticCode::Cancelled),
+        5 => Ok(DiagnosticCode::Internal),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn encode_class(class: DiagnosticClass) -> i64 {
+    match class {
+        DiagnosticClass::Transient => 1,
+        DiagnosticClass::Permanent => 2,
+        DiagnosticClass::Cancellation => 3,
+    }
+}
+
+fn decode_class(value: i64) -> Result<DiagnosticClass, RuntimeError> {
+    match value {
+        1 => Ok(DiagnosticClass::Transient),
+        2 => Ok(DiagnosticClass::Permanent),
+        3 => Ok(DiagnosticClass::Cancellation),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn encode_purpose(purpose: LeasePurpose) -> i64 {
+    match purpose {
+        LeasePurpose::Deliver => 1,
+        LeasePurpose::Skip => 2,
+    }
+}
+
+fn decode_purpose(value: i64) -> Result<LeasePurpose, RuntimeError> {
+    match value {
+        1 => Ok(LeasePurpose::Deliver),
+        2 => Ok(LeasePurpose::Skip),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn decode_diagnostic(row: &libsql::Row, code_index: i32) -> Result<SafeDiagnostic, RuntimeError> {
+    Ok(SafeDiagnostic {
+        code: decode_code(
+            row.get::<i64>(code_index)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        class: decode_class(
+            row.get::<i64>(code_index + 1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+    })
+}
+
+async fn ensure_stream_checkpoint(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO stream_checkpoint (
+                key_id, consumer_principal, consumer_root, consumer_function,
+                consumer_binding, source_format, source, partition_format,
+                partition, position_format, version, committed_position, next_fence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, NULL, 0)
+             ON CONFLICT(key_id) DO NOTHING",
+            params![
+                stream_key_id(key),
+                key.consumer.principal.as_str().to_owned(),
+                key.consumer.root.as_str().to_owned(),
+                key.consumer.function.as_str().to_owned(),
+                key.consumer.binding.as_str().to_owned(),
+                key.source_format.as_str().to_owned(),
+                key.source.as_str().to_owned(),
+                key.partition_format.as_str().to_owned(),
+                key.partition.as_str().to_owned(),
+                key.position_format.as_str().to_owned(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_stream_checkpoint_state(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(StreamCheckpoint, u64), RuntimeError> {
+    let key_id = stream_key_id(key);
+    let mut rows = connection
+        .query(STREAM_CHECKPOINT_SELECT, params![key_id])
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok((
+            StreamCheckpoint {
+                key: key.clone(),
+                version: 0,
+                committed: None,
+            },
+            0,
+        ));
+    };
+    let committed: Option<String> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    Ok((
+        StreamCheckpoint {
+            key: key.clone(),
+            version: decode_u64(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+            committed: committed.map(decode_position).transpose()?,
+        },
+        decode_u64(
+            row.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+    ))
+}
+
+async fn load_stream_checkpoint(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<StreamCheckpoint, RuntimeError> {
+    Ok(load_stream_checkpoint_state(connection, key).await?.0)
+}
+
+async fn load_stream_failure(
+    connection: &Connection,
+    identity: &FailureIdentity,
+) -> Result<Option<FailureRecord>, RuntimeError> {
+    let identity_id = stream_identity_id(identity);
+    let mut rows = connection
+        .query(STREAM_FAILURE_SELECT, params![identity_id])
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let delivery = DeliveryIdentity {
+        consumer: ConsumerIdentity {
+            principal: decode_component(row_text(&row, 0)?)?,
+            root: decode_component(row_text(&row, 1)?)?,
+            function: decode_component(row_text(&row, 2)?)?,
+            binding: decode_component(row_text(&row, 3)?)?,
+        },
+        source_format: decode_component(row_text(&row, 4)?)?,
+        source: decode_component(row_text(&row, 5)?)?,
+        partition_format: decode_component(row_text(&row, 6)?)?,
+        partition: decode_component(row_text(&row, 7)?)?,
+        position_format: decode_component(row_text(&row, 8)?)?,
+        position: decode_position(row_text(&row, 9)?)?,
+        successor: decode_position(row_text(&row, 10)?)?,
+    };
+    Ok(Some(FailureRecord {
+        identity: FailureIdentity(delivery),
+        version: decode_u64(
+            row.get::<i64>(11)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        attempts: decode_u32(
+            row.get::<i64>(12)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        status: decode_status(
+            row.get::<i64>(13)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        diagnostic: decode_diagnostic(&row, 14)?,
+    }))
+}
+
+async fn load_stream_lease(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<Option<StoredStreamLease>, RuntimeError> {
+    let key_id = stream_key_id(key);
+    let mut rows = connection
+        .query(
+            "SELECT delivery_position, successor_position, fence, purpose
+             FROM stream_lease WHERE key_id = ?1",
+            params![key_id],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StoredStreamLease {
+        delivery_position: row_text(&row, 0)?,
+        successor_position: row_text(&row, 1)?,
+        fence: decode_u64(
+            row.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        purpose: decode_purpose(
+            row.get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+    }))
+}
+
+fn lease_matches(lease: &DeliveryLease, stored: &StoredStreamLease) -> bool {
+    lease.fence == stored.fence
+        && lease.purpose == stored.purpose
+        && lease.delivery.position.token.as_str() == stored.delivery_position
+        && lease.delivery.successor.token.as_str() == stored.successor_position
+}
+
+async fn stream_checkpoint_matches(
+    connection: &Connection,
+    key: &CheckpointKey,
+    expected: &orna_stream_v1::CheckpointPrecondition,
+) -> Result<bool, RuntimeError> {
+    let (checkpoint, _) = load_stream_checkpoint_state(connection, key).await?;
+    Ok(checkpoint.version == expected.version && checkpoint.committed == expected.committed)
+}
+
+async fn apply_stream_intent(
+    state: &RuntimeState,
+    intent: CommitIntent,
+) -> Result<CommitResult, RuntimeError> {
+    let transaction = state
+        .connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let result = apply_stream_intent_tx(&transaction, intent).await;
+    match result {
+        Ok(result) => {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(result)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn apply_stream_intent_tx(
+    connection: &Connection,
+    intent: CommitIntent,
+) -> Result<CommitResult, RuntimeError> {
+    match intent {
+        CommitIntent::Acquire {
+            delivery,
+            expected,
+            purpose,
+        } => {
+            let key = delivery.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            if !stream_checkpoint_matches(connection, &key, &expected).await? {
+                return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
+            }
+            if load_stream_lease(connection, &key).await?.is_some() {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseAlreadyHeld));
+            }
+            let identity = FailureIdentity(delivery.clone());
+            if let Some(failure) = load_stream_failure(connection, &identity).await? {
+                let allowed = matches!(
+                    (purpose, failure.status),
+                    (LeasePurpose::Deliver, FailureStatus::Retrying)
+                        | (LeasePurpose::Skip, FailureStatus::Failed)
+                );
+                if !allowed {
+                    return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+                }
+            } else if purpose == LeasePurpose::Skip {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            }
+            let (_, next_fence) = load_stream_checkpoint_state(connection, &key).await?;
+            let fence = next_fence
+                .checked_add(1)
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "UPDATE stream_checkpoint SET next_fence = ?2 WHERE key_id = ?1",
+                    params![
+                        key_id.clone(),
+                        i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "INSERT INTO stream_lease
+                     (key_id, delivery_position, successor_position, fence, purpose)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        key_id,
+                        delivery.position.token.as_str().to_owned(),
+                        delivery.successor.token.as_str().to_owned(),
+                        i64::try_from(fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                        encode_purpose(purpose),
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::Acquired {
+                lease: DeliveryLease {
+                    delivery,
+                    fence,
+                    purpose,
+                },
+            })
+        }
+        CommitIntent::Fail { lease, diagnostic } => {
+            let key = lease.delivery.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(stored) = load_stream_lease(connection, &key).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            };
+            if lease.purpose != LeasePurpose::Deliver || !lease_matches(&lease, &stored) {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            }
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "DELETE FROM stream_lease WHERE key_id = ?1",
+                    params![key_id.clone()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let identity = FailureIdentity(lease.delivery.clone());
+            let identity_id = stream_identity_id(&identity);
+            let delivery = lease.delivery;
+            connection
+                .execute(
+                    "INSERT INTO stream_failure (
+                        identity_id, key_id, consumer_principal, consumer_root,
+                        consumer_function, consumer_binding, source_format, source,
+                        partition_format, partition, position_format,
+                        delivery_position, successor_position, version, attempts,
+                        status, diagnostic_code, diagnostic_class
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                               ?12, ?13, 1, 1, ?14, ?15, ?16)
+                     ON CONFLICT(identity_id) DO UPDATE SET
+                        version = stream_failure.version + 1,
+                        attempts = stream_failure.attempts + 1,
+                        status = ?14,
+                        diagnostic_code = ?15,
+                        diagnostic_class = ?16",
+                    params![
+                        identity_id,
+                        key_id,
+                        delivery.consumer.principal.as_str().to_owned(),
+                        delivery.consumer.root.as_str().to_owned(),
+                        delivery.consumer.function.as_str().to_owned(),
+                        delivery.consumer.binding.as_str().to_owned(),
+                        delivery.source_format.as_str().to_owned(),
+                        delivery.source.as_str().to_owned(),
+                        delivery.partition_format.as_str().to_owned(),
+                        delivery.partition.as_str().to_owned(),
+                        delivery.position_format.as_str().to_owned(),
+                        delivery.position.token.as_str().to_owned(),
+                        delivery.successor.token.as_str().to_owned(),
+                        encode_status(FailureStatus::Failed),
+                        encode_code(diagnostic.code),
+                        encode_class(diagnostic.class),
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::Failed {
+                failure: load_stream_failure(connection, &identity)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::Retry {
+            failure,
+            expected_version,
+            expected,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            if !stream_checkpoint_matches(connection, &key, &expected).await? {
+                return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
+            }
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if record.status != FailureStatus::Failed {
+                return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            let identity_id = stream_identity_id(&failure);
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![identity_id, encode_status(FailureStatus::Retrying)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::RetryScheduled {
+                failure: load_stream_failure(connection, &failure)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::Complete { lease, expected } => {
+            let key = lease.delivery.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            if !stream_checkpoint_matches(connection, &key, &expected).await? {
+                return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
+            }
+            let Some(stored) = load_stream_lease(connection, &key).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            };
+            if lease.purpose != LeasePurpose::Deliver || !lease_matches(&lease, &stored) {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            }
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "UPDATE stream_checkpoint
+                     SET committed_position = ?2, version = version + 1
+                     WHERE key_id = ?1",
+                    params![
+                        key_id.clone(),
+                        lease.delivery.successor.token.as_str().to_owned()
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_lease WHERE key_id = ?1",
+                    params![key_id],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let identity_id = stream_identity_id(&FailureIdentity(lease.delivery));
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![identity_id, encode_status(FailureStatus::Succeeded)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::CheckpointAdvanced {
+                checkpoint: load_stream_checkpoint(connection, &key).await?,
+            })
+        }
+        CommitIntent::Skip {
+            lease,
+            expected,
+            expected_failure_version,
+        } => {
+            let key = lease.delivery.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let identity = FailureIdentity(lease.delivery.clone());
+            let Some(record) = load_stream_failure(connection, &identity).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_failure_version || record.status != FailureStatus::Failed
+            {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if !stream_checkpoint_matches(connection, &key, &expected).await? {
+                return Ok(CommitResult::Rejected(RejectReason::StaleCheckpoint));
+            }
+            let Some(stored) = load_stream_lease(connection, &key).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            };
+            if lease.purpose != LeasePurpose::Skip || !lease_matches(&lease, &stored) {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            }
+            let key_id = stream_key_id(&key);
+            connection
+                .execute(
+                    "UPDATE stream_checkpoint
+                     SET committed_position = ?2, version = version + 1
+                     WHERE key_id = ?1",
+                    params![
+                        key_id.clone(),
+                        lease.delivery.successor.token.as_str().to_owned()
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "DELETE FROM stream_lease WHERE key_id = ?1",
+                    params![key_id],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&identity),
+                        encode_status(FailureStatus::Skipped)
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::CheckpointAdvanced {
+                checkpoint: load_stream_checkpoint(connection, &key).await?,
+            })
+        }
+        CommitIntent::Replay {
+            failure,
+            expected_version,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if record.status != FailureStatus::Skipped {
+                return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&failure),
+                        encode_status(FailureStatus::Replaying)
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::ReplayGranted {
+                grant: orna_stream_v1::ReplayGrant {
+                    failure,
+                    version: record.version + 1,
+                },
+            })
+        }
+        CommitIntent::ReplayComplete {
+            failure,
+            expected_version,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if record.status != FailureStatus::Replaying {
+                return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&failure),
+                        encode_status(FailureStatus::Replayed)
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::ReplayCompleted {
+                failure: load_stream_failure(connection, &failure)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::ReplayFail {
+            failure,
+            expected_version,
+            diagnostic,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if record.status != FailureStatus::Replaying {
+                return Ok(CommitResult::Rejected(RejectReason::RetryNotAllowed));
+            }
+            connection
+                .execute(
+                    "UPDATE stream_failure
+                     SET version = version + 1, attempts = attempts + 1,
+                         status = ?2, diagnostic_code = ?3, diagnostic_class = ?4
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&failure),
+                        encode_status(FailureStatus::Skipped),
+                        encode_code(diagnostic.code),
+                        encode_class(diagnostic.class),
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::ReplayFailed {
+                failure: load_stream_failure(connection, &failure)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::Resolve {
+            failure,
+            expected_version,
+        } => {
+            let key = failure.0.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(record) = load_stream_failure(connection, &failure).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
+            };
+            if record.version != expected_version {
+                return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
+            }
+            if !matches!(
+                record.status,
+                FailureStatus::Succeeded | FailureStatus::Skipped | FailureStatus::Replayed
+            ) {
+                return Ok(CommitResult::Rejected(RejectReason::ResolveBlocked));
+            }
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1",
+                    params![
+                        stream_identity_id(&failure),
+                        encode_status(FailureStatus::Resolved)
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::Resolved {
+                failure: load_stream_failure(connection, &failure)
+                    .await?
+                    .ok_or(RuntimeError::RecoveryInvalid)?,
+            })
+        }
+        CommitIntent::Cancel { lease } => {
+            let key = lease.delivery.checkpoint_key();
+            ensure_stream_checkpoint(connection, &key).await?;
+            let Some(stored) = load_stream_lease(connection, &key).await? else {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            };
+            if !lease_matches(&lease, &stored) {
+                return Ok(CommitResult::Rejected(RejectReason::LeaseFenced));
+            }
+            connection
+                .execute(
+                    "DELETE FROM stream_lease WHERE key_id = ?1",
+                    params![stream_key_id(&key)],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            connection
+                .execute(
+                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                     WHERE identity_id = ?1 AND status = ?3",
+                    params![
+                        stream_identity_id(&FailureIdentity(lease.delivery)),
+                        encode_status(FailureStatus::Failed),
+                        encode_status(FailureStatus::Retrying),
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(CommitResult::Cancelled {
+                checkpoint: load_stream_checkpoint(connection, &key).await?,
+                classification: CancellationClassification::RollbackShaped,
+            })
+        }
+    }
+}
+
 async fn request_status_tx(
     connection: &Connection,
     identity: RequestIdentity,
@@ -1172,6 +2038,117 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    fn stream_delivery(position: &str, successor: &str) -> DeliveryIdentity {
+        DeliveryIdentity {
+            consumer: ConsumerIdentity {
+                principal: Component::new("principal").unwrap(),
+                root: Component::new("root").unwrap(),
+                function: Component::new("consume").unwrap(),
+                binding: Component::new("binding").unwrap(),
+            },
+            source_format: Component::new("source-format").unwrap(),
+            source: Component::new("source").unwrap(),
+            partition_format: Component::new("partition-format").unwrap(),
+            partition: Component::new("partition").unwrap(),
+            position_format: Component::new("position-format").unwrap(),
+            position: Position {
+                token: Component::new(position).unwrap(),
+            },
+            successor: Position {
+                token: Component::new(successor).unwrap(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_stream_backend_reopens_with_checkpoint_and_failure_state() {
+        let (_temp, repo) = repository();
+        let mut state = open_state(&repo).await;
+        let delivery = stream_delivery("one", "two");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match state
+            .apply_async(CommitIntent::Fail {
+                lease,
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert_eq!(failed.attempts, 1);
+        let retry = match state
+            .apply_async(CommitIntent::Retry {
+                failure: failed.identity.clone(),
+                expected_version: failed.version,
+                expected: expected.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("unexpected stream retry result: {other:?}"),
+        };
+        assert_eq!(retry.status, FailureStatus::Retrying);
+        let lease = match state
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream retry acquire result: {other:?}"),
+        };
+        let advanced = match state
+            .apply_async(CommitIntent::Complete { lease, expected })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected stream completion result: {other:?}"),
+        };
+        assert_eq!(
+            advanced.committed,
+            Some(Position {
+                token: Component::new("two").unwrap(),
+            })
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let checkpoint = reopened.checkpoint_async(&advanced.key).await.unwrap();
+        assert_eq!(checkpoint, advanced);
+        let failure = reopened
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("durable failure");
+        assert_eq!(failure.status, FailureStatus::Succeeded);
+        assert_eq!(failure.attempts, 1);
     }
 
     #[tokio::test]
