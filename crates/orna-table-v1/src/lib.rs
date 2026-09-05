@@ -201,6 +201,34 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         }
         Relation::new(groups.into_iter())
     }
+
+    /// Joins each left value with right values sharing a key.
+    pub fn join<Right, Key, LeftKey, RightKey>(
+        self,
+        right: Relation<'a, Right>,
+        mut left_key: LeftKey,
+        mut right_key: RightKey,
+    ) -> Relation<'a, (Item, Right)>
+    where
+        Item: Clone,
+        Right: Clone + 'a,
+        Key: Ord + 'a,
+        LeftKey: FnMut(&Item) -> Key + 'a,
+        RightKey: FnMut(&Right) -> Key + 'a,
+    {
+        let mut right_groups = BTreeMap::<Key, Vec<Right>>::new();
+        for item in right.source {
+            right_groups.entry(right_key(&item)).or_default().push(item);
+        }
+        Relation::new(self.source.flat_map(move |left| {
+            right_groups
+                .get(&left_key(&left))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |right| (left.clone(), right))
+        }))
+    }
 }
 
 impl<Item> Iterator for Relation<'_, Item> {
@@ -1230,6 +1258,18 @@ mod tests {
                 ('o', vec![(1, "one")]),
                 ('t', vec![(2, "two"), (3, "three")]),
             ]
+        );
+        assert_eq!(
+            database
+                .relation(&"notes")
+                .join(
+                    database.relation(&"notes"),
+                    |(_, row)| row.chars().next().expect("nonempty row"),
+                    |(_, row)| row.chars().next().expect("nonempty row"),
+                )
+                .map(|((left_key, _), (right_key, _))| (left_key, right_key))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 2), (2, 3), (3, 2), (3, 3), (4, 4)]
         );
 
         let mut activation = database.begin();
