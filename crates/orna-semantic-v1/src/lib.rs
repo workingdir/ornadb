@@ -3953,7 +3953,11 @@ fn infer_table_operation(
             Some("database read"),
         ),
         "one" => (0, table.ty.clone(), Some("database read")),
-        "as_of" => (1, table.ty.clone(), Some("database read")),
+        "as_of" => (
+            1,
+            Type::Relation(Box::new(table.ty.clone())),
+            Some("database read"),
+        ),
         _ => return None,
     };
     if arguments.len() != parameters {
