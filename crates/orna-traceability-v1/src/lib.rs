@@ -69,6 +69,7 @@ pub struct ScenarioTrace {
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
     Executed,
+    PartiallyExecuted,
     SpecifiedModelOnly,
     JustifiedGap,
 }
@@ -443,12 +444,22 @@ fn status_from_level(level: &str) -> Status {
     }
 }
 fn aggregate(statuses: &[Status]) -> Status {
-    if statuses.contains(&Status::Executed) {
-        Status::Executed
-    } else if statuses.contains(&Status::SpecifiedModelOnly) {
-        Status::SpecifiedModelOnly
-    } else {
+    if statuses.is_empty() {
         Status::JustifiedGap
+    } else if statuses.iter().all(|status| *status == Status::Executed) {
+        Status::Executed
+    } else if statuses
+        .iter()
+        .all(|status| *status == Status::SpecifiedModelOnly)
+    {
+        Status::SpecifiedModelOnly
+    } else if statuses
+        .iter()
+        .all(|status| *status == Status::JustifiedGap)
+    {
+        Status::JustifiedGap
+    } else {
+        Status::PartiallyExecuted
     }
 }
 fn logical_test_id(test: &Test, fallback: &str) -> String {
@@ -561,6 +572,34 @@ mod tests {
                 .iter()
                 .all(|item| item.status == Status::JustifiedGap)
         );
+    }
+    #[test]
+    fn aggregate_requires_all_applicable_boundaries_to_execute() {
+        let cases = [
+            (
+                "all executed",
+                vec![Status::Executed, Status::Executed],
+                Status::Executed,
+            ),
+            (
+                "all gaps",
+                vec![Status::JustifiedGap, Status::JustifiedGap],
+                Status::JustifiedGap,
+            ),
+            (
+                "executed and model",
+                vec![Status::Executed, Status::SpecifiedModelOnly],
+                Status::PartiallyExecuted,
+            ),
+            (
+                "executed and gap",
+                vec![Status::Executed, Status::JustifiedGap],
+                Status::PartiallyExecuted,
+            ),
+        ];
+        for (name, statuses, expected) in cases {
+            assert_eq!(aggregate(&statuses), expected, "{name}");
+        }
     }
     #[test]
     fn output_is_logical_only() {
