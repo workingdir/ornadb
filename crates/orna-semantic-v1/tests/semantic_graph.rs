@@ -113,6 +113,22 @@ fn system_file_history_uses_the_file_reference_overload() {
 }
 
 #[test]
+fn system_catalogue_relations_support_typed_filter_and_map_queries() {
+    let result = analyze(&[
+        ModuleInput::new(
+            "sys-definition-file.orna",
+            "pub fn source_files(function: sys.Function) = sys.catalog.definitions | filter(definition => definition.reference == function.definition) | map(definition => definition.file);",
+        ),
+        ModuleInput::new(
+            "sys-table-query.orna",
+            "pub fn inventory_table_objects() = sys.catalog.objects | filter(object => object.kind == sys.ObjectKind.table && object.qualified_name.starts_with(\"inventory.\"));",
+        ),
+    ]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn qualified_table_operations_infer_rows_and_reach_block_expression_statements() {
     let result = analyze(&[
         ModuleInput::new("library.orna", "pub table Book(id: Str) { title: Str, }"),
