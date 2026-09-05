@@ -271,6 +271,12 @@ pub struct RuntimeState {
     connection: Connection,
 }
 
+/// Writer-fenced stream administration backed by one runtime state.
+pub struct RuntimeStreamBackend<'a> {
+    state: &'a RuntimeState,
+    lease: WriterLease,
+}
+
 impl RuntimeState {
     /// Opens the `state.db` path resolved by Git for this exact worktree.
     pub async fn open(
@@ -312,6 +318,11 @@ impl RuntimeState {
         state.initialize(identity, initial_digest).await?;
         state.validate_recovery().await?;
         Ok(state)
+    }
+
+    /// Creates a stream backend whose mutations are fenced by this writer lease.
+    pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
+        RuntimeStreamBackend { state: self, lease }
     }
 
     async fn initialize(
@@ -1043,7 +1054,7 @@ impl RuntimeState {
     }
 }
 
-impl AsyncCheckpointBackend for RuntimeState {
+impl AsyncCheckpointBackend for RuntimeStreamBackend<'_> {
     type Error = RuntimeError;
     type ApplyFuture<'a>
         = Pin<Box<dyn Future<Output = Result<CommitResult, RuntimeError>> + 'a>>
@@ -1059,15 +1070,15 @@ impl AsyncCheckpointBackend for RuntimeState {
         Self: 'a;
 
     fn apply_async<'a>(&'a mut self, intent: CommitIntent) -> Self::ApplyFuture<'a> {
-        Box::pin(async move { apply_stream_intent(self, intent).await })
+        Box::pin(async move { apply_stream_intent(self.state, self.lease, intent).await })
     }
 
     fn checkpoint_async<'a>(&'a self, key: &'a CheckpointKey) -> Self::CheckpointFuture<'a> {
-        Box::pin(async move { load_stream_checkpoint(&self.connection, key).await })
+        Box::pin(async move { load_stream_checkpoint(&self.state.connection, key).await })
     }
 
     fn failure_async<'a>(&'a self, identity: &'a FailureIdentity) -> Self::FailureFuture<'a> {
-        Box::pin(async move { load_stream_failure(&self.connection, identity).await })
+        Box::pin(async move { load_stream_failure(&self.state.connection, identity).await })
     }
 }
 
@@ -1398,6 +1409,7 @@ async fn stream_checkpoint_matches(
 
 async fn apply_stream_intent(
     state: &RuntimeState,
+    lease: WriterLease,
     intent: CommitIntent,
 ) -> Result<CommitResult, RuntimeError> {
     let transaction = state
@@ -1405,6 +1417,7 @@ async fn apply_stream_intent(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+    state.require_owner(&transaction, lease).await?;
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
@@ -2065,84 +2078,91 @@ mod tests {
     #[tokio::test]
     async fn durable_stream_backend_reopens_with_checkpoint_and_failure_state() {
         let (_temp, repo) = repository();
-        let mut state = open_state(&repo).await;
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
         let delivery = stream_delivery("one", "two");
         let expected = orna_stream_v1::CheckpointPrecondition {
             version: 0,
             committed: None,
         };
-        let lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: delivery.clone(),
-                expected: expected.clone(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected stream acquire result: {other:?}"),
+        let (failed, advanced) = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .apply_async(CommitIntent::Fail {
+                    lease,
+                    diagnostic: SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            assert_eq!(failed.attempts, 1);
+            let retry = match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity.clone(),
+                    expected_version: failed.version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected stream retry result: {other:?}"),
+            };
+            assert_eq!(retry.status, FailureStatus::Retrying);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream retry acquire result: {other:?}"),
+            };
+            let advanced = match stream
+                .apply_async(CommitIntent::Complete { lease, expected })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected stream completion result: {other:?}"),
+            };
+            assert_eq!(
+                advanced.committed,
+                Some(Position {
+                    token: Component::new("two").unwrap(),
+                })
+            );
+            (failed, advanced)
         };
-        let failed = match state
-            .apply_async(CommitIntent::Fail {
-                lease,
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Permanent,
-                },
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Failed { failure } => failure,
-            other => panic!("unexpected stream failure result: {other:?}"),
-        };
-        assert_eq!(failed.attempts, 1);
-        let retry = match state
-            .apply_async(CommitIntent::Retry {
-                failure: failed.identity.clone(),
-                expected_version: failed.version,
-                expected: expected.clone(),
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::RetryScheduled { failure } => failure,
-            other => panic!("unexpected stream retry result: {other:?}"),
-        };
-        assert_eq!(retry.status, FailureStatus::Retrying);
-        let lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery,
-                expected: expected.clone(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected stream retry acquire result: {other:?}"),
-        };
-        let advanced = match state
-            .apply_async(CommitIntent::Complete { lease, expected })
-            .await
-            .unwrap()
-        {
-            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
-            other => panic!("unexpected stream completion result: {other:?}"),
-        };
-        assert_eq!(
-            advanced.committed,
-            Some(Position {
-                token: Component::new("two").unwrap(),
-            })
-        );
         drop(state);
 
         let reopened = open_state(&repo).await;
-        let checkpoint = reopened.checkpoint_async(&advanced.key).await.unwrap();
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let stream = reopened.stream_backend(writer);
+        let checkpoint = stream.checkpoint_async(&advanced.key).await.unwrap();
         assert_eq!(checkpoint, advanced);
-        let failure = reopened
+        let failure = stream
             .failure_async(&failed.identity)
             .await
             .unwrap()
@@ -2152,80 +2172,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_fenced_stream_backend_rejects_stale_writer_without_mutation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let old = state.acquire_lease(id(4)).await.unwrap();
+        let mut old_backend = state.stream_backend(old);
+        let replacement = state.recover_abandoned(id(4), id(5)).await.unwrap();
+        let delivery = stream_delivery("stale-owner", "next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+
+        assert_eq!(
+            old_backend
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected,
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            old_backend
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap()
+                .version,
+            0
+        );
+
+        let mut replacement_backend = state.stream_backend(replacement);
+        assert!(matches!(
+            replacement_backend
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: orna_stream_v1::CheckpointPrecondition {
+                        version: 0,
+                        committed: None,
+                    },
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn durable_stream_backend_fences_stale_leases_and_reopens_active_lease() {
         let (_temp, repo) = repository();
-        let mut state = open_state(&repo).await;
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
         let delivery = stream_delivery("lease-one", "lease-two");
         let expected = orna_stream_v1::CheckpointPrecondition {
             version: 0,
             committed: None,
         };
-        let first = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: delivery.clone(),
-                expected: expected.clone(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected stream acquire result: {other:?}"),
-        };
-        assert!(matches!(
-            state
-                .apply_async(CommitIntent::Cancel {
-                    lease: first.clone(),
+        let second = {
+            let mut stream = state.stream_backend(writer);
+            let first = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
                 })
-                .await
-                .unwrap(),
-            CommitResult::Cancelled {
-                classification: CancellationClassification::RollbackShaped,
-                checkpoint: StreamCheckpoint {
-                    version: 0,
-                    committed: None,
-                    ..
-                },
-            }
-        ));
-        assert!(
-            state
-                .failure_async(&FailureIdentity(delivery.clone()))
                 .await
                 .unwrap()
-                .is_none()
-        );
-
-        let second = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: delivery.clone(),
-                expected: expected.clone(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected replacement acquire result: {other:?}"),
-        };
-        assert!(second.fence > first.fence);
-        assert_eq!(
-            state
-                .apply_async(CommitIntent::Fail {
-                    lease: first,
-                    diagnostic: SafeDiagnostic {
-                        code: DiagnosticCode::ExecutionRejected,
-                        class: DiagnosticClass::Permanent,
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Cancel {
+                        lease: first.clone(),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Cancelled {
+                    classification: CancellationClassification::RollbackShaped,
+                    checkpoint: StreamCheckpoint {
+                        version: 0,
+                        committed: None,
+                        ..
                     },
+                }
+            ));
+            assert!(
+                stream
+                    .failure_async(&FailureIdentity(delivery.clone()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let second = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
                 })
                 .await
-                .unwrap(),
-            CommitResult::Rejected(RejectReason::LeaseFenced)
-        );
-
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected replacement acquire result: {other:?}"),
+            };
+            assert!(second.fence > first.fence);
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Fail {
+                        lease: first,
+                        diagnostic: SafeDiagnostic {
+                            code: DiagnosticCode::ExecutionRejected,
+                            class: DiagnosticClass::Permanent,
+                        },
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::LeaseFenced)
+            );
+            second
+        };
         drop(state);
-        let mut reopened = open_state(&repo).await;
-        let advanced = match reopened
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let mut stream = reopened.stream_backend(writer);
+        let advanced = match stream
             .apply_async(CommitIntent::Complete {
                 lease: second,
                 expected,
@@ -2247,211 +2322,220 @@ mod tests {
     #[tokio::test]
     async fn durable_stream_backend_persists_skip_replay_resolution_and_stale_cas() {
         let (_temp, repo) = repository();
-        let mut state = open_state(&repo).await;
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
         let delivery = stream_delivery("failed", "after-failed");
         let expected = orna_stream_v1::CheckpointPrecondition {
             version: 0,
             committed: None,
         };
-        let lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: delivery.clone(),
-                expected: expected.clone(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected stream acquire result: {other:?}"),
-        };
-        let failed = match state
-            .apply_async(CommitIntent::Fail {
-                lease,
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ProviderUnavailable,
-                    class: DiagnosticClass::Transient,
-                },
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Failed { failure } => failure,
-            other => panic!("unexpected stream failure result: {other:?}"),
-        };
-        let skip_lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: delivery.clone(),
-                expected: expected.clone(),
-                purpose: LeasePurpose::Skip,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected skip acquire result: {other:?}"),
-        };
-        let skipped = match state
-            .apply_async(CommitIntent::Skip {
-                lease: skip_lease,
-                expected: expected.clone(),
-                expected_failure_version: failed.version,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
-            other => panic!("unexpected skip result: {other:?}"),
-        };
-        let skipped_failure = state
-            .failure_async(&failed.identity)
-            .await
-            .unwrap()
-            .expect("skipped failure");
-        assert_eq!(skipped_failure.status, FailureStatus::Skipped);
-
-        let replay = match state
-            .apply_async(CommitIntent::Replay {
-                failure: failed.identity.clone(),
-                expected_version: skipped_failure.version,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::ReplayGranted { grant } => grant,
-            other => panic!("unexpected replay result: {other:?}"),
-        };
-        assert_eq!(state.checkpoint_async(&skipped.key).await.unwrap(), skipped);
-        let replay_failed = match state
-            .apply_async(CommitIntent::ReplayFail {
-                failure: replay.failure.clone(),
-                expected_version: replay.version,
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::DecodeRejected,
-                    class: DiagnosticClass::Permanent,
-                },
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::ReplayFailed { failure } => failure,
-            other => panic!("unexpected replay failure result: {other:?}"),
-        };
-        assert_eq!(replay_failed.attempts, 2);
-        let replay = match state
-            .apply_async(CommitIntent::Replay {
-                failure: replay_failed.identity.clone(),
-                expected_version: replay_failed.version,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::ReplayGranted { grant } => grant,
-            other => panic!("unexpected second replay result: {other:?}"),
-        };
-        let replayed = match state
-            .apply_async(CommitIntent::ReplayComplete {
-                failure: replay.failure,
-                expected_version: replay.version,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::ReplayCompleted { failure } => failure,
-            other => panic!("unexpected replay completion result: {other:?}"),
-        };
-        let resolved = match state
-            .apply_async(CommitIntent::Resolve {
-                failure: replayed.identity.clone(),
-                expected_version: replayed.version,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Resolved { failure } => failure,
-            other => panic!("unexpected resolve result: {other:?}"),
-        };
-        assert_eq!(resolved.status, FailureStatus::Resolved);
-
-        let stale_delivery = stream_delivery("stale", "stale-next");
-        let stale_lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: stale_delivery.clone(),
-                expected: (&skipped).into(),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected stale acquire result: {other:?}"),
-        };
-        let stale_failure = match state
-            .apply_async(CommitIntent::Fail {
-                lease: stale_lease,
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Permanent,
-                },
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Failed { failure } => failure,
-            other => panic!("unexpected stale failure result: {other:?}"),
-        };
-        let current = state
-            .checkpoint_async(&stale_delivery.checkpoint_key())
-            .await
-            .unwrap();
-        let later = stream_delivery("later", "later-next");
-        let later_lease = match state
-            .apply_async(CommitIntent::Acquire {
-                delivery: later.clone(),
-                expected: orna_stream_v1::CheckpointPrecondition::from(&current),
-                purpose: LeasePurpose::Deliver,
-            })
-            .await
-            .unwrap()
-        {
-            CommitResult::Acquired { lease } => lease,
-            other => panic!("unexpected later acquire result: {other:?}"),
-        };
-        assert!(matches!(
-            state
-                .apply_async(CommitIntent::Complete {
-                    lease: later_lease,
-                    expected: orna_stream_v1::CheckpointPrecondition::from(&current),
+        let resolved = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
                 })
-                .await
-                .unwrap(),
-            CommitResult::CheckpointAdvanced { .. }
-        ));
-        assert_eq!(
-            state
-                .apply_async(CommitIntent::Retry {
-                    failure: stale_failure.identity.clone(),
-                    expected_version: stale_failure.version,
-                    expected: orna_stream_v1::CheckpointPrecondition::from(&current),
-                })
-                .await
-                .unwrap(),
-            CommitResult::Rejected(RejectReason::StaleCheckpoint)
-        );
-        assert_eq!(
-            state
-                .failure_async(&stale_failure.identity)
                 .await
                 .unwrap()
-                .expect("stale failure")
-                .status,
-            FailureStatus::Failed
-        );
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .apply_async(CommitIntent::Fail {
+                    lease,
+                    diagnostic: SafeDiagnostic {
+                        code: DiagnosticCode::ProviderUnavailable,
+                        class: DiagnosticClass::Transient,
+                    },
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip acquire result: {other:?}"),
+            };
+            let skipped = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected: expected.clone(),
+                    expected_failure_version: failed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped_failure = stream
+                .failure_async(&failed.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            assert_eq!(skipped_failure.status, FailureStatus::Skipped);
 
+            let replay = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failed.identity.clone(),
+                    expected_version: skipped_failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay result: {other:?}"),
+            };
+            assert_eq!(
+                stream.checkpoint_async(&skipped.key).await.unwrap(),
+                skipped
+            );
+            let replay_failed = match stream
+                .apply_async(CommitIntent::ReplayFail {
+                    failure: replay.failure.clone(),
+                    expected_version: replay.version,
+                    diagnostic: SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayFailed { failure } => failure,
+                other => panic!("unexpected replay failure result: {other:?}"),
+            };
+            assert_eq!(replay_failed.attempts, 2);
+            let replay = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: replay_failed.identity.clone(),
+                    expected_version: replay_failed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected second replay result: {other:?}"),
+            };
+            let replayed = match stream
+                .apply_async(CommitIntent::ReplayComplete {
+                    failure: replay.failure,
+                    expected_version: replay.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayCompleted { failure } => failure,
+                other => panic!("unexpected replay completion result: {other:?}"),
+            };
+            let resolved = match stream
+                .apply_async(CommitIntent::Resolve {
+                    failure: replayed.identity.clone(),
+                    expected_version: replayed.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Resolved { failure } => failure,
+                other => panic!("unexpected resolve result: {other:?}"),
+            };
+            assert_eq!(resolved.status, FailureStatus::Resolved);
+
+            let stale_delivery = stream_delivery("stale", "stale-next");
+            let stale_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: stale_delivery.clone(),
+                    expected: (&skipped).into(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stale acquire result: {other:?}"),
+            };
+            let stale_failure = match stream
+                .apply_async(CommitIntent::Fail {
+                    lease: stale_lease,
+                    diagnostic: SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stale failure result: {other:?}"),
+            };
+            let current = stream
+                .checkpoint_async(&stale_delivery.checkpoint_key())
+                .await
+                .unwrap();
+            let later = stream_delivery("later", "later-next");
+            let later_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: later.clone(),
+                    expected: orna_stream_v1::CheckpointPrecondition::from(&current),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected later acquire result: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Complete {
+                        lease: later_lease,
+                        expected: orna_stream_v1::CheckpointPrecondition::from(&current),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::CheckpointAdvanced { .. }
+            ));
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Retry {
+                        failure: stale_failure.identity.clone(),
+                        expected_version: stale_failure.version,
+                        expected: orna_stream_v1::CheckpointPrecondition::from(&current),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StaleCheckpoint)
+            );
+            assert_eq!(
+                stream
+                    .failure_async(&stale_failure.identity)
+                    .await
+                    .unwrap()
+                    .expect("stale failure")
+                    .status,
+                FailureStatus::Failed
+            );
+            resolved
+        };
         drop(state);
         let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        let stream = reopened.stream_backend(writer);
         assert_eq!(
-            reopened
+            stream
                 .failure_async(&resolved.identity)
                 .await
                 .unwrap()
