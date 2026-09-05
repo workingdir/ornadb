@@ -475,6 +475,24 @@ fn display_implementations_reject_database_writes() {
 }
 
 #[test]
+fn secret_values_reject_display_after_authoritative_open() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "secret.orna",
+            "pub fn bad() = std.secret.open(std.secret.ref(\"x\"), as: Str).display();",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "secret values cannot be displayed" })
+    );
+}
+
+#[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze(&[ModuleInput::new(
         "sum.orna",
