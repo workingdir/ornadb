@@ -349,6 +349,25 @@ fn generic_ordering_pipeline_keeps_element_and_optional_types() {
 }
 
 #[test]
+fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
+    let result = analyze(&[ModuleInput::new(
+        "inferred.orna",
+        "pub fn square(value) = value * value;",
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("inferred module");
+    assert_eq!(
+        module.symbols.get("square").expect("square function").ty,
+        Type::Function {
+            parameters: vec![Type::Int],
+            parameter_names: Some(vec!["value".into()]),
+            result: Box::new(Type::Int),
+        }
+    );
+}
+
+#[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     let result = analyze(&[ModuleInput::new(
         "literals.orna",
