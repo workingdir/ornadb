@@ -86,6 +86,22 @@ fn table_assertion_elaborates_reference_relation_predicates_without_an_evaluator
 }
 
 #[test]
+fn module_assertion_elaborates_the_reference_projects_nested_relation_predicate() {
+    let result = analyze(&[ModuleInput::new(
+        "library.orna",
+        r#"
+            pub table Book(id: Str) { title: Str, }
+            pub table Loan(book_id: Str) { borrower: Str, }
+            assert every(Loan, loan =>
+                exists(Book, book => book.id == loan.book_id)
+            );
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn authoritative_core_catalogue_resolves_prelude_types_and_common_functions() {
     let profile = Catalogue::authoritative_core();
     let result = analyze_with_catalogue(
