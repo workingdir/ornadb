@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 
 /// A non-empty, separator-free typed identity component.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -364,6 +365,35 @@ pub trait CheckpointBackend {
     fn failure(&self, identity: &FailureIdentity) -> Option<&FailureRecord>;
 }
 
+/// Asynchronous durability seam for a runtime-owned checkpoint store.
+///
+/// The async backend has the same atomic intent boundary as
+/// [`CheckpointBackend`]. Storage failures are distinct from deterministic
+/// [`RejectReason`] outcomes, and checkpoint/failure reads return owned
+/// snapshots so an implementation may hold a database borrow across an await
+/// without exposing storage lifetimes to stream administration.
+pub trait AsyncCheckpointBackend {
+    type Error;
+    type ApplyFuture<'a>: Future<Output = Result<CommitResult, Self::Error>> + 'a
+    where
+        Self: 'a;
+    type CheckpointFuture<'a>: Future<Output = Result<Checkpoint, Self::Error>> + 'a
+    where
+        Self: 'a;
+    type FailureFuture<'a>: Future<Output = Result<Option<FailureRecord>, Self::Error>> + 'a
+    where
+        Self: 'a;
+
+    /// Atomically apply one complete stream intent.
+    fn apply_async<'a>(&'a mut self, intent: CommitIntent) -> Self::ApplyFuture<'a>;
+
+    /// Read the current owned checkpoint snapshot for an ordered stream key.
+    fn checkpoint_async<'a>(&'a self, key: &'a CheckpointKey) -> Self::CheckpointFuture<'a>;
+
+    /// Read the current owned failure snapshot, if one exists.
+    fn failure_async<'a>(&'a self, identity: &'a FailureIdentity) -> Self::FailureFuture<'a>;
+}
+
 /// Deterministic in-memory backend for runtime integration and focused tests.
 #[derive(Default)]
 pub struct InMemoryCheckpointBackend {
@@ -684,6 +714,9 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn component(value: &str) -> Component {
         Component::new(value).unwrap()
@@ -692,6 +725,85 @@ mod tests {
         Position {
             token: component(token),
         }
+    }
+
+    struct ReadyAsyncBackend {
+        inner: InMemoryCheckpointBackend,
+    }
+
+    impl AsyncCheckpointBackend for ReadyAsyncBackend {
+        type Error = ();
+        type ApplyFuture<'a>
+            = std::future::Ready<Result<CommitResult, ()>>
+        where
+            Self: 'a;
+        type CheckpointFuture<'a>
+            = std::future::Ready<Result<Checkpoint, ()>>
+        where
+            Self: 'a;
+        type FailureFuture<'a>
+            = std::future::Ready<Result<Option<FailureRecord>, ()>>
+        where
+            Self: 'a;
+
+        fn apply_async<'a>(&'a mut self, intent: CommitIntent) -> Self::ApplyFuture<'a> {
+            std::future::ready(Ok(self.inner.apply(intent)))
+        }
+
+        fn checkpoint_async<'a>(&'a self, key: &'a CheckpointKey) -> Self::CheckpointFuture<'a> {
+            std::future::ready(Ok(self.inner.checkpoint(key)))
+        }
+
+        fn failure_async<'a>(&'a self, identity: &'a FailureIdentity) -> Self::FailureFuture<'a> {
+            std::future::ready(Ok(self.inner.failure(identity).cloned()))
+        }
+    }
+
+    fn poll_ready<F: Future>(future: F) -> F::Output {
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test future was not ready"),
+        }
+    }
+
+    #[test]
+    fn async_backend_preserves_atomic_intent_result_shapes() {
+        let item = delivery("one", "two");
+        let key = item.checkpoint_key();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut backend = ReadyAsyncBackend {
+            inner: InMemoryCheckpointBackend::default(),
+        };
+        let lease = match poll_ready(backend.apply_async(CommitIntent::Acquire {
+            delivery: item.clone(),
+            expected: expected.clone(),
+            purpose: LeasePurpose::Deliver,
+        }))
+        .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected async acquire result: {other:?}"),
+        };
+        let result =
+            poll_ready(backend.apply_async(CommitIntent::Complete { lease, expected })).unwrap();
+        assert!(matches!(result, CommitResult::CheckpointAdvanced { .. }));
+        assert_eq!(
+            poll_ready(backend.checkpoint_async(&key))
+                .unwrap()
+                .committed,
+            Some(position("two"))
+        );
+        assert!(
+            poll_ready(backend.failure_async(&FailureIdentity(item)))
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn delivery(token: &str, successor: &str) -> DeliveryIdentity {
