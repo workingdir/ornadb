@@ -354,6 +354,24 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn retained_functions_execute_closures_without_mutating_captures() {
+    let module = SourceUnit {
+        fixture_id: "closure-capture".into(),
+        source_id: "logical/closure-capture.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "fn verify() { let seed = 2; let compute = value => value + seed; seed = 9; if (10 | compute) == 12 { 1 } else { 1 / 0 } } fn reject() { let seed = 1; let mutate = () => { seed += 1; seed }; mutate() }".into(),
+    };
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(evaluator.evaluate(&module), StageOutcome::Passed);
+    assert_eq!(evaluator.invoke("verify"), StageOutcome::Passed);
+    let StageOutcome::Failed(diagnostic) = evaluator.invoke("reject") else {
+        panic!("captured values are immutable");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-EVAL-IMMUTABLE-CAPTURE");
+    assert_eq!(diagnostic.message(), "<redacted>");
+}
+
+#[test]
 fn retained_function_pipeline_executes_and_checks_its_result() {
     let module = SourceUnit {
         fixture_id: "function-pipeline".into(),
