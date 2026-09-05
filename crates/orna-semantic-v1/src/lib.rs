@@ -1183,6 +1183,12 @@ fn infer(
             }
         }
         Expr::Name { text, .. } => {
+            if let Some(ty) = intrinsic_value_type(text) {
+                return Inferred {
+                    ty,
+                    effects: EffectSummary::default(),
+                };
+            }
             if scope.ambiguous.contains(text) {
                 diagnostics.push(diag(
                     DIAG_AMBIGUOUS,
@@ -1292,6 +1298,12 @@ fn infer(
                 return resolve_qualified_module_member(&path, scope, diagnostics);
             }
             let base = infer(base, scope, local, diagnostics);
+            if let Some(ty) = infer_numeric_member(&base.ty, name) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
             if let Some(ty) = infer_numeric_postfix(&base.ty, name, scope) {
                 return Inferred {
                     ty,
@@ -1802,45 +1814,45 @@ fn check_call_arguments(
     values: &[Type],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let named = arguments
-        .iter()
-        .filter(|argument| argument.name.is_some())
-        .count();
-    if named == 0 {
-        if parameters.len() != values.len() {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "function argument count does not match its static signature",
-            ));
-        }
-        for (expected, actual) in parameters.iter().zip(values) {
-            require_same(expected, actual, diagnostics);
-        }
-        return;
-    }
-    if named != arguments.len() {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "function call cannot mix named and positional arguments",
-        ));
-        return;
-    }
     let Some(parameter_names) = parameter_names.filter(|names| names.len() == parameters.len())
     else {
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "named arguments require declared parameter names",
-        ));
+        if arguments.iter().any(|argument| argument.name.is_some()) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "named arguments require declared parameter names",
+            ));
+        } else {
+            if parameters.len() != values.len() {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "function argument count does not match its static signature",
+                ));
+            }
+            for (expected, actual) in parameters.iter().zip(values) {
+                require_same(expected, actual, diagnostics);
+            }
+        }
         return;
     };
     let mut seen = BTreeSet::new();
     let mut malformed = parameters.len() != values.len();
+    let mut positional = 0usize;
+    let mut named_started = false;
     for (argument, actual) in arguments.iter().zip(values) {
-        let name = argument.name.as_deref().expect("all arguments are named");
-        let Some(index) = parameter_names
-            .iter()
-            .position(|parameter| parameter == name)
-        else {
+        let index = if let Some(name) = argument.name.as_deref() {
+            named_started = true;
+            parameter_names
+                .iter()
+                .position(|parameter| parameter == name)
+        } else if named_started {
+            malformed = true;
+            None
+        } else {
+            let index = (positional < parameters.len()).then_some(positional);
+            positional += 1;
+            index
+        };
+        let Some(index) = index else {
             malformed = true;
             continue;
         };
@@ -2382,6 +2394,15 @@ fn infer_success_pipeline(
             effects: input.effects,
         };
     }
+    if let Expr::Name { text, .. } = rhs
+        && text == "count"
+        && matches!(input.ty, Type::Relation(_))
+    {
+        return Inferred {
+            ty: Type::Int,
+            effects: input.effects,
+        };
+    }
     if !matches!(input.ty, Type::Relation(_) | Type::Stream(_)) {
         return match rhs {
             Expr::Call {
@@ -2436,6 +2457,7 @@ fn infer_success_pipeline(
     let (ty, callback_result) = match (text.as_str(), is_stream, arguments.as_slice()) {
         ("filter", false, [_]) => (Type::Relation(Box::new(element.clone())), Some(Type::Bool)),
         ("one", false, []) => (element.clone(), None),
+        ("count", false, []) => (Type::Int, None),
         ("for_each", true, [_]) => (Type::Null, Some(Type::Null)),
         _ => {
             let ignored = infer(rhs, scope, local, diagnostics);
@@ -2758,6 +2780,24 @@ fn resolve_qualified_module_member(
 fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic>) {
     if expected != actual && !matches!(expected, Type::Error) && !matches!(actual, Type::Error) {
         diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+    }
+}
+
+fn intrinsic_value_type(name: &str) -> Option<Type> {
+    match name {
+        "half_even" => Some(Type::Named("std.Rounding".into())),
+        _ => None,
+    }
+}
+
+fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
+    match (base, name) {
+        (Type::Decimal, "divide") => Some(Type::Function {
+            parameters: vec![Type::Decimal, Type::Int, Type::Named("std.Rounding".into())],
+            parameter_names: Some(vec!["value".into(), "scale".into(), "rounding".into()]),
+            result: Box::new(Type::Decimal),
+        }),
+        _ => None,
     }
 }
 

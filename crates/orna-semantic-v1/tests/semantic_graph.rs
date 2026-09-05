@@ -277,6 +277,26 @@ fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
 }
 
 #[test]
+fn numeric_methods_and_relation_count_use_closed_intrinsic_shapes() {
+    let result = analyze(&[ModuleInput::new(
+        "intrinsics.orna",
+        r#"
+            pub table Note { text: Str, }
+            pub fn exact_eighth(): Decimal = 1.decimal / 8.decimal;
+            pub fn rounded_third(): Decimal = 1.decimal.divide(
+                3.decimal,
+                scale: 6,
+                rounding: half_even,
+            );
+            pub fn count_call(): Int = Note | count();
+            pub fn count_name(): Int = Note | count;
+        "#,
+    )]);
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_execution() {
     let source = r#"
             pub table Book(id: Int) { title: Str, }
