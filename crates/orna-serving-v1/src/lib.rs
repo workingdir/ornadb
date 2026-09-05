@@ -249,6 +249,23 @@ impl Serving {
         Ok(())
     }
 
+    /// Replace a session credential only after checking the credential that
+    /// currently protects the serving state.  A host uses this while rotating
+    /// one shared session credential across the security and serving layers.
+    pub fn rotate_credential(
+        &mut self,
+        session_id: Id,
+        current: &Credential,
+        replacement: Credential,
+    ) -> Result<()> {
+        let session = self.session_mut(session_id)?;
+        if &session.credential != current {
+            return Err(Error::CredentialRejected);
+        }
+        session.credential = replacement;
+        Ok(())
+    }
+
     pub fn retain_pin(&self, session_id: Id) -> Result<Option<RetainedPin>> {
         Ok(self
             .session(session_id)?
@@ -553,6 +570,15 @@ mod tests {
             state.reconnect(id(1), &Credential::new([8; 32])),
             Err(Error::CredentialRejected)
         );
+        let replacement = Credential::new([9; 32]);
+        state
+            .rotate_credential(id(1), &credential(), replacement.clone())
+            .unwrap();
+        assert_eq!(
+            state.rotate_credential(id(1), &credential(), Credential::new([10; 32])),
+            Err(Error::CredentialRejected)
+        );
+        state.reconnect(id(1), &replacement).unwrap();
     }
 
     #[test]
