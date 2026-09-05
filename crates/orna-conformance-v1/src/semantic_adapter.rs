@@ -12,7 +12,7 @@ use orna_evaluator_v1::{
     Environment, Limits as EvaluatorLimits, PureFunction as RetainedFunction,
     evaluate_expression_with_functions, invoke_named,
 };
-use orna_foundation_v1::Diagnostic;
+use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, parse_module};
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,8 +231,9 @@ pub trait RuntimeEvaluator {
 /// is not part of the module grammar; immutable values enter via the host
 /// environment or local bindings inside function bodies.
 ///
-/// Module execution, table access, mutations, external effects, and prose
-/// scenarios remain explicit skips until their owning runtime contracts exist.
+/// Table access, mutations, external effects, and scenarios without an exact
+/// executable contract remain explicit skips. The let-rebinding scenario runs
+/// isolated pure evaluations with exact value and migration-diagnostic checks.
 #[derive(Clone, Default)]
 pub struct BoundedEvaluator {
     environment: Environment,
@@ -241,6 +242,40 @@ pub struct BoundedEvaluator {
 }
 
 impl BoundedEvaluator {
+    fn run_let_rebinding(&self) -> StageOutcome<Diagnostic> {
+        let expected = Value::new(OvbRaw::Array(vec![
+            OvbRaw::Int(2.into()),
+            OvbRaw::Int(1.into()),
+            OvbRaw::Int(1.into()),
+        ]))
+        .expect("scenario expectation is canonical");
+        // Independent exact expectations cover scalar and aggregate values,
+        // both copied bindings and closures captured before replacement.
+        for source in [
+            "if true { let slot = 1; let captured = slot; let snapshot = () => slot; slot = 2; [slot, captured, snapshot()] } else { [0, 0, 0] }",
+            "if true { let slot = { value: 1 }; let captured = slot; let snapshot = () => slot; slot = { value: 2 }; [slot.value, captured.value, snapshot().value] } else { [0, 0, 0] }",
+            "if true { let slot = [1]; let captured = slot; let snapshot = () => slot; slot = [2]; [slot[0], captured[0], snapshot()[0]] } else { [0, 0, 0] }",
+        ] {
+            match evaluate_expression_with_functions(
+                source,
+                &Environment::new(),
+                &BTreeMap::new(),
+                self.limits,
+            ) {
+                Ok(actual) if actual == expected => {}
+                Ok(_) => return scenario_mismatch(),
+                Err(error) => return StageOutcome::Failed(error.diagnostic().clone()),
+            }
+        }
+        let parsed = parse_module("fn sample() { var slot = 1; slot }");
+        if !parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ORNA091-E-VAR" && diagnostic.message.contains("`let`")
+        }) {
+            return scenario_mismatch();
+        }
+        StageOutcome::Passed
+    }
+
     #[must_use]
     pub fn new(limits: EvaluatorLimits) -> Self {
         Self {
@@ -432,11 +467,48 @@ impl RuntimeEvaluator for BoundedEvaluator {
         StageOutcome::Passed
     }
 
-    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<Diagnostic> {
+    fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
+        if let_rebinding_contract(scenario) {
+            return self.run_let_rebinding();
+        }
         StageOutcome::Skipped {
-            reason: "scenario requires the integrated Orna runtime and durable test fixture".into(),
+            reason: "scenario has no implemented execution contract in the bounded runtime".into(),
         }
     }
+}
+
+fn let_rebinding_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LET-REBIND-091"
+        && scenario.title == "Let slots rebind without mutable value identity"
+        && scenario.given == ["a let slot whose value is captured before reassignment"]
+        && scenario.when == ["assign a replacement value to the slot"]
+        && scenario.then
+            == [
+                "the slot observes the replacement",
+                "the captured value is unchanged",
+                "`var` receives ORNA091-E-VAR",
+            ]
+        && scenario.requirements
+            == [
+                "ORNA-VALUE-006",
+                "ORNA-VALUE-007",
+                "ORNA-CFLOW-005",
+                "ORNA-CFLOW-006",
+                "ORNA-CFLOW-011",
+            ]
+}
+
+fn scenario_mismatch() -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-SCENARIO-MISMATCH").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("runtime scenario did not match its exact expected result")
+                .expect("static message"),
+        )
+        .expect("valid diagnostic")
+        .redacted(),
+    )
 }
 
 pub struct RuntimeAdapter<R> {
