@@ -2114,8 +2114,59 @@ pub enum WebSocketOutput {
         outcome: FrameOutcome,
         payload: Vec<u8>,
     },
-    Pong,
+    Pong(Vec<u8>),
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebSocketEncodeError {
+    Limit,
+}
+
+/// Encodes one unfragmented, unmasked server-to-client RFC 6455 frame.
+/// Logical acknowledgement-only outcomes produce no wire bytes.
+///
+/// # Errors
+///
+/// Returns [`WebSocketEncodeError::Limit`] when a payload exceeds the
+/// effective outgoing bound or a control payload exceeds 125 bytes.
+pub fn encode_websocket_output(
+    output: &WebSocketOutput,
+    limits: TransportLimits,
+) -> std::result::Result<Option<Vec<u8>>, WebSocketEncodeError> {
+    let (opcode, payload) = match output {
+        WebSocketOutput::Accepted(_) => return Ok(None),
+        WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
+        WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
+        WebSocketOutput::Close => (8, &[] as &[u8]),
+    };
+    let control = matches!(opcode, 8..=10);
+    if payload.len() > limits.max_frame_bytes || control && payload.len() > 125 {
+        return Err(WebSocketEncodeError::Limit);
+    }
+    let (length_code, extended_length) = if payload.len() <= 125 {
+        (u8::try_from(payload.len()).unwrap_or_default(), Vec::new())
+    } else if u16::try_from(payload.len()).is_ok() {
+        (
+            126,
+            u16::try_from(payload.len())
+                .unwrap_or_default()
+                .to_be_bytes()
+                .to_vec(),
+        )
+    } else {
+        (127, (payload.len() as u64).to_be_bytes().to_vec())
+    };
+    let total = 2 + extended_length.len() + payload.len();
+    if total > limits.max_outgoing_bytes {
+        return Err(WebSocketEncodeError::Limit);
+    }
+    let mut encoded = Vec::with_capacity(total);
+    encoded.push(0x80 | opcode);
+    encoded.push(length_code);
+    encoded.extend_from_slice(&extended_length);
+    encoded.extend_from_slice(payload);
+    Ok(Some(encoded))
 }
 
 #[derive(Clone)]
@@ -2572,7 +2623,7 @@ impl LiveTransport {
                     output.push(self.websocket_output(dispatched)?);
                 }
                 SocketEvent::Text => return Err(Error::InvalidFrame),
-                SocketEvent::Ping => output.push(WebSocketOutput::Pong),
+                SocketEvent::Ping(payload) => output.push(WebSocketOutput::Pong(payload)),
                 SocketEvent::Pong => {}
                 SocketEvent::Close => {
                     output.push(WebSocketOutput::Accepted(
@@ -2906,7 +2957,7 @@ impl WebSocketState {
                     }
                 }
                 8 => events.push(SocketEvent::Close),
-                9 => events.push(SocketEvent::Ping),
+                9 => events.push(SocketEvent::Ping(payload)),
                 10 => events.push(SocketEvent::Pong),
                 _ => return Err(Error::InvalidFrame),
             }
@@ -2917,7 +2968,7 @@ impl WebSocketState {
 enum SocketEvent {
     Binary(Vec<u8>),
     Text,
-    Ping,
+    Ping(Vec<u8>),
     Pong,
     Close,
 }

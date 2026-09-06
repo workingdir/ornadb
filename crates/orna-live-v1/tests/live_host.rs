@@ -8,7 +8,7 @@ use orna_live_v1::{
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, LiveApplication,
     LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
     SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
-    WebSocketState, WireRequest, WireResponse, parse_http_request,
+    WebSocketState, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -1814,13 +1814,97 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         block_on(transport.receive(&mut socket, 2, &masked(true, 0, &message[split..]))),
         Err(Error::Denied)
     );
+    let pong = block_on(transport.receive(&mut socket, 2, &masked(true, 9, b"p"))).unwrap();
+    assert_eq!(pong, vec![WebSocketOutput::Pong(b"p".to_vec())]);
     assert_eq!(
-        block_on(transport.receive(&mut socket, 2, &masked(true, 9, b"p"))).unwrap(),
-        vec![WebSocketOutput::Pong]
+        encode_websocket_output(&pong[0], TransportLimits::default()).unwrap(),
+        Some(vec![0x8a, 1, b'p'])
     );
     assert_eq!(
         block_on(transport.receive(&mut socket, 2, &masked(true, 1, b"text"))),
         Err(Error::InvalidFrame)
+    );
+}
+
+#[test]
+fn websocket_output_encoder_emits_minimal_unmasked_frames() {
+    for (size, header) in [(0, vec![0x82, 0]), (125, vec![0x82, 125])] {
+        let output = WebSocketOutput::Binary {
+            outcome: FrameOutcome::Accepted,
+            payload: vec![7; size],
+        };
+        let encoded = encode_websocket_output(&output, TransportLimits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(&encoded[..header.len()], header.as_slice());
+        assert_eq!(encoded.len(), header.len() + size);
+    }
+    let cases = [
+        (126, vec![0x82, 126, 0, 126]),
+        (u16::MAX as usize, vec![0x82, 126, 255, 255]),
+        (
+            u16::MAX as usize + 1,
+            vec![0x82, 127, 0, 0, 0, 0, 0, 1, 0, 0],
+        ),
+    ];
+    for (size, header) in cases {
+        let output = WebSocketOutput::Binary {
+            outcome: FrameOutcome::Accepted,
+            payload: vec![7; size],
+        };
+        let encoded = encode_websocket_output(&output, TransportLimits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(&encoded[..header.len()], header.as_slice());
+        assert_eq!(encoded.len(), header.len() + size);
+    }
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Pong(vec![1, 2]),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x8a, 2, 1, 2])
+    );
+    assert_eq!(
+        encode_websocket_output(&WebSocketOutput::Close, TransportLimits::default()).unwrap(),
+        Some(vec![0x88, 0])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Accepted(FrameOutcome::Accepted),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
+    let limits = TransportLimits {
+        max_frame_bytes: 2,
+        max_outgoing_bytes: 2,
+        ..TransportLimits::default()
+    };
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Binary {
+                outcome: FrameOutcome::Accepted,
+                payload: vec![7; 3],
+            },
+            limits
+        ),
+        Err(orna_live_v1::WebSocketEncodeError::Limit)
+    );
+    let control_limits = TransportLimits {
+        max_frame_bytes: 256,
+        max_outgoing_bytes: 256,
+        ..TransportLimits::default()
+    };
+    assert_eq!(
+        encode_websocket_output(&WebSocketOutput::Pong(vec![7; 126]), control_limits),
+        Err(orna_live_v1::WebSocketEncodeError::Limit)
     );
 }
 
