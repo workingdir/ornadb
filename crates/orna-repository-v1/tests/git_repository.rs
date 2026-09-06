@@ -400,6 +400,73 @@ fn checkout_force_authorization_is_canonical_and_stale_state_is_rejected() {
 }
 
 #[test]
+fn same_commit_checkout_switches_attachment_without_discarding_local_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(26))
+        .unwrap();
+
+    repo.execute_same_commit_checkout(&plan).unwrap();
+
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
+    let detached = repo
+        .plan_checkout(
+            &git(root.path(), &["rev-parse", "HEAD"]),
+            RuntimeGeneration::new(26),
+        )
+        .unwrap();
+    repo.execute_same_commit_checkout(&detached).unwrap();
+    assert!(git(root.path(), &["branch", "--show-current"]).is_empty());
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged source\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked\n"
+    );
+}
+
+#[test]
+fn same_commit_checkout_rejects_a_divergent_target_without_mutating_cwd() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+    let before = repo.cwd_generation(RuntimeGeneration::new(27)).unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(27))
+        .unwrap();
+
+    assert!(matches!(
+        repo.execute_same_commit_checkout(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(27)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+}
+
+#[test]
 fn checkout_subplan_classifies_target_and_local_path_sets() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
