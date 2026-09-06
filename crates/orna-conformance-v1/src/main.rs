@@ -2,11 +2,16 @@ use orna_conformance_v1::{
     BoundedEvaluator, Corpus, Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator,
     Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
+use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_protocol_v1::{Envelope, Message, PresentationContext};
+use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
+use std::collections::BTreeMap;
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; only the two
 /// exact transactional scenario contracts and the authoritative duplicate-key
-/// fixture are delegated to the real table evaluator. Unsupported scenarios
+/// fixture are delegated to the real table evaluator. The live revision-gap
+/// contract is delegated to the serving state machine. Unsupported scenarios
 /// remain explicit skips.
 #[derive(Default)]
 struct CompositeEvaluator {
@@ -60,10 +65,101 @@ impl RuntimeEvaluator for CompositeEvaluator {
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
         if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
             self.transactional.run_scenario(scenario)
+        } else if live_resync_contract(scenario) {
+            run_live_resync_scenario(scenario)
         } else {
             self.bounded.run_scenario(scenario)
         }
     }
+}
+
+fn live_resync_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LIVE-003"
+        && scenario.title == "Missing revision resynchronizes"
+        && scenario.given == ["client has revision 4", "server delta expects base 5"]
+        && scenario.when == ["client detects mismatch"]
+        && scenario.then == ["full snapshot/resync occurs"]
+        && scenario.requirements == ["ORNA-LIVE-004"]
+}
+
+fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-SCENARIO-MISMATCH").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new(message).expect("static message"),
+        )
+        .expect("valid scenario diagnostic"),
+    )
+}
+
+fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if !live_resync_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the serving runtime".into(),
+        };
+    }
+    let mut serving = match Serving::new(ServingLimits::default()) {
+        Ok(serving) => serving,
+        Err(_) => return scenario_failure("serving limits rejected the live scenario"),
+    };
+    let subscribe = Envelope {
+        request: Some([1; 16]),
+        watch: None,
+        message: Message::Subscribe {
+            resource: [2; 16],
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".into(),
+                supported_kinds: vec!["text".into()],
+            },
+        },
+        extensions: BTreeMap::new(),
+    };
+    if serving
+        .admit(
+            [3; 16],
+            Credential::new([4; 32]),
+            Origin([5; 16]),
+            &subscribe,
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the live session admission");
+    }
+    for revision in 1..=5 {
+        if serving
+            .apply_patch(
+                [3; 16],
+                revision - 1,
+                revision,
+                &[Patch::Set {
+                    key: format!("contact/{revision}/email"),
+                    value: format!("revision-{revision}"),
+                }],
+                RetainedPin {
+                    revision,
+                    fingerprint: [revision as u8; 32],
+                },
+            )
+            .is_err()
+        {
+            return scenario_failure("serving rejected a valid live revision");
+        }
+    }
+    let replay = match serving.resync([3; 16], 4) {
+        Ok(replay) => replay,
+        Err(_) => return scenario_failure("live revision gap did not produce a resync"),
+    };
+    if replay.len() != 1
+        || replay[0].revision != 5
+        || replay[0].page.get("contact/5/email") != Some(&"revision-5".into())
+    {
+        return scenario_failure("live resync did not restore the missing revision");
+    }
+    StageOutcome::Passed
 }
 
 fn main() {
@@ -89,7 +185,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, the live resync contract, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -100,6 +196,7 @@ fn main() {
                 "PIPE-002",
                 "TXN-001",
                 "TXN-002",
+                "LIVE-003",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -110,4 +207,29 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(&report).expect("report serializes")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Scenario, StageOutcome, run_live_resync_scenario};
+
+    #[test]
+    fn live_resync_contract_replays_the_missing_revision() {
+        let scenario = Scenario {
+            id: "LIVE-003".into(),
+            title: "Missing revision resynchronizes".into(),
+            given: vec![
+                "client has revision 4".into(),
+                "server delta expects base 5".into(),
+            ],
+            when: vec!["client detects mismatch".into()],
+            then: vec!["full snapshot/resync occurs".into()],
+            requirements: vec!["ORNA-LIVE-004".into()],
+            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
+        };
+        assert!(matches!(
+            run_live_resync_scenario(&scenario),
+            StageOutcome::Passed
+        ));
+    }
 }
