@@ -1,4 +1,4 @@
-use futures::executor::block_on;
+use futures::{executor::block_on, io::Cursor};
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
@@ -369,6 +369,39 @@ fn http_connection_driver_routes_partial_reads_and_encodes_the_response() {
         )),
         Err(HttpConnectionError::Parse(HttpParseError::Malformed))
     ));
+}
+
+#[test]
+fn async_http_connection_loop_writes_routed_responses_until_eof() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut reader = Cursor::new(request.into_bytes());
+    let mut writer = Cursor::new(Vec::new());
+    let mut authority = Authority;
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    block_on(transport.serve_http_connection(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ))
+    .unwrap();
+    assert!(writer.into_inner().starts_with(b"HTTP/1.1 201 Created\r\n"));
+    assert_eq!(connection.buffered_bytes(), 0);
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
