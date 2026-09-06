@@ -13,6 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
+    time::SystemTime,
 };
 
 use libsql::{Builder, Connection, TransactionBehavior, params};
@@ -330,6 +331,27 @@ impl std::error::Error for RuntimeError {}
 
 pub struct RuntimeState {
     connection: Connection,
+}
+
+/// The immutable runtime context captured at activation admission.
+///
+/// Reads performed by an activation use this CWD capture even if another
+/// activation advances the durable runtime generation while this value is
+/// retained. The activation time is captured once and never recomputed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeActivationContext {
+    capture: CwdCapture,
+    activation_time: SystemTime,
+}
+
+impl RuntimeActivationContext {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    pub fn activation_time(&self) -> SystemTime {
+        self.activation_time
+    }
 }
 
 pub struct StreamDeliveryCommit<'a> {
@@ -818,6 +840,27 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    /// Captures the fixed CWD and activation time for one root activation.
+    pub async fn begin_activation(&self) -> Result<RuntimeActivationContext, RuntimeError> {
+        Ok(RuntimeActivationContext {
+            capture: self.capture().await?,
+            activation_time: SystemTime::now(),
+        })
+    }
+
+    /// Publishes one activation against the CWD capture admitted at its start.
+    pub async fn commit_activation(
+        &self,
+        lease: WriterLease,
+        context: &RuntimeActivationContext,
+        mutations: &[Mutation],
+        next_digest: [u8; 32],
+        faults: &dyn FaultInjector,
+    ) -> Result<CwdCapture, RuntimeError> {
+        self.commit_batch(lease, context.capture(), mutations, next_digest, faults)
+            .await
     }
 
     async fn record_stream_provider_failure(
@@ -4062,6 +4105,26 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn activation_context_pins_capture_and_time_through_commit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let captured = context.capture().clone();
+        let started = context.activation_time();
+
+        let next = state
+            .commit_activation(lease, &context, &[mutation(5)], digest(6), &NoFault)
+            .await
+            .unwrap();
+
+        assert_eq!(context.capture(), &captured);
+        assert_eq!(context.activation_time(), started);
+        assert_ne!(next, captured);
+        assert_eq!(state.capture().await.unwrap(), next);
     }
 
     fn stream_delivery(position: &str, successor: &str) -> DeliveryIdentity {
