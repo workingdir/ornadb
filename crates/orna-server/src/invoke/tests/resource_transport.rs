@@ -1517,7 +1517,11 @@ fn socket_transport_retains_nested_identity_for_terminal_failure() {
 fn socket_transport_retains_nested_identity_for_terminal_cancellation() {
     let (active, registry) = transport_test_context();
     let request = transport_test_request(active.pair(), 1);
-    let accepted_identity = (request.stream_id, request.request_id, request.target_revision);
+    let accepted_identity = (
+        request.stream_id,
+        request.request_id,
+        request.target_revision,
+    );
     let nested_invocation_id = InvocationId::from_bytes([0x53; 16]);
     let (peer, client) = StandardUnixStream::pair().expect("resource socket pair");
     let peer_thread = thread::spawn({
