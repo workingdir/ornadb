@@ -24,6 +24,17 @@ fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit
     }
 }
 
+fn source_with_module_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-source".into(),
+        source_id: "txn-source.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Book(id: Int) {{ title: Str, }} pub table Loan(id: Int) {{ book_id: Int, }} assert {assertion}; fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 #[test]
 fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
@@ -237,6 +248,43 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     assert!(
         runtime
             .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
+}
+
+#[test]
+fn module_every_exists_assertion_rolls_back_cross_table_candidate_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_module_assertion(
+        "every(Loan, loan => exists(Book, book => book.id == loan.book_id))",
+        "Book.insert({ id: 7, title: \"present\" }); Loan.insert({ id: 1, book_id: 8 });",
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Loan", &Value::int(1.into())), None);
+}
+
+#[test]
+fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_module_assertion(
+        "every(Loan, loan => exists(Book, book => book.id == loan.book_id))",
+        "Book.insert({ id: 7, title: \"present\" }); Loan.insert({ id: 1, book_id: 7 });",
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(
+        runtime
+            .committed_row("Book", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Loan", &Value::int(1.into()))
             .is_some()
     );
 }
