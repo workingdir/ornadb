@@ -1120,6 +1120,13 @@ impl Repository {
         {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
+        // A normal Git writer may have moved HEAD after reconciliation but
+        // before the separately durable runtime completion.  Do not discard
+        // the journal in that state: PUB-1 recovery must retain it to
+        // reconcile the newer ref rather than treating cleanup as complete.
+        if self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
         self.write_publication_journal(journal)?;
         journal.advance(PublicationJournalStage::Complete)?;
