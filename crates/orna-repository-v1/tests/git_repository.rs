@@ -572,9 +572,10 @@ fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
             "orna: publish runtime data",
         )
         .unwrap();
-    let mut journal = orna_repository_v1::PublicationJournal::new(
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_index_tree(
         head.clone(),
         candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
         vec![orna_repository_v1::PublicationJournalEntry::new(
             managed.clone(),
             None,
