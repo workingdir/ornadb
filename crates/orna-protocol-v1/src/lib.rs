@@ -521,7 +521,7 @@ impl Message {
         watch: Option<[u8; 16]>,
         body: &[(Node, Node)],
     ) -> Result<(Self, BTreeMap<u16, ValueNode>)> {
-        let (known, message) = match code {
+        let (required, message) = match code {
             0 => (
                 vec![0, 1],
                 Self::Subscribe {
@@ -550,7 +550,7 @@ impl Message {
                 },
             ),
             5 => (
-                vec![0, 1, 2, 3],
+                vec![0, 1, 2],
                 Self::Watch {
                     source: text(field(body, 0)?)?.to_owned(),
                     database: DatabaseContext::decode(field(body, 1)?)?,
@@ -599,7 +599,7 @@ impl Message {
                 },
             ),
             19 => (
-                vec![0, 1],
+                vec![0],
                 Self::Diagnostic {
                     diagnostic: Diagnostic::decode(field(body, 0)?)?,
                     recoverable: optional_field(body, 1).map(bool_value).transpose()?,
@@ -616,7 +616,7 @@ impl Message {
             ),
             _ => return Err(Error::Unsupported),
         };
-        for key in &known {
+        for key in &required {
             let _ = field(body, *key)?;
         }
         let mut extensions = BTreeMap::new();
@@ -626,7 +626,8 @@ impl Message {
                 return Err(Error::InvalidMessage);
             }
             let number = number as u16;
-            if !known.contains(&number) {
+            let optional = matches!((code, number), (5, 3) | (19, 1));
+            if !required.contains(&number) && !optional {
                 if number >= 32768 {
                     return Err(Error::UnknownMandatoryExtension);
                 }
@@ -1720,6 +1721,49 @@ mod tests {
         let decoded = Envelope::decode(&bytes, Limits::default()).unwrap();
         assert_eq!(decoded.encode(Limits::default()).unwrap(), bytes);
     }
+
+    #[test]
+    fn optional_watch_and_diagnostic_fields_decode_as_absent() {
+        let watch = wire(
+            5,
+            Some(id(1)),
+            None,
+            Node::Map(vec![
+                (uint(0), Node::Text("source".into())),
+                (uint(1), database().node()),
+                (uint(2), context().node()),
+            ]),
+        );
+        assert!(matches!(
+            Envelope::decode(&watch, Limits::default()).unwrap().message,
+            Message::Watch {
+                refresh_floor: None,
+                ..
+            }
+        ));
+        let canonical_watch = Envelope::decode(&watch, Limits::default())
+            .unwrap()
+            .encode(Limits::default())
+            .unwrap();
+        assert!(Envelope::decode(&canonical_watch, Limits::default()).is_ok());
+
+        let diagnostic = wire(19, None, None, Node::Map(vec![(uint(0), diagnostic().0.0)]));
+        assert!(matches!(
+            Envelope::decode(&diagnostic, Limits::default())
+                .unwrap()
+                .message,
+            Message::Diagnostic {
+                recoverable: None,
+                ..
+            }
+        ));
+        let canonical_diagnostic = Envelope::decode(&diagnostic, Limits::default())
+            .unwrap()
+            .encode(Limits::default())
+            .unwrap();
+        assert!(Envelope::decode(&canonical_diagnostic, Limits::default()).is_ok());
+    }
+
     #[test]
     fn diagnostics_validate_each_span_shape_and_value() {
         let valid_span = Node::Array(vec![
