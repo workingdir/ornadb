@@ -412,6 +412,7 @@ impl WorktreeState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CwdGeneration {
     head: Option<GitCommitRef>,
+    branch: Option<String>,
     index: IndexGeneration,
     worktree: WorktreeState,
     runtime: RuntimeGeneration,
@@ -420,6 +421,9 @@ pub struct CwdGeneration {
 impl CwdGeneration {
     pub fn head(&self) -> Option<&GitCommitRef> {
         self.head.as_ref()
+    }
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
     }
     pub fn index(&self) -> &IndexGeneration {
         &self.index
@@ -551,6 +555,7 @@ impl CheckoutPreflight {
             &mut bytes,
             self.expected_head.as_ref().map(GitCommitRef::as_str),
         );
+        token_optional_string(&mut bytes, self.cwd.branch.as_deref());
         token_optional_string(
             &mut bytes,
             self.cwd.index.head.as_ref().map(GitCommitRef::as_str),
@@ -1337,12 +1342,15 @@ impl Repository {
         // bounded recheck detects external Git writers.
         for _ in 0..3 {
             let before = self.index_generation()?;
+            let branch = self.current_branch()?;
             let worktree = self.worktree_state()?;
             let after = self.index_generation()?;
+            let branch_after = self.current_branch()?;
             let worktree_after = self.worktree_state()?;
-            if before == after && worktree == worktree_after {
+            if before == after && branch == branch_after && worktree == worktree_after {
                 return Ok(CwdGeneration {
                     head: before.head.clone(),
+                    branch,
                     index: before,
                     worktree,
                     runtime,
@@ -1350,6 +1358,29 @@ impl Repository {
             }
         }
         Err(RepositoryError::StaleCwd)
+    }
+
+    /// Returns the local branch currently attached to `HEAD`, if any. A
+    /// detached `HEAD` is distinct CWD state even when it names the same
+    /// commit as a local branch.
+    fn current_branch(&self) -> Result<Option<String>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            let branch = trim_output(&output.stdout);
+            if valid_branch_name(&branch) {
+                Ok(Some(branch))
+            } else {
+                Err(RepositoryError::GitOperationFailed)
+            }
+        } else if output.status.code() == Some(1) && output.stderr.is_empty() {
+            Ok(None)
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
     }
 
     /// Rechecks an earlier CWD observation before an operation that depends on
@@ -2899,4 +2930,66 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
         bytes.push(((high << 4) | low) as u8);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path, process::Command};
+
+    use super::{Repository, RepositoryError, RuntimeGeneration};
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn checkout_preflight_rejects_same_commit_branch_attachment_drift() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        git(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(root.path(), &["config", "user.name", "Repository test"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        git(root.path(), &["branch", "target"]);
+        git(root.path(), &["branch", "interleaved"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let plan = repository
+            .plan_checkout("target", RuntimeGeneration::new(41))
+            .unwrap();
+        let token = plan.force_token();
+
+        git(root.path(), &["switch", "interleaved"]);
+
+        assert!(matches!(
+            repository.verify_checkout_preflight(&plan),
+            Err(RepositoryError::CheckoutPlanStale)
+        ));
+        assert!(matches!(
+            repository.authorize_checkout_force(&plan, true, Some(&token)),
+            Err(RepositoryError::CheckoutPlanStale)
+        ));
+        assert_eq!(
+            Command::new("git")
+                .current_dir(root.path())
+                .args(["branch", "--show-current"])
+                .output()
+                .unwrap()
+                .stdout,
+            b"interleaved\n"
+        );
+    }
 }
