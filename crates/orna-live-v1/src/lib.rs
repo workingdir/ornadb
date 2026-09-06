@@ -498,6 +498,37 @@ impl LiveHost {
         Ok(SessionCredential { security, serving })
     }
 
+    /// Rotates a session credential and retires its currently attached
+    /// WebSocket, if any. The session and its serving state remain resumable;
+    /// the executable host owns cancellation of the retired socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same redacted credential, origin, lease, or serving error
+    /// as [`Self::rotate`], or when retiring the active attachment fails.
+    pub async fn rotate_and_retire(
+        &mut self,
+        id: [u8; 16],
+        origin: &Origin,
+        credential: &SessionCredential,
+        now: u64,
+        issuer: &mut impl LiveCredentialIssuer,
+    ) -> Result<(SessionCredential, Option<[u8; 16]>)> {
+        let retired = self
+            .attachments
+            .iter()
+            .find_map(|(attachment, session)| (*session == id).then_some(*attachment));
+        let replacement = self.rotate(id, origin, credential, now, issuer).await?;
+        if let Some(attachment) = retired {
+            self.security
+                .disconnect(session_id(id), attachment_id(attachment), now)
+                .map_err(map_boundary)?;
+            self.serving.disconnect(id).map_err(map_serving)?;
+            self.attachments.remove(&attachment);
+        }
+        Ok((replacement, retired))
+    }
+
     /// HTTP WebSocket upgrade `POST /v1/live/sessions/{id}/attachments`:
     /// `101`, headers `upgrade: websocket` and `sec-websocket-protocol:
     /// orna.present.v1`, empty body. The actual HTTP server performs the
@@ -2314,6 +2345,7 @@ pub struct LiveTransport {
     host: LiveHost,
     limits: TransportLimits,
     sessions: BTreeMap<[u8; 16], SessionRecord>,
+    retired_attachments: VecDeque<[u8; 16]>,
 }
 
 impl LiveTransport {
@@ -2396,7 +2428,15 @@ impl LiveTransport {
             limits: limits.validate(host.limits.protocol)?,
             host,
             sessions: BTreeMap::new(),
+            retired_attachments: VecDeque::new(),
         })
+    }
+
+    /// Takes attachment identities retired by successful HTTP session resume.
+    /// The executable host uses these identities to cancel and join the old
+    /// socket task without changing session-owned work.
+    pub fn take_retired_attachments(&mut self) -> Vec<[u8; 16]> {
+        self.retired_attachments.drain(..).collect()
     }
 
     /// Parses exactly the three live-session HTTP endpoint shapes.
@@ -2489,8 +2529,15 @@ impl LiveTransport {
                     security: OpaqueCredential::from_bytes(token),
                     serving: ServingCredential::new(token),
                 };
-                match self.host.rotate(id, &origin, &supplied, now, issuer).await {
-                    Ok(credential) => {
+                match self
+                    .host
+                    .rotate_and_retire(id, &origin, &supplied, now, issuer)
+                    .await
+                {
+                    Ok((credential, retired)) => {
+                        if let Some(attachment) = retired {
+                            self.retired_attachments.push_back(attachment);
+                        }
                         let Some(replacement) = issuer.last_issued() else {
                             return wire_error(503, "live.unavailable");
                         };
