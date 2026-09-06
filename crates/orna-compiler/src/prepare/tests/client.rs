@@ -770,10 +770,7 @@ END;"#;
     };
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].owner, probe.id());
-    assert_eq!(
-        steps[0].field,
-        probe.field_by_name("event").unwrap().id()
-    );
+    assert_eq!(steps[0].field, probe.field_by_name("event").unwrap().id());
 
     let client = prepared
         .candidate()

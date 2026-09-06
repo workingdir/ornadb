@@ -325,7 +325,9 @@ fn matches_client_capability_exercise_by_exact_qualified_target_identity() {
     );
     assert_eq!(
         function.called_functions(),
-        vec![super::super::CheckedFunctionId::Existing(matching_target_id)]
+        vec![super::super::CheckedFunctionId::Existing(
+            matching_target_id
+        )]
     );
 
     let mismatch_source = "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.mismatch(p_path TEXT) \
