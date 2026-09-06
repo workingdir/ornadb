@@ -616,16 +616,97 @@ impl PostgresKernel {
                             definition,
                             executable,
                         } => {
-                            let arguments =
-                                bind_sealed_invoke_arguments(definition, decoded.arguments())?;
-                            let value = execute_checked_standard_artifact(
-                                &active,
-                                &registry,
-                                definition,
-                                executable.revision(),
-                                &arguments,
-                            )?;
-                            (vec![value], security_target)
+                            if definition.domain() == FunctionDomain::Client {
+                                if select_checked_standard_artifact_executor(
+                                    &active,
+                                    executable.revision(),
+                                )? != CheckedStandardArtifactExecutor::ClientExpression
+                                {
+                                    return Err(sealed_target_invariant(
+                                        &active,
+                                        "verified standard CLIENT target must retain its checked expression artifact",
+                                    ));
+                                }
+                                if !invocation_audit_appended {
+                                    append_allowed_invocation_audit_evidence(
+                                        &transaction,
+                                        &authorisation,
+                                        invocation,
+                                    )
+                                    .await?;
+                                    invocation_audit_appended = true;
+                                }
+                                let arguments = bind_sealed_invoke_arguments(
+                                    definition,
+                                    decoded.arguments(),
+                                )?;
+                                let execution = if let Some(executor) =
+                                    resource_executor.as_deref_mut()
+                                {
+                                    executor.bind_current_invocation(invocation);
+                                    evaluate_authorised_client_function_with_state_context_and_arguments_and_executor(
+                                        &active,
+                                        &authorisation,
+                                        &ClientStateContext::default_for(definition.id()),
+                                        &arguments,
+                                        &[],
+                                        &self.capability_grants,
+                                        state,
+                                        invocation,
+                                        executor,
+                                    )
+                                } else {
+                                    evaluate_authorised_client_function_with_arguments(
+                                        &active,
+                                        &authorisation,
+                                        &arguments,
+                                        &[],
+                                        &self.capability_grants,
+                                    )
+                                }
+                                .map_err(PostgresKernelError::ClientExecution);
+                                let capability_denied = matches!(
+                                    &execution,
+                                    Err(PostgresKernelError::ClientExecution(
+                                        ClientExecutionError::CapabilityDenied { .. }
+                                    ))
+                                );
+                                if !*capability_audit_appended || capability_denied {
+                                    append_client_capability_audit(
+                                        &transaction,
+                                        authenticated_session,
+                                        &active,
+                                        security_target,
+                                        &execution,
+                                    )
+                                    .await?;
+                                    if !capability_denied {
+                                        *capability_audit_appended = true;
+                                    }
+                                }
+                                let value = match execution {
+                                    Ok(result) => result.into_value(),
+                                    Err(error) => {
+                                        transaction
+                                            .commit()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        return Err(error);
+                                    }
+                                };
+                                (vec![value], security_target)
+                            } else {
+                                let arguments =
+                                    bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                                let value = execute_checked_standard_artifact(
+                                    &active,
+                                    &registry,
+                                    definition,
+                                    executable.revision(),
+                                    &arguments,
+                                )?;
+                                (vec![value], security_target)
+                            }
                         }
                     };
                     let events = match decoded.output_requirement() {
@@ -807,6 +888,7 @@ impl PostgresKernel {
 pub(super) enum CheckedStandardArtifactExecutor {
     ParameterEcho,
     JsonEncode,
+    ClientExpression,
 }
 
 pub(super) fn select_checked_standard_artifact_executor(
@@ -828,6 +910,11 @@ pub(super) fn select_checked_standard_artifact_executor(
             orna_artifact::server_json_encode::FORMAT_IDENTITY,
             orna_artifact::server_json_encode::FORMAT_VERSION,
         ) => Ok(CheckedStandardArtifactExecutor::JsonEncode),
+        (
+            orna_core::revision::ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+        ) => Ok(CheckedStandardArtifactExecutor::ClientExpression),
         _ => Err(sealed_target_invariant(
             active,
             "verified standard executable artifact is unsupported",
@@ -849,5 +936,9 @@ pub(super) fn execute_checked_standard_artifact(
         CheckedStandardArtifactExecutor::JsonEncode => {
             execute_standard_json_encode(definition, revision, arguments, active, registry)
         }
+        CheckedStandardArtifactExecutor::ClientExpression => Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT expression artifacts require CLIENT dispatch",
+        )),
     }
 }
