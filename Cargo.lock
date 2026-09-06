@@ -1551,6 +1551,7 @@ dependencies = [
  "num-bigint",
  "orna-evaluator-v1",
  "orna-foundation-v1",
+ "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
