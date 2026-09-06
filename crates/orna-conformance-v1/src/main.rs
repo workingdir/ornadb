@@ -66,6 +66,8 @@ impl RuntimeEvaluator for CompositeEvaluator {
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
         if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
             self.transactional.run_scenario(scenario)
+        } else if live_keyed_update_contract(scenario) {
+            run_live_keyed_update_scenario(scenario)
         } else if live_resync_contract(scenario) {
             run_live_resync_scenario(scenario)
         } else if sys_rt_rename_contract(scenario) {
@@ -94,6 +96,108 @@ fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
         )
         .expect("valid scenario diagnostic"),
     )
+}
+
+fn live_keyed_update_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LIVE-001"
+        && scenario.title == "Keyed row update sends contextual delta"
+        && scenario.given == ["page shows Contact relation keyed by id"]
+        && scenario.when == ["Alice email changes"]
+        && scenario.then == ["delta targets Alice/email rather than replacing unrelated rows"]
+        && scenario.requirements == ["ORNA-LIVE-001", "ORNA-LIVE-003"]
+}
+
+fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if !live_keyed_update_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the serving runtime".into(),
+        };
+    }
+    let mut serving = match Serving::new(ServingLimits::default()) {
+        Ok(serving) => serving,
+        Err(_) => return scenario_failure("serving limits rejected the keyed live scenario"),
+    };
+    let subscribe = Envelope {
+        request: Some([11; 16]),
+        watch: None,
+        message: Message::Subscribe {
+            resource: [12; 16],
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".into(),
+                supported_kinds: vec!["text".into()],
+            },
+        },
+        extensions: BTreeMap::new(),
+    };
+    if serving
+        .admit(
+            [13; 16],
+            Credential::new([14; 32]),
+            Origin([15; 16]),
+            &subscribe,
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the keyed live session admission");
+    }
+    let initial = [
+        Patch::Set {
+            key: "contact/alice/email".into(),
+            value: "alice@example.test".into(),
+        },
+        Patch::Set {
+            key: "contact/bob/email".into(),
+            value: "bob@example.test".into(),
+        },
+    ];
+    if serving
+        .apply_patch(
+            [13; 16],
+            0,
+            1,
+            &initial,
+            RetainedPin {
+                revision: 1,
+                fingerprint: [1; 32],
+            },
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the initial keyed page");
+    }
+    if serving
+        .apply_patch(
+            [13; 16],
+            1,
+            2,
+            &[Patch::Set {
+                key: "contact/alice/email".into(),
+                value: "alice-updated@example.test".into(),
+            }],
+            RetainedPin {
+                revision: 2,
+                fingerprint: [2; 32],
+            },
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the keyed contextual delta");
+    }
+    let replay = match serving.resync([13; 16], 1) {
+        Ok(replay) => replay,
+        Err(_) => return scenario_failure("serving could not replay the keyed update"),
+    };
+    if replay.len() != 1
+        || replay[0].revision != 2
+        || replay[0].page.get("contact/alice/email") != Some(&"alice-updated@example.test".into())
+        || replay[0].page.get("contact/bob/email") != Some(&"bob@example.test".into())
+    {
+        return scenario_failure("keyed update changed an unrelated row or missed Alice");
+    }
+    StageOutcome::Passed
 }
 
 fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
@@ -230,7 +334,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, the live resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, keyed-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -241,6 +345,7 @@ fn main() {
                 "PIPE-002",
                 "TXN-001",
                 "TXN-002",
+                "LIVE-001",
                 "LIVE-003",
                 "SYS-RT-RENAME-100",
             ]
@@ -257,7 +362,27 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scenario, StageOutcome, run_live_resync_scenario, run_sys_rt_rename_scenario};
+    use super::{
+        Scenario, StageOutcome, run_live_keyed_update_scenario, run_live_resync_scenario,
+        run_sys_rt_rename_scenario,
+    };
+
+    #[test]
+    fn keyed_live_update_preserves_unrelated_rows() {
+        let scenario = Scenario {
+            id: "LIVE-001".into(),
+            title: "Keyed row update sends contextual delta".into(),
+            given: vec!["page shows Contact relation keyed by id".into()],
+            when: vec!["Alice email changes".into()],
+            then: vec!["delta targets Alice/email rather than replacing unrelated rows".into()],
+            requirements: vec!["ORNA-LIVE-001".into(), "ORNA-LIVE-003".into()],
+            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
+        };
+        assert!(matches!(
+            run_live_keyed_update_scenario(&scenario),
+            StageOutcome::Passed
+        ));
+    }
 
     #[test]
     fn live_resync_contract_replays_the_missing_revision() {
