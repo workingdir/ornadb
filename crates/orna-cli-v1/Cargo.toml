@@ -21,9 +21,11 @@ missing_errors_doc = "allow"
 [dependencies]
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
 
 [dev-dependencies]
 tempfile = "3.23.0"

@@ -1513,9 +1513,11 @@ version = "0.1.0"
 dependencies = [
  "orna-conformance-v1",
  "orna-evaluator-v1",
+ "orna-foundation-v1",
  "orna-project-v1",
  "orna-repository-v1",
  "orna-semantic-v1",
+ "orna-value-v1",
  "tempfile",
 ]
 
