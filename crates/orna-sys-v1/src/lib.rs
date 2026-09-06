@@ -708,6 +708,20 @@ impl RuntimeSupervisor {
         }
     }
 
+    pub fn id(&self) -> Result<RuntimeId, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)
+            .map(|runtime| runtime.id.clone())
+    }
+
+    pub fn generation(&self) -> Result<u64, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)
+            .map(|runtime| runtime.generation)
+    }
+
     pub fn restart(&self) -> Result<RuntimeId, AdmissionError> {
         self.runtime
             .lock()
@@ -1510,6 +1524,19 @@ mod tests {
         };
         assert_ne!(new_handle.runtime(), old_handle.runtime());
         assert_eq!(new_handle.invocation(), old_handle.invocation());
+    }
+
+    #[test]
+    fn supervisor_exposes_the_current_runtime_generation() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let old_id = supervisor.id().unwrap();
+        assert_eq!(supervisor.generation(), Ok(1));
+
+        let new_id = supervisor.restart().unwrap();
+
+        assert_ne!(new_id, old_id);
+        assert_eq!(supervisor.id(), Ok(new_id));
+        assert_eq!(supervisor.generation(), Ok(2));
     }
 
     #[test]
