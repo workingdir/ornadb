@@ -215,7 +215,7 @@ pub struct SafeDiagnostic {
 }
 
 /// Connector-selected retention for a failed delivery.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum StreamFailurePayload {
     /// The connector has not declared a safe retention mechanism.
     Unavailable,
@@ -223,6 +223,23 @@ pub enum StreamFailurePayload {
     Plaintext(Vec<u8>),
     /// Retain only a protected connector reference and its validation digest.
     ProtectedReference { reference: String, digest: [u8; 32] },
+}
+
+impl fmt::Debug for StreamFailurePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("Unavailable"),
+            Self::Plaintext(bytes) => f
+                .debug_struct("Plaintext")
+                .field("bytes", &bytes.len())
+                .field("redacted", &true)
+                .finish(),
+            Self::ProtectedReference { .. } => f
+                .debug_struct("ProtectedReference")
+                .field("redacted", &true)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1073,6 +1090,27 @@ mod tests {
         assert!(!printed.contains("password"));
         assert!(!printed.contains("token="));
         assert!(!printed.contains("secret"));
+    }
+
+    #[test]
+    fn retained_provider_payload_debug_output_is_redacted() {
+        let plaintext = StreamFailurePayload::Plaintext(b"provider-secret-payload".to_vec());
+        let protected = StreamFailurePayload::ProtectedReference {
+            reference: "provider-secret-reference".to_owned(),
+            digest: [7; 32],
+        };
+
+        let plaintext_debug = format!("{plaintext:?}");
+        assert!(plaintext_debug.contains("Plaintext"));
+        assert!(plaintext_debug.contains("bytes: 23"));
+        assert!(plaintext_debug.contains("redacted: true"));
+        assert!(!plaintext_debug.contains("provider-secret-payload"));
+
+        let protected_debug = format!("{protected:?}");
+        assert!(protected_debug.contains("ProtectedReference"));
+        assert!(protected_debug.contains("redacted: true"));
+        assert!(!protected_debug.contains("provider-secret-reference"));
+        assert!(!protected_debug.contains("7, 7, 7"));
     }
 
     #[test]
