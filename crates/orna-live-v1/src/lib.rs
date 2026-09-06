@@ -2750,7 +2750,7 @@ impl LiveTransport {
                         .await
                     {
                         Ok(read) => read,
-                        Err(error @ HttpIoError::Cancelled) => {
+                        Err(error) => {
                             self.close_websocket_attachment(
                                 socket.attachment,
                                 clock(),
@@ -2759,7 +2759,6 @@ impl LiveTransport {
                             .await?;
                             return Err(error);
                         }
-                        Err(error) => return Err(error),
                     };
                 if read == 0 {
                     self.close_websocket_attachment(socket.attachment, clock(), application)
@@ -2779,12 +2778,11 @@ impl LiveTransport {
                 {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(error @ (HttpIoError::Cancelled | HttpIoError::Write)) => {
+                    Err(error) => {
                         self.close_websocket_attachment(socket.attachment, clock(), application)
                             .await?;
                         return Err(error);
                     }
-                    Err(error) => return Err(error),
                 }
             } else {
                 let bytes = std::mem::take(&mut initial);
@@ -2801,12 +2799,11 @@ impl LiveTransport {
                 {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(error @ (HttpIoError::Cancelled | HttpIoError::Write)) => {
+                    Err(error) => {
                         self.close_websocket_attachment(socket.attachment, clock(), application)
                             .await?;
                         return Err(error);
                     }
-                    Err(error) => return Err(error),
                 }
             }
         }
@@ -3605,6 +3602,22 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 mod tests {
     use super::*;
 
+    struct FixedIssuer(Option<[u8; 32]>);
+
+    impl CredentialIssuer for FixedIssuer {
+        fn issue_credential(&mut self) -> std::result::Result<[u8; 32], BoundaryError> {
+            let credential = [7; 32];
+            self.0 = Some(credential);
+            Ok(credential)
+        }
+    }
+
+    impl LiveCredentialIssuer for FixedIssuer {
+        fn last_issued(&self) -> Option<[u8; 32]> {
+            self.0
+        }
+    }
+
     fn result(request: u8, fingerprint: u8) -> Envelope {
         Envelope {
             request: Some([request; 16]),
@@ -3671,5 +3684,95 @@ mod tests {
         let token = issuer.issue_credential().unwrap();
         assert_ne!(token, [0; 32]);
         assert_eq!(issuer.last_issued(), Some(token));
+    }
+
+    #[test]
+    fn malformed_post_upgrade_frame_closes_its_attachment() {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = LiveHost::new(
+            Limits::default(),
+            SessionBoundary::new(
+                orna_security_v1::OriginPolicy::new([origin.clone()], []),
+                10,
+            ),
+            Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+        )
+        .unwrap();
+        let subscribe = Envelope {
+            request: Some([2; 16]),
+            watch: None,
+            message: Message::Subscribe {
+                resource: [3; 16],
+                presentation: orna_protocol_v1::PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "dark".into(),
+                    supported_kinds: vec![],
+                },
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let mut issuer = FixedIssuer(None);
+        let credential = futures::executor::block_on(host.create(
+            CreateRequest {
+                id: [1; 16],
+                origin: origin.clone(),
+                expires_at: 10,
+                now: 0,
+                subscribe: &subscribe,
+            },
+            &mut issuer,
+        ))
+        .unwrap();
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe,
+                },
+                credential,
+            },
+        );
+        let mut input = format!(
+            "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+            uuid([1; 16]),
+            SUBPROTOCOL,
+            encode_token([7; 32]),
+        )
+        .into_bytes();
+        input.extend([0x89, 0x00]);
+        let mut reader = futures::io::Cursor::new(input);
+        let mut writer = futures::io::Cursor::new(Vec::new());
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut clock = || 1;
+        let mut cancellation = std::future::pending::<()>();
+        let mut application = RejectApplication;
+
+        assert_eq!(
+            futures::executor::block_on(transport.serve_websocket_connection(
+                &mut reader,
+                &mut writer,
+                &mut connection,
+                [4; 16],
+                &mut clock,
+                &mut cancellation,
+                &mut application,
+            )),
+            Err(HttpIoError::Transport(HttpConnectionError::Protocol(
+                Error::InvalidFrame
+            )))
+        );
+        assert_eq!(
+            futures::executor::block_on(transport.host.handle_frame([4; 16], 2, Frame::Close)),
+            Err(Error::Closed)
+        );
     }
 }
