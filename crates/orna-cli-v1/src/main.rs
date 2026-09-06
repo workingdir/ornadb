@@ -14,6 +14,20 @@ use orna_conformance_v1::{
 
 const REPL_TARGET: &str = "std.cli.repl";
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
+const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
+const STD_MATH_SOURCE: &str = "pub fn increment(value: Int): Int = value + 1;";
+
+fn standard_sources() -> [(String, String); 1] {
+    [(STD_MATH_LOGICAL_PATH.into(), STD_MATH_SOURCE.into())]
+}
+
+fn standard_profile() -> orna_semantic_v1::StandardDependencyProfile {
+    orna_semantic_v1::StandardDependencyProfile::from_sources(
+        "orna.std/v1-pure-math",
+        standard_sources(),
+    )
+    .expect("built-in standard source profile is valid")
+}
 
 #[allow(
     dead_code,
@@ -437,7 +451,7 @@ fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, D
         )
     })?;
     orna_project_v1::ProjectLoader::default()
-        .load(&repository)
+        .load_with_standard_profile(&repository, Some(standard_profile()))
         .map_err(|_| {
             Diagnostic::target(
                 "E2100",
@@ -447,18 +461,37 @@ fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, D
         })
 }
 
-fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let project = load_project(endpoint)?;
-    if project.has_standard_imports() {
-        return Err(Diagnostic::unavailable(
-            "verified v1 standard profile is unavailable",
-            "supply the pinned standard profile before checking a project that imports `std`",
+fn semantic_catalogue(
+    project: &orna_project_v1::LoadedProject,
+) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
+    let Some(profile) = project.standard_profile() else {
+        return Ok(orna_semantic_v1::Catalogue::authoritative_core());
+    };
+    if project
+        .standard_modules()
+        .iter()
+        .any(|module| !profile.module_digests().contains_key(module))
+    {
+        return Err(Diagnostic::target(
+            "E2101",
+            "standard module is outside the pinned bundle",
+            "use a standard module from the selected Orna standard profile",
         ));
     }
-    let analysis = orna_semantic_v1::analyze_with_catalogue(
-        project.modules(),
-        &orna_semantic_v1::Catalogue::authoritative_core(),
-    );
+    orna_semantic_v1::Catalogue::authoritative_core()
+        .with_standard_sources(profile, standard_sources())
+        .map_err(|_| {
+            Diagnostic::unavailable(
+                "pinned standard source bundle was rejected",
+                "use the standard source bundle selected by the Orna runtime",
+            )
+        })
+}
+
+fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
         println!("project valid");
         Ok(())
@@ -472,7 +505,7 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 }
 
 fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
-    let modules = project
+    let mut modules: Vec<SourceUnit> = project
         .modules()
         .iter()
         .zip(project.identities())
@@ -483,6 +516,14 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             source: module.source.clone(),
         })
         .collect();
+    if project.has_standard_imports() {
+        modules.push(SourceUnit {
+            fixture_id: "cli-standard".into(),
+            source_id: STD_MATH_LOGICAL_PATH.into(),
+            parse_as: "module_unit".into(),
+            source: STD_MATH_SOURCE.into(),
+        });
+    }
     ProjectUnit {
         fixture_id: "cli-project".into(),
         project_id: "cli-project".into(),
@@ -504,16 +545,8 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
 
 fn run_standard_free_seed(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    if project.has_standard_imports() {
-        return Err(Diagnostic::unavailable(
-            "verified v1 standard profile is unavailable",
-            "supply the pinned standard profile before running a project that imports `std`",
-        ));
-    }
-    let analysis = orna_semantic_v1::analyze_with_catalogue(
-        project.modules(),
-        &orna_semantic_v1::Catalogue::authoritative_core(),
-    );
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -670,11 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn check_rejects_standard_imports_without_a_verified_profile() {
+    fn check_accepts_the_pinned_pure_math_standard_bundle() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
-            "use std.math; pub fn run() {}",
+            "use std.math; pub fn run(): Int = std.math.increment(41);",
         )
         .expect("main source");
         assert!(
@@ -687,8 +720,53 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = check_project(&endpoint).expect_err("missing standard profile");
-        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
+        assert_eq!(check_project(&endpoint), Ok(()));
+    }
+
+    #[test]
+    fn check_rejects_a_standard_module_outside_the_pinned_bundle() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use std.cli; pub fn run() {}",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let error = check_project(&endpoint).expect_err("unbundled standard module");
+        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+    }
+
+    #[test]
+    fn run_seed_executes_a_pinned_standard_function() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use std.math; pub fn seed(): Int = std.math.increment(41);",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let parsed = Parsed {
+            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
+            command: Command::Run(Invocation::Seed),
+        };
+        assert_eq!(execute(&parsed), Ok(()));
     }
 
     #[test]
