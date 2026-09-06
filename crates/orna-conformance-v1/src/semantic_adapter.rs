@@ -528,6 +528,7 @@ impl BoundedEvaluator {
                         },
                     );
                 }
+                Declaration::Use { .. } => {}
                 _ => return Self::unsupported_module(),
             }
         }
@@ -541,9 +542,13 @@ impl BoundedEvaluator {
     }
 
     fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
-        items
-            .iter()
-            .all(|item| matches!(&item.declaration, Declaration::Function { .. }))
+        items.iter().all(|item| match &item.declaration {
+            Declaration::Function { .. } => true,
+            Declaration::Use { path, .. } => {
+                path.first().is_some_and(|segment| segment.name == "std")
+            }
+            _ => false,
+        })
     }
 
     fn supports_pure_project(project: &ProjectUnit) -> bool {

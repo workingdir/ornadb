@@ -110,6 +110,37 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
 }
 
 #[test]
+fn bounded_project_execution_retains_functions_with_catalogue_std_imports() {
+    let project = ProjectUnit {
+        fixture_id: "stdlib-project".into(),
+        project_id: "logical/project".into(),
+        environment_id: None,
+        modules: vec![SourceUnit {
+            fixture_id: "stdlib-project".into(),
+            source_id: "logical/project/main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "use std.math.{increment}; pub fn answer() = std.math.increment(41);".into(),
+        }],
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    };
+    let mut evaluator = BoundedEvaluator::default();
+
+    let outcome = evaluator.evaluate_project(&project);
+    assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
+    assert!(matches!(evaluator.invoke("answer"), StageOutcome::Passed));
+}
+
+#[test]
 fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
     let project = ProjectUnit {
