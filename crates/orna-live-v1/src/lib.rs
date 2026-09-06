@@ -2751,29 +2751,22 @@ impl LiveTransport {
                     {
                         Ok(read) => read,
                         Err(error @ HttpIoError::Cancelled) => {
-                            self.host
-                                .dispatch_frame(
-                                    socket.attachment,
-                                    clock(),
-                                    Frame::Close,
-                                    application,
-                                )
-                                .await
-                                .map_err(HttpConnectionError::Protocol)
-                                .map_err(HttpIoError::Transport)?;
+                            self.close_websocket_attachment(
+                                socket.attachment,
+                                clock(),
+                                application,
+                            )
+                            .await?;
                             return Err(error);
                         }
                         Err(error) => return Err(error),
                     };
                 if read == 0 {
-                    self.host
-                        .dispatch_frame(socket.attachment, clock(), Frame::Close, application)
-                        .await
-                        .map_err(HttpConnectionError::Protocol)
-                        .map_err(HttpIoError::Transport)?;
+                    self.close_websocket_attachment(socket.attachment, clock(), application)
+                        .await?;
                     return Ok(());
                 }
-                if self
+                match self
                     .serve_websocket_bytes(
                         &mut socket,
                         &chunk[..read],
@@ -2782,13 +2775,20 @@ impl LiveTransport {
                         cancellation,
                         application,
                     )
-                    .await?
+                    .await
                 {
-                    return Ok(());
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error @ HttpIoError::Cancelled) => {
+                        self.close_websocket_attachment(socket.attachment, clock(), application)
+                            .await?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
                 }
             } else {
                 let bytes = std::mem::take(&mut initial);
-                if self
+                match self
                     .serve_websocket_bytes(
                         &mut socket,
                         &bytes,
@@ -2797,12 +2797,36 @@ impl LiveTransport {
                         cancellation,
                         application,
                     )
-                    .await?
+                    .await
                 {
-                    return Ok(());
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error @ HttpIoError::Cancelled) => {
+                        self.close_websocket_attachment(socket.attachment, clock(), application)
+                            .await?;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
+    }
+
+    async fn close_websocket_attachment<A>(
+        &mut self,
+        attachment: [u8; 16],
+        now: u64,
+        application: &mut A,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        A: LiveApplication,
+    {
+        self.host
+            .dispatch_frame(attachment, now, Frame::Close, application)
+            .await
+            .map_err(HttpConnectionError::Protocol)
+            .map_err(HttpIoError::Transport)?;
+        Ok(())
     }
 
     /// Validates the RFC 6455 handshake and attaches the cookie-authenticated

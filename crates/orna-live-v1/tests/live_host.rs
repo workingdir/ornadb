@@ -1030,6 +1030,66 @@ fn websocket_connection_driver_cancellation_disconnects_its_attachment() {
 }
 
 #[test]
+fn websocket_connection_driver_cancellation_during_output_disconnects_its_attachment() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let mut bytes = input.into_bytes();
+    bytes.extend(masked(true, 9, b"p"));
+    let mut reader = Cursor::new(bytes);
+    let mut writer = Cursor::new(Vec::new());
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = CancelAfterPolls {
+        polls: 0,
+        ready_after: 4,
+    };
+    assert_eq!(
+        block_on(transport.serve_websocket_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            [6; 16],
+            &mut clock,
+            &mut cancellation,
+            &mut application,
+        )),
+        Err(HttpIoError::Cancelled)
+    );
+    assert_eq!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([6; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        )),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
 fn websocket_connection_driver_delivers_co_read_frames_before_admitting_the_next() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
