@@ -244,6 +244,42 @@ impl TableMutation {
         self.value.as_deref()
     }
 
+    /// Decodes a mutation previously produced by this typed boundary.
+    /// Generic runtime mutations are rejected unless their payload, digest,
+    /// and canonical table operation all validate together.
+    pub fn decode(mutation: &Mutation) -> Result<Self, RuntimeError> {
+        validate_id(mutation.id)?;
+        let digest: [u8; 32] = Sha256::digest(&mutation.payload).into();
+        if digest != mutation.digest {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let mut cursor = 0;
+        let prefix = b"ORNA-TABLE-MUTATION\0";
+        if mutation.payload.get(..prefix.len()) != Some(prefix) {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        cursor += prefix.len();
+        let table =
+            String::from_utf8(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
+                .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        let key = read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec();
+        let value = match mutation.payload.get(cursor).copied() {
+            Some(0) => {
+                cursor += 1;
+                None
+            }
+            Some(1) => {
+                cursor += 1;
+                Some(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
+            }
+            _ => return Err(RuntimeError::InvalidTableMutation),
+        };
+        if cursor != mutation.payload.len() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        Self::new(mutation.id, table, key, value)
+    }
+
     fn runtime_mutation(&self) -> Result<Mutation, RuntimeError> {
         let payload = encode_table_mutation(self)?;
         Ok(Mutation {
@@ -2253,6 +2289,20 @@ impl RuntimeState {
             });
         }
         Ok(out)
+    }
+
+    /// Returns the typed table operations covered by a persisted freeze.
+    /// Non-table mutations fail closed; newer pending tail mutations remain
+    /// outside the returned range.
+    pub async fn pending_table_mutations_through(
+        &self,
+        freeze: &PublicationFreeze,
+    ) -> Result<Vec<TableMutation>, RuntimeError> {
+        self.pending_through(freeze)
+            .await?
+            .iter()
+            .map(TableMutation::decode)
+            .collect()
     }
 
     /// Returns the newest durable checkpoint, if this runtime has committed
@@ -4423,6 +4473,28 @@ fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) -> Result<(), Runt
     Ok(())
 }
 
+fn read_length_prefixed<'a>(
+    payload: &'a [u8],
+    cursor: &mut usize,
+) -> Result<&'a [u8], RuntimeError> {
+    let length = payload
+        .get(*cursor..(*cursor).saturating_add(4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    *cursor = cursor
+        .checked_add(4)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    let end = (*cursor)
+        .checked_add(usize::try_from(length).map_err(|_| RuntimeError::InvalidTableMutation)?)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    let bytes = payload
+        .get(*cursor..end)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    *cursor = end;
+    Ok(bytes)
+}
+
 async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
@@ -4719,6 +4791,34 @@ mod tests {
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_pending_mutations_round_trip_through_the_public_decoder() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let expected = table_mutation(5, 1, Some(9));
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                std::slice::from_ref(&expected),
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        let freeze = state.freeze(id(7), &checkpoint).await.unwrap();
+        assert_eq!(
+            state
+                .pending_table_mutations_through(&freeze)
+                .await
+                .unwrap(),
+            vec![expected]
         );
     }
 
