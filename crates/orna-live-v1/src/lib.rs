@@ -1716,6 +1716,20 @@ pub struct LiveListener {
     status: ListenerStatus,
 }
 
+/// A runtime-owned way to accept a stream from a [`LiveListener`].
+///
+/// The listener retains the bound socket while the executable supplies the
+/// asynchronous runtime integration. Implementations may box a runtime future
+/// when it is not [`Unpin`].
+pub trait LiveListenerAcceptor {
+    type Accept<'a>: Future<Output = io::Result<std::net::TcpStream>> + Unpin
+    where
+        Self: 'a;
+
+    /// Starts accepting one stream from the supplied owned listener.
+    fn accept<'a>(&'a mut self, listener: &'a TcpListener) -> Self::Accept<'a>;
+}
+
 impl LiveListener {
     /// Returns the caller-owned accept handle.
     #[must_use]
@@ -2345,6 +2359,33 @@ impl LiveTransport {
             listener,
             status: ListenerStatus { address, exposure },
         })
+    }
+
+    /// Accepts one stream through a caller-supplied runtime adapter.
+    ///
+    /// This only races acceptance with cancellation. The caller retains TLS,
+    /// connection lifetime, attachment identity, and subsequent HTTP or
+    /// WebSocket handoff ownership; no production listener loop is implied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted accept or cancellation error.
+    pub async fn accept_listener_with_cancellation<A, C>(
+        &self,
+        listener: &LiveListener,
+        acceptor: &mut A,
+        cancellation: &mut C,
+    ) -> std::result::Result<std::net::TcpStream, HttpIoError>
+    where
+        A: LiveListenerAcceptor,
+        C: Future<Output = ()> + Unpin,
+    {
+        await_http_io(
+            acceptor.accept(listener.listener()),
+            cancellation,
+            HttpIoError::Read,
+        )
+        .await
     }
 
     /// # Errors
