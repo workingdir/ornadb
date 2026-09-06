@@ -467,6 +467,79 @@ fn same_commit_checkout_rejects_a_divergent_target_without_mutating_cwd() {
 }
 
 #[test]
+fn divergent_checkout_carries_nonconflicting_git_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("target.orna"), "target source\n").unwrap();
+    git(root.path(), &["add", "target.orna"]);
+    git(root.path(), &["commit", "-m", "target source"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(29))
+        .unwrap();
+    assert!(plan.git().conflicting_paths().is_empty());
+
+    repo.execute_nonconflicting_git_checkout(&plan).unwrap();
+
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("target.orna")).unwrap(),
+        "target source\n"
+    );
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged source\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked\n"
+    );
+}
+
+#[test]
+fn divergent_checkout_refuses_conflicting_git_state_without_mutating_cwd() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+    fs::write(root.path().join("ordinary.txt"), "local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let before = repo.cwd_generation(RuntimeGeneration::new(30)).unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(30))
+        .unwrap();
+
+    assert!(matches!(
+        repo.execute_nonconflicting_git_checkout(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(30)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "local");
+}
+
+#[test]
 fn checkout_subplan_classifies_target_and_local_path_sets() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
