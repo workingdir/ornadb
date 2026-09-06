@@ -14,6 +14,7 @@ path = "src/main.rs"
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
+orna-project-v1 = { path = "../orna-project-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
