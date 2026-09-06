@@ -127,6 +127,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
         at: 0,
         tokens: Vec::new(),
         errors: Vec::new(),
+        string_depth: 0,
+        string_limit_reported: false,
     };
     l.run();
     l.tokens.push(Token {
@@ -140,11 +142,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
         Err(l.errors)
     }
 }
+// Interpolation can recurse before parser admission; bound that lexer stack
+// separately from ordinary braces and sequential string literals.
+const MAX_STRING_NESTING: usize = 32;
+
 struct Lexer<'a> {
     source: &'a str,
     at: usize,
     tokens: Vec<Token>,
     errors: Vec<LexError>,
+    string_depth: usize,
+    string_limit_reported: bool,
 }
 impl<'a> Lexer<'a> {
     fn run(&mut self) {
@@ -397,6 +405,24 @@ impl<'a> Lexer<'a> {
         self.push(kind, start)
     }
     fn string(&mut self, start: usize) {
+        if self.string_depth == MAX_STRING_NESTING {
+            if !self.string_limit_reported {
+                self.error(
+                    "ORNA-LEX-013",
+                    "maximum string interpolation nesting exceeded",
+                    start,
+                    start + 1,
+                );
+                self.string_limit_reported = true;
+            }
+            self.skip_limited_string();
+            return;
+        }
+        self.string_depth += 1;
+        self.string_inner(start);
+        self.string_depth -= 1;
+    }
+    fn string_inner(&mut self, start: usize) {
         self.bump();
         let mut segment_start = self.at;
         let mut interpolated = false;
@@ -442,6 +468,22 @@ impl<'a> Lexer<'a> {
             start,
             self.at,
         )
+    }
+    fn skip_limited_string(&mut self) {
+        self.bump();
+        while self.at < self.source.len() {
+            if self.peek() == '\\' {
+                self.bump();
+                if self.at < self.source.len() {
+                    self.bump();
+                }
+            } else if self.peek() == '"' {
+                self.bump();
+                return;
+            } else {
+                self.bump();
+            }
+        }
     }
     fn string_escape(&mut self) {
         let escape_start = self.at;
