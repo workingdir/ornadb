@@ -137,11 +137,23 @@ fn digest_source(source: &str) -> [u8; 32] {
 }
 
 fn is_standard_module_path(path: &str) -> bool {
-    let mut components = path.split('/');
-    components.next() == Some("std")
+    let mut components = path.split('/').collect::<Vec<_>>();
+    let Some(file) = components.pop() else {
+        return false;
+    };
+    let Some(stem) = file.strip_suffix(".orna") else {
+        return false;
+    };
+    components.first() == Some(&"std")
+        && valid_standard_component(stem)
         && components
-            .all(|component| !component.is_empty() && component != "." && component != "..")
-        && path.ends_with(".orna")
+            .iter()
+            .skip(1)
+            .all(|component| valid_standard_component(component))
+}
+
+fn valid_standard_component(component: &str) -> bool {
+    !component.is_empty() && !component.contains('.')
 }
 impl ModuleInput {
     pub fn new(logical_path: impl Into<String>, source: impl Into<String>) -> Self {
@@ -5934,6 +5946,13 @@ mod tests {
             StandardDependencyProfile::from_sources(
                 "std-snapshot-1",
                 [("project/math.orna".into(), "fn f() = 1;".into())],
+            ),
+            Err(StandardProfileError::InvalidModulePath)
+        );
+        assert_eq!(
+            StandardDependencyProfile::from_sources(
+                "std-snapshot-1",
+                [("std/hidden.module.orna".into(), "fn f() = 1;".into())],
             ),
             Err(StandardProfileError::InvalidModulePath)
         );
