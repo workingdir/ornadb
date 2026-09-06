@@ -715,6 +715,81 @@ async fn raw_sys_invoke_is_denied_before_sealed_entry() -> TestResult<()> {
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn dispatches_verified_v11_standard_math_increment_through_sealed_sys_invoke()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = open_standard_database(kernel(&database)?).await?;
+        let active = kernel.recover().await?;
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("the opened database did not retain its verified standard"))?;
+        let definition = standard
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().to_string() == "std.math.increment")
+            .ok_or_else(|| failure("the V11 standard is missing std.math.increment"))?;
+        let executable = standard
+            .executables()
+            .iter()
+            .find(|executable| executable.function() == definition.id())
+            .ok_or_else(|| failure("std.math.increment has no pinned executable"))?;
+        require(
+            executable.revision().id() == definition.current_revision(),
+            "std.math.increment did not retain its current executable revision",
+        )?;
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![SecurityFunctionTarget::verified_standard(
+                definition.id(),
+                standard.revision(),
+                executable.revision().id(),
+            )],
+            vec![
+                Principal::new(
+                    RAW_CLIENT_USER,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                ),
+                Principal::new(
+                    RAW_CLIENT_UNGRANTED_USER,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                ),
+            ],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, definition.id())],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let granted = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let ungranted = security.bind_authenticated_session(RAW_CLIENT_UNGRANTED_USER, vec![])?;
+        let parameter = definition.parameters()[0].id();
+        let request = sealed_echo_request(
+            InvocationRequestTarget::qualified_name(definition.name().clone())?,
+            InvocationParameterSelector::parameter_id(parameter),
+            4,
+        )?;
+        let registry = registered_opaque_codecs(standard)?;
+        let retained = encode_invoke_request(&active, &registry, &request)?;
+        let result = kernel
+            .dispatch_sealed_sys_invoke(&granted, 5, &retained)
+            .await?;
+        require_echo_completion(&result, 5)?;
+        let denied = kernel
+            .dispatch_sealed_sys_invoke(&ungranted, 5, &retained)
+            .await?;
+        require(
+            matches!(denied, SealedInvocationResult::Denied { .. }),
+            "std.math.increment ran without its exact EXECUTE grant",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 #[test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 fn proves_standard_invocation_dogfooding_through_sealed_sys_invoke() -> TestResult<()> {
