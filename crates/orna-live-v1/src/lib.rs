@@ -1712,6 +1712,87 @@ pub struct WireResponse {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpEncodeError {
+    Limit,
+    Malformed,
+    UnsupportedStatus,
+}
+
+impl WireResponse {
+    /// Serializes one complete HTTP/1.1 response for a trusted socket edge.
+    /// The encoder owns `Content-Length`, rejects header injection, and applies
+    /// the configured outgoing bound before allocating the result buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the response is malformed, uses an unsupported
+    /// status, or exceeds the configured outgoing bound.
+    pub fn encode_http(
+        &self,
+        limits: TransportLimits,
+    ) -> std::result::Result<Vec<u8>, HttpEncodeError> {
+        let reason = http_reason(self.status).ok_or(HttpEncodeError::UnsupportedStatus)?;
+        if ((100..200).contains(&self.status) || self.status == 204) && !self.body.is_empty() {
+            return Err(HttpEncodeError::Malformed);
+        }
+        let mut length = 0usize;
+        length = length
+            .checked_add(9 + self.status.to_string().len() + reason.len() + 4)
+            .ok_or(HttpEncodeError::Limit)?;
+        let mut header_names = BTreeSet::new();
+        for (name, value) in &self.headers {
+            if name.is_empty()
+                || !name.bytes().all(is_http_token)
+                || value.bytes().any(is_http_header_control)
+                || name.eq_ignore_ascii_case("content-length")
+                || !header_names.insert(name.to_ascii_lowercase())
+            {
+                return Err(HttpEncodeError::Malformed);
+            }
+            length = length
+                .checked_add(name.len() + value.len() + 4)
+                .ok_or(HttpEncodeError::Limit)?;
+        }
+        length = length
+            .checked_add("Content-Length: ".len() + self.body.len().to_string().len() + 4)
+            .and_then(|length| length.checked_add(self.body.len()))
+            .ok_or(HttpEncodeError::Limit)?;
+        if length > limits.max_outgoing_bytes {
+            return Err(HttpEncodeError::Limit);
+        }
+
+        let mut encoded = Vec::with_capacity(length);
+        encoded.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", self.status, reason).as_bytes());
+        for (name, value) in &self.headers {
+            encoded.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        encoded
+            .extend_from_slice(format!("Content-Length: {}\r\n\r\n", self.body.len()).as_bytes());
+        encoded.extend_from_slice(&self.body);
+        Ok(encoded)
+    }
+}
+
+const fn http_reason(status: u16) -> Option<&'static str> {
+    Some(match status {
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        426 => "Upgrade Required",
+        503 => "Service Unavailable",
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HttpParseError {
     Incomplete,
     Limit,
