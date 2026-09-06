@@ -1628,11 +1628,49 @@ END IF;
     let result = super::super::evaluate_client_function_with_arguments(
         &active,
         &authorise(active.pair(), function),
-        &[argument],
+        std::slice::from_ref(&argument),
     )
     .expect("the recursive control-flow function evaluates successfully");
 
     assert_eq!(result.value(), &RuntimeValue::Integer(6));
+
+    let authorisation = authorise(active.pair(), function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    )
+    .expect("recursive control-flow plan should be admitted");
+    let admitted = super::super::vm::execute_admitted_pure_client_function(
+        &active,
+        &authorisation,
+        &host,
+        &admission,
+        &[argument],
+    )
+    .expect("admitted recursive plan should execute");
+    assert_eq!(admitted.value(), &RuntimeValue::Integer(6));
 }
 #[test]
 fn recursive_client_control_flow_stops_at_depth_limit() {
