@@ -1809,6 +1809,18 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute(
+                "UPDATE stream_failure
+                 SET version = version + 1, status = ?1
+                 WHERE status = ?2",
+                params![
+                    encode_status(FailureStatus::Skipped),
+                    encode_status(FailureStatus::Replaying),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         let mut rows = transaction
             .query("SELECT epoch FROM writer_lease WHERE singleton = 1", ())
             .await
@@ -8462,6 +8474,48 @@ mod tests {
                 .is_ok()
         );
     }
+
+    #[tokio::test]
+    async fn recovery_reopens_an_interrupted_replay() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "replay-recovery", digest(5)).await;
+        let before_capture = state.capture().await.unwrap();
+
+        let replacement = state.recover_abandoned(id(4), id(5)).await.unwrap();
+        let recovered = state
+            .stream_backend(replacement)
+            .failure_async(&grant.failure)
+            .await
+            .unwrap()
+            .expect("interrupted replay remains durable");
+        assert_eq!(recovered.status, FailureStatus::Skipped);
+        assert_eq!(recovered.version, grant.version + 1);
+        assert_eq!(
+            state
+                .stream_backend(replacement)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert_eq!(state.capture().await.unwrap(), before_capture);
+
+        assert!(matches!(
+            state
+                .stream_backend(replacement)
+                .apply_async(CommitIntent::Replay {
+                    failure: grant.failure,
+                    expected_version: recovered.version,
+                })
+                .await
+                .unwrap(),
+            CommitResult::ReplayGranted { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn malformed_identity_and_digest_fail_closed_without_diagnostics() {
         let (_temp, repo) = repository();
