@@ -6,10 +6,10 @@ use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
-    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
-    LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
-    WebSocketOutput, WebSocketState, WireRequest, WireResponse, encode_websocket_output,
-    parse_http_request,
+    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveHost, LiveListenerAcceptor,
+    LiveSessionAuthority, LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential,
+    SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState, WireRequest, WireResponse,
+    encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -136,6 +136,20 @@ impl AsyncWrite for PendingWriter {
 struct CancelAfterPolls {
     polls: usize,
     ready_after: usize,
+}
+
+#[derive(Default)]
+struct PendingListenerAcceptor {
+    accepts: usize,
+}
+
+impl LiveListenerAcceptor for PendingListenerAcceptor {
+    type Accept<'a> = std::future::Pending<std::io::Result<TcpStream>>;
+
+    fn accept<'a>(&'a mut self, _: &'a TcpListener) -> Self::Accept<'a> {
+        self.accepts += 1;
+        std::future::pending()
+    }
 }
 
 impl std::future::Future for CancelAfterPolls {
@@ -672,6 +686,30 @@ fn listener_policy_reports_loopback_rejects_exposure_and_releases_on_drop() {
     let listener = LiveTransport::bind_explicit_listener(([127, 0, 0, 1], 0).into()).unwrap();
     assert_eq!(listener.status().exposure, ListenerExposure::Explicit);
     assert!(listener.status().address.ip().is_loopback());
+}
+
+#[test]
+fn cancellable_listener_accept_preserves_listener_ownership() {
+    let listener = LiveTransport::bind_default_listener(0).unwrap();
+    let address = listener.status().address;
+    let transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut acceptor = PendingListenerAcceptor::default();
+    let mut cancellation = CancelAfterPolls {
+        polls: 0,
+        ready_after: 2,
+    };
+
+    assert!(matches!(
+        block_on(transport.accept_listener_with_cancellation(
+            &listener,
+            &mut acceptor,
+            &mut cancellation,
+        )),
+        Err(HttpIoError::Cancelled)
+    ));
+    assert_eq!(acceptor.accepts, 1);
+    assert_eq!(listener.listener().local_addr().unwrap(), address);
+    assert!(TcpListener::bind(address).is_err());
 }
 
 #[test]
