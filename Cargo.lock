@@ -1559,6 +1559,7 @@ dependencies = [
  "orna-storage-v1",
  "orna-stream-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-table-v1",
  "orna-value-v1",
  "serde",
