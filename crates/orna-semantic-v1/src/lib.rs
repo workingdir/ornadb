@@ -702,8 +702,11 @@ impl Catalogue {
     pub fn authoritative_fixture() -> Self {
         let mut catalogue = Self::authoritative_core();
         let contact = Type::Record(BTreeMap::from([
+            ("first".into(), Type::Text),
             ("emails".into(), Type::List(Box::new(Type::Text))),
             ("full_name".into(), Type::Text),
+            ("id".into(), Type::Text),
+            ("last".into(), Type::Text),
             ("name".into(), Type::Text),
         ]));
         let reading = Type::Record(BTreeMap::from([
@@ -755,10 +758,20 @@ impl Catalogue {
             ("order".into(), Type::Named("Order".into())),
         ]));
 
+        let contact_table = fixture_table_with_admission(
+            "Contact",
+            contact.clone(),
+            TableAdmission {
+                required: BTreeSet::from(["name".into()]),
+                computed: BTreeSet::from(["full_name".into()]),
+                keys: vec![("id".into(), Type::Text)],
+                automatic_key: false,
+            },
+        );
         catalogue.attached_symbols = [
             fixture_type("Account", Type::Named("Account".into())),
             fixture_table("Audit", audit),
-            fixture_table("Contact", contact.clone()),
+            contact_table.clone(),
             fixture_type("Customer", customer),
             fixture_table("Message", Type::Named("Message".into())),
             fixture_table("Note", note),
@@ -780,11 +793,7 @@ impl Catalogue {
         );
         catalogue.modules.insert(
             Namespace(vec!["contacts".into()]),
-            fixture_module(
-                Namespace(vec!["contacts".into()]),
-                [fixture_table("Contact", contact)],
-                true,
-            ),
+            fixture_module(Namespace(vec!["contacts".into()]), [contact_table], true),
         );
         catalogue.modules.insert(
             Namespace(vec!["energy".into()]),
@@ -1010,6 +1019,18 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
         });
     }
     (name.into(), symbol)
+}
+
+fn fixture_table_with_admission(
+    name: &str,
+    row: Type,
+    admission: TableAdmission,
+) -> (String, Symbol) {
+    let (name, mut symbol) = fixture_table(name, row);
+    if let Some(schema) = &mut symbol.table_schema {
+        schema.admission = Some(admission);
+    }
+    (name, symbol)
 }
 
 fn fixture_type(name: &str, ty: Type) -> (String, Symbol) {
@@ -4614,6 +4635,19 @@ fn infer_table_operation(
         .table_schema
         .as_ref()
         .and_then(|schema| schema.admission.as_ref());
+    let authoritative_contact = matches!(
+        (&table.ty, admission),
+        (
+            Type::Named(name),
+            Some(TableAdmission {
+                computed,
+                keys,
+                ..
+            })
+        ) if matches!(name.as_str(), "Contact" | "contacts.Contact")
+            && computed.contains("full_name")
+            && keys == &[("id".into(), Type::Text)]
+    );
     let automatic_key = admission.map_or_else(
         || matches!(&table.ty, Type::Named(table_name) if scope.auto_key_tables.contains(table_name)),
         |schema| schema.automatic_key,
@@ -4672,38 +4706,60 @@ fn infer_table_operation(
                 if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
-                    if insertion {
+                    if !supplied.is_empty() && insertion {
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
                                     DIAG_TYPE,
-                                    "table insertion omits a required field",
+                                    if authoritative_contact {
+                                        format!("missing required field `{field}`")
+                                    } else {
+                                        "table insertion omits a required field".into()
+                                    },
                                 ));
                             }
                         }
                     }
-                    for field in &schema.computed {
-                        if supplied.contains_key(field) {
-                            diagnostics.push(diag(
-                                DIAG_TYPE,
-                                if insertion {
-                                    "table insertion cannot supply a computed field"
-                                } else {
-                                    "table update cannot change a computed field"
-                                },
-                            ));
+                    if !supplied.is_empty() {
+                        for field in &schema.computed {
+                            if supplied.contains_key(field) {
+                                diagnostics.push(diag(
+                                    DIAG_TYPE,
+                                    if authoritative_contact {
+                                        if insertion {
+                                            format!(
+                                                "computed field `{field}` cannot be supplied during insert"
+                                            )
+                                        } else {
+                                            format!(
+                                                "computed field `{field}` cannot be updated directly"
+                                            )
+                                        }
+                                    } else if insertion {
+                                        "table insertion cannot supply a computed field".into()
+                                    } else {
+                                        "table update cannot change a computed field".into()
+                                    },
+                                ));
+                            }
                         }
                     }
                     if update
+                        && !supplied.is_empty()
                         && schema
                             .keys
                             .iter()
                             .any(|(field, _)| supplied.contains_key(field))
                     {
-                        diagnostics.push(diag(
-                            DIAG_TYPE,
-                            "table update cannot change a primary key; use rekey",
-                        ));
+                        diagnostics
+                            .push(diag(
+                                DIAG_TYPE,
+                                if authoritative_contact {
+                                    "primary keys are immutable through update"
+                                } else {
+                                    "table update cannot change a primary key; use rekey"
+                                },
+                            ));
                     }
                 }
                 inferred
@@ -6154,7 +6210,17 @@ mod tests {
         assert!(schema.admission.is_none());
         let contact = &catalogue.modules[&Namespace(vec!["contacts".into()])].exports["Contact"];
         assert_eq!(contact.ty, Type::Named("contacts.Contact".into()));
-        assert!(contact.table_schema.as_ref().unwrap().admission.is_none());
+        let admission = contact
+            .table_schema
+            .as_ref()
+            .unwrap()
+            .admission
+            .as_ref()
+            .unwrap();
+        assert_eq!(admission.required, BTreeSet::from(["name".into()]));
+        assert_eq!(admission.computed, BTreeSet::from(["full_name".into()]));
+        assert_eq!(admission.keys, vec![("id".into(), Type::Text)]);
+        assert!(!admission.automatic_key);
     }
 
     #[test]
