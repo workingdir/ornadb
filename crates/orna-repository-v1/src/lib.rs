@@ -14,6 +14,7 @@ use std::{
 };
 
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
 /// shared foundation owns the portable Orna `SnapshotRef` row identity and
@@ -466,6 +467,18 @@ pub struct CheckoutPreflight {
     cwd: CwdGeneration,
 }
 
+/// A domain-separated authorization witness for one exact checkout
+/// preflight. It is opaque so callers cannot assemble a force token without
+/// first observing the repository state it authorizes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CheckoutPlanToken([u8; 32]);
+
+impl CheckoutPlanToken {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl CheckoutPreflight {
     pub fn target(&self) -> &CheckoutTarget {
         &self.target
@@ -477,6 +490,74 @@ impl CheckoutPreflight {
 
     pub fn cwd(&self) -> &CwdGeneration {
         &self.cwd
+    }
+
+    /// Derives a stable authorization witness over the complete preflight,
+    /// including target attachment kind, Git state, raw worktree status, and
+    /// runtime generation.
+    pub fn force_token(&self) -> CheckoutPlanToken {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ORNA-CHECKOUT-PLAN-TOKEN\0");
+        bytes.push(1);
+        match &self.target {
+            CheckoutTarget::Branch { name, commit } => {
+                bytes.push(1);
+                token_string(&mut bytes, name);
+                token_string(&mut bytes, commit.as_str());
+            }
+            CheckoutTarget::Detached { commit } => {
+                bytes.push(2);
+                token_string(&mut bytes, commit.as_str());
+            }
+        }
+        token_optional_string(
+            &mut bytes,
+            self.expected_head.as_ref().map(GitCommitRef::as_str),
+        );
+        token_optional_string(
+            &mut bytes,
+            self.cwd.index.head.as_ref().map(GitCommitRef::as_str),
+        );
+        token_optional_string(
+            &mut bytes,
+            self.cwd.index.tree.as_ref().map(IndexTreeRef::as_str),
+        );
+        token_bytes(&mut bytes, self.cwd.worktree.as_porcelain_v2_z());
+        bytes.extend_from_slice(&self.cwd.runtime.get().to_be_bytes());
+        CheckoutPlanToken(Sha256::digest(bytes).into())
+    }
+
+    /// Requires explicit force authorization for this exact, still-current
+    /// preflight. A missing or stale witness never permits checkout mutation.
+    pub fn authorize_force(
+        &self,
+        force: bool,
+        token: Option<&CheckoutPlanToken>,
+    ) -> Result<(), RepositoryError> {
+        if force && token == Some(&self.force_token()) {
+            Ok(())
+        } else {
+            Err(RepositoryError::CheckoutPlanStale)
+        }
+    }
+}
+
+fn token_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    output.extend_from_slice(bytes);
+}
+
+fn token_string(output: &mut Vec<u8>, value: &str) {
+    token_bytes(output, value.as_bytes());
+}
+
+fn token_optional_string(output: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            token_string(output, value);
+        }
+        None => output.push(0),
     }
 }
 

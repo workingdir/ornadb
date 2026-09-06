@@ -9,6 +9,7 @@ description = "Git-backed repository, CWD, index, and local runtime boundary for
 [dependencies]
 fs2 = "0.4.3"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+sha2 = "0.11.0"
 
 [dev-dependencies]
 num-bigint = "0.4.6"
