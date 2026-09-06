@@ -201,3 +201,41 @@ fn loopback_host_runs_create_resume_and_delete_on_one_connection() {
     assert!(host.serve().is_ok());
     client.join().unwrap();
 }
+
+#[test]
+fn loopback_host_reuses_session_state_across_connections_until_cancelled() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let request_database = database.clone();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut first = TcpStream::connect(address).unwrap();
+        first
+            .write_all(request(&request_database).as_bytes())
+            .unwrap();
+        first.shutdown(Shutdown::Write).unwrap();
+        let mut first_response = Vec::new();
+        first.read_to_end(&mut first_response).unwrap();
+        assert!(first_response.starts_with(b"HTTP/1.1 201 Created\r\n"));
+
+        let mut second = TcpStream::connect(address).unwrap();
+        second
+            .write_all(request("00000000-0000-0000-0000-000000000001").as_bytes())
+            .unwrap();
+        second.shutdown(Shutdown::Write).unwrap();
+        let mut second_response = Vec::new();
+        second.read_to_end(&mut second_response).unwrap();
+        assert!(second_response.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
