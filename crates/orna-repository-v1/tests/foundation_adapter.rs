@@ -181,3 +181,41 @@ fn adapter_exposes_the_real_head_as_a_committed_snapshot() {
     assert_eq!(algorithm, orna_foundation_v1::GitHash::Sha1);
     assert_eq!(oid.len(), 20);
 }
+
+#[test]
+fn adapter_preserves_a_sha256_head_as_a_committed_snapshot() {
+    let root = TempDir::new().unwrap();
+    git(
+        root.path(),
+        &["init", "--object-format=sha256", "-b", "main"],
+    );
+    git(
+        root.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(
+        root.path(),
+        &["config", "user.name", "Foundation adapter test"],
+    );
+    fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+
+    let adapter = OrnaRepositoryAdapter::new(
+        Repository::discover(root.path()).unwrap(),
+        Store::new(capture(1, 1)),
+    );
+
+    let snapshot = adapter.committed_snapshot().unwrap().unwrap();
+    let CanonicalSnapshot::Commit {
+        database,
+        algorithm,
+        oid,
+    } = snapshot
+    else {
+        panic!("expected a committed snapshot");
+    };
+    assert_eq!(database, [1; 16]);
+    assert_eq!(algorithm, orna_foundation_v1::GitHash::Sha256);
+    assert_eq!(oid.len(), 32);
+}
