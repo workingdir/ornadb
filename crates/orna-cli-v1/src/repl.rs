@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use orna_evaluator_v1::ReplSession;
+use orna_conformance_v1::AdmittedReplSession;
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
@@ -17,12 +17,13 @@ enum ReadSubmission {
     Source(String),
 }
 
-/// Run one retained, line-oriented REPL session.  A malformed or unsupported
-/// submission reports its redacted evaluator code and leaves the session open.
+/// Run one retained, line-oriented admitted REPL session. A malformed or
+/// rejected submission reports its redacted evaluator code and leaves the
+/// session open.
 pub fn run<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
-    session: &mut ReplSession,
+    session: &mut AdmittedReplSession,
 ) -> io::Result<()> {
     loop {
         writer.write_all(b"> ")?;
@@ -211,10 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn scripted_loop_retains_a_real_evaluator_session() {
-        let mut input = b"let answer = 42;\nanswer\n:quit\n".as_slice();
+    fn scripted_loop_admits_typed_declarations() {
+        let mut input = b"let answer: Int = 42;\nanswer\n:quit\n".as_slice();
         let mut output = Vec::new();
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
@@ -228,7 +229,7 @@ mod tests {
         input.extend_from_slice(b"\n1\n:quit\n");
         let mut input = input.as_slice();
         let mut output = Vec::new();
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
@@ -241,7 +242,7 @@ mod tests {
         let source = "\"é\"\n:quit\n";
         let mut input = BufReader::with_capacity(1, source.as_bytes());
         let mut output = Vec::new();
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
@@ -251,20 +252,34 @@ mod tests {
 
     #[test]
     fn failed_submission_keeps_the_last_successful_result() {
-        let mut input = b"1 + 1\nmissing()\n$_\n:quit\n".as_slice();
+        let mut input = b"1 + 1\nlet mismatch: Int = \"wrong\";\n$_\n:quit\n".as_slice();
         let mut output = Vec::new();
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error["));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]"));
         assert!(output.ends_with("> 2 : Int\n> "));
+    }
+
+    #[test]
+    fn submitted_effect_is_rejected_without_changing_the_last_result() {
+        let mut input =
+            b"let seed: Int = 2;\nseed\nstd.net.http.get(\"https://example.com\")\n$_\n:quit\n"
+                .as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]\n> 2 : Int\n> "
+        );
     }
 
     #[test]
     fn malformed_utf8_is_a_recoverable_submission_error() {
         let mut input = b"2\n\xff\n$_\n:quit\n".as_slice();
         let mut output = Vec::new();
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
@@ -288,7 +303,7 @@ mod tests {
     fn writer_errors_are_propagated() {
         let mut input = b":quit\n".as_slice();
         let mut writer = BrokenWriter;
-        let mut session = ReplSession::new(Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         assert_eq!(
             run(&mut input, &mut writer, &mut session)
                 .expect_err("writer error")
