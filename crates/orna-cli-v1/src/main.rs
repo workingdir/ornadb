@@ -750,7 +750,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
-            "use std.math; pub fn seed(): Int = std.math.increment(41);",
+            "use std.math; pub fn seed(): Int = std.math.decrement(43);",
         )
         .expect("main source");
         assert!(
