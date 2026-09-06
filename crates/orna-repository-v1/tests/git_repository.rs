@@ -609,6 +609,48 @@ fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
 }
 
 #[test]
+fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [9; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    fs::write(root.path().join(".git/index.lock"), b"ordinary writer\n").unwrap();
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &candidate, &mut journal),
+        Err(orna_repository_v1::RepositoryError::GitIndexLockPresent)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(
+        journal.stage(),
+        orna_repository_v1::PublicationJournalStage::Prepared
+    );
+}
+
+#[test]
 fn recovery_resumes_after_ref_and_index_boundaries() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
