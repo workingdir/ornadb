@@ -3928,6 +3928,64 @@ mod list_stream_tests {
     }
 
     #[tokio::test]
+    async fn project_stream_skips_arbitrary_pipeline_without_publishing_rows_or_checkpoint() {
+        let (_temp, repository) = repository();
+        let mut project = authoritative_sensor_project();
+        project.modules[0].source = project.modules[0].source.replace(
+            "                    }); }\n",
+            "                    });\n                    input() | for_each(sample => {\n                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });\n                    }); }\n",
+        );
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        let outcome = evaluator
+            .execute_project_stream(
+                &repository,
+                identity(),
+                [23; 16],
+                [24; 32],
+                &project,
+                "sensors.ingest",
+            )
+            .await
+            .expect("unsupported project stream must not fail the runtime");
+        assert!(
+            matches!(outcome, StageOutcome::Skipped { ref reason } if reason.contains("one producer pipeline")),
+            "unsupported arbitrary pipeline must be explicitly skipped: {outcome:?}"
+        );
+
+        let expected = authoritative_sensor_project();
+        let bridge = admit_project_list_stream(
+            &expected,
+            admit_transaction_project(&expected, Limits::default(), "sensors.ingest")
+                .expect("authoritative project admission"),
+            "sensors.ingest",
+            identity(),
+        )
+        .expect("authoritative stream admission");
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("runtime remains empty after skipped stream");
+        assert!(
+            state
+                .committed_table_rows("Reading")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a skipped project stream must not publish rows"
+        );
+        let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&bridge.checkpoint_key().expect("checkpoint key"))
+            .await
+            .expect("checkpoint read");
+        assert!(
+            checkpoint.committed.is_none(),
+            "a skipped project stream must not publish a checkpoint"
+        );
+    }
+
+    #[tokio::test]
     async fn literal_list_stream_reopens_without_duplicate_delivery() {
         let (_temp, repository) = repository();
         let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
