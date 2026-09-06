@@ -690,7 +690,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                         diagnostic,
                     });
                 failure.version += 1;
-                failure.attempts += 1;
+                failure.attempts += u32::from(failure.status != FailureStatus::Retrying);
                 failure.status = FailureStatus::Failed;
                 failure.diagnostic = diagnostic;
                 CommitResult::Failed {
@@ -729,6 +729,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 self.retry_claims.insert(key);
                 let record = self.failures.get_mut(&failure).expect("checked above");
                 record.version += 1;
+                record.attempts += 1;
                 record.status = FailureStatus::Retrying;
                 CommitResult::RetryScheduled {
                     failure: record.clone(),
@@ -1200,6 +1201,7 @@ mod tests {
             CommitResult::RetryScheduled { failure } => failure,
             _ => panic!(),
         };
+        assert_eq!(scheduled.attempts, 2);
         let lease = acquire(&mut backend, item.clone());
         assert!(matches!(
             backend.apply(CommitIntent::Complete {
@@ -1212,21 +1214,49 @@ mod tests {
             backend.failure(&failed.identity).unwrap().status,
             FailureStatus::Succeeded
         );
+        assert_eq!(backend.failure(&failed.identity).unwrap().attempts, 2);
 
         let second = delivery("receipt:one", "resume:two");
         let failed = acquire_and_fail(&mut backend, second.clone());
-        match backend.apply(CommitIntent::Retry {
+        let scheduled = match backend.apply(CommitIntent::Retry {
             failure: failed.identity.clone(),
             expected_version: failed.version,
             expected: expected(&backend, &second),
         }) {
-            CommitResult::RetryScheduled { .. } => (),
+            CommitResult::RetryScheduled { failure } => failure,
             _ => panic!(),
         };
+        assert_eq!(scheduled.attempts, 2);
         let failed_again = acquire_and_fail(&mut backend, second);
         assert_eq!(failed_again.status, FailureStatus::Failed);
         assert_eq!(failed_again.attempts, 2);
         assert!(scheduled.version < backend.failure(&FailureIdentity(item)).unwrap().version);
+    }
+
+    #[test]
+    fn retry_admission_preserves_attempts_when_interrupted() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let failed = acquire_and_fail(&mut backend, item.clone());
+        let retry = match backend.apply(CommitIntent::Retry {
+            failure: failed.identity.clone(),
+            expected_version: failed.version,
+            expected: expected(&backend, &item),
+        }) {
+            CommitResult::RetryScheduled { failure } => failure,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert_eq!(retry.attempts, 2);
+        let before = backend.checkpoint(&item.checkpoint_key());
+        let lease = acquire(&mut backend, item.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Cancel { lease }),
+            CommitResult::Cancelled { .. }
+        ));
+        assert_eq!(backend.checkpoint(&item.checkpoint_key()), before);
+        let recovered = backend.failure(&failed.identity).unwrap();
+        assert_eq!(recovered.status, FailureStatus::Failed);
+        assert_eq!(recovered.attempts, 2);
     }
 
     #[test]
