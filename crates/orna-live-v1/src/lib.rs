@@ -609,6 +609,22 @@ impl LiveHost {
             .outcome)
     }
 
+    /// Idempotently closes one attachment owned by an executable socket
+    /// worker. A worker may race retirement with its own EOF or frame error;
+    /// an already-retired attachment is therefore reported as [`Error::Closed`]
+    /// and has no effect on a replacement attachment.
+    pub async fn close_attachment(
+        &mut self,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> Result<FrameOutcome> {
+        let mut application = RejectApplication;
+        Ok(self
+            .dispatch_frame(attachment, now, Frame::Close, &mut application)
+            .await?
+            .outcome)
+    }
+
     /// Dispatches one complete client frame through the full client registry.
     /// Application-owned operations are delegated through [`LiveApplication`];
     /// their typed canonical response is validated before it is retained.
@@ -3148,7 +3164,8 @@ impl LiveTransport {
         attachment: [u8; 16],
         now: u64,
     ) -> Result<WireResponse> {
-        self.host
+        let outcome = self
+            .host
             .resume(ResumeRequest {
                 id: admission.id,
                 origin: &admission.origin,
@@ -3156,8 +3173,11 @@ impl LiveTransport {
                 attachment,
                 now,
             })
-            .await
-            .map(|_| admission.response)
+            .await?;
+        if let AttachOutcome::Replaced(previous) = outcome {
+            self.retired_attachments.push_back(previous.as_bytes());
+        }
+        Ok(admission.response)
     }
 
     /// Reassembles client RFC 6455 frames and forwards only complete binary
