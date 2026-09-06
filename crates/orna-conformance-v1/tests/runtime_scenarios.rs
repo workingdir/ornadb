@@ -312,7 +312,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner() {
+fn published_report_skips_all_scenarios_without_authoritative_runtime_witnesses() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -325,43 +325,20 @@ fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        declared,
-        [
-            "LET-REBIND-091",
-            "PIPE-001",
-            "PIPE-002",
-            "TXN-001",
-            "TXN-002",
-        ]
-    );
-    for scenario_id in [
-        "LIVE-001",
-        "LIVE-002",
-        "LIVE-003",
-        "LIVE-004",
-        "SYS-RT-RENAME-100",
-        "STREAM-001",
-        "STREAM-002",
-    ] {
-        let result = report["scenarios"]
-            .as_array()
-            .expect("scenario results are an array")
-            .iter()
-            .find(|result| result["scenario"] == scenario_id)
-            .expect("scenario is present");
+    assert!(declared.is_empty());
+    let scenarios = report["scenarios"]
+        .as_array()
+        .expect("scenario results are an array");
+    assert_eq!(scenarios.len(), 144);
+    for result in scenarios {
         assert_eq!(
             result["status"], "skipped",
-            "{scenario_id} must remain skipped"
+            "{} must remain skipped",
+            result["scenario"]
         );
-        if matches!(
-            scenario_id,
-            "LIVE-001" | "LIVE-002" | "LIVE-003" | "LIVE-004" | "SYS-RT-RENAME-100"
-        ) {
-            assert_eq!(
-                result["detail"],
-                "scenario execution skipped: scenario is covered by direct serving or semantic adapter tests, not Orna-engine execution"
-            );
-        }
+        assert_eq!(
+            result["detail"],
+            "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
+        );
     }
 }
