@@ -635,6 +635,156 @@ fn type_span(ty: &TypeExpr) -> SourceSpan {
     }
 }
 
+fn max_depth(depths: impl Iterator<Item = usize>) -> usize {
+    depths.max().unwrap_or(0)
+}
+
+fn pattern_depth(pattern: &Pattern) -> usize {
+    1 + match pattern {
+        Pattern::Name(_, _) | Pattern::Wildcard(_) | Pattern::Literal { .. } => 0,
+        Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+            max_depth(elements.iter().map(pattern_depth))
+        }
+        Pattern::Record { fields, .. } => max_depth(
+            fields
+                .iter()
+                .filter_map(|(_, pattern, _)| pattern.as_ref().map(pattern_depth)),
+        ),
+        Pattern::Constructor {
+            arguments, fields, ..
+        } => max_depth(
+            arguments.iter().map(pattern_depth).chain(
+                fields
+                    .iter()
+                    .filter_map(|field| field.pattern.as_ref().map(pattern_depth)),
+            ),
+        ),
+    }
+}
+
+fn type_depth(ty: &TypeExpr) -> usize {
+    1 + match ty {
+        TypeExpr::Name { arguments, .. } => max_depth(arguments.iter().map(type_depth)),
+        TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => type_depth(inner),
+        TypeExpr::Product { lhs, rhs, .. } => type_depth(lhs).max(type_depth(rhs)),
+        TypeExpr::Record { fields, .. } => {
+            max_depth(fields.iter().map(|(_, ty, _)| type_depth(ty)))
+        }
+        TypeExpr::Tuple { elements, .. } => max_depth(elements.iter().map(type_depth)),
+        TypeExpr::Function {
+            parameters, result, ..
+        } => max_depth(
+            parameters
+                .iter()
+                .map(type_depth)
+                .chain(std::iter::once(type_depth(result))),
+        ),
+    }
+}
+
+fn assignment_target_depth(target: &AssignmentTarget) -> usize {
+    1 + match target {
+        AssignmentTarget::Name { .. } => 0,
+        AssignmentTarget::Field { base, .. } => assignment_target_depth(base),
+        AssignmentTarget::Index { base, index, .. } => {
+            assignment_target_depth(base).max(expr_depth(index))
+        }
+    }
+}
+
+fn statement_depth(statement: &Statement) -> usize {
+    match statement {
+        Statement::Let {
+            pattern,
+            annotation,
+            value,
+            ..
+        } => pattern_depth(pattern)
+            .max(annotation.as_ref().map_or(0, type_depth))
+            .max(expr_depth(value)),
+        Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => expr_depth(value),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            value.as_ref().map_or(0, expr_depth)
+        }
+        Statement::Continue { .. } => 0,
+        Statement::Assignment { target, value, .. } => {
+            assignment_target_depth(target).max(expr_depth(value))
+        }
+    }
+}
+
+fn expr_depth(expr: &Expr) -> usize {
+    1 + match expr {
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => 0,
+        Expr::InterpolatedString { segments, .. } => {
+            max_depth(segments.iter().filter_map(|segment| {
+                if let StringSegment::Expression { value, .. } = segment {
+                    Some(expr_depth(value))
+                } else {
+                    None
+                }
+            }))
+        }
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => expr_depth(rhs),
+        Expr::Binary { lhs, rhs, .. } => expr_depth(lhs).max(expr_depth(rhs)),
+        Expr::Call {
+            callee, arguments, ..
+        } => max_depth(
+            std::iter::once(expr_depth(callee))
+                .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
+        ),
+        Expr::Index { base, index, .. } => expr_depth(base).max(expr_depth(index)),
+        Expr::Field { base, .. } => expr_depth(base),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            max_depth(elements.iter().map(expr_depth))
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            max_depth(fields.iter().map(|field| expr_depth(&field.value)))
+        }
+        Expr::Lambda {
+            parameters, body, ..
+        } => max_depth(
+            parameters
+                .iter()
+                .map(|parameter| {
+                    pattern_depth(&parameter.pattern)
+                        .max(parameter.annotation.as_ref().map_or(0, type_depth))
+                })
+                .chain(std::iter::once(expr_depth(body))),
+        ),
+        Expr::Block {
+            statements, tail, ..
+        } => max_depth(
+            statements
+                .iter()
+                .map(statement_depth)
+                .chain(tail.iter().map(|tail| expr_depth(tail))),
+        ),
+        Expr::Control {
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => max_depth(
+            binding
+                .iter()
+                .map(pattern_depth)
+                .chain(condition.iter().map(|value| expr_depth(value)))
+                .chain(body.iter().map(|value| expr_depth(value)))
+                .chain(arms.iter().flat_map(|arm| {
+                    std::iter::once(pattern_depth(&arm.pattern))
+                        .chain(arm.guard.iter().map(expr_depth))
+                        .chain(std::iter::once(expr_depth(&arm.body)))
+                }))
+                .chain(alternate.iter().map(|value| expr_depth(value))),
+        ),
+    }
+}
+
 fn type_expr_text(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Name {
@@ -724,6 +874,7 @@ pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
     p.validate_token_grammar();
     let mut items = Vec::new();
     while !p.eof() {
+        p.reset_syntax_budget();
         if let Some(item) = p.item(true) {
             items.push(item)
         } else {
@@ -742,6 +893,7 @@ pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
 }
 pub fn parse_row(source: &str) -> Parse<Expr> {
     let mut p = Parser::new(source);
+    p.reset_syntax_budget();
     let result = if p.is_punct("{") {
         p.expr()
     } else {
@@ -762,6 +914,7 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
 }
 pub fn parse_repl(source: &str) -> Parse<ReplInput> {
     let mut p = Parser::new(source);
+    p.reset_syntax_budget();
     let value = if matches!(
         p.keyword(),
         Some(Keyword::Use | Keyword::Let | Keyword::Fn | Keyword::Pub)
@@ -781,6 +934,7 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
 }
 pub fn parse_expression(source: &str) -> Parse<Expr> {
     let mut p = Parser::new(source);
+    p.reset_syntax_budget();
     let v = p.expr();
     p.finish();
     Parse {
@@ -1314,10 +1468,17 @@ fn annotate_diagnostics(items: &mut [Diagnostic], source: &str, file: &str) {
     }
 }
 
+// Implementation resource bounds protect parser frames and recursive AST
+// consumers. These do not change the grammar or cap wide, shallow source.
+const MAX_PARSE_NESTING: usize = 64;
+const MAX_AST_DEPTH: usize = 64;
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
     errors: Vec<Diagnostic>,
+    nesting_depth: usize,
+    syntax_limit_reported: bool,
 }
 impl Parser {
     fn new(source: &str) -> Self {
@@ -1326,6 +1487,8 @@ impl Parser {
                 tokens,
                 at: 0,
                 errors: Vec::new(),
+                nesting_depth: 0,
+                syntax_limit_reported: false,
             },
             Err(es) => Self {
                 tokens: vec![Token {
@@ -1335,7 +1498,37 @@ impl Parser {
                 }],
                 at: 0,
                 errors: es.into_iter().map(from_lex).collect(),
+                nesting_depth: 0,
+                syntax_limit_reported: false,
             },
+        }
+    }
+    fn reset_syntax_budget(&mut self) {
+        self.nesting_depth = 0;
+        self.syntax_limit_reported = false;
+    }
+    fn recurse<T>(&mut self, parse: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
+        if self.nesting_depth == MAX_PARSE_NESTING {
+            self.syntax_limit();
+            return None;
+        }
+        self.nesting_depth += 1;
+        let value = parse(self);
+        self.nesting_depth -= 1;
+        value
+    }
+    fn syntax_limit(&mut self) {
+        if !self.syntax_limit_reported {
+            self.error_here("ORNA-PARSE-001", "maximum syntax nesting exceeded");
+            self.syntax_limit_reported = true;
+        }
+    }
+    fn within_depth(&mut self, depth: usize) -> bool {
+        if depth > MAX_AST_DEPTH {
+            self.syntax_limit();
+            false
+        } else {
+            true
         }
     }
     /// Cross-production checks whose meaning depends on token order rather
@@ -2141,6 +2334,22 @@ impl Parser {
         parameters
     }
     fn parse_pattern(&mut self) -> Pattern {
+        let pattern = self
+            .recurse(|parser| Some(parser.parse_pattern_inner()))
+            .unwrap_or_else(|| Pattern::Record {
+                fields: Vec::new(),
+                span: self.current().span.clone(),
+            });
+        if self.within_depth(pattern_depth(&pattern)) {
+            pattern
+        } else {
+            Pattern::Record {
+                fields: Vec::new(),
+                span: self.current().span.clone(),
+            }
+        }
+    }
+    fn parse_pattern_inner(&mut self) -> Pattern {
         let token = self.current().clone();
         match token.kind {
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => {
@@ -2401,6 +2610,17 @@ impl Parser {
     }
     fn parse_block(&mut self) -> Expr {
         let start = self.current().span.clone();
+        self.recurse(|parser| Some(parser.parse_block_inner()))
+            .unwrap_or_else(|| {
+                self.skip_limited_block();
+                Expr::Tuple {
+                    elements: Vec::new(),
+                    span: start,
+                }
+            })
+    }
+    fn parse_block_inner(&mut self) -> Expr {
+        let start = self.current().span.clone();
         let mut statements = Vec::new();
         let mut tail = None;
         if !self.is_punct("{") {
@@ -2565,10 +2785,34 @@ impl Parser {
         } else {
             self.error_here("ORNA-PARSE-003", "unterminated block")
         }
-        Expr::Block {
+        let block = Expr::Block {
             statements,
             tail,
             span: start.join(self.previous().span.clone()),
+        };
+        if self.within_depth(expr_depth(&block)) {
+            block
+        } else {
+            self.error_expr()
+        }
+    }
+    fn skip_limited_block(&mut self) {
+        if !self.is_punct("{") {
+            return;
+        }
+        let mut depth = 0usize;
+        while !self.eof() {
+            if self.is_punct("{") {
+                depth += 1;
+            } else if self.is_punct("}") {
+                depth -= 1;
+                self.bump();
+                if depth == 0 {
+                    return;
+                }
+                continue;
+            }
+            self.bump();
         }
     }
     fn parse_table_body(&mut self) -> Vec<TableMember> {
@@ -2942,6 +3186,9 @@ impl Parser {
         parameters
     }
     fn parse_type_expr(&mut self) -> Option<TypeExpr> {
+        self.recurse(|parser| parser.parse_type_expr_inner())
+    }
+    fn parse_type_expr_inner(&mut self) -> Option<TypeExpr> {
         let token = self.current().clone();
         let mut ty = match token.kind {
             TokenKind::Keyword(Keyword::Fn) => {
@@ -3074,7 +3321,13 @@ impl Parser {
                 return None;
             }
         };
+        if !self.within_depth(type_depth(&ty)) {
+            return None;
+        }
         while self.is_punct("?") {
+            if !self.within_depth(type_depth(&ty) + 1) {
+                return None;
+            }
             let start = type_span(&ty);
             self.bump();
             ty = TypeExpr::Optional {
@@ -3086,6 +3339,9 @@ impl Parser {
             let op = self.current().text.clone();
             self.bump();
             let rhs = self.parse_type_expr()?;
+            if !self.within_depth(type_depth(&ty).max(type_depth(&rhs)) + 1) {
+                return None;
+            }
             let span = type_span(&ty).join(type_span(&rhs));
             ty = TypeExpr::Product {
                 lhs: Box::new(ty),
@@ -3097,7 +3353,8 @@ impl Parser {
         Some(ty)
     }
     fn expr(&mut self) -> Option<Expr> {
-        self.pratt(0)
+        let expr = self.recurse(|parser| parser.pratt(0))?;
+        self.within_depth(expr_depth(&expr)).then_some(expr)
     }
 
     fn generic_call_ahead(&self) -> bool {
@@ -3163,6 +3420,9 @@ impl Parser {
                 } else {
                     self.error_here("ORNA-PARSE-001", "expected `]` after index")
                 }
+                if !self.within_depth(expr_depth(&lhs).max(expr_depth(&index)) + 1) {
+                    return Some(lhs);
+                }
                 lhs = Expr::Index {
                     base: Box::new(lhs),
                     index: Box::new(index),
@@ -3173,6 +3433,14 @@ impl Parser {
             if self.is_punct("(") {
                 let start = lhs.span().start;
                 let arguments = self.parse_arguments();
+                if !self.within_depth(
+                    1 + max_depth(
+                        std::iter::once(expr_depth(&lhs))
+                            .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
+                    ),
+                ) {
+                    return Some(lhs);
+                }
                 lhs = Expr::Call {
                     span: SourceSpan::new(start, self.previous().span.end),
                     callee: Box::new(lhs),
@@ -3186,6 +3454,9 @@ impl Parser {
                 let t = self.current().clone();
                 if self.contextual() {
                     self.bump();
+                    if !self.within_depth(expr_depth(&lhs) + 1) {
+                        return Some(lhs);
+                    }
                     lhs = Expr::Field {
                         base: Box::new(lhs),
                         name: t.text,
@@ -3219,8 +3490,11 @@ impl Parser {
                 );
                 break;
             }
-            let rhs = self.pratt(if right { prec } else { prec + 1 });
+            let rhs = self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }));
             let Some(rhs) = rhs else { break };
+            if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
+                return Some(lhs);
+            }
             let span = lhs.span().join(rhs.span());
             lhs = Expr::Binary {
                 lhs: Box::new(lhs),
@@ -3238,7 +3512,10 @@ impl Parser {
             TokenKind::Punct("!") | TokenKind::Punct("-") | TokenKind::Punct("+")
         ) {
             self.bump();
-            let rhs = self.prefix()?;
+            let rhs = self.recurse(|parser| parser.prefix())?;
+            if !self.within_depth(expr_depth(&rhs) + 1) {
+                return None;
+            }
             let end = rhs.span();
             return Some(Expr::Unary {
                 op: t.text,
@@ -3354,6 +3631,9 @@ impl Parser {
                     self.bump()
                 }
                 let span = t.span.join(self.previous().span.clone());
+                if !self.within_depth(expr_depth(&inner) + 1) {
+                    return None;
+                }
                 Some(Expr::Group {
                     inner: Box::new(inner),
                     span,
@@ -3459,6 +3739,19 @@ impl Parser {
     }
     fn parse_control_expression(&mut self) -> Expr {
         let start = self.current().span.clone();
+        self.recurse(|parser| Some(parser.parse_control_expression_inner()))
+            .unwrap_or_else(|| {
+                if !self.eof() {
+                    self.bump();
+                }
+                Expr::Tuple {
+                    elements: Vec::new(),
+                    span: start,
+                }
+            })
+    }
+    fn parse_control_expression_inner(&mut self) -> Expr {
+        let start = self.current().span.clone();
         let kind = self.keyword();
         self.bump();
         let mut condition = None;
@@ -3478,7 +3771,8 @@ impl Parser {
                 if self.keyword() == Some(Keyword::Else) {
                     self.bump();
                     alternate = if self.keyword() == Some(Keyword::If) {
-                        Some(Box::new(self.parse_control_expression()))
+                        self.recurse(|parser| Some(parser.parse_control_expression()))
+                            .map(Box::new)
                     } else {
                         self.parse_required_block("expected else block")
                             .map(Box::new)
@@ -3562,7 +3856,7 @@ impl Parser {
             Some(Keyword::While) => ControlKind::While,
             _ => ControlKind::Loop,
         };
-        Expr::Control {
+        let control = Expr::Control {
             kind: control_kind,
             binding,
             condition,
@@ -3570,6 +3864,11 @@ impl Parser {
             arms,
             alternate,
             span: start.join(self.previous().span.clone()),
+        };
+        if self.within_depth(expr_depth(&control)) {
+            control
+        } else {
+            self.error_expr()
         }
     }
     fn parse_required_block(&mut self, message: &str) -> Option<Expr> {
@@ -3729,6 +4028,10 @@ impl Parser {
                 let field = self.current().clone();
                 if self.contextual() {
                     self.bump();
+                    if !self.within_depth(assignment_target_depth(&target) + 1) {
+                        self.skip_assignment_target_tail();
+                        break;
+                    }
                     let span = assignment_target_span(&target).join(field.span);
                     target = AssignmentTarget::Field {
                         base: Box::new(target),
@@ -3744,6 +4047,11 @@ impl Parser {
                 self.bump();
                 let index = self.expr().unwrap_or_else(|| self.error_expr());
                 self.require_punct("]", "expected `]` after assignment index");
+                if !self.within_depth(assignment_target_depth(&target).max(expr_depth(&index)) + 1)
+                {
+                    self.skip_assignment_target_tail();
+                    break;
+                }
                 target = AssignmentTarget::Index {
                     base: Box::new(target),
                     index,
@@ -3754,6 +4062,25 @@ impl Parser {
             }
         }
         target
+    }
+    fn skip_assignment_target_tail(&mut self) {
+        let mut brackets = 0usize;
+        while !self.eof() {
+            if brackets == 0
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Punct("=" | "+=" | "-=" | "*=" | "/=")
+                )
+            {
+                return;
+            }
+            if self.is_punct("[") {
+                brackets += 1;
+            } else if self.is_punct("]") && brackets > 0 {
+                brackets -= 1;
+            }
+            self.bump();
+        }
     }
     fn infix(&self) -> Option<(u8, bool)> {
         let s = self.current().text.as_str();
