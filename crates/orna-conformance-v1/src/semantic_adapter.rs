@@ -899,12 +899,14 @@ impl DurableTransactionalEvaluator {
         };
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
-        let context = state.begin_activation().await?;
+        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let snapshot = state.begin_table_activation(&tables).await?;
+        let context = snapshot.context();
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
-        for table in key_fields.keys() {
-            for (key, row) in state.committed_table_rows(table).await? {
-                let row = Value::decode(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
-                evaluator.seed_committed(table.clone(), key, row)?;
+        for (table, rows) in snapshot.table_rows() {
+            for (key, row) in rows {
+                let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
         let mutations = match evaluator.execute_admitted(&functions, &key_fields) {
@@ -917,7 +919,7 @@ impl DurableTransactionalEvaluator {
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         state
-            .commit_table_activation(lease, &context, &mutations, next_digest, &NoFault)
+            .commit_table_activation(lease, context, &mutations, next_digest, &NoFault)
             .await?;
         Ok(StageOutcome::Passed)
     }
