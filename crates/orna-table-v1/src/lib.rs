@@ -209,6 +209,22 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         }
     }
 
+    /// Returns the smallest value, or `None` when the relation is empty.
+    pub fn min(self) -> Option<Item>
+    where
+        Item: Ord,
+    {
+        self.source.min()
+    }
+
+    /// Returns the largest value, or `None` when the relation is empty.
+    pub fn max(self) -> Option<Item>
+    where
+        Item: Ord,
+    {
+        self.source.max()
+    }
+
     /// Returns whether every value satisfies the predicate, short-circuiting on false.
     pub fn every<P>(mut self, mut predicate: P) -> bool
     where
@@ -1407,5 +1423,17 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn relation_min_and_max_are_optional_and_order_independent() {
+        let relation = super::Relation::new([3, 1, 2].into_iter());
+        assert_eq!(relation.min(), Some(1));
+
+        let relation = super::Relation::new([3, 1, 2].into_iter());
+        assert_eq!(relation.max(), Some(3));
+
+        assert_eq!(super::Relation::new(std::iter::empty::<u8>()).min(), None);
+        assert_eq!(super::Relation::new(std::iter::empty::<u8>()).max(), None);
     }
 }
