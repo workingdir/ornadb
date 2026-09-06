@@ -868,6 +868,123 @@ impl Repository {
         Ok(reconciled)
     }
 
+    /// Resumes a persisted publication after a process interruption. The
+    /// journal is advanced only after each observable boundary is verified;
+    /// unexpected ref, index, or worktree state remains a typed conflict.
+    pub fn recover_publication(&self) -> Result<Option<IndexGeneration>, RepositoryError> {
+        let Some(mut journal) = self.read_publication_journal()? else {
+            return Ok(None);
+        };
+        let candidate = self.candidate_from_journal(&journal)?;
+        let base_tree = journal
+            .base_index_tree()
+            .cloned()
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        let expected_index = IndexGeneration {
+            head: Some(journal.old_head().clone()),
+            tree: Some(base_tree),
+        };
+
+        if journal.stage() == PublicationJournalStage::Prepared {
+            match self.head()? {
+                Some(head) if &head == journal.old_head() => {
+                    return self
+                        .publish_candidate(&expected_index, &candidate, &mut journal)
+                        .map(Some);
+                }
+                Some(head) if &head == journal.new_head() => {
+                    journal.advance(PublicationJournalStage::RefAdvanced)?;
+                    self.write_publication_journal(&journal)?;
+                }
+                _ => return Err(RepositoryError::StaleHead),
+            }
+        }
+
+        if journal.stage() == PublicationJournalStage::RefAdvanced {
+            if self.head()?.as_ref() != Some(journal.new_head()) {
+                return Err(RepositoryError::StaleHead);
+            }
+            let current = self.index_generation()?;
+            let reconciled = if current.tree() == expected_index.tree() {
+                let paths = journal
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<Vec<_>>();
+                self.reconcile_published_index(&expected_index, &candidate, &paths)?
+            } else if self.index_entries_match_candidate(&candidate, journal.entries())? {
+                current
+            } else {
+                return Err(RepositoryError::StaleIndex {
+                    expected: expected_index,
+                    actual: current,
+                });
+            };
+            journal.advance(PublicationJournalStage::IndexReconciled)?;
+            self.write_publication_journal(&journal)?;
+            self.recover_publication_worktree(&mut journal)?;
+            journal.advance(PublicationJournalStage::Complete)?;
+            self.write_publication_journal(&journal)?;
+            self.clear_publication_journal()?;
+            return Ok(Some(reconciled));
+        }
+
+        if journal.stage() == PublicationJournalStage::IndexReconciled {
+            if self.head()?.as_ref() != Some(journal.new_head()) {
+                return Err(RepositoryError::StaleHead);
+            }
+            self.recover_publication_worktree(&mut journal)?;
+        }
+        if journal.stage() == PublicationJournalStage::WorktreeReconciled {
+            journal.advance(PublicationJournalStage::Complete)?;
+            self.write_publication_journal(&journal)?;
+        }
+        if journal.stage() == PublicationJournalStage::Complete {
+            self.clear_publication_journal()?;
+            return Ok(Some(self.index_generation()?));
+        }
+        Err(RepositoryError::InvalidPublicationJournal)
+    }
+
+    fn candidate_from_journal(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
+        let commit = self
+            .commit_optional(&commit_expression)?
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        if &commit != journal.new_head() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let tree_expression = format!("{}^{{tree}}", journal.new_head().as_str());
+        let tree = self.index_tree_from_native_oid(self.git([
+            "rev-parse",
+            "--verify",
+            &tree_expression,
+        ])?)?;
+        Ok(PrivateCommit { tree, commit })
+    }
+
+    fn recover_publication_worktree(
+        &self,
+        journal: &mut PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        for entry in journal.entries() {
+            let current = self.managed_file_bytes(&entry.path)?;
+            if current.as_deref() == entry.next() {
+                continue;
+            }
+            if current.as_deref() != entry.expected() {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            self.materialize_managed_file(&entry.path, entry.expected(), entry.next())?;
+        }
+        journal.advance(PublicationJournalStage::WorktreeReconciled)?;
+        self.write_publication_journal(journal)?;
+        Ok(())
+    }
+
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
@@ -1216,6 +1333,52 @@ impl Repository {
         }
         GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
         Ok(Some((mode, object)))
+    }
+
+    fn index_entries_match_candidate(
+        &self,
+        candidate: &PrivateCommit,
+        entries: &[PublicationJournalEntry],
+    ) -> Result<bool, RepositoryError> {
+        for entry in entries {
+            let mut command = self.command();
+            command
+                .args(["ls-files", "--stage", "-z", "--"])
+                .arg(entry.path.as_path());
+            let output = self.run(command)?.stdout;
+            let records = output
+                .split(|byte| *byte == 0)
+                .filter(|record| !record.is_empty())
+                .collect::<Vec<_>>();
+            let expected = self.candidate_tree_entry(candidate, &entry.path)?;
+            match (expected, records.as_slice()) {
+                (None, []) => {}
+                (Some((mode, object)), [record]) => {
+                    let tab = record
+                        .iter()
+                        .position(|byte| *byte == b'\t')
+                        .ok_or(RepositoryError::GitOperationFailed)?;
+                    let metadata = &record[..tab];
+                    let encoded_path = &record[tab + 1..];
+                    if encoded_path != entry.path.as_path().as_os_str().as_encoded_bytes() {
+                        return Ok(false);
+                    }
+                    let mut fields = metadata.split(|byte| *byte == b' ');
+                    let actual_mode = fields.next().unwrap_or_default();
+                    let actual_object = fields.next().unwrap_or_default();
+                    let stage = fields.next().unwrap_or_default();
+                    if actual_mode != mode.as_bytes()
+                        || actual_object != object.as_bytes()
+                        || stage != b"0"
+                        || fields.next().is_some()
+                    {
+                        return Ok(false);
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
     fn git_at<const N: usize>(
         directory: &Path,
