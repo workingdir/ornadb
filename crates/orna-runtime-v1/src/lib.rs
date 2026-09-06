@@ -7625,7 +7625,60 @@ mod tests {
         );
         let pending = state.pending().await.unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0], table_mutation(31, 4, Some(12)).runtime_mutation().unwrap());
+        assert_eq!(
+            pending[0],
+            table_mutation(31, 4, Some(12)).runtime_mutation().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_typed_table_delivery_rolls_back_rows_and_terminal_transition_on_fault() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "typed-replay-fault", digest(5)).await;
+        let capture = state.capture().await.unwrap();
+        let table = table_mutation(32, 5, Some(13));
+        let encoded = table.runtime_mutation().unwrap();
+
+        assert_eq!(
+            state
+                .commit_stream_replay(StreamReplayCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: std::slice::from_ref(&encoded),
+                    table_mutations: std::slice::from_ref(&table),
+                    next_digest: digest(101),
+                    grant: grant.clone(),
+                    faults: &Fail(FaultPoint::AfterMutation),
+                })
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[5]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replay remains retryable")
+                .status,
+            FailureStatus::Replaying
+        );
     }
 
     #[tokio::test]
