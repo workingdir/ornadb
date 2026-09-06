@@ -254,6 +254,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
     let directory = reference_project();
     let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
