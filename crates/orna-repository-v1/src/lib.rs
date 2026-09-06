@@ -488,6 +488,19 @@ impl Repository {
         }
     }
 
+    /// Observes one managed regular file without exposing host paths. The
+    /// observation is serialized with Orna's repository coordination lock;
+    /// callers that later materialise content must still pass the observed
+    /// bytes back as the expected value for the final revalidation.
+    pub fn managed_file_bytes(
+        &self,
+        path: &ManagedPath,
+    ) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let target = self.managed_target(path)?;
+        self.read_managed_file(&target)
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
