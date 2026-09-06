@@ -8492,6 +8492,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_stream_delivery_rolls_back_staged_row_and_checkpoint_on_fault_or_stale_cas() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("typed-fault:one", "typed-fault:two");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let delivery_lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            }
+        };
+        let key = delivery_lease.delivery.checkpoint_key();
+
+        assert_eq!(
+            state
+                .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &[table_mutation(7, 2, Some(8))],
+                    next_digest: digest(8),
+                    delivery: delivery_lease.clone(),
+                    expected_stream: expected.clone(),
+                    faults: &Fail(FaultPoint::AfterCheckpoint),
+                })
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint))
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[2]).await.unwrap(),
+            None
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().committed, None);
+
+        let (unchanged, result) = state
+            .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                writer,
+                expected_capture: &capture,
+                mutations: &[table_mutation(8, 3, Some(9))],
+                next_digest: digest(9),
+                delivery: delivery_lease,
+                expected_stream: CheckpointPrecondition {
+                    version: 1,
+                    committed: None,
+                },
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
+        assert_eq!(unchanged, capture);
+        assert_eq!(
+            state.committed_table_row("books", &[3]).await.unwrap(),
+            None
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().version, 0);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().committed, None);
+    }
+
+    #[tokio::test]
     async fn stream_delivery_commit_rolls_back_both_sides_on_fault_or_stale_cas() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
