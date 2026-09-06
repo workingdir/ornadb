@@ -627,11 +627,10 @@ fn accepted_tcp_socket_hands_off_an_upgrade_to_the_websocket_driver() {
             &mut deletion,
         ));
         sender.send(token(&created)).unwrap();
-        let (stream, _) = listener.accept().unwrap();
         let mut connection = HttpConnection::new(TransportLimits::default());
         let mut application = UnitApplication::default();
-        transport.serve_accepted_websocket_socket(
-            stream,
+        transport.serve_one_websocket_listener(
+            &listener,
             &mut connection,
             [5; 16],
             &mut || 1,
