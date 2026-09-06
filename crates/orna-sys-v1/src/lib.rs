@@ -764,6 +764,27 @@ impl RuntimeSupervisor {
             .map(|mut runtime| runtime.restart())
     }
 
+    /// Runs one admitted invocation synchronously under this owner's lifecycle
+    /// fence. Idempotent replays retain the original terminal result and never
+    /// execute the supplied callback again.
+    pub fn run<T, E>(
+        &self,
+        request: AdmissionRequest<T>,
+        executor: &mut E,
+    ) -> Result<InvocationState, AdmissionError>
+    where
+        E: InvocationExecutor,
+    {
+        let _control = self
+            .control
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?
+            .run(request, executor)
+    }
+
     /// Admits a separate invocation and schedules exactly one worker for a new
     /// idempotency identity. Existing active or terminal identities reuse the
     /// original handle and never spawn another worker.
@@ -1390,6 +1411,45 @@ mod tests {
             ))
         ));
         assert_eq!(executor.calls, 1);
+    }
+    #[test]
+    fn supervised_run_replays_the_retained_terminal_result_and_obeys_restart_fence() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let mut first = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "answer")),
+        };
+        assert!(matches!(
+            supervisor.run(request.clone(), &mut first),
+            Ok(InvocationState::Terminal(RetainedInvocationResult::Success(ref retained)))
+                if retained.canonical() == Some(b"answer".as_slice())
+        ));
+        assert_eq!(first.calls, 1);
+
+        let mut replay = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "wrong")),
+        };
+        assert!(matches!(
+            supervisor.run(request.clone(), &mut replay),
+            Ok(InvocationState::Terminal(RetainedInvocationResult::Success(ref retained)))
+                if retained.canonical() == Some(b"answer".as_slice())
+        ));
+        assert_eq!(replay.calls, 0);
+
+        supervisor.restart().unwrap();
+        let mut after_restart = Executor {
+            calls: 0,
+            result: InvocationResult::Success(value("Str", "after-restart")),
+        };
+        assert!(matches!(
+            supervisor.run(request, &mut after_restart),
+            Ok(InvocationState::Terminal(RetainedInvocationResult::Success(ref retained)))
+                if retained.canonical() == Some(b"after-restart".as_slice())
+        ));
+        assert_eq!(after_restart.calls, 1);
     }
     #[test]
     fn supervised_start_timeout_does_not_cancel_or_duplicate_work() {
