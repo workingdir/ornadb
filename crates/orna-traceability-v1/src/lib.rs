@@ -17,7 +17,7 @@ const IMPLEMENTED_TRANSPORT_BOUNDARIES: &[(&str, &str)] = &[
         "ORNA-PROTO-001",
         "live.transport.complete_message_admission",
     ),
-    ("ORNA-WIRE-005", "live.transport.bounded_connection_framing"),
+    ("ORNA-WIRE-005", "live.transport.cbor_admission_bounds"),
     ("ORNA-WIRE-011", "live.transport.origin_credential_fencing"),
 ];
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -780,6 +780,21 @@ mod tests {
                 boundary.logical_id == *boundary_id && boundary.status == Status::Executed
             }));
         }
+        let framing = report
+            .requirements
+            .iter()
+            .find(|item| item.requirement_id == "ORNA-WIRE-005")
+            .expect("framing requirement");
+        assert_eq!(framing.status, Status::PartiallyExecuted);
+        assert_eq!(
+            framing
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.status == Status::Executed)
+                .map(|boundary| boundary.logical_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live.transport.cbor_admission_bounds"]
+        );
         for requirement_id in [
             "ORNA-LIVE-001",
             "ORNA-LIVE-002",
