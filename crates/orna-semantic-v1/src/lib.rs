@@ -873,6 +873,17 @@ impl Catalogue {
             ),
         );
         catalogue.modules.insert(
+            Namespace(vec!["openbanking".into()]),
+            fixture_module(
+                Namespace(vec!["openbanking".into()]),
+                [fixture_function(
+                    "transactions",
+                    function(Vec::new(), Type::Stream(Box::new(Type::Error))),
+                )],
+                true,
+            ),
+        );
+        catalogue.modules.insert(
             Namespace(vec!["google".into()]),
             fixture_module(
                 Namespace(vec!["google".into()]),
@@ -4089,6 +4100,15 @@ fn infer_success_pipeline(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let input = infer(lhs, scope, local, diagnostics);
+    if diagnostics.iter().any(|diagnostic| {
+        diagnostic.message()
+            == "a durable consumer function may own only one checkpointed source root"
+    }) {
+        return Inferred {
+            ty: Type::Error,
+            effects: input.effects,
+        };
+    }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
             callee, arguments, ..
@@ -6473,6 +6493,27 @@ mod tests {
                 == "a durable consumer function may own only one checkpointed source root"
         }));
     }
+
+    #[test]
+    fn fixture_provider_roots_reach_source_ownership_typechecking() {
+        let a = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "examples/invalid/two-durable-sources.orna",
+                "pub fn main() = merge_streams([google.mail(), openbanking.transactions()]);",
+            )],
+            &Catalogue::authoritative_fixture(),
+        );
+        assert!(
+            !has(&a, DIAG_UNRESOLVED),
+            "provider roots resolved: {:?}",
+            a.diagnostics
+        );
+        assert!(a.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message()
+                == "a durable consumer function may own only one checkpointed source root"
+        }));
+    }
+
     #[test]
     fn assertion_plan_rejects_compile_time_boolean() {
         let a = checked(&[ModuleInput::new("m.orna", "assert true;")]);
