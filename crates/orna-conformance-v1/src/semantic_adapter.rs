@@ -29,6 +29,10 @@ use orna_stream_v1::{
     CheckpointKey, Component, ConsumerIdentity, DiagnosticClass, DiagnosticCode, SafeDiagnostic,
 };
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
+use orna_sys_v1::{
+    AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
+    InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
+};
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -297,7 +301,75 @@ pub struct BoundedEvaluator {
     functions: BTreeMap<String, RetainedFunction>,
 }
 
+struct BoundedSourceExecutor<'a> {
+    functions: &'a BTreeMap<String, RetainedFunction>,
+    limits: EvaluatorLimits,
+    descriptor: &'a FunctionDescriptor,
+    evaluator_name: &'a str,
+}
+
+impl InvocationExecutor for BoundedSourceExecutor<'_> {
+    fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+        // The supervisor admits arguments and result witnesses first. Retain
+        // the independent function/snapshot pin at the evaluator edge too.
+        if boundary.function != self.descriptor.identity {
+            return InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic());
+        }
+        let mut arguments = Environment::new();
+        for (name, value) in boundary.arguments.entries() {
+            let Some(canonical) = value.canonical() else {
+                return InvocationResult::OrdinaryFailure(
+                    AdmissionError::SourceMismatch.diagnostic(),
+                );
+            };
+            let Ok(value) = Value::decode(canonical) else {
+                return InvocationResult::OrdinaryFailure(
+                    AdmissionError::SourceMismatch.diagnostic(),
+                );
+            };
+            arguments.insert(name.into(), value);
+        }
+        match invoke_named(self.evaluator_name, self.functions, &arguments, self.limits) {
+            Ok(value) => match value.encode() {
+                Ok(canonical) => InvocationResult::Success(TypedValue::public(
+                    self.descriptor.result_type.clone(),
+                    canonical,
+                )),
+                Err(_) => {
+                    InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
+                }
+            },
+            Err(_) => {
+                InvocationResult::OrdinaryFailure(AdmissionError::SourceMismatch.diagnostic())
+            }
+        }
+    }
+}
+
 impl BoundedEvaluator {
+    /// Executes one source-admitted pure function through the synchronous
+    /// `sys.invoke` supervisor. The complete descriptor is a pre-pinned
+    /// function/snapshot/argument/result witness; disagreement is rejected
+    /// before the bounded evaluator sees a value.
+    pub fn invoke_through_sys<T>(
+        &self,
+        supervisor: &RuntimeSupervisor,
+        request: AdmissionRequest<T>,
+        descriptor: &FunctionDescriptor,
+        evaluator_name: &str,
+    ) -> Result<InvocationState, AdmissionError> {
+        if descriptor != &request.function || !self.functions.contains_key(evaluator_name) {
+            return Err(AdmissionError::SourceMismatch);
+        }
+        let mut executor = BoundedSourceExecutor {
+            functions: &self.functions,
+            limits: self.limits,
+            descriptor,
+            evaluator_name,
+        };
+        supervisor.run(request, &mut executor)
+    }
+
     fn check_scenario_expression(
         &self,
         source: &str,
@@ -494,9 +566,9 @@ impl BoundedEvaluator {
         &self,
         function: &str,
         arguments: &Environment,
-    ) -> Result<Value, Diagnostic> {
+    ) -> Result<Value, Box<Diagnostic>> {
         invoke_named(function, &self.functions, arguments, self.limits)
-            .map_err(|error| error.diagnostic().clone())
+            .map_err(|error| Box::new(error.diagnostic().clone()))
     }
 
     /// Loads pure standard-library source only after every module is verified
@@ -1997,7 +2069,7 @@ impl RuntimeAdapter<BoundedEvaluator> {
         unit: &SourceUnit,
         function: &str,
         arguments: &Environment,
-    ) -> Result<Value, StageOutcome<Diagnostic>> {
+    ) -> Result<Value, Box<StageOutcome<Diagnostic>>> {
         for outcome in [
             self.semantic.parse(unit),
             self.semantic.resolve(unit),
@@ -2005,12 +2077,12 @@ impl RuntimeAdapter<BoundedEvaluator> {
             self.runtime.evaluate(unit),
         ] {
             if !matches!(outcome, StageOutcome::Passed) {
-                return Err(outcome);
+                return Err(Box::new(outcome));
             }
         }
         self.runtime
             .invoke_value_with(function, arguments)
-            .map_err(StageOutcome::Failed)
+            .map_err(|error| Box::new(StageOutcome::Failed(*error)))
     }
 }
 
@@ -2071,6 +2143,126 @@ mod bounded_tests {
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::{Environment, Limits, evaluate_expression_with_functions};
     use orna_foundation_v1::Value;
+    use orna_sys_v1::{
+        AdmissionError, AdmissionRequest, ArgumentMap, FunctionDescriptor, FunctionId,
+        FunctionIdentity, InvocationContext, InvocationMode, InvocationState,
+        RetainedInvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
+        TransactionMode, TypeId, TypeWitness,
+    };
+
+    fn source_descriptor() -> FunctionDescriptor {
+        FunctionDescriptor {
+            identity: FunctionIdentity {
+                function: FunctionId::new("math.answer"),
+                revision: RevisionId::new("source-r1"),
+                snapshot: SnapshotId::new("source-s1"),
+            },
+            parameters: Vec::new(),
+            result_type: TypeId::new("Int"),
+            visible: true,
+            callable: true,
+            generics_resolved: true,
+        }
+    }
+
+    fn source_request(descriptor: FunctionDescriptor, result: TypeId) -> AdmissionRequest<()> {
+        AdmissionRequest {
+            explicit_snapshot: Some(descriptor.identity.snapshot.clone()),
+            function: descriptor,
+            arguments: ArgumentMap::default(),
+            mode: InvocationMode::Invoke,
+            transaction: TransactionMode::Inherit,
+            witness: TypeWitness::new(result),
+            idempotency_key: Some("source-answer".into()),
+            context: InvocationContext::default(),
+        }
+    }
+
+    #[test]
+    fn sys_source_bridge_rejects_result_witness_before_evaluation() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let source = SourceUnit {
+            fixture_id: "source-bridge".into(),
+            source_id: "source-bridge.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "fn answer(): Int = 42;".into(),
+        };
+        assert!(matches!(
+            evaluator.evaluate_module(&source),
+            StageOutcome::Passed
+        ));
+        let descriptor = source_descriptor();
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("source"));
+
+        assert_eq!(
+            evaluator.invoke_through_sys(
+                &supervisor,
+                source_request(descriptor.clone(), TypeId::new("String")),
+                &descriptor,
+                "answer",
+            ),
+            Err(AdmissionError::ReturnType)
+        );
+    }
+
+    #[test]
+    fn sys_source_bridge_rejects_descriptor_mismatch_before_evaluation() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let source = SourceUnit {
+            fixture_id: "source-bridge".into(),
+            source_id: "source-bridge.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "fn answer(): Int = 42;".into(),
+        };
+        assert!(matches!(
+            evaluator.evaluate_module(&source),
+            StageOutcome::Passed
+        ));
+        let descriptor = source_descriptor();
+        let mut request_descriptor = descriptor.clone();
+        request_descriptor.identity.function = FunctionId::new("math.other");
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("source"));
+
+        assert_eq!(
+            evaluator.invoke_through_sys(
+                &supervisor,
+                source_request(request_descriptor, TypeId::new("Int")),
+                &descriptor,
+                "answer",
+            ),
+            Err(AdmissionError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn sys_source_bridge_replays_identical_request_without_re_evaluation() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let source = SourceUnit {
+            fixture_id: "source-bridge".into(),
+            source_id: "source-bridge.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "fn answer(): Int = 42;".into(),
+        };
+        assert!(matches!(
+            evaluator.evaluate_module(&source),
+            StageOutcome::Passed
+        ));
+        let descriptor = source_descriptor();
+        let request = source_request(descriptor.clone(), TypeId::new("Int"));
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("source"));
+
+        let first = evaluator
+            .invoke_through_sys(&supervisor, request.clone(), &descriptor, "answer")
+            .expect("first pinned source invocation succeeds");
+        assert!(matches!(
+            &first,
+            InvocationState::Terminal(RetainedInvocationResult::Success(_))
+        ));
+        let second = evaluator
+            .invoke_through_sys(&supervisor, request, &descriptor, "answer")
+            .expect("identical pinned source invocation replays");
+        assert_eq!(first, second);
+    }
 
     #[test]
     fn project_modules_retain_qualified_pure_functions() {
