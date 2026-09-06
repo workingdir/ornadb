@@ -512,6 +512,63 @@ fn checkout_subplan_classifies_target_and_local_path_sets() {
 }
 
 #[test]
+fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged local\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(28))
+        .unwrap();
+    let token = plan.force_token();
+    let before = repo.cwd_generation(RuntimeGeneration::new(28)).unwrap();
+
+    repo.validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(28)).unwrap(),
+        before
+    );
+
+    assert!(matches!(
+        repo.validate_checkout_discard_set(&plan, true, Some(&token), &[]),
+        Err(orna_repository_v1::RepositoryError::CheckoutDiscardSetMismatch)
+    ));
+    assert!(matches!(
+        repo.validate_checkout_discard_set(
+            &plan,
+            false,
+            Some(&token),
+            plan.git().discardable_paths(),
+        ),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(28)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged local\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked\n"
+    );
+}
+
+#[test]
 fn verify_cwd_rejects_a_worktree_only_interleaving() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
