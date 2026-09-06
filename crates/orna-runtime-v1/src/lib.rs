@@ -998,6 +998,35 @@ impl RuntimeState {
             .transpose()
     }
 
+    /// Reads one complete committed relation in canonical key order.
+    pub async fn committed_table_rows(
+        &self,
+        table: &str,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, RuntimeError> {
+        validate_table_name(table)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT row_key, row_value FROM table_row
+                 WHERE table_id = ?1 ORDER BY row_key",
+                params![table],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            result.push((
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            ));
+        }
+        Ok(result)
+    }
+
     async fn record_stream_provider_failure(
         &self,
         writer: WriterLease,
@@ -4091,12 +4120,15 @@ fn validate_stream_mutations(
 }
 
 fn validate_table_identity(table: &str, key: &[u8]) -> Result<(), RuntimeError> {
-    if table.is_empty()
-        || table.len() > MAX_TABLE_MUTATION_BYTES
-        || table.contains('\0')
-        || key.is_empty()
-        || key.len() > MAX_TABLE_MUTATION_BYTES
-    {
+    validate_table_name(table)?;
+    if key.is_empty() || key.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(())
+}
+
+fn validate_table_name(table: &str) -> Result<(), RuntimeError> {
+    if table.is_empty() || table.len() > MAX_TABLE_MUTATION_BYTES || table.contains('\0') {
         return Err(RuntimeError::InvalidTableMutation);
     }
     Ok(())
@@ -4400,7 +4432,7 @@ mod tests {
             .commit_table_activation(
                 lease,
                 &context,
-                &[table_mutation(5, 1, Some(9))],
+                &[table_mutation(5, 1, Some(9)), table_mutation(6, 2, Some(8))],
                 digest(6),
                 &NoFault,
             )
@@ -4410,12 +4442,20 @@ mod tests {
             state.committed_table_row("books", &[1]).await.unwrap(),
             Some(vec![9])
         );
+        assert_eq!(
+            state.committed_table_rows("books").await.unwrap(),
+            vec![(vec![1], vec![9]), (vec![2], vec![8])]
+        );
         drop(state);
 
         let state = open_state(&repo).await;
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             Some(vec![9])
+        );
+        assert_eq!(
+            state.committed_table_rows("books").await.unwrap(),
+            vec![(vec![1], vec![9]), (vec![2], vec![8])]
         );
         let lease = state.recover_abandoned(id(4), id(7)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
