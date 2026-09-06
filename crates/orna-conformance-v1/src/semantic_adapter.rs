@@ -95,6 +95,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
             "E4107".into()
         }
         "same durable source consumed twice without distinct consumer identity" => "E9101".into(),
+        "cross-database writes are not atomic/supported" => "E9001".into(),
         _ => diagnostic.code().into(),
     }
 }
