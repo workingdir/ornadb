@@ -1558,6 +1558,20 @@ impl RuntimeState {
                 }
             }
             StreamHandlerResult::Fail(diagnostic) => {
+                if is_cancellation_diagnostic(diagnostic) {
+                    let result = self
+                        .stream_backend(writer)
+                        .apply_async(CommitIntent::Cancel { lease })
+                        .await
+                        .map_err(StreamStepError::Runtime)?;
+                    return match result {
+                        CommitResult::Cancelled { checkpoint, .. } => {
+                            Ok(StreamStep::Cancelled { checkpoint })
+                        }
+                        CommitResult::Rejected(reason) => Ok(StreamStep::Rejected(reason)),
+                        _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                    };
+                }
                 self.require_owner(&self.connection, writer)
                     .await
                     .map_err(StreamStepError::Runtime)?;
@@ -6386,7 +6400,10 @@ mod tests {
             polls: 0,
         };
         let mut cancelled_handler = TestHandler {
-            result: Some(StreamHandlerResult::Cancelled),
+            result: Some(StreamHandlerResult::Fail(SafeDiagnostic {
+                code: DiagnosticCode::Cancelled,
+                class: DiagnosticClass::Cancellation,
+            })),
             calls: 0,
         };
         let before_cancel = state
