@@ -43,6 +43,33 @@ fn request(database: &str) -> String {
     )
 }
 
+fn read_response(stream: &mut TcpStream) -> String {
+    let mut response = Vec::new();
+    let mut byte = [0; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        response.extend_from_slice(&byte);
+    }
+    let header = String::from_utf8(response).unwrap();
+    let length = header
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .unwrap_or("0")
+        .parse::<usize>()
+        .unwrap();
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).unwrap();
+    header + &String::from_utf8(body).unwrap()
+}
+
+fn json_field(response: &str, field: &str) -> String {
+    let prefix = format!(r#""{field}":""#);
+    response
+        .split_once(&prefix)
+        .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value.to_owned()))
+        .unwrap()
+}
+
 #[test]
 fn loopback_host_creates_a_session_from_a_real_repository() {
     let temporary = TemporaryRepository::new();
@@ -131,4 +158,46 @@ fn loopback_host_cancellation_closes_a_stalled_connection() {
     );
     client.join().unwrap();
     let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_runs_create_resume_and_delete_on_one_connection() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let request_database = database.clone();
+    let client = std::thread::spawn(move || {
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .write_all(request(&request_database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut client);
+        assert!(created.starts_with("HTTP/1.1 201 Created\r\n"));
+        let session = json_field(&created, "session");
+        let first_token = json_field(&created, "resume_token");
+
+        let body = format!(r#"{{"resume_token":"{first_token}","protocol":"orna.present.v1"}}"#);
+        let resume = format!(
+            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        client.write_all(resume.as_bytes()).unwrap();
+        let resumed = read_response(&mut client);
+        assert!(resumed.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(json_field(&resumed, "session"), session);
+        let second_token = json_field(&resumed, "resume_token");
+        assert_ne!(second_token, first_token);
+
+        let delete = format!(
+            "DELETE /orna/session/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nAuthorization: Bearer {second_token}\r\nContent-Length: 0\r\n\r\n"
+        );
+        client.write_all(delete.as_bytes()).unwrap();
+        let deleted = read_response(&mut client);
+        assert!(deleted.starts_with("HTTP/1.1 204 No Content\r\n"));
+        client.shutdown(Shutdown::Write).unwrap();
+    });
+    assert!(host.serve().is_ok());
+    client.join().unwrap();
 }
