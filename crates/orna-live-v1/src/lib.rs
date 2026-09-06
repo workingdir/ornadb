@@ -2905,6 +2905,7 @@ pub struct WebSocketState {
     attachment: [u8; 16],
     fragment: Option<(u8, Vec<u8>)>,
     pending: Vec<u8>,
+    closed: bool,
 }
 impl WebSocketState {
     #[must_use]
@@ -2913,9 +2914,13 @@ impl WebSocketState {
             attachment,
             fragment: None,
             pending: Vec::new(),
+            closed: false,
         }
     }
     fn push(&mut self, bytes: &[u8], limit: usize) -> Result<Vec<SocketEvent>> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
         self.pending.extend_from_slice(bytes);
         if self.pending.len() > limit.saturating_add(14) {
             return Err(Error::Limit);
@@ -2956,7 +2961,13 @@ impl WebSocketState {
                         self.fragment = Some((opcode, payload));
                     }
                 }
-                8 => events.push(SocketEvent::Close),
+                8 => {
+                    self.closed = true;
+                    events.push(SocketEvent::Close);
+                    if !self.pending.is_empty() {
+                        return Err(Error::Closed);
+                    }
+                }
                 9 => events.push(SocketEvent::Ping(payload)),
                 10 => events.push(SocketEvent::Pong),
                 _ => return Err(Error::InvalidFrame),
