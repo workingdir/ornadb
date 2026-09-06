@@ -14,9 +14,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod admitted_repl;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
+pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, RuntimeAdapter, RuntimeEvaluator,
     SemanticAdapter, TransactionalEvaluator,
