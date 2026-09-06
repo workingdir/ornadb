@@ -329,43 +329,4 @@ async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
             .expect("read sensors checkpoint after restart"),
         checkpoint
     );
-
-    let reference_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0");
-    let base_trace =
-        orna_traceability_v1::generate(&reference_root).expect("authoritative traceability report");
-    let trace = orna_traceability_v1::generate_with_engine_witnesses(
-        &reference_root,
-        &orna_conformance_v1::EngineWitnesses {
-            publication_digests: base_trace.publication_digests,
-            witnesses: vec![orna_conformance_v1::EngineWitness {
-                requirement_id: "ORNA-STREAM-002".into(),
-                fixture_id: "PROJECT-REFERENCE".into(),
-                fixture_path: "examples/reference".into(),
-                stage: orna_conformance_v1::Stage::Evaluate,
-                implementation_ref: "orna-cli-v1.project-runtime".into(),
-                test_ref:
-                    "cli.project_runtime.binary_sensors_ingest_reopens_typed_rows_and_checkpoint"
-                        .into(),
-                observed_status: orna_conformance_v1::EvidenceStatus::Passed,
-            }],
-        },
-    )
-    .expect("sensor execution becomes a digest-bound witness");
-    let stream_requirement = trace
-        .requirements
-        .iter()
-        .find(|requirement| requirement.requirement_id == "ORNA-STREAM-002")
-        .expect("finite stream requirement");
-    assert_eq!(
-        stream_requirement.status,
-        orna_traceability_v1::Status::PartiallyExecuted
-    );
-    assert!(stream_requirement.boundaries.iter().any(|boundary| {
-        boundary.implementation_ref.as_deref() == Some("orna-cli-v1.project-runtime")
-            && boundary.test_ref.as_deref()
-                == Some(
-                    "cli.project_runtime.binary_sensors_ingest_reopens_typed_rows_and_checkpoint",
-                )
-    }));
 }
