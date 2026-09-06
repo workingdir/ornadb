@@ -717,19 +717,61 @@ pub struct FixtureStageBinding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineWitness {
-    pub requirement_id: String,
-    pub fixture_id: String,
-    pub fixture_path: String,
-    pub stage: Stage,
-    pub implementation_ref: String,
-    pub test_ref: String,
-    pub observed_status: EvidenceStatus,
+    requirement_id: String,
+    fixture_id: String,
+    fixture_path: String,
+    stage: Stage,
+    implementation_ref: String,
+    test_ref: String,
+    observed_status: EvidenceStatus,
+}
+
+impl EngineWitness {
+    #[must_use]
+    pub fn requirement_id(&self) -> &str {
+        &self.requirement_id
+    }
+    #[must_use]
+    pub fn fixture_id(&self) -> &str {
+        &self.fixture_id
+    }
+    #[must_use]
+    pub fn fixture_path(&self) -> &str {
+        &self.fixture_path
+    }
+    #[must_use]
+    pub fn stage(&self) -> &Stage {
+        &self.stage
+    }
+    #[must_use]
+    pub fn implementation_ref(&self) -> &str {
+        &self.implementation_ref
+    }
+    #[must_use]
+    pub fn test_ref(&self) -> &str {
+        &self.test_ref
+    }
+    #[must_use]
+    pub fn observed_status(&self) -> &EvidenceStatus {
+        &self.observed_status
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineWitnesses {
-    pub publication_digests: BTreeMap<String, String>,
-    pub witnesses: Vec<EngineWitness>,
+    publication_digests: BTreeMap<String, String>,
+    witnesses: Vec<EngineWitness>,
+}
+
+impl EngineWitnesses {
+    #[must_use]
+    pub fn publication_digests(&self) -> &BTreeMap<String, String> {
+        &self.publication_digests
+    }
+    #[must_use]
+    pub fn witnesses(&self) -> &[EngineWitness] {
+        &self.witnesses
+    }
 }
 
 pub struct Harness {
