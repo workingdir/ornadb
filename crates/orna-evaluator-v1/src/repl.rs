@@ -27,6 +27,19 @@ pub struct ReplSession {
     last_success: Option<CanonicalValue>,
 }
 
+/// Parses one REPL input after applying source bounds. Callers which also
+/// typecheck the input retain this AST and pass it to
+/// [`ReplSession::submit_admitted`]; they must not parse the source a second
+/// time.
+pub fn parse_admitted_repl(source: &str, limits: Limits) -> Result<ReplInput, EvaluationError> {
+    limits.check_source(source)?;
+    let parsed = parse_repl(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    Ok(parsed.value)
+}
+
 impl ReplSession {
     /// Starts an empty session with no admitted project bindings.
     pub fn new(limits: Limits) -> Self {
@@ -76,12 +89,29 @@ impl ReplSession {
     /// Submits one REPL expression or declaration. Declarations return `None`.
     /// Failed submissions leave every retained binding and the last result intact.
     pub fn submit(&mut self, source: &str) -> Result<Option<CanonicalValue>, EvaluationError> {
-        self.limits.check_source(source)?;
-        let parsed = parse_repl(source);
-        if !parsed.is_ok() {
-            return Err(error("ORNA-EVAL-PARSE"));
-        }
-        match parsed.value {
+        let parsed = parse_admitted_repl(source, self.limits)?;
+        self.submit_unchecked(parsed)
+    }
+
+    /// Executes an already parsed input which a caller has admitted through a
+    /// semantic context.  This deliberately receives the original AST: type
+    /// annotations remain attached to declarations and source is not
+    /// fabricated or reparsed at the runtime boundary.
+    pub fn submit_admitted(
+        &mut self,
+        input: &ReplInput,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let mut candidate = self.clone();
+        let result = candidate.submit_checked(input)?;
+        *self = candidate;
+        Ok(result)
+    }
+
+    fn submit_unchecked(
+        &mut self,
+        parsed: ReplInput,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        match parsed {
             ReplInput::Expression(expression) => {
                 let value = self.evaluate(&expression)?;
                 self.last_success = Some(value.clone());
@@ -96,14 +126,27 @@ impl ReplSession {
         }
     }
 
+    fn submit_checked(
+        &mut self,
+        input: &ReplInput,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        match input {
+            ReplInput::Expression(expression) => {
+                let value = self.evaluate(expression)?;
+                self.last_success = Some(value.clone());
+                Ok(Some(value))
+            }
+            ReplInput::Item(item) => {
+                self.declare_admitted(&item.declaration)?;
+                Ok(None)
+            }
+        }
+    }
+
     /// Evaluates an expression against session state without changing it.
     pub fn preview(&self, source: &str) -> Result<CanonicalValue, EvaluationError> {
-        self.limits.check_source(source)?;
-        let parsed = parse_repl(source);
-        if !parsed.is_ok() {
-            return Err(error("ORNA-EVAL-PARSE"));
-        }
-        let ReplInput::Expression(expression) = parsed.value else {
+        let parsed = parse_admitted_repl(source, self.limits)?;
+        let ReplInput::Expression(expression) = parsed else {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         };
         self.evaluate(&expression)
@@ -133,26 +176,13 @@ impl ReplSession {
     }
 
     fn declare(&mut self, declaration: Declaration) -> Result<(), EvaluationError> {
-        match declaration {
-            Declaration::Use { path, tail } => self.import(
-                &path
-                    .into_iter()
-                    .map(|segment| segment.name)
-                    .collect::<Vec<_>>()
-                    .join("."),
-                tail,
-            ),
-            Declaration::Let {
-                pattern,
-                annotation,
-                value,
-            } => {
+        match &declaration {
+            Declaration::Let { annotation, .. } => {
                 if annotation.is_some() {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
-                self.let_binding(&pattern, &value)
             }
-            Declaration::Function { signature, body } => {
+            Declaration::Function { signature, .. } => {
                 if !signature.generics.is_empty()
                     || signature.result.is_some()
                     || signature
@@ -162,20 +192,52 @@ impl ReplSession {
                 {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
+            }
+            Declaration::Use { .. } => {}
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+        self.declare_admitted(&declaration)
+    }
+
+    fn declare_admitted(&mut self, declaration: &Declaration) -> Result<(), EvaluationError> {
+        match declaration {
+            Declaration::Use { path, tail } => self.import(
+                &path
+                    .iter()
+                    .map(|segment| segment.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                tail.clone(),
+            ),
+            Declaration::Let { pattern, value, .. } => self.let_binding(pattern, value),
+            Declaration::Function { signature, body } => {
+                // Generic execution has no bounded runtime implementation.
+                // Keep it explicit rather than silently dropping its type
+                // parameters while retaining a superficially successful fn.
+                if !signature.generics.is_empty() {
+                    return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                }
                 if self.binding_taken(&signature.name) {
                     return Err(error("ORNA-EVAL-NAME"));
                 }
                 let name = signature.name.clone();
+                let mut environment = self.environment.clone();
+                if let Some(last_success) = &self.last_success {
+                    environment.insert("$_".into(), last_success.clone());
+                }
                 self.functions.insert(
                     name.clone(),
                     PureFunction {
-                        parameters: signature.parameters,
-                        body,
-                        environment: self.environment.clone(),
+                        parameters: signature.parameters.clone(),
+                        body: body.clone(),
+                        // A retained REPL function is an immutable lexical
+                        // closure. Capture the current last result now rather
+                        // than consulting whichever `$_` its caller has.
+                        environment,
                     },
                 );
                 self.aliases.insert(name.clone(), name);
-                self.session_functions.insert(signature.name);
+                self.session_functions.insert(signature.name.clone());
                 self.check_retained()
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -548,6 +610,15 @@ mod tests {
         );
         assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
         assert_eq!(session.submit("fn last() = $_;").unwrap(), None);
+        assert_eq!(session.submit("fn echo(value) = value;").unwrap(), None);
+        assert_eq!(
+            session.submit("\"text\"").unwrap(),
+            Some(Value::new(Raw::Text("text".into())).unwrap())
+        );
+        assert_eq!(
+            session.submit("echo($_)").unwrap(),
+            Some(Value::new(Raw::Text("text".into())).unwrap())
+        );
         assert_eq!(
             session.submit("last()").unwrap(),
             Some(Value::int(42.into()))
@@ -559,6 +630,17 @@ mod tests {
         assert_eq!(
             session.submit("twice(n + 1)").unwrap(),
             Some(Value::int(42.into()))
+        );
+    }
+
+    #[test]
+    fn a_function_declared_before_a_result_cannot_capture_it_later() {
+        let mut session = ReplSession::new(Limits::default());
+        assert_eq!(session.submit("fn previous() = $_;").unwrap(), None);
+        assert_eq!(session.submit("42").unwrap(), Some(Value::int(42.into())));
+        assert_eq!(
+            session.submit("previous()").unwrap_err().code(),
+            "ORNA-EVAL-NAME"
         );
     }
 
