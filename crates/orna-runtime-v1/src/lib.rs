@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS publication_freeze (
     checkpoint_digest BLOB NOT NULL CHECK (length(checkpoint_digest) = 32),
     frozen INTEGER NOT NULL CHECK (frozen = 1)
 );
+CREATE TABLE IF NOT EXISTS publication_commit (
+    intent_id BLOB PRIMARY KEY REFERENCES publication_freeze(intent_id),
+    commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64))
+);
 CREATE TABLE IF NOT EXISTS request_ledger (
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
     request_id BLOB NOT NULL CHECK (length(request_id) = 16),
@@ -269,6 +273,23 @@ pub struct PublicationFreeze {
     pub checkpoint: Checkpoint,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationCommitId(Vec<u8>);
+
+impl PublicationCommitId {
+    pub fn new(value: impl Into<Vec<u8>>) -> Result<Self, RuntimeError> {
+        let value = value.into();
+        if !matches!(value.len(), 40 | 64) || !value.iter().all(u8::is_ascii_hexdigit) {
+            return Err(RuntimeError::InvalidPublicationCommit);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestIdentity {
     pub session_id: [u8; 16],
@@ -366,6 +387,8 @@ pub enum RuntimeError {
     EmptyMutationBatch,
     InvalidTableMutation,
     ConflictingPublicationIntent,
+    ConflictingPublicationCommit,
+    InvalidPublicationCommit,
     RequestUnknown,
     RequestFingerprintMismatch,
     RequestStateConflict,
@@ -389,6 +412,8 @@ impl fmt::Display for RuntimeError {
             Self::EmptyMutationBatch => "empty runtime mutation batch",
             Self::InvalidTableMutation => "invalid durable table mutation",
             Self::ConflictingPublicationIntent => "conflicting publication intent",
+            Self::ConflictingPublicationCommit => "conflicting publication commit",
+            Self::InvalidPublicationCommit => "invalid publication commit",
             Self::RequestUnknown => "runtime request is unknown",
             Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
             Self::RequestStateConflict => "runtime request state conflict",
@@ -2106,6 +2131,46 @@ impl RuntimeState {
         Ok(out)
     }
 
+    /// Returns only the pending mutation prefix covered by a persisted freeze.
+    /// Mutations appended after the freeze are intentionally excluded.
+    pub async fn pending_through(
+        &self,
+        freeze: &PublicationFreeze,
+    ) -> Result<Vec<Mutation>, RuntimeError> {
+        validate_id(freeze.intent_id)?;
+        validate_digest(freeze.checkpoint.digest)?;
+        let stored = self
+            .frozen_intent(freeze.intent_id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        if stored != freeze.checkpoint {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT mutation_id, payload, digest FROM pending_mutation WHERE sequence <= ?1 ORDER BY sequence",
+                params![upper],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            out.push(Mutation {
+                id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                payload: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// Returns the newest durable checkpoint, if this runtime has committed
     /// one. Checkpoints are never inferred from a pending mutation.
     pub async fn latest_checkpoint(&self) -> Result<Option<Checkpoint>, RuntimeError> {
@@ -2165,6 +2230,67 @@ impl RuntimeState {
             intent_id,
             checkpoint: stored,
         })
+    }
+
+    /// Records a verified publication and consumes only the frozen pending
+    /// prefix. Repeating the same intent and commit is safe after restart;
+    /// another commit for that intent is rejected.
+    pub async fn complete_publication(
+        &self,
+        freeze: &PublicationFreeze,
+        commit_id: &PublicationCommitId,
+    ) -> Result<(), RuntimeError> {
+        validate_id(freeze.intent_id)?;
+        validate_digest(freeze.checkpoint.digest)?;
+        let stored = self
+            .frozen_intent(freeze.intent_id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        if stored != freeze.checkpoint {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = tx
+            .query(
+                "SELECT commit_id FROM publication_commit WHERE intent_id = ?1",
+                params![freeze.intent_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let existing = row
+                .get::<Vec<u8>>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if existing != commit_id.as_bytes() {
+                return Err(RuntimeError::ConflictingPublicationCommit);
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO publication_commit (intent_id, commit_id) VALUES (?1, ?2)",
+                params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        tx.execute(
+            "DELETE FROM pending_mutation WHERE sequence <= ?1",
+            params![upper],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
     /// Atomically reserves a REQUEST-1 identity. Repeating the same identity
@@ -2537,6 +2663,36 @@ impl RuntimeState {
             if generation == 0 || sequence == 0 || frozen != 1 || referenced.is_none() {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+        }
+
+        let mut publications = self
+            .connection
+            .query(
+                "SELECT publication_commit.intent_id, publication_commit.commit_id, publication_freeze.intent_id \
+                 FROM publication_commit LEFT JOIN publication_freeze \
+                 ON publication_freeze.intent_id = publication_commit.intent_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = publications
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            validate_id(fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            PublicationCommitId::new(
+                row.get::<Vec<u8>>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(fixed(
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
         }
         Ok(())
     }
@@ -7820,6 +7976,65 @@ mod tests {
         let reopened = open_state(&repo).await;
         reopened.validate_recovery().await.unwrap();
         assert_eq!(reopened.pending().await.unwrap(), vec![mutation(5)]);
+    }
+
+    #[tokio::test]
+    async fn publication_completion_consumes_only_the_frozen_pending_prefix() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        let freeze = state
+            .freeze(
+                id(7),
+                &Checkpoint {
+                    generation: 1,
+                    digest: digest(6),
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &capture, &mutation(8), digest(9), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.pending_through(&freeze).await.unwrap(),
+            vec![mutation(5)]
+        );
+        assert_eq!(
+            state.pending().await.unwrap(),
+            vec![mutation(5), mutation(8)]
+        );
+
+        let published = PublicationCommitId::new(vec![b'a'; 40]).unwrap();
+        state
+            .complete_publication(&freeze, &published)
+            .await
+            .unwrap();
+        assert_eq!(state.pending_through(&freeze).await.unwrap(), Vec::new());
+        assert_eq!(state.pending().await.unwrap(), vec![mutation(8)]);
+        state
+            .complete_publication(&freeze, &published)
+            .await
+            .unwrap();
+        let different = PublicationCommitId::new(vec![b'b'; 40]).unwrap();
+        assert_eq!(
+            state.complete_publication(&freeze, &different).await,
+            Err(RuntimeError::ConflictingPublicationCommit)
+        );
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        reopened.validate_recovery().await.unwrap();
+        assert_eq!(reopened.pending().await.unwrap(), vec![mutation(8)]);
     }
     #[tokio::test]
     async fn duplicate_request_reservation_is_idempotent() {
