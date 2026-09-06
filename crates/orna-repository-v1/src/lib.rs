@@ -426,6 +426,97 @@ impl Repository {
         Ok(())
     }
 
+    /// Installs the ordinary index image for a published candidate. Only the
+    /// supplied managed paths are replaced from the candidate tree; unrelated
+    /// staged entries remain in the captured index. The worktree is not
+    /// modified, so managed file replacement is a later recovery boundary.
+    pub fn reconcile_published_index(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        paths: &[ManagedPath],
+    ) -> Result<IndexGeneration, RepositoryError> {
+        if paths.is_empty() {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        self.ensure_atomic_index_install_supported()?;
+        self.ensure_no_git_index_lock()?;
+        if self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        let index = self.git_path("index")?;
+        let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let actual = self.index_generation()?;
+        if actual.tree() != expected_index.tree() {
+            return Err(RepositoryError::StaleIndex {
+                expected: expected_index.clone(),
+                actual,
+            });
+        }
+        let mut unique = HashSet::new();
+        if paths.iter().any(|path| !unique.insert(path.clone())) {
+            return Err(RepositoryError::UnsafeManagedPath);
+        }
+
+        let candidate_index = index
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?
+            .join(format!(
+                "index-candidate-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                    .as_nanos()
+            ));
+        fs::write(&candidate_index, &base_index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let result = (|| {
+            for path in paths {
+                let mut update = self.command();
+                update.env("GIT_INDEX_FILE", &candidate_index);
+                if let Some((mode, object)) = self.candidate_tree_entry(candidate, path)? {
+                    let cacheinfo = format!(
+                        "{mode},{object},{}",
+                        path.as_path()
+                            .to_str()
+                            .ok_or(RepositoryError::UnsafeManagedPath)?
+                    );
+                    update.args(["update-index", "--add", "--cacheinfo", &cacheinfo]);
+                } else {
+                    update
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(path.as_path());
+                }
+                self.run(update)?;
+            }
+            fs::File::open(&candidate_index)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
+            let current_index =
+                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
+                drop(git_lock);
+                return Err(RepositoryError::StaleHead);
+            }
+            fs::rename(&candidate_index, &index)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::File::open(
+                index
+                    .parent()
+                    .ok_or(RepositoryError::LocalStateUnavailable)?,
+            )
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            drop(git_lock);
+            self.index_generation()
+        })();
+        let _ = fs::remove_file(&candidate_index);
+        result
+    }
+
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
@@ -730,6 +821,50 @@ impl Repository {
         } else {
             Err(RepositoryError::GitOperationFailed)
         }
+    }
+
+    fn candidate_tree_entry(
+        &self,
+        candidate: &PrivateCommit,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
+        let mut command = self.command();
+        command
+            .args([
+                "ls-tree",
+                "-z",
+                "--full-tree",
+                candidate.commit.as_str(),
+                "--",
+            ])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        let Some(entry) = output.split(|byte| *byte == 0).next() else {
+            return Ok(None);
+        };
+        if entry.is_empty() {
+            return Ok(None);
+        }
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let metadata = &entry[..tab];
+        let encoded_path = &entry[tab + 1..];
+        if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut fields = metadata.split(|byte| *byte == b' ');
+        let mode = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let kind = fields.next().unwrap_or_default();
+        let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if kind != b"blob" || fields.next().is_some() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+        Ok(Some((mode, object)))
     }
     fn git_at<const N: usize>(
         directory: &Path,
