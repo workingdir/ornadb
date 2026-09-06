@@ -4,8 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use futures::FutureExt;
+use futures::{FutureExt, executor::block_on};
+use orna_protocol_v1::{
+    DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
+    canonical_request_fingerprint,
+};
 use orna_repository_v1::initialize_repository;
+use orna_runtime_v1::{RequestIdentity, RequestState, RuntimeIdentity, RuntimeState};
 use orna_server::{LiveHostError, LiveOnceHost};
 
 struct TemporaryRepository {
@@ -72,10 +77,15 @@ fn json_field(response: &str, field: &str) -> String {
 }
 
 fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
-    assert!(body.len() < 126);
+    assert!(body.len() <= u16::MAX as usize);
     let key = [1, 2, 3, 4];
-    let length = u8::try_from(body.len()).unwrap();
-    let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode, 0x80 | length];
+    let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode];
+    if body.len() < 126 {
+        frame.push(0x80 | u8::try_from(body.len()).unwrap());
+    } else {
+        frame.push(0x80 | 126);
+        frame.extend(u16::try_from(body.len()).unwrap().to_be_bytes());
+    }
     frame.extend(key);
     frame.extend(
         body.iter()
@@ -83,6 +93,48 @@ fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
             .map(|(index, byte)| byte ^ key[index % key.len()]),
     );
     frame
+}
+
+fn uuid_bytes(value: &str) -> [u8; 16] {
+    let hex = value.replace('-', "");
+    assert_eq!(hex.len(), 32);
+    let mut bytes = [0; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    bytes
+}
+
+fn eval_payload(session: [u8; 16], request: [u8; 16]) -> Vec<u8> {
+    let mut envelope = Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Eval {
+            source: "0".into(),
+            database: DatabaseContext {
+                database: [2; 16],
+                snapshot: None,
+            },
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/dark".into(),
+                supported_kinds: vec![],
+            },
+            fingerprint: [0; 32],
+        },
+        extensions: std::collections::BTreeMap::new(),
+    };
+    let fingerprint =
+        canonical_request_fingerprint(session, &envelope, ProtocolLimits::default()).unwrap();
+    if let Message::Eval {
+        fingerprint: sent, ..
+    } = &mut envelope.message
+    {
+        *sent = fingerprint;
+    }
+    envelope.encode(ProtocolLimits::default()).unwrap()
 }
 
 #[test]
@@ -319,5 +371,79 @@ fn loopback_host_serves_websocket_and_resumes_the_session_after_close() {
         Err(LiveHostError::Cancelled)
     );
     client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let request_id = [7; 16];
+    let request_database = database.clone();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &request_database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket = TcpStream::connect(address).unwrap();
+        let handshake = format!(
+            "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token}\r\n\r\n",
+            address.port()
+        );
+        let mut input = handshake.into_bytes();
+        input.extend(masked(
+            true,
+            2,
+            &eval_payload(uuid_bytes(&session), request_id),
+        ));
+        input.extend(masked(true, 8, b""));
+        websocket.write_all(&input).unwrap();
+        websocket.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        websocket.read_to_end(&mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+        sender.send(()).unwrap();
+        (session, json_field(&created, "runtime"))
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    let (session, runtime) = client.join().unwrap();
+    let database_id = uuid_bytes(&database);
+    let repository_id = uuid_bytes(&runtime);
+    let identity = RuntimeIdentity {
+        database_id,
+        repository_id,
+    };
+    let mut digest = [0; 32];
+    digest[..16].copy_from_slice(&database_id);
+    digest[16..].copy_from_slice(&repository_id);
+    let state = block_on(RuntimeState::open(
+        initialized.repository(),
+        identity,
+        digest,
+    ))
+    .unwrap();
+    let status = block_on(state.request_status_for_identity(RequestIdentity {
+        session_id: uuid_bytes(&session),
+        request_id,
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(status.state, RequestState::Completed);
+    assert!(status.terminal_outcome.is_some());
     let _released = TcpListener::bind(address).unwrap();
 }
