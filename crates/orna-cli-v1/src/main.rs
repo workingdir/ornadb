@@ -909,6 +909,30 @@ mod tests {
     }
 
     #[test]
+    fn run_seed_executes_composed_source_defined_standard_math() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use std.math; pub fn seed(): Int = std.math.clamp(std.math.max(2, 9), 3, 7);",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let parsed = Parsed {
+            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
+            command: Command::Run(Invocation::Seed),
+        };
+        assert_eq!(execute(&parsed), Ok(()));
+    }
+
+    #[test]
     fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(

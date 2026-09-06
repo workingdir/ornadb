@@ -1,3 +1,6 @@
 pub fn increment(value: Int): Int = value + 1;
 pub fn decrement(value: Int): Int = value - 1;
 pub fn is_zero(value: Int): Bool = value == 0;
+pub fn min(left: Int, right: Int): Int = if left < right { left } else { right };
+pub fn max(left: Int, right: Int): Int = if left > right { left } else { right };
+pub fn clamp(value: Int, lower: Int, upper: Int): Int = max(lower, min(value, upper));
