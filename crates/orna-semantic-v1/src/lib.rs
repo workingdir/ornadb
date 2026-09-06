@@ -14,6 +14,7 @@ use orna_syntax_v1::{
     LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement, StringSegment, SyntaxTree,
     TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility, parse_module_with_file,
 };
+use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
@@ -43,6 +44,104 @@ pub struct ModuleInput {
     /// Explicit prelude exports for this module.  The AST has no prelude
     /// declaration node, so a repository/catalogue adapter supplies this set.
     pub prelude_exports: BTreeSet<String>,
+}
+
+/// A verified dependency boundary for optional standard-library source.
+///
+/// This descriptor records the immutable source snapshot and the canonical
+/// digest of each admitted `std` module. It does not discover files, install a
+/// host library, or provide declarations by name alone. A later loader may
+/// verify source bytes against this descriptor before converting them into
+/// semantic catalogue entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardDependencyProfile {
+    snapshot: String,
+    module_digests: BTreeMap<String, [u8; 32]>,
+}
+
+impl StandardDependencyProfile {
+    /// Creates an empty profile for a pinned snapshot.
+    pub fn empty(snapshot: impl Into<String>) -> Result<Self, StandardProfileError> {
+        let snapshot = snapshot.into();
+        if snapshot.is_empty() {
+            return Err(StandardProfileError::EmptySnapshot);
+        }
+        Ok(Self {
+            snapshot,
+            module_digests: BTreeMap::new(),
+        })
+    }
+
+    /// Computes a profile from caller-supplied source bytes in deterministic
+    /// logical-path order. The bytes are not retained after digesting.
+    pub fn from_sources(
+        snapshot: impl Into<String>,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, StandardProfileError> {
+        let mut profile = Self::empty(snapshot)?;
+        for (logical_path, source) in sources {
+            if !is_standard_module_path(&logical_path) {
+                return Err(StandardProfileError::InvalidModulePath);
+            }
+            if profile
+                .module_digests
+                .insert(logical_path, digest_source(&source))
+                .is_some()
+            {
+                return Err(StandardProfileError::DuplicateModule);
+            }
+        }
+        Ok(profile)
+    }
+
+    pub fn snapshot(&self) -> &str {
+        &self.snapshot
+    }
+
+    pub fn module_digests(&self) -> &BTreeMap<String, [u8; 32]> {
+        &self.module_digests
+    }
+
+    /// Verifies one source unit against the exact pinned module digest.
+    pub fn verify_source(
+        &self,
+        logical_path: &str,
+        source: &str,
+    ) -> Result<(), StandardProfileError> {
+        if !is_standard_module_path(logical_path) {
+            return Err(StandardProfileError::InvalidModulePath);
+        }
+        let expected = self
+            .module_digests
+            .get(logical_path)
+            .ok_or(StandardProfileError::MissingModule)?;
+        if digest_source(source) != *expected {
+            return Err(StandardProfileError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Source-free, stable failures for standard dependency admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandardProfileError {
+    EmptySnapshot,
+    InvalidModulePath,
+    DuplicateModule,
+    MissingModule,
+    DigestMismatch,
+}
+
+fn digest_source(source: &str) -> [u8; 32] {
+    Sha256::digest(source.as_bytes()).into()
+}
+
+fn is_standard_module_path(path: &str) -> bool {
+    let mut components = path.split('/');
+    components.next() == Some("std")
+        && components
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && path.ends_with(".orna")
 }
 impl ModuleInput {
     pub fn new(logical_path: impl Into<String>, source: impl Into<String>) -> Self {
@@ -5799,6 +5898,55 @@ mod tests {
             ModuleInput::new("std/main.orna", ""),
         ]);
         assert!(has(&a, DIAG_RESERVED));
+    }
+
+    #[test]
+    fn standard_dependency_profile_requires_exact_pinned_source_bytes() {
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-1",
+            [("std/math.orna".into(), "fn increment() = 1;".into())],
+        )
+        .unwrap();
+
+        assert_eq!(profile.snapshot(), "std-snapshot-1");
+        assert_eq!(profile.module_digests().len(), 1);
+        assert_eq!(
+            profile.verify_source("std/math.orna", "fn increment() = 1;"),
+            Ok(())
+        );
+        assert_eq!(
+            profile.verify_source("std/math.orna", "fn increment() = 2;"),
+            Err(StandardProfileError::DigestMismatch)
+        );
+        assert_eq!(
+            profile.verify_source("std/text.orna", "fn trim() = 1;"),
+            Err(StandardProfileError::MissingModule)
+        );
+    }
+
+    #[test]
+    fn standard_dependency_profile_rejects_unsafe_or_duplicate_modules() {
+        assert_eq!(
+            StandardDependencyProfile::empty(""),
+            Err(StandardProfileError::EmptySnapshot)
+        );
+        assert_eq!(
+            StandardDependencyProfile::from_sources(
+                "std-snapshot-1",
+                [("project/math.orna".into(), "fn f() = 1;".into())],
+            ),
+            Err(StandardProfileError::InvalidModulePath)
+        );
+        assert_eq!(
+            StandardDependencyProfile::from_sources(
+                "std-snapshot-1",
+                [
+                    ("std/math.orna".into(), "fn f() = 1;".into()),
+                    ("std/math.orna".into(), "fn f() = 1;".into()),
+                ],
+            ),
+            Err(StandardProfileError::DuplicateModule)
+        );
     }
     #[test]
     fn named_alias_glob_and_prelude_imports_resolve() {
