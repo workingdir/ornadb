@@ -661,6 +661,66 @@ fn accepted_tcp_socket_hands_off_an_upgrade_to_the_websocket_driver() {
 }
 
 #[test]
+fn accepted_websocket_eof_disconnects_its_attachment() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut authority = Authority;
+        let mut issuer = Issuer(7, None);
+        let mut deletion = Delete(true);
+        let created = block_on(transport.handle(
+            wire(
+                "POST",
+                "/orna/session",
+                &format!(
+                    r#"{{"database":"{}","protocol":"{}"}}"#,
+                    uuid(2),
+                    SUBPROTOCOL
+                ),
+            ),
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ));
+        sender.send(token(&created)).unwrap();
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut application = UnitApplication::default();
+        transport
+            .serve_one_websocket_listener(
+                &listener,
+                &mut connection,
+                [5; 16],
+                &mut || 1,
+                &mut application,
+            )
+            .unwrap();
+        block_on(transport.receive(
+            &mut WebSocketState::new([5; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        ))
+    });
+
+    let request = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        receiver.recv().unwrap()
+    );
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    assert_eq!(server.join().unwrap(), Err(Error::Closed));
+}
+
+#[test]
 fn async_http_connection_loop_rejects_truncated_eof() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut connection = HttpConnection::new(TransportLimits::default());
