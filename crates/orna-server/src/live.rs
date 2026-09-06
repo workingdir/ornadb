@@ -2,7 +2,7 @@
 //!
 //! This is the first executable-owned live boundary. Its basic entry point
 //! accepts one local HTTP connection; the cancellable entry point retains
-//! transport/session state across sequential connections and hands the live
+//! transport/session state across concurrent connections and hands the live
 //! WebSocket path to the bounded transport driver. TLS, remote exposure,
 //! durable session credentials, and application dispatch are deliberately
 //! outside this slice. Verified runtime request reservations and terminal
@@ -154,7 +154,7 @@ impl LiveOnceHost {
         runtime.block_on(self.serve_with_cancellation_async(&mut cancellation))
     }
 
-    /// Accepts sequential loopback connections until the caller cancels.
+    /// Accepts concurrent loopback connections until the caller cancels.
     /// Transport/session state remains owned by this host across connections.
     pub fn serve_until_cancellation<C>(self, mut cancellation: C) -> Result<(), LiveHostError>
     where
@@ -205,10 +205,60 @@ impl LiveOnceHost {
         ));
         let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
         let mut workers = tokio::task::JoinSet::new();
+        let mut actor = Some(actor);
         loop {
             tokio::select! {
+                biased;
+                () = &mut *cancellation => {
+                    drop(listener);
+                    return shutdown_concurrent_host(
+                        &registry,
+                        &mut workers,
+                        actor_sender,
+                        actor.take(),
+                        LiveHostError::Cancelled,
+                    ).await;
+                }
+                result = actor.as_mut().expect("actor remains owned until shutdown") => {
+                    // Polling the JoinHandle above has already joined this actor.
+                    // Drop the resolved handle rather than polling it a second time.
+                    let _ = actor.take();
+                    let _ = result;
+                    drop(listener);
+                    return shutdown_concurrent_host(
+                        &registry,
+                        &mut workers,
+                        actor_sender,
+                        None,
+                        LiveHostError::Runtime,
+                    ).await;
+                }
+                result = workers.join_next(), if !workers.is_empty() => {
+                    if result.is_some_and(|result| result.is_err()) {
+                        drop(listener);
+                        return shutdown_concurrent_host(
+                            &registry,
+                            &mut workers,
+                            actor_sender,
+                            actor.take(),
+                            LiveHostError::Connection,
+                        ).await;
+                    }
+                }
                 result = listener.accept() => {
-                    let (stream, _) = result.map_err(|_| LiveHostError::Connection)?;
+                    let (stream, _) = match result {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            drop(listener);
+                            return shutdown_concurrent_host(
+                                &registry,
+                                &mut workers,
+                                actor_sender,
+                                actor.take(),
+                                LiveHostError::Connection,
+                            ).await;
+                        }
+                    };
                     let (worker_id, cancellation_receiver, done_sender) = registry.borrow_mut().register();
                     let actor = actor_sender.clone();
                     let registry = Rc::clone(&registry);
@@ -224,18 +274,6 @@ impl LiveOnceHost {
                         registry.borrow_mut().remove(worker_id);
                         let _ = done_sender.send(());
                     });
-                }
-                result = workers.join_next(), if !workers.is_empty() => {
-                    if result.is_some_and(|result| result.is_err()) {
-                        continue;
-                    }
-                }
-                () = &mut *cancellation => {
-                    registry.borrow_mut().cancel_all();
-                    while workers.join_next().await.is_some() {}
-                    drop(actor_sender);
-                    let _ = actor.await;
-                    return Err(LiveHostError::Cancelled);
                 }
             }
         }
@@ -435,6 +473,149 @@ async fn run_host_actor(
     }
 }
 
+/// Ends the host owner after admission has stopped. Every active socket worker
+/// receives cancellation and is joined before the command channel closes and
+/// the actor is joined. A caller-requested cancellation remains observable even
+/// if a child also failed while shutdown was beginning.
+async fn shutdown_concurrent_host(
+    registry: &Rc<RefCell<WorkerRegistry>>,
+    workers: &mut tokio::task::JoinSet<()>,
+    actor_sender: futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    actor: Option<tokio::task::JoinHandle<()>>,
+    requested: LiveHostError,
+) -> Result<(), LiveHostError> {
+    registry.borrow_mut().cancel_all();
+    let mut worker_failed = false;
+    while let Some(result) = workers.join_next().await {
+        worker_failed |= result.is_err();
+    }
+    drop(actor_sender);
+    let actor_failed = match actor {
+        Some(actor) => actor.await.is_err(),
+        None => false,
+    };
+    if requested == LiveHostError::Cancelled {
+        Err(LiveHostError::Cancelled)
+    } else if worker_failed {
+        Err(LiveHostError::Connection)
+    } else if actor_failed {
+        Err(LiveHostError::Runtime)
+    } else {
+        Err(requested)
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    fn run_local(future: impl Future<Output = ()> + 'static) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, future);
+    }
+
+    #[test]
+    fn shutdown_cancels_and_joins_a_pending_worker() {
+        run_local(async {
+            let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
+            let (_, cancellation, _done_sender) = registry.borrow_mut().register();
+            let (finished_sender, finished) = futures::channel::oneshot::channel();
+            let mut workers = tokio::task::JoinSet::new();
+            workers.spawn_local(async move {
+                cancellation.await.unwrap();
+                let _ = finished_sender.send(());
+            });
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                let mut actor_receiver = actor_receiver;
+                while actor_receiver.next().await.is_some() {}
+            });
+
+            assert_eq!(
+                shutdown_concurrent_host(
+                    &registry,
+                    &mut workers,
+                    actor_sender,
+                    Some(actor),
+                    LiveHostError::Cancelled,
+                )
+                .await,
+                Err(LiveHostError::Cancelled)
+            );
+            assert_eq!(finished.now_or_never(), Some(Ok(())));
+            assert!(workers.is_empty());
+            assert!(registry.borrow().workers.is_empty());
+        });
+    }
+
+    #[test]
+    fn shutdown_joins_workers_before_reporting_a_panicked_actor() {
+        run_local(async {
+            let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
+            let (_, cancellation, _) = registry.borrow_mut().register();
+            let (finished_sender, finished) = futures::channel::oneshot::channel();
+            let mut workers = tokio::task::JoinSet::new();
+            workers.spawn_local(async move {
+                cancellation.await.unwrap();
+                let _ = finished_sender.send(());
+            });
+            let (actor_sender, _actor_receiver) = futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(async {
+                panic!("actor termination is observed by its owner");
+            });
+
+            assert_eq!(
+                shutdown_concurrent_host(
+                    &registry,
+                    &mut workers,
+                    actor_sender,
+                    Some(actor),
+                    LiveHostError::Connection,
+                )
+                .await,
+                Err(LiveHostError::Runtime)
+            );
+            assert_eq!(finished.now_or_never(), Some(Ok(())));
+            assert!(workers.is_empty());
+        });
+    }
+
+    #[test]
+    fn shutdown_preserves_cancellation_after_a_worker_failure() {
+        run_local(async {
+            let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
+            let (_, _cancellation, _done_sender) = registry.borrow_mut().register();
+            let mut workers = tokio::task::JoinSet::new();
+            workers.spawn_local(async {
+                panic!("worker termination is observed by its owner");
+            });
+            let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                let mut actor_receiver = actor_receiver;
+                while actor_receiver.next().await.is_some() {}
+            });
+
+            assert_eq!(
+                shutdown_concurrent_host(
+                    &registry,
+                    &mut workers,
+                    actor_sender,
+                    Some(actor),
+                    LiveHostError::Cancelled,
+                )
+                .await,
+                Err(LiveHostError::Cancelled)
+            );
+            assert!(workers.is_empty());
+        });
+    }
+}
+
 struct WorkerSlot {
     cancellation: futures::channel::oneshot::Sender<()>,
     done: futures::channel::oneshot::Receiver<()>,
@@ -540,7 +721,10 @@ async fn serve_socket_worker(
     let reader = TokioReader(reader);
     let mut reader = PrefixedReader::new(reader);
     let writer = TokioWriter(writer);
-    let mut cancellation = cancellation_receiver.map(|_| ());
+    // A cancelled worker still closes its attachment through the actor. Fuse
+    // the one-shot signal so cleanup can poll it without repolling a completed
+    // receiver; after cancellation, the cleanup reply remains awaitable.
+    let mut cancellation = cancellation_receiver.map(|_| ()).fuse();
     if let Ok(initial) = read_initial_request(&mut reader, &mut cancellation).await
         && let Some(parsed) = parse_http_request(&initial, TransportLimits::default())
             .ok()
