@@ -21,6 +21,7 @@ use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation};
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
+use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
@@ -919,6 +920,41 @@ impl DurableTransactionalEvaluator {
             .commit_table_activation(lease, &context, &mutations, next_digest, &NoFault)
             .await?;
         Ok(StageOutcome::Passed)
+    }
+
+    /// Publishes the caller-selected frozen runtime prefix through the loose
+    /// Git projection. Publication is explicit: source execution only stages
+    /// durable runtime mutations and never advances the repository by itself.
+    pub async fn publish_pending(
+        &self,
+        repository: &Repository,
+        runtime: &RuntimeState,
+        intent_id: [u8; 16],
+        checkpoint: &orna_runtime_v1::Checkpoint,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage_v1::Error>,
+        message: &str,
+    ) -> Result<orna_repository_v1::IndexGeneration, RuntimeError> {
+        let freeze = runtime.freeze(intent_id, checkpoint).await?;
+        let head = repository
+            .head()
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let index = repository
+            .index_generation()
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut coordinator = RuntimePublicationCoordinator::prepare_from_runtime(
+            repository, runtime, &head, index, &freeze, path_for, message,
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let published = coordinator
+            .publish(repository)
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        coordinator
+            .complete(repository, runtime, &freeze)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(published)
     }
 }
 
