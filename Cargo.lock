@@ -1518,6 +1518,7 @@ dependencies = [
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
+ "orna-traceability-v1",
  "orna-value-v1",
  "tempfile",
  "tokio",
