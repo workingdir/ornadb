@@ -21,13 +21,15 @@ use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot};
 use orna_repository_v1::Repository;
-pub use orna_stream_v1::StreamFailurePayload;
+pub use orna_stream_v1::{
+    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
+    ConsumerIdentity, StreamFailurePayload,
+};
 use orna_stream_v1::{
-    AsyncCheckpointBackend, AsyncFailurePayloadBackend, CancellationClassification,
-    Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition, CommitIntent,
-    CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DeliveryLease, DiagnosticClass,
-    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
-    RejectReason, ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
+    AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
+    CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode,
+    FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason,
+    ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1192,6 +1194,15 @@ impl RuntimeState {
             ));
         }
         Ok(result)
+    }
+
+    /// Reads one durable stream checkpoint without exposing the runtime
+    /// database connection or weakening the stream identity boundary.
+    pub async fn stream_checkpoint(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        load_stream_checkpoint(&self.connection, key).await
     }
 
     async fn record_stream_provider_failure(
