@@ -37,6 +37,10 @@ struct FailFirstWriter {
     writes: usize,
 }
 
+struct FailAfterFirstWrite {
+    writes: usize,
+}
+
 #[derive(Default)]
 struct RecordingWriter {
     bytes: Vec<u8>,
@@ -161,6 +165,35 @@ impl AsyncWrite for FailFirstWriter {
             Err(std::io::Error::other("write rejected"))
         } else {
             Ok(0)
+        })
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for FailAfterFirstWrite {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.writes += 1;
+        std::task::Poll::Ready(if self.writes == 1 {
+            Ok(bytes.len())
+        } else {
+            Err(std::io::Error::other("write rejected"))
         })
     }
 
@@ -1082,6 +1115,63 @@ fn websocket_connection_driver_cancellation_during_output_disconnects_its_attach
     assert_eq!(
         block_on(transport.receive(
             &mut WebSocketState::new([6; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        )),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
+fn websocket_connection_driver_output_write_failure_disconnects_its_attachment() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let mut input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    )
+    .into_bytes();
+    input.extend(masked(true, 9, b"p"));
+    let mut reader = Cursor::new(input);
+    let mut writer = FailAfterFirstWrite { writes: 0 };
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    assert_eq!(
+        block_on(transport.serve_websocket_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            [7; 16],
+            &mut clock,
+            &mut cancellation,
+            &mut application,
+        )),
+        Err(HttpIoError::Write)
+    );
+    assert_eq!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([7; 16]),
             2,
             &masked(true, 2, &unsubscribe()),
         )),
