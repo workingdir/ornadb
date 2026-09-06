@@ -4,6 +4,7 @@ use orna_conformance_v1::{
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
+use orna_semantic_v1::{ModuleInput, analyze};
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use std::collections::BTreeMap;
 
@@ -67,6 +68,8 @@ impl RuntimeEvaluator for CompositeEvaluator {
             self.transactional.run_scenario(scenario)
         } else if live_resync_contract(scenario) {
             run_live_resync_scenario(scenario)
+        } else if sys_rt_rename_contract(scenario) {
+            run_sys_rt_rename_scenario(scenario)
         } else {
             self.bounded.run_scenario(scenario)
         }
@@ -162,6 +165,48 @@ fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
+fn sys_rt_rename_contract(scenario: &Scenario) -> bool {
+    scenario.id == "SYS-RT-RENAME-100"
+        && scenario.title == "The runtime root is sys.rt"
+        && scenario.given == ["active source, removed `sys.runtime` source and runtime-info access"]
+        && scenario.when == ["resolve valid and invalid spellings and inspect the diagnostic"]
+        && scenario.then
+            == [
+                "`sys.rt` and `sys.rt.info()` resolve",
+                "`sys.runtime` and `sys.runtime_info` receive ORNA100-E-SYS-RUNTIME",
+                "no alias is installed",
+            ]
+        && scenario.requirements == ["ORNA-SYS-005", "ORNA-SYS-105"]
+}
+
+fn run_sys_rt_rename_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if !sys_rt_rename_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the semantic runtime".into(),
+        };
+    }
+    let current = analyze(&[ModuleInput::new(
+        "runtime.orna",
+        "pub fn view() = sys.rt; pub fn info() = sys.rt.info();",
+    )]);
+    if !current.is_ok() {
+        return scenario_failure("current sys runtime names did not resolve");
+    }
+    for source in [
+        "pub fn bad() = sys.runtime.streams;",
+        "pub fn bad() = sys.runtime_info();",
+    ] {
+        let analysis = analyze(&[ModuleInput::new("legacy.orna", source)]);
+        if !analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == "ORNA100-E-SYS-RUNTIME"
+                && diagnostic.message() == "`sys.runtime` was renamed to `sys.rt`"
+        }) {
+            return scenario_failure("legacy sys runtime spelling was not rejected");
+        }
+    }
+    StageOutcome::Passed
+}
+
 fn main() {
     let corpus = Corpus::load_default().unwrap_or_else(|error| {
         eprintln!("cannot load authoritative Orna corpus: {error}");
@@ -185,7 +230,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, the live resync contract, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, the live resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -197,6 +242,7 @@ fn main() {
                 "TXN-001",
                 "TXN-002",
                 "LIVE-003",
+                "SYS-RT-RENAME-100",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -211,7 +257,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scenario, StageOutcome, run_live_resync_scenario};
+    use super::{Scenario, StageOutcome, run_live_resync_scenario, run_sys_rt_rename_scenario};
 
     #[test]
     fn live_resync_contract_replays_the_missing_revision() {
@@ -229,6 +275,29 @@ mod tests {
         };
         assert!(matches!(
             run_live_resync_scenario(&scenario),
+            StageOutcome::Passed
+        ));
+    }
+
+    #[test]
+    fn sys_runtime_root_contract_rejects_removed_spellings() {
+        let scenario = Scenario {
+            id: "SYS-RT-RENAME-100".into(),
+            title: "The runtime root is sys.rt".into(),
+            given: vec![
+                "active source, removed `sys.runtime` source and runtime-info access".into(),
+            ],
+            when: vec!["resolve valid and invalid spellings and inspect the diagnostic".into()],
+            then: vec![
+                "`sys.rt` and `sys.rt.info()` resolve".into(),
+                "`sys.runtime` and `sys.runtime_info` receive ORNA100-E-SYS-RUNTIME".into(),
+                "no alias is installed".into(),
+            ],
+            requirements: vec!["ORNA-SYS-005".into(), "ORNA-SYS-105".into()],
+            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
+        };
+        assert!(matches!(
+            run_sys_rt_rename_scenario(&scenario),
             StageOutcome::Passed
         ));
     }
