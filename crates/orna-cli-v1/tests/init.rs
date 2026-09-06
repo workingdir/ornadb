@@ -501,3 +501,51 @@ fn init_ignores_hostile_git_routing_variables() {
         "foreign source bytes are unchanged"
     );
 }
+
+#[test]
+fn init_then_check_accepts_unchanged_authoritative_reference_sources() {
+    let fixture = tempfile::tempdir().expect("temporary reference project");
+    let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../reference/Orna-1.0.0/examples/reference");
+    let names = [
+        "main.orna",
+        "library.orna",
+        "warehouse.orna",
+        "sensors.orna",
+        "values.orna",
+    ];
+    let original = names
+        .iter()
+        .map(|name| {
+            let source = bytes(&reference.join(name));
+            fs::write(fixture.path().join(name), &source).expect("reference source copied");
+            (*name, source)
+        })
+        .collect::<Vec<_>>();
+
+    let initialized = run_init(fixture.path(), None);
+    assert_success(&initialized, fixture.path());
+    for (name, source) in original {
+        assert_eq!(
+            bytes(&fixture.path().join(name)),
+            source,
+            "reference source bytes are unchanged"
+        );
+    }
+
+    let mut check = command();
+    let check = check
+        .arg("check")
+        .current_dir(fixture.path())
+        .output()
+        .expect("CLI process starts");
+    assert!(
+        check.status.success(),
+        "authoritative reference project passes CLI check"
+    );
+    assert!(
+        check.stdout == b"project valid\n" && check.stderr.is_empty(),
+        "check emits only its stable success status"
+    );
+    assert_fixture_path_absent(&check, fixture.path());
+}
