@@ -31,7 +31,7 @@ use orna_stream_v1::{
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
 use orna_sys_v1::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
-    InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
+    InvocationHandle, InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
 };
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
@@ -301,14 +301,14 @@ pub struct BoundedEvaluator {
     functions: BTreeMap<String, RetainedFunction>,
 }
 
-struct BoundedSourceExecutor<'a> {
-    functions: &'a BTreeMap<String, RetainedFunction>,
+struct BoundedSourceExecutor {
+    functions: BTreeMap<String, RetainedFunction>,
     limits: EvaluatorLimits,
-    descriptor: &'a FunctionDescriptor,
-    evaluator_name: &'a str,
+    descriptor: FunctionDescriptor,
+    evaluator_name: String,
 }
 
-impl InvocationExecutor for BoundedSourceExecutor<'_> {
+impl InvocationExecutor for BoundedSourceExecutor {
     fn execute(&mut self, boundary: &ExecutionBoundary) -> InvocationResult<TypedValue> {
         // The supervisor admits arguments and result witnesses first. Retain
         // the independent function/snapshot pin at the evaluator edge too.
@@ -329,7 +329,12 @@ impl InvocationExecutor for BoundedSourceExecutor<'_> {
             };
             arguments.insert(name.into(), value);
         }
-        match invoke_named(self.evaluator_name, self.functions, &arguments, self.limits) {
+        match invoke_named(
+            &self.evaluator_name,
+            &self.functions,
+            &arguments,
+            self.limits,
+        ) {
             Ok(value) => match value.encode() {
                 Ok(canonical) => InvocationResult::Success(TypedValue::public(
                     self.descriptor.result_type.clone(),
@@ -362,12 +367,34 @@ impl BoundedEvaluator {
             return Err(AdmissionError::SourceMismatch);
         }
         let mut executor = BoundedSourceExecutor {
-            functions: &self.functions,
+            functions: self.functions.clone(),
             limits: self.limits,
-            descriptor,
-            evaluator_name,
+            descriptor: descriptor.clone(),
+            evaluator_name: evaluator_name.into(),
         };
         supervisor.run(request, &mut executor)
+    }
+
+    /// Starts one source-admitted pure function through the asynchronous
+    /// `sys.start` supervisor. The worker owns cloned source state so the
+    /// returned handle remains valid after this evaluator call returns.
+    pub fn start_through_sys<T>(
+        &self,
+        supervisor: &RuntimeSupervisor,
+        request: AdmissionRequest<T>,
+        descriptor: &FunctionDescriptor,
+        evaluator_name: &str,
+    ) -> Result<InvocationHandle<T>, AdmissionError> {
+        if descriptor != &request.function || !self.functions.contains_key(evaluator_name) {
+            return Err(AdmissionError::SourceMismatch);
+        }
+        let executor = BoundedSourceExecutor {
+            functions: self.functions.clone(),
+            limits: self.limits,
+            descriptor: descriptor.clone(),
+            evaluator_name: evaluator_name.into(),
+        };
+        supervisor.start(request, executor)
     }
 
     fn check_scenario_expression(
@@ -2388,6 +2415,7 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 mod bounded_tests {
     use super::{BoundedEvaluator, RuntimeEvaluator, SourceUnit, StageOutcome};
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
+    use num_bigint::BigInt;
     use orna_evaluator_v1::{Environment, Limits, evaluate_expression_with_functions};
     use orna_foundation_v1::Value;
     use orna_sys_v1::{
@@ -2396,6 +2424,7 @@ mod bounded_tests {
         RetainedInvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
         TransactionMode, TypeId, TypeWitness,
     };
+    use std::time::Duration;
 
     fn source_descriptor() -> FunctionDescriptor {
         FunctionDescriptor {
@@ -2423,6 +2452,17 @@ mod bounded_tests {
             idempotency_key: Some("source-answer".into()),
             context: InvocationContext::default(),
         }
+    }
+
+    fn source_start_request(
+        descriptor: FunctionDescriptor,
+        result: TypeId,
+    ) -> AdmissionRequest<()> {
+        let mut request = source_request(descriptor, result);
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        request.idempotency_key = Some("source-answer-start".into());
+        request
     }
 
     #[test]
@@ -2509,6 +2549,41 @@ mod bounded_tests {
             .invoke_through_sys(&supervisor, request, &descriptor, "answer")
             .expect("identical pinned source invocation replays");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn sys_source_bridge_starts_and_awaits_a_pure_function() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let source = SourceUnit {
+            fixture_id: "source-bridge".into(),
+            source_id: "source-bridge.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "fn answer(): Int = 42;".into(),
+        };
+        assert!(matches!(
+            evaluator.evaluate_module(&source),
+            StageOutcome::Passed
+        ));
+        let descriptor = source_descriptor();
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("source"));
+        let handle = evaluator
+            .start_through_sys(
+                &supervisor,
+                source_start_request(descriptor.clone(), TypeId::new("Int")),
+                &descriptor,
+                "answer",
+            )
+            .expect("source start is admitted");
+        let result = supervisor
+            .await_invocation(&handle, Some(Duration::from_secs(1)))
+            .expect("source start completes");
+        let RetainedInvocationResult::Success(value) = result else {
+            panic!("source start did not retain success");
+        };
+        assert_eq!(
+            Value::decode(value.canonical().expect("success retains canonical value")).unwrap(),
+            Value::int(BigInt::from(42)),
+        );
     }
 
     #[test]
