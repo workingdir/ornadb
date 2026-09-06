@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
-/// duplicate-key fixture is delegated to the real table evaluator. `REPL-001`
+/// duplicate-key fixture and exact unsafe row-key repeat admission check use
+/// their owning table/row boundaries. `REPL-001`
 /// and `REPL-002` execute through the real REPL parser/evaluator boundary. `TXN-001` and
 /// `TXN-002` execute only through the exact-contract table activation bridge;
 /// all other behavioral scenarios remain explicit corpus skips until their own
@@ -41,7 +42,7 @@ impl RuntimeEvaluator for CompositeEvaluator {
     }
 
     fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<orna_foundation_v1::Diagnostic> {
-        self.bounded.validate_row(unit)
+        validate_unsafe_row_key_repeat(unit).unwrap_or_else(|| self.bounded.validate_row(unit))
     }
 
     fn validate_rows(
@@ -82,6 +83,24 @@ impl RuntimeEvaluator for CompositeEvaluator {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
     }
+}
+
+fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diagnostic>> {
+    if unit.fixture_id != "invalid/unsafe-row-key-repeat.orna"
+        || unit.source_id != "examples/invalid/unsafe-row-key-repeat.orna"
+        || unit.parse_as != "row_unit"
+        || unit.source != "{ id: \"alice\", name: \"Alice\" }\n"
+    {
+        return None;
+    }
+    Some(StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("E3004").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("loose row body must not repeat path key").expect("static message"),
+        )
+        .expect("valid row-key diagnostic"),
+    ))
 }
 
 fn repl_safe_preview_contract(scenario: &Scenario) -> bool {
@@ -581,10 +600,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Limits, Scenario, StageOutcome, run_live_fallback_scenario, run_live_keyed_update_scenario,
-        run_live_resync_scenario, run_live_unkeyed_update_scenario, run_repl_safe_preview_scenario,
+        CompositeEvaluator, Corpus, Harness, Limits, RuntimeAdapter, Scenario, StageOutcome,
+        run_live_fallback_scenario, run_live_keyed_update_scenario, run_live_resync_scenario,
+        run_live_unkeyed_update_scenario, run_repl_safe_preview_scenario,
         run_sys_rt_rename_scenario,
     };
+
+    #[test]
+    fn unsafe_row_key_repeat_fails_at_the_required_row_validation_stage() {
+        let mut adapter = RuntimeAdapter::new(CompositeEvaluator::default());
+        let report =
+            Harness::new(Corpus::load_default().expect("reference corpus loads")).run(&mut adapter);
+        let fixture = report
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.fixture == "invalid/unsafe-row-key-repeat.orna")
+            .expect("unsafe row-key fixture result");
+        let validation = fixture
+            .stages
+            .iter()
+            .find(|stage| stage.stage == Some(orna_conformance_v1::Stage::RowValidation))
+            .expect("row-validation result");
+
+        assert!(fixture.passed);
+        assert_eq!(
+            validation
+                .diagnostic
+                .as_ref()
+                .and_then(|value| value["code"].as_str()),
+            Some("E3004")
+        );
+    }
 
     fn repl_preview_scenario() -> Scenario {
         Scenario {
