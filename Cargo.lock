@@ -1706,10 +1706,14 @@ name = "orna-repository-v1"
 version = "1.0.0"
 dependencies = [
  "fs2",
+ "libc",
  "num-bigint",
  "orna-foundation-v1",
+ "orna-syntax-v1",
+ "rustix 0.38.44",
  "sha2 0.11.0",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
