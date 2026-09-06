@@ -692,6 +692,72 @@ fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), D
     }
 }
 
+fn run_project_stream_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+    let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "project runtime could not be discovered",
+                "run the command inside an initialized local Git worktree",
+            )
+        })?;
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let project = execution_project(&project);
+    let owner_id = invocation_owner_id(identity);
+    let outcome = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "project runtime could not start",
+                "retry the durable project invocation",
+            )
+        })?
+        .block_on(
+            DurableTransactionalEvaluator::default().execute_project_stream(
+                &repository,
+                identity,
+                owner_id,
+                initial_digest,
+                &project,
+                root_entry,
+            ),
+        )
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "durable project invocation failed",
+                "retry the project transaction after checking its durable state",
+            )
+        })?;
+    match outcome {
+        StageOutcome::Passed => {
+            println!("invocation completed");
+            Ok(())
+        }
+        StageOutcome::Failed(_) => Err(Diagnostic::target(
+            "E2200",
+            "durable project invocation was rejected",
+            "the project stream failed atomically; no partial changes were committed",
+        )),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+            "durable project stream invocation is not available",
+            "use a supported finite-list stream root",
+        )),
+    }
+}
+
 fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
@@ -892,10 +958,9 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Run(Invocation::Exercise) => {
             run_project_invocation(&parsed.endpoint, "main.exercise")
         }
-        Command::Run(Invocation::SensorsIngest) => Err(Diagnostic::unavailable(
-            "stream invocation execution is not available",
-            "use the explicit finite-list stream runtime for `sensors.ingest`",
-        )),
+        Command::Run(Invocation::SensorsIngest) => {
+            run_project_stream_invocation(&parsed.endpoint, "sensors.ingest")
+        }
     }
 }
 
@@ -1092,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_reference_project_runs_seed_and_fails_closed_for_unsupported_roots() {
+    fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
         let directory = tempfile::tempdir().expect("temporary reference project");
         let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../reference/Orna-1.0.0/examples/reference");
@@ -1151,12 +1216,13 @@ mod tests {
             }),
             Ok(())
         );
-        let error = execute(&Parsed {
-            endpoint: endpoint.clone(),
-            command: Command::Run(Invocation::SensorsIngest),
-        })
-        .expect_err("stream root remains explicitly unsupported");
-        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
+        assert_eq!(
+            execute(&Parsed {
+                endpoint,
+                command: Command::Run(Invocation::SensorsIngest),
+            }),
+            Ok(())
+        );
     }
 
     #[test]
