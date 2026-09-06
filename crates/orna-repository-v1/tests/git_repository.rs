@@ -313,3 +313,47 @@ fn explicit_snapshot_branch_and_remote_preserve_cwd() {
     );
     assert_eq!(repo.remote_names().unwrap(), vec!["origin"]);
 }
+
+#[test]
+fn managed_materialization_is_atomic_and_conflict_fenced() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let path = ManagedPath::new("generated/books/one.orna").unwrap();
+
+    repo.materialize_managed_file(&path, None, Some(b"first"))
+        .unwrap();
+    assert_eq!(
+        fs::read(root.path().join(path.as_path())).unwrap(),
+        b"first"
+    );
+
+    fs::write(root.path().join(path.as_path()), b"editor change").unwrap();
+    assert!(matches!(
+        repo.materialize_managed_file(&path, Some(b"first"), Some(b"second")),
+        Err(orna_repository_v1::RepositoryError::ManagedContentConflict)
+    ));
+    assert_eq!(
+        fs::read(root.path().join(path.as_path())).unwrap(),
+        b"editor change"
+    );
+    repo.materialize_managed_file(&path, Some(b"editor change"), None)
+        .unwrap();
+    assert!(!root.path().join(path.as_path()).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_materialization_rejects_symlinked_parents() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("generated")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("generated/linked")).unwrap();
+    let path = ManagedPath::new("generated/linked/row.orna").unwrap();
+
+    assert!(matches!(
+        repo.materialize_managed_file(&path, None, Some(b"row")),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+    assert!(!outside.path().join("row.orna").exists());
+}

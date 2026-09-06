@@ -1,9 +1,9 @@
 //! Git-valid repository state for Orna 1.0.
 //!
 //! This crate intentionally models only the repository boundary.  It does not
-//! materialise rows, write `.orna/` metadata, or publish a commit.  In
-//! particular, [`Repository::stage_managed`] delegates to Git's ordinary index
-//! and touches only the supplied worktree-relative paths.
+//! write `.orna/` metadata or publish a commit.  In particular,
+//! [`Repository::stage_managed`] delegates to Git's ordinary index and touches
+//! only the supplied worktree-relative paths.
 
 use std::{
     fmt, fs,
@@ -415,6 +415,79 @@ impl Repository {
             .collect())
     }
 
+    /// Atomically materialises one repository-managed file while preserving
+    /// an ordinary editor's later change. The expected bytes are checked both
+    /// before and immediately before replacement; `None` removes an existing
+    /// regular file and is a no-op when the file is already absent.
+    pub fn materialize_managed_file(
+        &self,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+    ) -> Result<(), RepositoryError> {
+        self.ensure_atomic_worktree_install_supported()?;
+        let _lock = self.acquire_coordination_lock()?;
+        let target = self.managed_target(path)?;
+        let current = self.read_managed_file(&target)?;
+        if current.as_deref() != expected {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        if let Some(bytes) = next {
+            let parent = target
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?;
+            fs::create_dir_all(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            self.validate_managed_parent(parent)?;
+            let candidate = parent.join(format!(
+                ".orna-materialize-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                    .as_nanos()
+            ));
+            let result = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&candidate)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                file.write_all(bytes)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                file.sync_all()
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if self.read_managed_file(&target)?.as_deref() != expected {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
+                fs::rename(&candidate, &target)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&candidate);
+            }
+            result
+        } else {
+            if target.exists() {
+                if !fs::symlink_metadata(&target)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                    .is_file()
+                {
+                    return Err(RepositoryError::UnsafeManagedPath);
+                }
+                fs::remove_file(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if let Some(parent) = target.parent() {
+                    fs::File::open(parent)
+                        .and_then(|directory| directory.sync_all())
+                        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
@@ -540,6 +613,56 @@ impl Repository {
         Ok(CoordinationLock { file })
     }
 
+    fn managed_target(&self, path: &ManagedPath) -> Result<PathBuf, RepositoryError> {
+        let target = self.worktree.join(path.as_path());
+        self.validate_managed_parent(
+            target
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?,
+        )?;
+        if let Ok(metadata) = fs::symlink_metadata(&target)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(RepositoryError::UnsafeManagedPath);
+        }
+        Ok(target)
+    }
+
+    fn read_managed_file(&self, target: &Path) -> Result<Option<Vec<u8>>, RepositoryError> {
+        match fs::symlink_metadata(target) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(RepositoryError::UnsafeManagedPath)
+            }
+            Ok(_) => fs::read(target)
+                .map(Some)
+                .map_err(|_| RepositoryError::LocalStateUnavailable),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+
+    fn validate_managed_parent(&self, parent: &Path) -> Result<(), RepositoryError> {
+        let relative = parent
+            .strip_prefix(&self.worktree)
+            .map_err(|_| RepositoryError::UnsafeManagedPath)?;
+        let mut current = self.worktree.clone();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(RepositoryError::UnsafeManagedPath);
+            };
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(RepositoryError::UnsafeManagedPath);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+        Ok(())
+    }
+
     fn update_managed_index(
         &self,
         expected: &IndexGeneration,
@@ -659,6 +782,16 @@ impl Repository {
 
     #[cfg(not(windows))]
     fn ensure_atomic_index_install_supported(&self) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn ensure_atomic_worktree_install_supported(&self) -> Result<(), RepositoryError> {
+        Err(RepositoryError::PlatformUnsupported)
+    }
+
+    #[cfg(not(windows))]
+    fn ensure_atomic_worktree_install_supported(&self) -> Result<(), RepositoryError> {
         Ok(())
     }
 
@@ -788,6 +921,7 @@ pub enum RepositoryError {
         actual: IndexGeneration,
     },
     StaleCwd,
+    ManagedContentConflict,
     RepositoryBusy,
     GitIndexLockPresent,
     StaleHead,
@@ -818,6 +952,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("Git index changed since the expected generation")
             }
             Self::StaleCwd => f.write_str("Git CWD changed during observation"),
+            Self::ManagedContentConflict => {
+                f.write_str("managed worktree content changed since capture")
+            }
             Self::RepositoryBusy => {
                 f.write_str("another local Orna operation owns the repository lock")
             }
