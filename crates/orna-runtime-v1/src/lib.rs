@@ -4101,7 +4101,8 @@ async fn apply_stream_intent_tx(
                                ?12, ?13, 1, 1, ?14, ?15, ?16)
                      ON CONFLICT(identity_id) DO UPDATE SET
                         version = stream_failure.version + 1,
-                        attempts = stream_failure.attempts + 1,
+                        attempts = stream_failure.attempts
+                            + CASE WHEN stream_failure.status = ?17 THEN 0 ELSE 1 END,
                         status = ?14,
                         diagnostic_code = ?15,
                         diagnostic_class = ?16",
@@ -4122,6 +4123,7 @@ async fn apply_stream_intent_tx(
                         encode_status(FailureStatus::Failed),
                         encode_code(diagnostic.code),
                         encode_class(diagnostic.class),
+                        encode_status(FailureStatus::Retrying),
                     ],
                 )
                 .await
@@ -4195,7 +4197,7 @@ async fn apply_stream_intent_tx(
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             connection
                 .execute(
-                    "UPDATE stream_failure SET version = version + 1, status = ?2
+                    "UPDATE stream_failure SET version = version + 1, attempts = attempts + 1, status = ?2
                      WHERE identity_id = ?1",
                     params![identity_id, encode_status(FailureStatus::Retrying)],
                 )
@@ -6151,6 +6153,7 @@ mod tests {
                 other => panic!("unexpected stream retry result: {other:?}"),
             };
             assert_eq!(retry.status, FailureStatus::Retrying);
+            assert_eq!(retry.attempts, 2);
             let lease = match stream
                 .apply_async(CommitIntent::Acquire {
                     delivery,
@@ -6192,7 +6195,7 @@ mod tests {
             .unwrap()
             .expect("durable failure");
         assert_eq!(failure.status, FailureStatus::Succeeded);
-        assert_eq!(failure.attempts, 1);
+        assert_eq!(failure.attempts, 2);
     }
 
     #[tokio::test]
@@ -6979,6 +6982,7 @@ mod tests {
             }
         };
         assert_eq!(retrying.status, FailureStatus::Retrying);
+        assert_eq!(retrying.attempts, 2);
 
         let replacement = state.recover_abandoned(id(4), id(5)).await.unwrap();
         let mut stream = state.stream_backend(replacement);
@@ -6989,6 +6993,7 @@ mod tests {
             .expect("recovered failure");
         assert_eq!(recovered.status, FailureStatus::Failed);
         assert_eq!(recovered.version, retrying.version + 1);
+        assert_eq!(recovered.attempts, 2);
         assert!(matches!(
             stream
                 .apply_async(CommitIntent::Retry {
