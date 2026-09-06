@@ -11,7 +11,7 @@ use std::{
 };
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
-use orna_repository_v1::ManagedPath;
+use orna_repository_v1::{ManagedPath, Repository, RepositoryError};
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
 };
@@ -214,6 +214,60 @@ impl LooseProjection {
         }
         self.applied.insert(mutation.id.clone(), mutation.clone());
         Ok(())
+    }
+}
+
+/// The result of materialising one loose row. This operation intentionally
+/// stops at the worktree projection boundary; it does not stage an index,
+/// advance a ref, or claim PUB-1 completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Materialization {
+    Applied,
+    AlreadyApplied,
+}
+
+/// Materialises one validated loose mutation through the repository boundary.
+///
+/// A matching next value is idempotent. Any other unexpected current bytes are
+/// reported as an external conflict and are never overwritten.
+pub fn materialize_loose_mutation(
+    repository: &Repository,
+    mutation: &LooseMutation,
+) -> Result<Materialization, Error> {
+    let current = repository
+        .managed_file_bytes(mutation.path.as_managed_path())
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    let actual = current.as_deref().map(RowHash::of);
+    let desired = mutation.next.as_ref().map(LooseRow::hash);
+    if actual == desired {
+        return Ok(Materialization::AlreadyApplied);
+    }
+    if actual != mutation.expected {
+        return Err(Error::ExternalConflict {
+            path: mutation.path.clone(),
+            expected: mutation.expected,
+            actual,
+        });
+    }
+    match repository.materialize_managed_file(
+        mutation.path.as_managed_path(),
+        current.as_deref(),
+        mutation.next.as_ref().map(LooseRow::bytes),
+    ) {
+        Ok(()) => Ok(Materialization::Applied),
+        Err(RepositoryError::ManagedContentConflict) => {
+            let actual = repository
+                .managed_file_bytes(mutation.path.as_managed_path())
+                .map_err(|_| Error::RepositoryUnavailable)?
+                .as_deref()
+                .map(RowHash::of);
+            Err(Error::ExternalConflict {
+                path: mutation.path.clone(),
+                expected: mutation.expected,
+                actual,
+            })
+        }
+        Err(_) => Err(Error::RepositoryUnavailable),
     }
 }
 
@@ -484,6 +538,7 @@ pub enum Error {
     RefConflict,
     InvalidTransition,
     RuntimeUnavailable,
+    RepositoryUnavailable,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -504,6 +559,7 @@ impl fmt::Display for Error {
             Self::RefConflict => "publication ref conflict",
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
+            Self::RepositoryUnavailable => "repository projection is unavailable",
         })
     }
 }
@@ -512,6 +568,36 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path, process::Command};
+    use tempfile::TempDir;
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        assert!(
+            Command::new("git")
+                .current_dir(directory)
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn repository() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        git(temp.path(), &["init", "-b", "main"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "Storage test"]);
+        fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+        fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
+        git(temp.path(), &["add", "."]);
+        git(temp.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
     fn path() -> LoosePath {
         LoosePath::for_key("tables", &["sensor".into(), "one".into()]).unwrap()
     }
@@ -956,5 +1042,91 @@ mod tests {
             result.get(&managed).unwrap().as_ref().unwrap().bytes(),
             b"published"
         );
+    }
+
+    #[test]
+    fn loose_materialization_is_idempotent_and_does_not_publish_git_state() {
+        let (root, repository) = repository();
+        let path = path();
+        let before_index = repository.index_generation().unwrap();
+        let before_head = repository.head().unwrap();
+        let first = LooseRow::new(b"first".to_vec()).unwrap();
+        let mutation = LooseMutation {
+            id: id("materialize-one"),
+            path: path.clone(),
+            expected: None,
+            next: Some(first.clone()),
+        };
+
+        assert_eq!(
+            materialize_loose_mutation(&repository, &mutation).unwrap(),
+            Materialization::Applied
+        );
+        assert_eq!(
+            materialize_loose_mutation(&repository, &mutation).unwrap(),
+            Materialization::AlreadyApplied
+        );
+        assert_eq!(
+            fs::read(root.path().join(path.as_managed_path().as_path())).unwrap(),
+            b"first"
+        );
+        assert_eq!(repository.index_generation().unwrap(), before_index);
+        assert_eq!(repository.head().unwrap(), before_head);
+    }
+
+    #[test]
+    fn loose_materialization_preserves_external_edits_and_supports_idempotent_delete() {
+        let (root, repository) = repository();
+        let path = path();
+        let first = LooseRow::new(b"first".to_vec()).unwrap();
+        let first_mutation = LooseMutation {
+            id: id("materialize-two"),
+            path: path.clone(),
+            expected: None,
+            next: Some(first.clone()),
+        };
+        materialize_loose_mutation(&repository, &first_mutation).unwrap();
+
+        fs::write(
+            root.path().join(path.as_managed_path().as_path()),
+            b"editor",
+        )
+        .unwrap();
+        let replacement = LooseRow::new(b"runtime".to_vec()).unwrap();
+        let conflict = LooseMutation {
+            id: id("materialize-three"),
+            path: path.clone(),
+            expected: Some(first.hash()),
+            next: Some(replacement),
+        };
+        assert!(matches!(
+            materialize_loose_mutation(&repository, &conflict),
+            Err(Error::ExternalConflict { .. })
+        ));
+        assert_eq!(
+            fs::read(root.path().join(path.as_managed_path().as_path())).unwrap(),
+            b"editor"
+        );
+
+        fs::write(
+            root.path().join(path.as_managed_path().as_path()),
+            first.bytes(),
+        )
+        .unwrap();
+        let deletion = LooseMutation {
+            id: id("materialize-four"),
+            path: path.clone(),
+            expected: Some(first.hash()),
+            next: None,
+        };
+        assert_eq!(
+            materialize_loose_mutation(&repository, &deletion).unwrap(),
+            Materialization::Applied
+        );
+        assert_eq!(
+            materialize_loose_mutation(&repository, &deletion).unwrap(),
+            Materialization::AlreadyApplied
+        );
+        assert!(!root.path().join(path.as_managed_path().as_path()).exists());
     }
 }
