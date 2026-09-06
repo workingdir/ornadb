@@ -110,6 +110,29 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
 }
 
 #[test]
+fn pure_function_witness_flows_from_compiler_stages_to_bounded_runtime() {
+    let unit = SourceUnit {
+        fixture_id: "pure-function-witness".into(),
+        source_id: "main.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub fn add_one(value: Int): Int = value + 1;".into(),
+    };
+    let arguments = BTreeMap::from([(
+        "value".into(),
+        Value::new(OvbRaw::Int(41.into())).expect("canonical argument"),
+    )]);
+
+    let actual = RuntimeAdapter::new(BoundedEvaluator::default())
+        .compile_and_invoke_pure_function(&unit, "add_one", &arguments)
+        .expect("compiler-admitted pure function executes in the bounded runtime");
+
+    assert_eq!(
+        actual,
+        Value::new(OvbRaw::Int(42.into())).expect("canonical result")
+    );
+}
+
+#[test]
 fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
     let project = ProjectUnit {

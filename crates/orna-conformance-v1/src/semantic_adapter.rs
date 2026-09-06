@@ -487,6 +487,18 @@ impl BoundedEvaluator {
         }
     }
 
+    /// Invokes one retained pure function and returns its canonical result.
+    /// This is intentionally limited to the bounded evaluator's explicit
+    /// function namespace; it does not provide module loading or host calls.
+    pub fn invoke_value_with(
+        &self,
+        function: &str,
+        arguments: &Environment,
+    ) -> Result<Value, Diagnostic> {
+        invoke_named(function, &self.functions, arguments, self.limits)
+            .map_err(|error| error.diagnostic().clone())
+    }
+
     /// Loads pure standard-library source only after every module is verified
     /// against the caller's pinned dependency profile. The staged evaluator is
     /// published only when the complete bundle is admitted; effects, tables,
@@ -1974,6 +1986,34 @@ impl<R> RuntimeAdapter<R> {
         self.runtime
     }
 }
+
+impl RuntimeAdapter<BoundedEvaluator> {
+    /// Admits one pure-function source module through the v1 compiler stages,
+    /// then invokes the retained function in the bounded runtime. The source
+    /// remains the hand-off because the semantic API exposes analysis rather
+    /// than an executable compiler artifact.
+    pub fn compile_and_invoke_pure_function(
+        &mut self,
+        unit: &SourceUnit,
+        function: &str,
+        arguments: &Environment,
+    ) -> Result<Value, StageOutcome<Diagnostic>> {
+        for outcome in [
+            self.semantic.parse(unit),
+            self.semantic.resolve(unit),
+            self.semantic.typecheck(unit),
+            self.runtime.evaluate(unit),
+        ] {
+            if !matches!(outcome, StageOutcome::Passed) {
+                return Err(outcome);
+            }
+        }
+        self.runtime
+            .invoke_value_with(function, arguments)
+            .map_err(StageOutcome::Failed)
+    }
+}
+
 impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     type Diagnostic = Diagnostic;
     fn diagnostic_code(&self, diagnostic: &Diagnostic) -> String {
