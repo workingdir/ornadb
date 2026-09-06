@@ -1321,7 +1321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_recovers_after_repository_publication_before_runtime_completion() {
+    async fn coordinator_recovery_consumes_only_the_frozen_prefix() {
         let (_temp, repository) = repository();
         let runtime = RuntimeState::open(
             &repository,
@@ -1380,17 +1380,34 @@ mod tests {
         )
         .await
         .unwrap();
+        let tail_context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &tail_context,
+                &[TableMutation::new(
+                    [18; 16],
+                    "Contact",
+                    b"Bob".to_vec(),
+                    Some(b"later row".to_vec()),
+                )
+                .unwrap()],
+                [19; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
         plan.publish(&repository).unwrap();
         drop(plan);
 
-        assert!(!runtime.pending().await.unwrap().is_empty());
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert!(
             RuntimePublicationCoordinator::recover(&repository, &runtime)
                 .await
                 .unwrap()
                 .is_some()
         );
-        assert!(runtime.pending().await.unwrap().is_empty());
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
         let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
         assert_eq!(
