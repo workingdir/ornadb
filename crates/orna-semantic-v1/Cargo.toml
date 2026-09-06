@@ -9,6 +9,7 @@ description = "Read-only first semantic slice for the frozen Orna 1.0 AST"
 [dependencies]
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
+sha2 = "0.10.9"
 unicode-normalization = "0.1.24"
 unicode-casefold = "0.2.0"
 
