@@ -17,6 +17,7 @@ orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
+orna-stream-v1 = { path = "../orna-stream-v1" }
 orna-storage-v1 = { path = "../orna-storage-v1" }
 orna-table-v1 = { path = "../orna-table-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
