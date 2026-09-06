@@ -33,6 +33,40 @@ struct FailFirstWriter {
     writes: usize,
 }
 
+#[derive(Default)]
+struct RecordingWriter {
+    bytes: Vec<u8>,
+    flushes: usize,
+    closes: usize,
+}
+
+impl AsyncWrite for RecordingWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.bytes.extend_from_slice(bytes);
+        std::task::Poll::Ready(Ok(bytes.len()))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.flushes += 1;
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.closes += 1;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 struct PendingReader;
 
 impl AsyncRead for PendingReader {
@@ -691,6 +725,230 @@ fn async_http_connection_loop_cancels_a_pending_write() {
         Err(HttpIoError::Cancelled)
     );
     assert_eq!(authority.calls, 1);
+}
+
+#[test]
+fn websocket_connection_driver_preserves_a_co_read_frame_after_upgrade() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let cookie = token(&created);
+    let upgrade = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        cookie
+    );
+    let mut input = upgrade.into_bytes();
+    input.extend(masked(true, 9, b"hi"));
+    let mut reader = Cursor::new(input);
+    let mut writer = Cursor::new(Vec::new());
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    block_on(transport.serve_websocket_connection(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        [5; 16],
+        &mut clock,
+        &mut cancellation,
+        &mut application,
+    ))
+    .unwrap();
+    let output = writer.into_inner();
+    let header_end = output
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("serialized handshake response");
+    assert!(output.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    assert!(
+        !output[..header_end]
+            .windows(16)
+            .any(|window| window == b"Content-Length: ")
+    );
+    assert_eq!(&output[header_end + 4..], b"\x8a\x02hi");
+}
+
+#[test]
+fn websocket_connection_driver_delivers_co_read_frames_before_admitting_the_next() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let mut bytes = input.into_bytes();
+    bytes.extend(masked(true, 9, b"one"));
+    bytes.extend(masked(true, 9, b"two"));
+    let mut reader = Cursor::new(bytes);
+    let mut writer = RecordingWriter::default();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    block_on(transport.serve_websocket_connection(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        [5; 16],
+        &mut clock,
+        &mut cancellation,
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(writer.flushes, 3);
+    let header_end = writer
+        .bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    assert_eq!(&writer.bytes[header_end + 4..], b"\x8a\x03one\x8a\x03two");
+}
+
+#[test]
+fn websocket_connection_driver_does_not_commit_an_upgrade_before_handshake_delivery() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let request = parse_http_request(input.as_bytes(), TransportLimits::default())
+        .unwrap()
+        .unwrap()
+        .request()
+        .clone();
+    assert_eq!(block_on(transport.upgrade(request, [4; 16], 1)).status, 101);
+    let mut reader = Cursor::new(input.into_bytes());
+    let mut writer = FailFirstWriter { writes: 0 };
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    assert_eq!(
+        block_on(transport.serve_websocket_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            [5; 16],
+            &mut clock,
+            &mut cancellation,
+            &mut application,
+        )),
+        Err(HttpIoError::Write)
+    );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([4; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn websocket_connection_driver_closes_after_a_peer_close() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let mut bytes = input.into_bytes();
+    bytes.extend(masked(true, 8, b""));
+    let mut reader = Cursor::new(bytes);
+    let mut writer = RecordingWriter::default();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = std::future::pending::<()>();
+    block_on(transport.serve_websocket_connection(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        [5; 16],
+        &mut clock,
+        &mut cancellation,
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(writer.closes, 1);
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
