@@ -2524,7 +2524,21 @@ fn infer(
                 bind_pattern(&parameter.pattern, ty.clone(), &mut locals, diagnostics);
                 types.push(ty);
             }
-            let value = infer(body, scope, &locals, diagnostics);
+            let value = if matches!(
+                &**body,
+                Expr::Block {
+                    statements,
+                    tail: None,
+                    ..
+                } if statements.is_empty()
+            ) {
+                Inferred {
+                    ty: Type::Record(BTreeMap::new()),
+                    effects: EffectSummary::default(),
+                }
+            } else {
+                infer(body, scope, &locals, diagnostics)
+            };
             Inferred {
                 ty: Type::Function {
                     parameters: types,
@@ -6279,6 +6293,31 @@ mod tests {
             }
         );
         assert!(!has(&a, DIAG_TYPE));
+    }
+
+    #[test]
+    fn empty_lambda_blocks_match_empty_record_literals() {
+        let a = checked(&[ModuleInput::new(
+            "m.orna",
+            "pub fn makers() = [() => ({}), () => {},];",
+        )]);
+        assert!(!has(&a, DIAG_TYPE), "empty lambda records: {:?}", a.diagnostics);
+        let module = a.modules.values().next().expect("module is present");
+        let symbol = module.symbols.get("makers").expect("makers is collected");
+        assert_eq!(
+            symbol.ty,
+            Type::Function {
+                parameters: vec![],
+                parameter_names: Some(vec![]),
+                default_parameters: BTreeSet::new(),
+                result: Box::new(Type::List(Box::new(Type::Function {
+                    parameters: vec![],
+                    parameter_names: Some(vec![]),
+                    default_parameters: BTreeSet::new(),
+                    result: Box::new(Type::Record(BTreeMap::new())),
+                }))),
+            }
+        );
     }
     #[test]
     fn assertion_plan_rejects_compile_time_boolean() {
