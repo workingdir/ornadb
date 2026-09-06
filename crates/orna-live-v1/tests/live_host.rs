@@ -2025,7 +2025,7 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
 }
 
 #[test]
-fn durable_runtime_reclaims_a_reserved_request_after_host_reconstruction() {
+fn durable_runtime_does_not_replay_a_reserved_request_after_host_reconstruction() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [24; 16], "1");
     let fingerprint = request_fingerprint(&request, [1; 16]);
@@ -2053,7 +2053,48 @@ fn durable_runtime_reclaims_a_reserved_request_after_host_reconstruction() {
     .unwrap();
     let mut application = UnitApplication::default();
     assert_eq!(
-        block_on(host.dispatch_frame([7; 16], 2, Frame::Binary(request), &mut application,))
+        block_on(
+            host.dispatch_frame([7; 16], 2, Frame::Binary(request.clone()), &mut application,)
+        )
+        .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Accepted)
+    );
+    assert_eq!(application.calls, 0);
+
+    let duplicate =
+        block_on(host.dispatch_frame([7; 16], 2, Frame::Binary(request), &mut application))
+            .unwrap();
+    assert_eq!(duplicate.outcome, FrameOutcome::Accepted);
+    assert!(duplicate.response.is_none());
+    assert_eq!(application.calls, 0);
+
+    let status_request = Envelope {
+        request: Some([25; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [24; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let status =
+        block_on(host.dispatch_frame([7; 16], 3, Frame::Binary(status_request), &mut application))
+            .unwrap();
+    assert!(matches!(
+        status.response.unwrap().message,
+        Message::RequestStatusResult {
+            target: returned_target,
+            state: orna_protocol_v1::RequestState::Reserved,
+            fingerprint: Some(returned_fingerprint),
+            result: None,
+        } if returned_target == [24; 16] && returned_fingerprint == fingerprint
+    ));
+
+    let fresh = eval([1; 16], [26; 16], "2");
+    assert_eq!(
+        block_on(host.dispatch_frame([7; 16], 4, Frame::Binary(fresh), &mut application,))
             .map(|outcome| outcome.outcome),
         Ok(FrameOutcome::Accepted)
     );
