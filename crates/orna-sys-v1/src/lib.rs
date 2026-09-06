@@ -87,6 +87,12 @@ impl TypedValue {
     pub fn is_redacted(&self) -> bool {
         self.redacted
     }
+    /// Returns public OVB-1 bytes for a bounded pure evaluator.
+    ///
+    /// Protected values deliberately never cross the source-evaluation seam.
+    pub fn canonical(&self) -> Option<&[u8]> {
+        (!self.redacted).then_some(self.canonical.as_slice())
+    }
     fn append_identity(&self, out: &mut Vec<u8>) {
         append(out, self.static_type.as_str().as_bytes());
         out.push(u8::from(self.redacted));
@@ -1041,6 +1047,7 @@ pub enum AdmissionError {
     NotVisible,
     NotCallable,
     ReturnType,
+    SourceMismatch,
     TransactionMode,
     IdempotencyMismatch,
     StartMode,
@@ -1057,6 +1064,7 @@ impl AdmissionError {
             Self::SnapshotMismatch => "sys.invoke.snapshot_mismatch",
             Self::NotVisible | Self::NotCallable => "sys.invoke.not_callable",
             Self::ReturnType => "sys.invoke.return_type",
+            Self::SourceMismatch => "sys.invoke.source_mismatch",
             Self::TransactionMode => "sys.invoke.transaction_mode",
             Self::IdempotencyMismatch => "sys.invoke.idempotency_mismatch",
             Self::StartMode => "sys.invoke.start_mode",
