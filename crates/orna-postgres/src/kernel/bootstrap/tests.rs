@@ -94,10 +94,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert_eq!(MIGRATIONS[44].name, "inspect snapshot observer context");
     assert_eq!(MIGRATIONS[45].name, "application_migrations");
     assert_eq!(MIGRATIONS[46].name, "application migration ledger baseline");
-    assert_eq!(
-        MIGRATIONS[47].name,
-        "security admin audit boundary repair"
-    );
+    assert_eq!(MIGRATIONS[47].name, "security admin audit boundary repair");
     assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
     assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
     assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -794,12 +791,16 @@ fn security_admin_audit_boundary_repair_is_the_registered_version_forty_eight() 
     assert_eq!(migration.version, 48);
     assert_eq!(migration.name, "security admin audit boundary repair");
     assert!(migration.data_step.is_none());
-    assert!(migration.sql.contains(
-        "DROP CONSTRAINT IF EXISTS security_audit_events_security_admin_detail_check"
-    ));
-    assert!(migration.sql.contains(
-        "ADD CONSTRAINT security_audit_events_security_admin_detail_check CHECK"
-    ));
+    assert!(
+        migration.sql.contains(
+            "DROP CONSTRAINT IF EXISTS security_audit_events_security_admin_detail_check"
+        )
+    );
+    assert!(
+        migration
+            .sql
+            .contains("ADD CONSTRAINT security_audit_events_security_admin_detail_check CHECK")
+    );
 
     for (target, operation) in [
         ("43", "create_principal"),
@@ -813,9 +814,11 @@ fn security_admin_audit_boundary_repair_is_the_registered_version_forty_eight() 
         assert!(migration.sql.contains(&format!(
             "function_id = decode('000000000000000000000000000000{target}', 'hex')"
         )));
-        assert!(migration
-            .sql
-            .contains(&format!("denial_reason = 'security_admin:{operation}'")));
+        assert!(
+            migration
+                .sql
+                .contains(&format!("denial_reason = 'security_admin:{operation}'"))
+        );
         assert!(migration.sql.contains(&format!(
             "denial_reason = 'security_admin:{operation}:missing-privilege'"
         )));

@@ -1541,11 +1541,8 @@ fn serves_target_function_navigation_and_semantic_kind_only_for_accepted_calls()
         "END;\n",
     );
     open_clean_document(&mut client, scalar_uri, scalar_source);
-    let scalar_target = position_inside(
-        scalar_source,
-        "target => scalar_target.",
-        "resource_server",
-    );
+    let scalar_target =
+        position_inside(scalar_source, "target => scalar_target.", "resource_server");
     assert_hover_contains(
         &mut client,
         scalar_uri,
