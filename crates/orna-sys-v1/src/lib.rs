@@ -595,7 +595,8 @@ impl Runtime {
     }
     /// Requests cancellation without converting an active invocation into an
     /// ordinary failure. The target remains active until its owner records a
-    /// terminal cancellation, so a concurrent completion can still win.
+    /// terminal result; cancellation wins unless that result was already
+    /// committed.
     pub fn cancel<T>(
         &mut self,
         handle: &InvocationHandle<T>,
@@ -670,6 +671,13 @@ impl Runtime {
         if stored.terminal.is_some() {
             return Ok(());
         }
+        let result = if stored.cancellation_requested
+            && result.terminal_class() != TerminalClass::Cancelled
+        {
+            RetainedInvocationResult::Cancelled(stored.cancellation_reason.clone())
+        } else {
+            result
+        };
         stored.terminal = Some(result.clone());
         for entry in self
             .idempotency
@@ -1550,12 +1558,14 @@ mod tests {
         *open.lock().unwrap() = true;
         wake.notify_one();
 
-        assert!(matches!(
+        assert_eq!(
             supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
-            Ok(RetainedInvocationResult::Success(_))
-        ));
+            Ok(RetainedInvocationResult::Cancelled(Some(diagnostic(
+                "cancelled"
+            ))))
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(supervisor.cancel(&handle, None), Ok(false));
+        assert_eq!(supervisor.cancel(&handle, None), Ok(true));
 
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let replay = supervisor
@@ -1793,7 +1803,7 @@ mod tests {
         assert_eq!(cancelled.terminal_class(), TerminalClass::Cancelled);
     }
     #[test]
-    fn cancellation_request_is_idempotent_and_preserves_terminal_race() {
+    fn cancellation_request_is_idempotent_and_wins_over_late_completion() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
         let handle = match runtime
             .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
@@ -1838,13 +1848,39 @@ mod tests {
                 InvocationResult::Success(value("Str", "done")),
             )
             .unwrap();
-        assert!(!completed.cancel(&completed_handle, None).unwrap());
-        assert!(matches!(
+        assert!(completed.cancel(&completed_handle, None).unwrap());
+        assert_eq!(
             completed.invocation_state(&completed_handle),
             Ok(InvocationState::Terminal(
-                RetainedInvocationResult::Success(_)
+                RetainedInvocationResult::Cancelled(None)
             ))
-        ));
+        );
+    }
+
+    #[test]
+    fn cancellation_wins_over_late_terminal_classification() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let handle = match runtime
+            .admit(request(Some(value("Int", "1")), ArgumentMap::default()))
+            .unwrap()
+        {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        runtime
+            .cancel(&handle, Some(diagnostic("cancelled")))
+            .unwrap();
+        runtime
+            .classify_terminal(&handle, TerminalClass::Succeeded)
+            .unwrap();
+
+        assert_eq!(
+            runtime.invocation_state(&handle),
+            Ok(InvocationState::Terminal(
+                RetainedInvocationResult::Cancelled(Some(diagnostic("cancelled")))
+            ))
+        );
     }
     #[test]
     fn committed_terminal_classification_wins_over_late_cancellation() {
