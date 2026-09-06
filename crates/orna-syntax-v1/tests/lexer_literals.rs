@@ -77,6 +77,16 @@ fn interpolation_reuses_normal_lexing_with_nested_braces_and_strings() {
 }
 
 #[test]
+fn nested_string_interpolation_is_limited_without_recursing_unboundedly() {
+    let source = format!("{}value{}", "\"{".repeat(100), "}\"".repeat(100));
+    let errors = lex(&source).expect_err("deep string interpolation must be rejected");
+    assert!(
+        errors.iter().any(|error| error.code == "ORNA-LEX-013"),
+        "expected interpolation nesting diagnostic, got {errors:?}"
+    );
+}
+
+#[test]
 fn malformed_escapes_and_unclosed_interpolations_are_lexical_errors() {
     for source in [
         r#""\u{}""#,
