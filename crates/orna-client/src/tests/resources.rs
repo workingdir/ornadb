@@ -52,6 +52,61 @@ fn vm_admission_resolves_and_decodes_an_authorised_client_revision() {
 }
 
 #[test]
+fn admitted_pure_plan_executes_and_rejects_a_stale_host() {
+    let (active, function, pair, _) = version_one_active(true);
+    let authorisation = authorise(pair, function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    )
+    .expect("authorised pure plan should be admitted");
+
+    let result = super::super::vm::execute_admitted_pure_client_function(
+        &active,
+        &authorisation,
+        &host,
+        &admission,
+        &[],
+    )
+    .expect("admitted pure plan should execute");
+    assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+
+    host.advance_policy_epoch().expect("policy epoch");
+    assert!(matches!(
+        super::super::vm::execute_admitted_pure_client_function(
+            &active,
+            &authorisation,
+            &host,
+            &admission,
+            &[],
+        ),
+        Err(super::super::vm::ClientVmExecutionError::AdmissionStale)
+    ));
+}
+
+#[test]
 fn vm_admission_rejects_stale_active_catalogue_before_root_binding() {
     let (base, function, pair, _) = version_one_active(true);
     let stale_origin = SourceOrigin::new(SourceUnitId::from_bytes([1; 16]), 0, 0)

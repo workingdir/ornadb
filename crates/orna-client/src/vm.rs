@@ -37,6 +37,7 @@ use orna_core::{
     catalogue::FunctionDomain,
     revision::{ActiveDatabaseRevision, ExecutableArtifactKind},
     security::AuthorisedInvocation,
+    value::FunctionArgument,
 };
 use std::{collections::HashSet, fmt, sync::Arc};
 
@@ -65,6 +66,77 @@ pub enum ClientVmDecodedPlan {
     Action(ActionClientPlan),
     /// A version-10 control-flow plan.
     ControlFlow(ControlFlowClientPlan),
+}
+
+/// A pure CLIENT plan could not cross the admitted execution boundary.
+#[derive(Debug)]
+pub enum ClientVmExecutionError {
+    /// The host policy, runtime, limit, or cancellation fence changed.
+    AdmissionStale,
+    /// The supplied authorisation does not identify the admitted active target.
+    TargetMismatch,
+    /// The admitted plan requests a resource, action, state, capability, or contract seam.
+    NonPurePlan,
+    /// The existing bounded evaluator rejected the admitted target.
+    Evaluation(Box<super::ClientExecutionError>),
+}
+
+impl fmt::Display for ClientVmExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AdmissionStale => formatter.write_str("CLIENT VM admission is no longer current"),
+            Self::TargetMismatch => {
+                formatter.write_str("CLIENT VM execution target does not match admission")
+            }
+            Self::NonPurePlan => formatter.write_str("CLIENT VM plan requires a host capability"),
+            Self::Evaluation(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ClientVmExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Evaluation(source) => Some(source.as_ref()),
+            Self::AdmissionStale | Self::TargetMismatch | Self::NonPurePlan => None,
+        }
+    }
+}
+
+/// Executes an admitted pure expression plan after rechecking its live fences.
+///
+/// Stage 1 deliberately rejects plans that need a host capability. The existing
+/// evaluator remains the value-producing implementation and revalidates the
+/// immutable active artifact; the admission is the required ownership and
+/// authority gate before that evaluation begins.
+#[allow(clippy::result_large_err)]
+pub fn execute_admitted_pure_client_function(
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    host: &ClientVmHostContext,
+    admission: &ClientVmAdmission<ClientVmDecodedPlan>,
+    arguments: &[FunctionArgument],
+) -> Result<super::ClientExecutionResult, ClientVmExecutionError> {
+    let target = authorisation.target();
+    let [source_revision, catalogue_revision] = admission.identity().revision_pair();
+    if target.revision() != active.pair()
+        || target.function().to_bytes() != admission.identity().function()
+        || target.revision().source().to_bytes() != source_revision
+        || target.revision().catalogue().to_bytes() != catalogue_revision
+    {
+        return Err(ClientVmExecutionError::TargetMismatch);
+    }
+    if !host.admission_is_current(admission) {
+        return Err(ClientVmExecutionError::AdmissionStale);
+    }
+    if !matches!(
+        admission.plan(),
+        ClientVmDecodedPlan::Boolean(_) | ClientVmDecodedPlan::Expression(_)
+    ) {
+        return Err(ClientVmExecutionError::NonPurePlan);
+    }
+    super::evaluate_client_function_with_arguments(active, authorisation, arguments)
+        .map_err(|error| ClientVmExecutionError::Evaluation(Box::new(error)))
 }
 
 /// Admits and decodes the CLIENT artifact selected by kernel authorisation.
