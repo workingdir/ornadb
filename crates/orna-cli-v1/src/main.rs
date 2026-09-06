@@ -144,7 +144,7 @@ enum Invocation {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
-    Repl,
+    Repl(Option<String>),
     Init,
     Check,
     Invoke(String),
@@ -171,7 +171,8 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         })?)?;
     }
     let command = match words.next() {
-        None | Some("repl") => Command::Repl,
+        None => Command::Repl(None),
+        Some("repl") => Command::Repl(words.next().map(str::to_owned)),
         Some("init") => Command::Init,
         Some("check") => Command::Check,
         Some("invoke") => Command::Invoke(
@@ -590,11 +591,34 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
     }
 }
 
+/// Runs one pure REPL expression without retaining session state or admitting
+/// declarations. Interactive ownership remains behind the session adapter.
+fn run_repl_expression(expression: &str) -> Result<(), Diagnostic> {
+    match parse_repl_input(expression)? {
+        ReplInput::Quit => {
+            println!("session closed");
+            Ok(())
+        }
+        ReplInput::Expression => orna_evaluator_v1::evaluate_repl(
+            expression,
+            &orna_evaluator_v1::Environment::new(),
+            orna_evaluator_v1::Limits::default(),
+        )
+        .map(|_| println!("expression completed"))
+        .map_err(|_| {
+            Diagnostic::unavailable(
+                "REPL expression is not available in the pure evaluator",
+                "use a bounded pure expression; declarations, tables, effects, streams, and persistence require the integrated runtime",
+            )
+        }),
+    }
+}
+
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl|init|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|init|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
             );
             Ok(())
         }
@@ -608,9 +632,10 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         )),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
-        Command::Repl => Err(Diagnostic::unavailable(
-            "the REPL runtime is not available",
-            "use an Orna runtime with source execution enabled",
+        Command::Repl(Some(ref expression)) => run_repl_expression(expression),
+        Command::Repl(None) => Err(Diagnostic::unavailable(
+            "the interactive REPL runtime is not available",
+            "supply one bounded pure expression after `repl`, or use an Orna runtime with source execution enabled",
         )),
         Command::Run(Invocation::Seed) => run_pure_invocation(&parsed.endpoint, "seed"),
         Command::Run(Invocation::Exercise | Invocation::SensorsIngest) => {
@@ -666,6 +691,12 @@ mod tests {
                 .expect("parses")
                 .command,
             Command::Invoke("library.value".into())
+        );
+        assert_eq!(
+            parse_cli(&["repl".into(), "1 + 2".into()])
+                .expect("parses")
+                .command,
+            Command::Repl(Some("1 + 2".into()))
         );
         assert_eq!(
             parse_cli(&["invoke".into()])
@@ -867,6 +898,25 @@ mod tests {
         assert_eq!(
             parse_repl_input(":watch x").expect_err("not in slice").code,
             "E1101"
+        );
+    }
+    #[test]
+    fn repl_expression_uses_the_pure_evaluator_without_persisting_a_session() {
+        let parsed = Parsed {
+            endpoint: Endpoint::ManagedLocal,
+            command: Command::Repl(Some("std.math.min(7, 3)".into())),
+        };
+        assert_eq!(execute(&parsed), Ok(()));
+
+        let declaration = Parsed {
+            endpoint: Endpoint::ManagedLocal,
+            command: Command::Repl(Some("pub fn retained() = 1;".into())),
+        };
+        assert_eq!(
+            execute(&declaration)
+                .expect_err("declarations are outside the pure slice")
+                .code,
+            "E2000"
         );
     }
     #[test]
