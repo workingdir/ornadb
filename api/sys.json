@@ -1,0 +1,6535 @@
+{
+  "title": "Orna portable sys API",
+  "language_version": "1.0.0",
+  "sys_version": "1.0",
+  "status": "specification",
+  "removed_names": {
+    "sys.runtime": {
+      "replacement": "sys.rt",
+      "diagnostic": "ORNA100-E-SYS-RUNTIME"
+    },
+    "sys.runtime_info": {
+      "replacement": "sys.rt.info",
+      "diagnostic": "ORNA100-E-SYS-RUNTIME"
+    }
+  },
+  "singletons": [
+    {
+      "name": "sys.database",
+      "type": "sys.DatabaseView",
+      "availability": "always while a database is attached"
+    },
+    {
+      "name": "sys.current",
+      "type": "sys.CurrentContext",
+      "availability": "every activation"
+    },
+    {
+      "name": "sys.rt",
+      "type": "sys.RuntimeView",
+      "availability": "every command/runtime owner"
+    },
+    {
+      "name": "sys.repl",
+      "type": "sys.ReplView",
+      "availability": "REPL only; otherwise sys.context.repl_unavailable"
+    }
+  ],
+  "opaque_identifiers": [
+    "sys.DatabaseId",
+    "sys.FileId",
+    "sys.DefinitionId",
+    "sys.ObjectId",
+    "sys.RevisionId",
+    "sys.SnapshotId",
+    "sys.RuntimeId",
+    "sys.TransactionId",
+    "sys.InvocationId",
+    "sys.RunId",
+    "sys.QueryId",
+    "sys.SessionId",
+    "sys.ClientId",
+    "sys.TraceId",
+    "sys.SpanId",
+    "sys.CheckpointVersion",
+    "sys.SegmentId",
+    "sys.BuildId",
+    "sys.GitOid",
+    "sys.FailureVersion",
+    "sys.ConsumerIdentity"
+  ],
+  "reference_aliases": [
+    {
+      "name": "sys.DatabaseRef",
+      "target": "sys.Database",
+      "definition": "sys.RowRef<sys.Database>"
+    },
+    {
+      "name": "sys.NamespaceRef",
+      "target": "sys.Namespace",
+      "definition": "sys.RowRef<sys.Namespace>"
+    },
+    {
+      "name": "sys.ModuleRef",
+      "target": "sys.Module",
+      "definition": "sys.RowRef<sys.Module>"
+    },
+    {
+      "name": "sys.ImportRef",
+      "target": "sys.Import",
+      "definition": "sys.RowRef<sys.Import>"
+    },
+    {
+      "name": "sys.FileRef",
+      "target": "sys.File",
+      "definition": "sys.RowRef<sys.File>"
+    },
+    {
+      "name": "sys.ObjectRef",
+      "target": "sys.Object",
+      "definition": "sys.RowRef<sys.Object>"
+    },
+    {
+      "name": "sys.RevisionRef",
+      "target": "sys.Revision",
+      "definition": "sys.RowRef<sys.Revision>"
+    },
+    {
+      "name": "sys.DefinitionRef",
+      "target": "sys.Definition",
+      "definition": "sys.RowRef<sys.Definition>"
+    },
+    {
+      "name": "sys.TypeRef",
+      "target": "sys.Type",
+      "definition": "sys.RowRef<sys.Type>"
+    },
+    {
+      "name": "sys.TypeParameterRef",
+      "target": "sys.TypeParameter",
+      "definition": "sys.RowRef<sys.TypeParameter>"
+    },
+    {
+      "name": "sys.FieldRef",
+      "target": "sys.Field",
+      "definition": "sys.RowRef<sys.Field>"
+    },
+    {
+      "name": "sys.VariantRef",
+      "target": "sys.Variant",
+      "definition": "sys.RowRef<sys.Variant>"
+    },
+    {
+      "name": "sys.ProtocolRef",
+      "target": "sys.Protocol",
+      "definition": "sys.RowRef<sys.Protocol>"
+    },
+    {
+      "name": "sys.ProtocolMemberRef",
+      "target": "sys.ProtocolMember",
+      "definition": "sys.RowRef<sys.ProtocolMember>"
+    },
+    {
+      "name": "sys.ImplementationRef",
+      "target": "sys.Implementation",
+      "definition": "sys.RowRef<sys.Implementation>"
+    },
+    {
+      "name": "sys.FunctionRef",
+      "target": "sys.Function",
+      "definition": "sys.RowRef<sys.Function>"
+    },
+    {
+      "name": "sys.ParameterRef",
+      "target": "sys.Parameter",
+      "definition": "sys.RowRef<sys.Parameter>"
+    },
+    {
+      "name": "sys.EffectRef",
+      "target": "sys.Effect",
+      "definition": "sys.RowRef<sys.Effect>"
+    },
+    {
+      "name": "sys.TableRef",
+      "target": "sys.Table",
+      "definition": "sys.RowRef<sys.Table>"
+    },
+    {
+      "name": "sys.ColumnRef",
+      "target": "sys.Column",
+      "definition": "sys.RowRef<sys.Column>"
+    },
+    {
+      "name": "sys.KeyRef",
+      "target": "sys.Key",
+      "definition": "sys.RowRef<sys.Key>"
+    },
+    {
+      "name": "sys.AssertionRef",
+      "target": "sys.Assertion",
+      "definition": "sys.RowRef<sys.Assertion>"
+    },
+    {
+      "name": "sys.ReferenceRef",
+      "target": "sys.Reference",
+      "definition": "sys.RowRef<sys.Reference>"
+    },
+    {
+      "name": "sys.PageRef",
+      "target": "sys.Page",
+      "definition": "sys.RowRef<sys.Page>"
+    },
+    {
+      "name": "sys.DimensionRef",
+      "target": "sys.Dimension",
+      "definition": "sys.RowRef<sys.Dimension>"
+    },
+    {
+      "name": "sys.UnitRef",
+      "target": "sys.Unit",
+      "definition": "sys.RowRef<sys.Unit>"
+    },
+    {
+      "name": "sys.CurrencyRef",
+      "target": "sys.Currency",
+      "definition": "sys.RowRef<sys.Currency>"
+    },
+    {
+      "name": "sys.SecretRequirementRef",
+      "target": "sys.SecretRequirement",
+      "definition": "sys.RowRef<sys.SecretRequirement>"
+    },
+    {
+      "name": "sys.ExtensionRef",
+      "target": "sys.Extension",
+      "definition": "sys.RowRef<sys.Extension>"
+    },
+    {
+      "name": "sys.DependencyRef",
+      "target": "sys.Dependency",
+      "definition": "sys.RowRef<sys.Dependency>"
+    },
+    {
+      "name": "sys.DiagnosticRef",
+      "target": "sys.Diagnostic",
+      "definition": "sys.RowRef<sys.Diagnostic>"
+    },
+    {
+      "name": "sys.SnapshotRef",
+      "target": "sys.Snapshot",
+      "definition": "sys.RowRef<sys.Snapshot>"
+    },
+    {
+      "name": "sys.SnapshotObjectRef",
+      "target": "sys.SnapshotObject",
+      "definition": "sys.RowRef<sys.SnapshotObject>"
+    },
+    {
+      "name": "sys.ChangeRef",
+      "target": "sys.Change",
+      "definition": "sys.RowRef<sys.Change>"
+    },
+    {
+      "name": "sys.DiffEntryRef",
+      "target": "sys.DiffEntry",
+      "definition": "sys.RowRef<sys.DiffEntry>"
+    },
+    {
+      "name": "sys.FileVersionRef",
+      "target": "sys.FileVersion",
+      "definition": "sys.RowRef<sys.FileVersion>"
+    },
+    {
+      "name": "sys.GitRepositoryRef",
+      "target": "sys.GitRepository",
+      "definition": "sys.RowRef<sys.GitRepository>"
+    },
+    {
+      "name": "sys.CommitRef",
+      "target": "sys.Commit",
+      "definition": "sys.RowRef<sys.Commit>"
+    },
+    {
+      "name": "sys.TreeEntryRef",
+      "target": "sys.TreeEntry",
+      "definition": "sys.RowRef<sys.TreeEntry>"
+    },
+    {
+      "name": "sys.RefRef",
+      "target": "sys.Ref",
+      "definition": "sys.RowRef<sys.Ref>"
+    },
+    {
+      "name": "sys.BranchRef",
+      "target": "sys.Branch",
+      "definition": "sys.RowRef<sys.Branch>"
+    },
+    {
+      "name": "sys.TagRef",
+      "target": "sys.Tag",
+      "definition": "sys.RowRef<sys.Tag>"
+    },
+    {
+      "name": "sys.RemoteRef",
+      "target": "sys.Remote",
+      "definition": "sys.RowRef<sys.Remote>"
+    },
+    {
+      "name": "sys.StashRef",
+      "target": "sys.Stash",
+      "definition": "sys.RowRef<sys.Stash>"
+    },
+    {
+      "name": "sys.GitObjectRef",
+      "target": "sys.GitObject",
+      "definition": "sys.RowRef<sys.GitObject>"
+    },
+    {
+      "name": "sys.WorktreeEntryRef",
+      "target": "sys.WorktreeEntry",
+      "definition": "sys.RowRef<sys.WorktreeEntry>"
+    },
+    {
+      "name": "sys.QueryRef",
+      "target": "sys.Query",
+      "definition": "sys.RowRef<sys.Query>"
+    },
+    {
+      "name": "sys.PlanRef",
+      "target": "sys.Plan",
+      "definition": "sys.RowRef<sys.Plan>"
+    },
+    {
+      "name": "sys.PlanNodeRef",
+      "target": "sys.PlanNode",
+      "definition": "sys.RowRef<sys.PlanNode>"
+    },
+    {
+      "name": "sys.InvocationRef",
+      "target": "sys.Invocation",
+      "definition": "sys.RowRef<sys.Invocation>"
+    },
+    {
+      "name": "sys.InvocationArgumentRef",
+      "target": "sys.InvocationArgument",
+      "definition": "sys.RowRef<sys.InvocationArgument>"
+    },
+    {
+      "name": "sys.RunRef",
+      "target": "sys.Run",
+      "definition": "sys.RowRef<sys.Run>"
+    },
+    {
+      "name": "sys.TransactionRef",
+      "target": "sys.Transaction",
+      "definition": "sys.RowRef<sys.Transaction>"
+    },
+    {
+      "name": "sys.TraceRef",
+      "target": "sys.Trace",
+      "definition": "sys.RowRef<sys.Trace>"
+    },
+    {
+      "name": "sys.SpanRef",
+      "target": "sys.Span",
+      "definition": "sys.RowRef<sys.Span>"
+    },
+    {
+      "name": "sys.TraceEventRef",
+      "target": "sys.TraceEvent",
+      "definition": "sys.RowRef<sys.TraceEvent>"
+    },
+    {
+      "name": "sys.StreamRef",
+      "target": "sys.Stream",
+      "definition": "sys.RowRef<sys.Stream>"
+    },
+    {
+      "name": "sys.CheckpointRef",
+      "target": "sys.Checkpoint",
+      "definition": "sys.RowRef<sys.Checkpoint>"
+    },
+    {
+      "name": "sys.CheckpointUpdateRef",
+      "target": "sys.CheckpointUpdate",
+      "definition": "sys.RowRef<sys.CheckpointUpdate>"
+    },
+    {
+      "name": "sys.FailureRef",
+      "target": "sys.Failure",
+      "definition": "sys.RowRef<sys.Failure>"
+    },
+    {
+      "name": "sys.SessionRef",
+      "target": "sys.Session",
+      "definition": "sys.RowRef<sys.Session>"
+    },
+    {
+      "name": "sys.ClientRef",
+      "target": "sys.Client",
+      "definition": "sys.RowRef<sys.Client>"
+    },
+    {
+      "name": "sys.LeaseRef",
+      "target": "sys.Lease",
+      "definition": "sys.RowRef<sys.Lease>"
+    },
+    {
+      "name": "sys.ListenerRef",
+      "target": "sys.Listener",
+      "definition": "sys.RowRef<sys.Listener>"
+    },
+    {
+      "name": "sys.StorageRef",
+      "target": "sys.Storage",
+      "definition": "sys.RowRef<sys.Storage>"
+    },
+    {
+      "name": "sys.SegmentRef",
+      "target": "sys.Segment",
+      "definition": "sys.RowRef<sys.Segment>"
+    },
+    {
+      "name": "sys.StatisticRef",
+      "target": "sys.Statistic",
+      "definition": "sys.RowRef<sys.Statistic>"
+    },
+    {
+      "name": "sys.IndexRef",
+      "target": "sys.Index",
+      "definition": "sys.RowRef<sys.Index>"
+    },
+    {
+      "name": "sys.MaterializationRef",
+      "target": "sys.Materialization",
+      "definition": "sys.RowRef<sys.Materialization>"
+    },
+    {
+      "name": "sys.AllocatorRef",
+      "target": "sys.Allocator",
+      "definition": "sys.RowRef<sys.Allocator>"
+    },
+    {
+      "name": "sys.HydrationRef",
+      "target": "sys.Hydration",
+      "definition": "sys.RowRef<sys.Hydration>"
+    },
+    {
+      "name": "sys.CompactionRef",
+      "target": "sys.Compaction",
+      "definition": "sys.RowRef<sys.Compaction>"
+    },
+    {
+      "name": "sys.MaintenanceJobRef",
+      "target": "sys.MaintenanceJob",
+      "definition": "sys.RowRef<sys.MaintenanceJob>"
+    },
+    {
+      "name": "sys.StorageFileRef",
+      "target": "sys.StorageFile",
+      "definition": "sys.RowRef<sys.StorageFile>"
+    },
+    {
+      "name": "sys.SecretRef",
+      "target": "sys.Secret",
+      "definition": "sys.RowRef<sys.Secret>"
+    },
+    {
+      "name": "sys.SettingRef",
+      "target": "sys.Setting",
+      "definition": "sys.RowRef<sys.Setting>"
+    },
+    {
+      "name": "sys.BuildRef",
+      "target": "sys.Build",
+      "definition": "sys.RowRef<sys.Build>"
+    },
+    {
+      "name": "sys.TestRef",
+      "target": "sys.Test",
+      "definition": "sys.RowRef<sys.Test>"
+    }
+  ],
+  "value_types": [
+    {
+      "name": "sys.RowRef<T>",
+      "kind": "opaque-generic",
+      "purpose": "Snapshot/runtime-pinned reference to one canonical system-relation row.",
+      "type_parameters": [
+        "T"
+      ],
+      "fields": [],
+      "invariants": [
+        "preserves the row natural key and resolution context",
+        "does not grant authority",
+        "live references are runtime-generation-bound"
+      ]
+    },
+    {
+      "name": "sys.Value",
+      "kind": "opaque",
+      "purpose": "Explicit existential envelope for a value crossing a reflective system boundary.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        },
+        {
+          "name": "canonical_digest",
+          "type": "Digest?"
+        }
+      ],
+      "invariants": [
+        "is not a dynamic Any fallback",
+        "retains the exact originating static type",
+        "cannot be implicitly unboxed or converted"
+      ]
+    },
+    {
+      "name": "sys.Argument",
+      "kind": "record",
+      "purpose": "One named typed reflective-call argument.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "value",
+          "type": "sys.Value"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.ArgumentMap",
+      "kind": "record",
+      "purpose": "Immutable ordered collection of uniquely named reflective-call arguments.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "entries",
+          "type": "[sys.Argument]"
+        }
+      ],
+      "invariants": [
+        "names are unique",
+        "canonical order is Unicode scalar-value order by name",
+        "record literals are boxed only under an ArgumentMap expected type"
+      ]
+    },
+    {
+      "name": "sys.ValueMetadata<T>",
+      "kind": "record-generic",
+      "purpose": "Safe type, protocol and codec metadata for a value without private-field disclosure.",
+      "type_parameters": [
+        "T"
+      ],
+      "fields": [
+        {
+          "name": "static_type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "nominal_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "protocols",
+          "type": "Relation<sys.Protocol>"
+        },
+        {
+          "name": "codecs",
+          "type": "[Str]"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.InvocationHandle<T>",
+      "kind": "opaque-generic",
+      "purpose": "Operational handle for one accepted invocation in one runtime generation.",
+      "type_parameters": [
+        "T"
+      ],
+      "fields": [
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "runtime",
+          "type": "sys.RuntimeId"
+        },
+        {
+          "name": "result_type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "resumable",
+          "type": "Bool"
+        }
+      ],
+      "invariants": [
+        "resumable is false in 1.0",
+        "usable only by sys.await and sys.cancel",
+        "descriptive decoding never revives operational authority"
+      ]
+    },
+    {
+      "name": "sys.InvocationResult<T>",
+      "kind": "record-generic",
+      "purpose": "Complete terminal result returned by sys.await.",
+      "type_parameters": [
+        "T"
+      ],
+      "fields": [
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "status",
+          "type": "sys.InvocationStatus"
+        },
+        {
+          "name": "value",
+          "type": "T?"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "started",
+          "type": "Instant?"
+        },
+        {
+          "name": "ended",
+          "type": "Instant"
+        },
+        {
+          "name": "duration",
+          "type": "Duration?"
+        }
+      ],
+      "invariants": [
+        "status is terminal",
+        "succeeded has value and no failure",
+        "failed has failure and no value",
+        "cancelled/orphaned have no value and may carry a diagnostic"
+      ]
+    },
+    {
+      "name": "sys.ExpressionRef",
+      "kind": "opaque",
+      "purpose": "Snapshot-pinned reference to a resolved expression in a definition.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "owner",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "semantic_hash",
+          "type": "Digest"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.SourceSpan",
+      "kind": "record",
+      "purpose": "Half-open canonical UTF-8 source range with one-based human coordinates.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "start_byte",
+          "type": "Int"
+        },
+        {
+          "name": "end_byte",
+          "type": "Int"
+        },
+        {
+          "name": "start_line",
+          "type": "Int"
+        },
+        {
+          "name": "start_column",
+          "type": "Int"
+        },
+        {
+          "name": "end_line",
+          "type": "Int"
+        },
+        {
+          "name": "end_column",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "0 <= start_byte <= end_byte",
+        "line and column values are one-based"
+      ]
+    },
+    {
+      "name": "sys.SourceMapEntry",
+      "kind": "record",
+      "purpose": "Mapping from a generated span to an authored span and optional original name.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "generated",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "original",
+          "type": "sys.SourceSpan?"
+        },
+        {
+          "name": "original_name",
+          "type": "Str?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.DiagnosticLabel",
+      "kind": "record",
+      "purpose": "One source label attached to a structured diagnostic.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "message",
+          "type": "Str"
+        },
+        {
+          "name": "primary",
+          "type": "Bool"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.SourceDocument",
+      "kind": "record",
+      "purpose": "Exact retained source plus source maps and explicit unavailability state.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "text",
+          "type": "Str?"
+        },
+        {
+          "name": "exact_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "encoding",
+          "type": "Str"
+        },
+        {
+          "name": "generated",
+          "type": "Bool"
+        },
+        {
+          "name": "maps",
+          "type": "Relation<sys.SourceMapEntry>"
+        },
+        {
+          "name": "unavailable_reason",
+          "type": "Str?"
+        }
+      ],
+      "invariants": [
+        "text and unavailable_reason are not both absent",
+        "text hashes to exact_hash after canonical decoding"
+      ]
+    },
+    {
+      "name": "sys.Attribution",
+      "kind": "record",
+      "purpose": "Source or semantic blame attribution for one exact target range.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "commit",
+          "type": "sys.CommitRef?"
+        },
+        {
+          "name": "author",
+          "type": "sys.PersonIdentity?"
+        },
+        {
+          "name": "authored_at",
+          "type": "Instant?"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "semantic",
+          "type": "Bool"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.PersonIdentity",
+      "kind": "record",
+      "purpose": "Git-compatible authored identity without signing or authorization semantics.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "email",
+          "type": "Str?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.ObjectDescription",
+      "kind": "record",
+      "purpose": "Structured summary of one semantic object at its pinned revision.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "revision",
+          "type": "sys.RevisionRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ObjectKind"
+        },
+        {
+          "name": "qualified_name",
+          "type": "Str"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        },
+        {
+          "name": "signature",
+          "type": "Str?"
+        },
+        {
+          "name": "metadata",
+          "type": "sys.Value"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.Explanation",
+      "kind": "record",
+      "purpose": "Structured causal explanation of a diagnostic.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "diagnostic",
+          "type": "sys.Diagnostic"
+        },
+        {
+          "name": "summary",
+          "type": "Str"
+        },
+        {
+          "name": "causes",
+          "type": "[sys.Diagnostic]"
+        },
+        {
+          "name": "suggestions",
+          "type": "[Str]"
+        },
+        {
+          "name": "related_objects",
+          "type": "[sys.ObjectRef]"
+        },
+        {
+          "name": "plan",
+          "type": "sys.PlanRef?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.CheckpointPosition",
+      "kind": "opaque",
+      "purpose": "Provider-specific replay position with portable equality and canonical encoding.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "format",
+          "type": "Str"
+        },
+        {
+          "name": "digest",
+          "type": "Digest"
+        }
+      ],
+      "invariants": [
+        "payload is not generically orderable",
+        "equality includes format and canonical payload",
+        "provider APIs own construction and comparison beyond equality"
+      ]
+    },
+    {
+      "name": "sys.CompatibilityInfo",
+      "kind": "record",
+      "purpose": "Compatibility tuple embedded in builds and artifacts.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "language_version",
+          "type": "Str"
+        },
+        {
+          "name": "sys_version",
+          "type": "Str"
+        },
+        {
+          "name": "canonical_orna_codec_version",
+          "type": "Str"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        },
+        {
+          "name": "presentation_protocol_version",
+          "type": "Str"
+        },
+        {
+          "name": "supported_profiles",
+          "type": "[Str]"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.RuntimeInfo",
+      "kind": "record",
+      "purpose": "Exact language, sys, storage, presentation and implementation coordinates for the current runtime.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "language_version",
+          "type": "Str"
+        },
+        {
+          "name": "sys_version",
+          "type": "Str"
+        },
+        {
+          "name": "canonical_orna_codec_version",
+          "type": "Str"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        },
+        {
+          "name": "presentation_protocol_version",
+          "type": "Str"
+        },
+        {
+          "name": "implementation_name",
+          "type": "Str"
+        },
+        {
+          "name": "implementation_version",
+          "type": "Str"
+        },
+        {
+          "name": "build_id",
+          "type": "Str"
+        },
+        {
+          "name": "supported_profiles",
+          "type": "[Str]"
+        },
+        {
+          "name": "runtime",
+          "type": "sys.RuntimeId"
+        },
+        {
+          "name": "mode",
+          "type": "sys.RuntimeMode"
+        },
+        {
+          "name": "read_only",
+          "type": "Bool"
+        },
+        {
+          "name": "std_snapshot",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "unicode_version",
+          "type": "Str"
+        },
+        {
+          "name": "timezone_database_version",
+          "type": "Str?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.FlushResult",
+      "kind": "record",
+      "purpose": "Result of sealing durable pending rows without a logical data change.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "tables",
+          "type": "[sys.TableRef]"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "bytes",
+          "type": "Int"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_changes",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "semantic_changes is zero"
+      ]
+    },
+    {
+      "name": "sys.CompactionResult",
+      "kind": "record",
+      "purpose": "Result of an atomic physical segment compaction.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "tables",
+          "type": "[sys.TableRef]"
+        },
+        {
+          "name": "input_segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "output_segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "bytes_before",
+          "type": "Int"
+        },
+        {
+          "name": "bytes_after",
+          "type": "Int"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_changes",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "semantic_changes is zero"
+      ]
+    },
+    {
+      "name": "sys.StorageRewriteResult",
+      "kind": "record",
+      "purpose": "Result of a generation-CAS rewrite between editable and compact physical representations.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "from",
+          "type": "sys.StorageProfile"
+        },
+        {
+          "name": "to",
+          "type": "sys.StorageProfile"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "previous_generation",
+          "type": "Int"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_diff",
+          "type": "Relation<sys.DiffEntry>"
+        }
+      ],
+      "invariants": [
+        "semantic_diff is empty",
+        "generation is published only after complete verification"
+      ]
+    },
+    {
+      "name": "sys.VerificationReport",
+      "kind": "record",
+      "purpose": "Structured integrity-verification outcome.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "scope",
+          "type": "sys.VerifyScope"
+        },
+        {
+          "name": "status",
+          "type": "sys.VerificationStatus"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant"
+        },
+        {
+          "name": "checked",
+          "type": "sys.Value"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Relation<sys.Diagnostic>"
+        }
+      ],
+      "invariants": [
+        "invalid has at least one error/fatal diagnostic",
+        "valid has no error/fatal diagnostic"
+      ]
+    },
+    {
+      "name": "sys.CancellationView",
+      "kind": "record",
+      "purpose": "Immutable activation-local cancellation observation.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "requested",
+          "type": "Bool"
+        },
+        {
+          "name": "reason",
+          "type": "Str?"
+        },
+        {
+          "name": "requested_at",
+          "type": "Instant?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.PresentationOverride",
+      "kind": "record",
+      "purpose": "Session-local presentation selection for one type.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "renderer",
+          "type": "Str?"
+        },
+        {
+          "name": "mode",
+          "type": "Str"
+        },
+        {
+          "name": "formatter",
+          "type": "sys.FunctionRef?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.Watch",
+      "kind": "record",
+      "purpose": "REPL watch expression and its most recent safe observation.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "expression",
+          "type": "sys.ExpressionRef"
+        },
+        {
+          "name": "label",
+          "type": "Str?"
+        },
+        {
+          "name": "last_value",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "last_diagnostic",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "updated",
+          "type": "Instant?"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.DatabaseView",
+      "kind": "record",
+      "purpose": "Current attached database/worktree descriptor exposed by sys.database.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "id",
+          "type": "sys.DatabaseId"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "root",
+          "type": "Path"
+        },
+        {
+          "name": "root_module",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "head",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "branch",
+          "type": "sys.BranchRef?"
+        },
+        {
+          "name": "writable",
+          "type": "Bool"
+        },
+        {
+          "name": "attached_as",
+          "type": "Str?"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.CurrentContext",
+      "kind": "record",
+      "purpose": "Immutable context of the current activation exposed by sys.current.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "transaction",
+          "type": "sys.TransactionRef?"
+        },
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef?"
+        },
+        {
+          "name": "run",
+          "type": "sys.RunRef?"
+        },
+        {
+          "name": "session",
+          "type": "sys.SessionRef?"
+        },
+        {
+          "name": "client",
+          "type": "sys.ClientRef?"
+        },
+        {
+          "name": "logical_cwd",
+          "type": "Path"
+        },
+        {
+          "name": "locale",
+          "type": "Locale"
+        },
+        {
+          "name": "timezone",
+          "type": "TimeZone"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef?"
+        },
+        {
+          "name": "cancellation",
+          "type": "sys.CancellationView"
+        },
+        {
+          "name": "present_context",
+          "type": "PresentContext"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.RuntimeView",
+      "kind": "record",
+      "purpose": "Current live runtime owner and live relation handles exposed by sys.rt.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "id",
+          "type": "sys.RuntimeId"
+        },
+        {
+          "name": "mode",
+          "type": "sys.RuntimeMode"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "owner_pid",
+          "type": "Int?"
+        },
+        {
+          "name": "owner_endpoint",
+          "type": "Str?"
+        },
+        {
+          "name": "read_only",
+          "type": "Bool"
+        },
+        {
+          "name": "runs",
+          "type": "Relation<sys.Run>"
+        },
+        {
+          "name": "streams",
+          "type": "Relation<sys.Stream>"
+        },
+        {
+          "name": "transactions",
+          "type": "Relation<sys.Transaction>"
+        },
+        {
+          "name": "invocations",
+          "type": "Relation<sys.Invocation>"
+        },
+        {
+          "name": "queries",
+          "type": "Relation<sys.Query>"
+        },
+        {
+          "name": "sessions",
+          "type": "Relation<sys.Session>"
+        },
+        {
+          "name": "clients",
+          "type": "Relation<sys.Client>"
+        },
+        {
+          "name": "traces",
+          "type": "Relation<sys.Trace>"
+        },
+        {
+          "name": "failures",
+          "type": "Relation<sys.Failure>"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Relation<sys.Diagnostic>"
+        },
+        {
+          "name": "leases",
+          "type": "Relation<sys.Lease>"
+        },
+        {
+          "name": "listeners",
+          "type": "Relation<sys.Listener>"
+        },
+        {
+          "name": "plans",
+          "type": "Relation<sys.Plan>"
+        },
+        {
+          "name": "plan_nodes",
+          "type": "Relation<sys.PlanNode>"
+        },
+        {
+          "name": "invocation_arguments",
+          "type": "Relation<sys.InvocationArgument>"
+        },
+        {
+          "name": "spans",
+          "type": "Relation<sys.Span>"
+        },
+        {
+          "name": "events",
+          "type": "Relation<sys.TraceEvent>"
+        },
+        {
+          "name": "checkpoints",
+          "type": "Relation<sys.Checkpoint>"
+        },
+        {
+          "name": "checkpoint_updates",
+          "type": "Relation<sys.CheckpointUpdate>"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.ReplView",
+      "kind": "record",
+      "purpose": "Interactive session presentation and watch state exposed by sys.repl.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "session",
+          "type": "sys.SessionRef"
+        },
+        {
+          "name": "renderer",
+          "type": "Str"
+        },
+        {
+          "name": "width",
+          "type": "Int?"
+        },
+        {
+          "name": "height",
+          "type": "Int?"
+        },
+        {
+          "name": "locale",
+          "type": "Locale"
+        },
+        {
+          "name": "timezone",
+          "type": "TimeZone"
+        },
+        {
+          "name": "presentation_overrides",
+          "type": "Relation<sys.PresentationOverride>"
+        },
+        {
+          "name": "watched_expressions",
+          "type": "Relation<sys.Watch>"
+        }
+      ],
+      "invariants": []
+    },
+    {
+      "name": "sys.ChangeTarget",
+      "kind": "record",
+      "purpose": "Discriminated identity of one changed semantic object, source file or table row.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "kind",
+          "type": "sys.ChangeTargetKind"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectId?"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileId?"
+        },
+        {
+          "name": "table",
+          "type": "sys.ObjectId?"
+        },
+        {
+          "name": "row_key",
+          "type": "sys.Value?"
+        }
+      ],
+      "invariants": [
+        "object: only object is present; file: only file is present; row: only table and row_key are present",
+        "row_key retains a non-secret key type and canonical value",
+        "equality includes kind and all populated identity fields"
+      ]
+    },
+    {
+      "name": "sys.CheckpointConflict",
+      "kind": "record",
+      "purpose": "A three-way merge conflict between incomparable or divergent checkpoint positions.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str"
+        },
+        {
+          "name": "partition",
+          "type": "Str?"
+        },
+        {
+          "name": "base",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "left",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "right",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "left_snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "right_snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "reason",
+          "type": "Str"
+        }
+      ],
+      "invariants": [
+        "reason is divergent_position, incompatible_format, or delete_update",
+        "opaque positions are never numerically ordered"
+      ]
+    },
+    {
+      "name": "sys.RowConflict",
+      "kind": "record",
+      "purpose": "A three-way merge conflict at one stable table identity and primary key.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "key",
+          "type": "sys.Value"
+        },
+        {
+          "name": "base",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "left",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "right",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "reason",
+          "type": "Str"
+        }
+      ],
+      "invariants": [
+        "absence means no row, not a row with null fields",
+        "reason is update_update, delete_update, key_collision, or assertion_failure"
+      ]
+    },
+    {
+      "name": "sys.CheckoutPlan",
+      "kind": "record",
+      "purpose": "Read-only preview bound to the exact target and local worktree state.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "token",
+          "type": "Digest"
+        },
+        {
+          "name": "target",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "target_branch",
+          "type": "Str?"
+        },
+        {
+          "name": "base_head",
+          "type": "sys.GitOid?"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "index_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "worktree_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "pending_generation",
+          "type": "Int"
+        },
+        {
+          "name": "would_discard",
+          "type": "[sys.ChangeTarget]"
+        },
+        {
+          "name": "active_consumers",
+          "type": "[sys.ConsumerIdentity]"
+        },
+        {
+          "name": "conflicts",
+          "type": "[sys.Diagnostic]"
+        }
+      ],
+      "invariants": [
+        "token is a domain-separated digest of all plan inputs in canonical order",
+        "the plan performs no mutation",
+        "force is not permission to accept a stale token"
+      ]
+    }
+  ],
+  "enums": {
+    "sys.RuntimeMode": [
+      "repl",
+      "run",
+      "serve",
+      "command_owner",
+      "embedded"
+    ],
+    "sys.ObjectKind": [
+      "namespace",
+      "module",
+      "table",
+      "column",
+      "key",
+      "assertion",
+      "function",
+      "parameter",
+      "type",
+      "field",
+      "variant",
+      "protocol",
+      "implementation",
+      "page",
+      "dimension",
+      "unit",
+      "currency",
+      "secret_requirement",
+      "extension"
+    ],
+    "sys.Visibility": [
+      "private",
+      "module",
+      "package",
+      "public"
+    ],
+    "sys.Severity": [
+      "note",
+      "help",
+      "warning",
+      "error",
+      "fatal"
+    ],
+    "sys.SnapshotKind": [
+      "commit",
+      "logical_cwd",
+      "synthetic_merge",
+      "build_input"
+    ],
+    "sys.ChangeKind": [
+      "add",
+      "modify",
+      "delete",
+      "rename",
+      "rekey",
+      "rewrite"
+    ],
+    "sys.ChangeArea": [
+      "cwd",
+      "staged",
+      "commit",
+      "merge",
+      "publication",
+      "storage"
+    ],
+    "sys.RunStatus": [
+      "starting",
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "orphaned"
+    ],
+    "sys.InvocationStatus": [
+      "queued",
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "orphaned"
+    ],
+    "sys.TransactionStatus": [
+      "active",
+      "committing",
+      "committed",
+      "rolling_back",
+      "rolled_back",
+      "failed"
+    ],
+    "sys.StreamStatus": [
+      "starting",
+      "running",
+      "paused",
+      "backing_off",
+      "completed",
+      "failed",
+      "cancelled",
+      "orphaned"
+    ],
+    "sys.FailureStatus": [
+      "open",
+      "retrying",
+      "recovered",
+      "skipped",
+      "replaying",
+      "replayed",
+      "resolved"
+    ],
+    "sys.LeaseStatus": [
+      "acquiring",
+      "held",
+      "releasing",
+      "expired",
+      "lost"
+    ],
+    "sys.BuildStatus": [
+      "queued",
+      "running",
+      "passed",
+      "failed",
+      "cancelled",
+      "orphaned"
+    ],
+    "sys.TestStatus": [
+      "not_run",
+      "running",
+      "passed",
+      "failed",
+      "skipped"
+    ],
+    "sys.AssertionOwnerKind": [
+      "executable",
+      "refined_type",
+      "table",
+      "module"
+    ],
+    "sys.AssertionScope": [
+      "activation",
+      "value_construction",
+      "transaction_candidate",
+      "snapshot_candidate"
+    ],
+    "sys.ClientKind": [
+      "cli",
+      "repl",
+      "server",
+      "renderer",
+      "embedded",
+      "tool"
+    ],
+    "sys.DependencyConfidence": [
+      "exact",
+      "conservative",
+      "possible"
+    ],
+    "sys.DependencyKind": [
+      "import",
+      "type_reference",
+      "call",
+      "table_read",
+      "table_write",
+      "assertion",
+      "implementation",
+      "page_entry",
+      "renderer_requirement",
+      "extension_import",
+      "storage_projection"
+    ],
+    "sys.DiffScope": [
+      "all",
+      "semantic",
+      "source",
+      "rows",
+      "storage"
+    ],
+    "sys.EffectKind": [
+      "table_read",
+      "table_write",
+      "network",
+      "filesystem",
+      "process",
+      "clock",
+      "randomness",
+      "secret_access",
+      "ui",
+      "git",
+      "storage_admin",
+      "runtime_admin"
+    ],
+    "sys.ExtensionTrust": [
+      "sandboxed",
+      "trusted"
+    ],
+    "sys.FileKind": [
+      "module",
+      "row",
+      "manifest",
+      "package_manifest",
+      "storage_manifest",
+      "compact_segment",
+      "asset",
+      "secret_document",
+      "generated",
+      "other"
+    ],
+    "sys.GitObjectKind": [
+      "commit",
+      "tree",
+      "blob",
+      "tag"
+    ],
+    "sys.HostAccess": [
+      "filesystem_read",
+      "filesystem_write",
+      "network",
+      "process",
+      "environment",
+      "clock",
+      "device"
+    ],
+    "sys.IndexKind": [
+      "primary",
+      "btree",
+      "hash",
+      "full_text",
+      "vector",
+      "provider"
+    ],
+    "sys.InvokeTransaction": [
+      "inherit",
+      "separate",
+      "read_only"
+    ],
+    "sys.ListenerKind": [
+      "git_http",
+      "query_http",
+      "websocket",
+      "renderer",
+      "admin",
+      "custom"
+    ],
+    "sys.MaintenanceKind": [
+      "flush",
+      "compact",
+      "verify",
+      "hydrate",
+      "prune",
+      "checkpoint_publish",
+      "storage_rewrite"
+    ],
+    "sys.PlanNodeKind": [
+      "scan",
+      "index_lookup",
+      "filter",
+      "project",
+      "join",
+      "aggregate",
+      "sort",
+      "limit",
+      "materialize",
+      "invoke",
+      "assertion_validate",
+      "checkpoint_update",
+      "external"
+    ],
+    "sys.ProtocolMemberKind": [
+      "function",
+      "static_property"
+    ],
+    "sys.ReferenceAction": [
+      "restrict",
+      "cascade",
+      "set_none"
+    ],
+    "sys.SettingScope": [
+      "runtime",
+      "database",
+      "repository",
+      "session"
+    ],
+    "sys.SettingSource": [
+      "default",
+      "manifest",
+      "environment",
+      "command_line",
+      "local_config"
+    ],
+    "sys.StatisticKind": [
+      "min",
+      "max",
+      "null_count",
+      "distinct_count",
+      "bloom",
+      "histogram"
+    ],
+    "sys.StorageFileKind": [
+      "cwd_database",
+      "wal",
+      "lock",
+      "socket",
+      "segment_cache",
+      "temporary",
+      "identity",
+      "other"
+    ],
+    "sys.StorageProfile": [
+      "empty",
+      "editable",
+      "compact",
+      "hybrid"
+    ],
+    "sys.StoragePreference": [
+      "automatic",
+      "editable",
+      "compact"
+    ],
+    "sys.StorageRewriteTarget": [
+      "editable",
+      "compact"
+    ],
+    "sys.TypeKind": [
+      "alias",
+      "nominal",
+      "refined",
+      "enum",
+      "protocol",
+      "table_row",
+      "generic_parameter",
+      "constructed"
+    ],
+    "sys.VerificationStatus": [
+      "unknown",
+      "pending",
+      "valid",
+      "invalid"
+    ],
+    "sys.VerifyScope": [
+      "database",
+      "repository",
+      "storage",
+      "history",
+      "checkpoints",
+      "all"
+    ],
+    "sys.ChangeTargetKind": [
+      "object",
+      "file",
+      "row"
+    ]
+  },
+  "relations": [
+    {
+      "name": "sys.Database",
+      "grouped_handle": "sys.catalog.databases",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Database/worktree attachments visible at a snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DatabaseRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.DatabaseId"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "root",
+          "type": "Path"
+        },
+        {
+          "name": "root_module",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "head",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "branch",
+          "type": "sys.BranchRef?"
+        },
+        {
+          "name": "writable",
+          "type": "Bool"
+        },
+        {
+          "name": "attached_as",
+          "type": "Str?"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DatabaseRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Namespace",
+      "grouped_handle": "sys.catalog.namespaces",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Resolved namespace tree.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.NamespaceRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "database",
+          "type": "sys.DatabaseRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "parent",
+          "type": "sys.NamespaceRef?"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.NamespaceRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Module",
+      "grouped_handle": "sys.catalog.modules",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Resolved source module.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "namespace",
+          "type": "sys.NamespaceRef"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "semantic_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "reachable",
+          "type": "Bool"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Relation<sys.Diagnostic>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ModuleRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Import",
+      "grouped_handle": "sys.catalog.imports",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "module + position",
+      "purpose": "Resolved import edge.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ImportRef"
+        },
+        {
+          "name": "module",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "source",
+          "type": "Str"
+        },
+        {
+          "name": "target",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "alias",
+          "type": "Str?"
+        },
+        {
+          "name": "visibility",
+          "type": "sys.Visibility"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ImportRef",
+      "key_fields": [
+        "module",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.File",
+      "grouped_handle": "sys.catalog.files",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Repository file/source unit metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.FileId"
+        },
+        {
+          "name": "database",
+          "type": "sys.DatabaseRef"
+        },
+        {
+          "name": "path",
+          "type": "Path"
+        },
+        {
+          "name": "kind",
+          "type": "sys.FileKind"
+        },
+        {
+          "name": "git_object",
+          "type": "sys.GitObjectRef?"
+        },
+        {
+          "name": "exact_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "size",
+          "type": "Int"
+        },
+        {
+          "name": "status",
+          "type": "sys.ChangeKind?"
+        },
+        {
+          "name": "text_available",
+          "type": "Bool"
+        },
+        {
+          "name": "generated",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.FileRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Object",
+      "grouped_handle": "sys.catalog.objects",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id + snapshot",
+      "purpose": "Stable semantic object identity at a snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.ObjectId"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ObjectKind"
+        },
+        {
+          "name": "qualified_name",
+          "type": "Str"
+        },
+        {
+          "name": "current_revision",
+          "type": "sys.RevisionRef"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        },
+        {
+          "name": "visibility",
+          "type": "sys.Visibility"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ObjectRef",
+      "key_fields": [
+        "id",
+        "snapshot"
+      ]
+    },
+    {
+      "name": "sys.Revision",
+      "grouped_handle": "sys.catalog.revisions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Immutable semantic revision of a stable object.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.RevisionRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.RevisionId"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "semantic_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "source_hash",
+          "type": "Digest?"
+        },
+        {
+          "name": "introduced_in",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "supersedes",
+          "type": "sys.RevisionRef?"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.RevisionRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Definition",
+      "grouped_handle": "sys.catalog.definitions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Source definition and span of an object revision.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.DefinitionId"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "module",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DefinitionRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Type",
+      "grouped_handle": "sys.catalog.types",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Resolved static type declaration or constructed type metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.TypeKind"
+        },
+        {
+          "name": "transparent",
+          "type": "Bool"
+        },
+        {
+          "name": "base",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "parameters",
+          "type": "Relation<sys.TypeParameter>"
+        },
+        {
+          "name": "fields",
+          "type": "Relation<sys.Field>"
+        },
+        {
+          "name": "variants",
+          "type": "Relation<sys.Variant>"
+        },
+        {
+          "name": "assertions",
+          "type": "Relation<sys.Assertion>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TypeRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.TypeParameter",
+      "grouped_handle": "sys.catalog.type_parameters",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "owner + position",
+      "purpose": "Generic parameter and protocol bounds.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TypeParameterRef"
+        },
+        {
+          "name": "owner",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "bounds",
+          "type": "Relation<sys.Protocol>"
+        },
+        {
+          "name": "inferred",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TypeParameterRef",
+      "key_fields": [
+        "owner",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.Field",
+      "grouped_handle": "sys.catalog.fields",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Nominal type field metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.FieldRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "owner",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "visibility",
+          "type": "sys.Visibility"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.FieldRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Variant",
+      "grouped_handle": "sys.catalog.variants",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Enum/sum variant metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.VariantRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "owner",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "payload_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.VariantRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Protocol",
+      "grouped_handle": "sys.catalog.protocols",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Protocol declaration metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ProtocolRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "parameters",
+          "type": "Relation<sys.TypeParameter>"
+        },
+        {
+          "name": "members",
+          "type": "Relation<sys.ProtocolMember>"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ProtocolRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.ProtocolMember",
+      "grouped_handle": "sys.catalog.protocol_members",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Required protocol function or static property.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ProtocolMemberRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "protocol",
+          "type": "sys.ProtocolRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ProtocolMemberKind"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ProtocolMemberRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Implementation",
+      "grouped_handle": "sys.catalog.implementations",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Nested protocol implementation owned by its target type.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ImplementationRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "protocol",
+          "type": "sys.ProtocolRef"
+        },
+        {
+          "name": "target",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "source_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "owner",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "members",
+          "type": "Relation<sys.Function>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ImplementationRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Function",
+      "grouped_handle": "sys.catalog.functions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Resolved function signature, effects and dependency surface.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "parameters",
+          "type": "Relation<sys.Parameter>"
+        },
+        {
+          "name": "return_type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "failure_types",
+          "type": "Relation<sys.Type>"
+        },
+        {
+          "name": "effects",
+          "type": "Relation<sys.Effect>"
+        },
+        {
+          "name": "reads",
+          "type": "Relation<sys.Table>"
+        },
+        {
+          "name": "writes",
+          "type": "Relation<sys.Table>"
+        },
+        {
+          "name": "calls",
+          "type": "Relation<sys.Function>"
+        },
+        {
+          "name": "inferred_signature",
+          "type": "Bool"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.FunctionRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Parameter",
+      "grouped_handle": "sys.catalog.parameters",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "function + position",
+      "purpose": "Function parameter metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ParameterRef"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "optional",
+          "type": "Bool"
+        },
+        {
+          "name": "default_expression",
+          "type": "sys.ExpressionRef?"
+        },
+        {
+          "name": "explicit_type",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ParameterRef",
+      "key_fields": [
+        "function",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.Effect",
+      "grouped_handle": "sys.catalog.effects",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "function + kind + target",
+      "purpose": "Conservative static effect metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.EffectRef"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.EffectKind"
+        },
+        {
+          "name": "target",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "conditional",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.EffectRef",
+      "key_fields": [
+        "function",
+        "kind",
+        "target"
+      ]
+    },
+    {
+      "name": "sys.Table",
+      "grouped_handle": "sys.catalog.tables",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Persistent relation declaration and storage projection.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "key",
+          "type": "sys.KeyRef"
+        },
+        {
+          "name": "columns",
+          "type": "Relation<sys.Column>"
+        },
+        {
+          "name": "assertions",
+          "type": "Relation<sys.Assertion>"
+        },
+        {
+          "name": "references",
+          "type": "Relation<sys.Reference>"
+        },
+        {
+          "name": "storage",
+          "type": "sys.StorageRef"
+        },
+        {
+          "name": "row_count",
+          "type": "Int?"
+        },
+        {
+          "name": "row_count_exact",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TableRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Column",
+      "grouped_handle": "sys.catalog.columns",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Table column metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ColumnRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "optional",
+          "type": "Bool"
+        },
+        {
+          "name": "key_position",
+          "type": "Int?"
+        },
+        {
+          "name": "default_expression",
+          "type": "sys.ExpressionRef?"
+        },
+        {
+          "name": "computed_expression",
+          "type": "sys.ExpressionRef?"
+        },
+        {
+          "name": "docs",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ColumnRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Key",
+      "grouped_handle": "sys.catalog.keys",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Primary-key definition and path/storage codec.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.KeyRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "columns",
+          "type": "Relation<sys.Column>"
+        },
+        {
+          "name": "automatic",
+          "type": "Bool"
+        },
+        {
+          "name": "allocator",
+          "type": "sys.AllocatorRef?"
+        },
+        {
+          "name": "path_codec",
+          "type": "Str"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.KeyRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Assertion",
+      "grouped_handle": "sys.catalog.assertions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Always-enforced executable, refined, table or cross-table proposition.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.AssertionRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "owner",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "owner_kind",
+          "type": "sys.AssertionOwnerKind"
+        },
+        {
+          "name": "subject_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "expression",
+          "type": "sys.ExpressionRef"
+        },
+        {
+          "name": "dependencies",
+          "type": "Relation<sys.Dependency>"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "source_order",
+          "type": "Int"
+        },
+        {
+          "name": "scope",
+          "type": "sys.AssertionScope"
+        },
+        {
+          "name": "deterministic",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.AssertionRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Reference",
+      "grouped_handle": "sys.catalog.references",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "from_column",
+      "purpose": "Stored table-reference edge.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ReferenceRef"
+        },
+        {
+          "name": "from_table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "from_column",
+          "type": "sys.ColumnRef"
+        },
+        {
+          "name": "to_table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "to_key",
+          "type": "sys.KeyRef"
+        },
+        {
+          "name": "optional",
+          "type": "Bool"
+        },
+        {
+          "name": "on_delete",
+          "type": "sys.ReferenceAction"
+        },
+        {
+          "name": "on_rekey",
+          "type": "sys.ReferenceAction"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ReferenceRef",
+      "key_fields": [
+        "from_column"
+      ]
+    },
+    {
+      "name": "sys.Page",
+      "grouped_handle": "sys.catalog.pages",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "function",
+      "purpose": "Function-derived page entry metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.PageRef"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "path",
+          "type": "Str"
+        },
+        {
+          "name": "dependencies",
+          "type": "Relation<sys.Dependency>"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.PageRef",
+      "key_fields": [
+        "function"
+      ]
+    },
+    {
+      "name": "sys.Dimension",
+      "grouped_handle": "sys.catalog.dimensions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Reduced physical dimension declaration.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DimensionRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "exponents",
+          "type": "sys.Value"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DimensionRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Unit",
+      "grouped_handle": "sys.catalog.units",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Unit scale/offset and dimension.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.UnitRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "dimension",
+          "type": "sys.DimensionRef"
+        },
+        {
+          "name": "scale",
+          "type": "Decimal"
+        },
+        {
+          "name": "offset",
+          "type": "Decimal"
+        },
+        {
+          "name": "affine",
+          "type": "Bool"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.UnitRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Currency",
+      "grouped_handle": "sys.catalog.currencies",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "type",
+      "purpose": "Nominal type implementing Currency.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.CurrencyRef"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "code",
+          "type": "Str"
+        },
+        {
+          "name": "minor_digits",
+          "type": "Int"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.CurrencyRef",
+      "key_fields": [
+        "type"
+      ]
+    },
+    {
+      "name": "sys.SecretRequirement",
+      "grouped_handle": "sys.catalog.secret_requirements",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Declared secret dependency without plaintext.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SecretRequirementRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "required_by",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "optional",
+          "type": "Bool"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SecretRequirementRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Extension",
+      "grouped_handle": "sys.catalog.extensions",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Extension component interface and coarse trust declaration.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ExtensionRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "component_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "interface",
+          "type": "Str"
+        },
+        {
+          "name": "declared_imports",
+          "type": "[Str]"
+        },
+        {
+          "name": "declared_exports",
+          "type": "[Str]"
+        },
+        {
+          "name": "host_access",
+          "type": "[sys.HostAccess]"
+        },
+        {
+          "name": "trust",
+          "type": "sys.ExtensionTrust"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ExtensionRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Dependency",
+      "grouped_handle": "sys.catalog.dependencies",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "from + to + kind + span",
+      "purpose": "Typed semantic dependency edge.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DependencyRef"
+        },
+        {
+          "name": "from",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "to",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.DependencyKind"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan?"
+        },
+        {
+          "name": "confidence",
+          "type": "sys.DependencyConfidence"
+        },
+        {
+          "name": "conditional",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DependencyRef",
+      "key_fields": [
+        "from",
+        "to",
+        "kind",
+        "span"
+      ]
+    },
+    {
+      "name": "sys.Diagnostic",
+      "grouped_handle": "sys.rt.diagnostics",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Structured diagnostic independent of renderer.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DiagnosticRef"
+        },
+        {
+          "name": "id",
+          "type": "Str"
+        },
+        {
+          "name": "severity",
+          "type": "sys.Severity"
+        },
+        {
+          "name": "code",
+          "type": "Str"
+        },
+        {
+          "name": "message",
+          "type": "Str"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        },
+        {
+          "name": "primary_span",
+          "type": "sys.SourceSpan?"
+        },
+        {
+          "name": "labels",
+          "type": "[sys.DiagnosticLabel]"
+        },
+        {
+          "name": "causes",
+          "type": "[sys.Diagnostic]"
+        },
+        {
+          "name": "help",
+          "type": "[Str]"
+        },
+        {
+          "name": "data",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DiagnosticRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Snapshot",
+      "grouped_handle": "sys.history.snapshots",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Committed, logical-CWD or synthetic database snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.SnapshotId"
+        },
+        {
+          "name": "kind",
+          "type": "sys.SnapshotKind"
+        },
+        {
+          "name": "database",
+          "type": "sys.DatabaseRef"
+        },
+        {
+          "name": "git_commit",
+          "type": "sys.CommitRef?"
+        },
+        {
+          "name": "logical_generation",
+          "type": "Int?"
+        },
+        {
+          "name": "created",
+          "type": "Instant"
+        },
+        {
+          "name": "parents",
+          "type": "Relation<sys.Snapshot>"
+        },
+        {
+          "name": "complete",
+          "type": "Bool"
+        },
+        {
+          "name": "missing_objects",
+          "type": "Relation<sys.GitObject>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SnapshotRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.SnapshotObject",
+      "grouped_handle": "sys.history.snapshot_objects",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "snapshot + object",
+      "purpose": "Object revision membership in a snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SnapshotObjectRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "revision",
+          "type": "sys.RevisionRef"
+        },
+        {
+          "name": "reachable",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SnapshotObjectRef",
+      "key_fields": [
+        "snapshot",
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Change",
+      "grouped_handle": "sys.history.changes",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "snapshot + area + target",
+      "purpose": "Semantic/source/row change entry.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ChangeRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "target",
+          "type": "sys.ChangeTarget"
+        },
+        {
+          "name": "area",
+          "type": "sys.ChangeArea"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ChangeKind"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileRef?"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef?"
+        },
+        {
+          "name": "key",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "before",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "after",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "old_name",
+          "type": "Str?"
+        },
+        {
+          "name": "new_name",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ChangeRef",
+      "key_fields": [
+        "snapshot",
+        "area",
+        "target"
+      ],
+      "invariants": [
+        "object/file/table/key projections agree exactly with target discriminator",
+        "snapshot identifies the compared result generation",
+        "one consolidated change per snapshot, area and typed target"
+      ]
+    },
+    {
+      "name": "sys.DiffEntry",
+      "grouped_handle": "sys.history.diffs",
+      "kind": "relation",
+      "availability": "derived",
+      "key": "from + to + change.area + change.target",
+      "purpose": "Snapshot-to-snapshot semantic diff entry.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.DiffEntryRef"
+        },
+        {
+          "name": "from",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "to",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "change",
+          "type": "sys.Change"
+        },
+        {
+          "name": "confidence",
+          "type": "sys.DependencyConfidence"
+        },
+        {
+          "name": "details",
+          "type": "sys.Value?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.DiffEntryRef",
+      "key_fields": [
+        "from",
+        "to",
+        "change.area",
+        "change.target"
+      ]
+    },
+    {
+      "name": "sys.FileVersion",
+      "grouped_handle": "sys.history.file_versions",
+      "kind": "relation",
+      "availability": "derived",
+      "key": "file + snapshot",
+      "purpose": "One retained version of a repository file at a snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.FileVersionRef"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "path",
+          "type": "Path"
+        },
+        {
+          "name": "kind",
+          "type": "sys.FileKind"
+        },
+        {
+          "name": "git_object",
+          "type": "sys.GitObjectRef?"
+        },
+        {
+          "name": "exact_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "size",
+          "type": "Int"
+        },
+        {
+          "name": "change",
+          "type": "sys.ChangeKind?"
+        },
+        {
+          "name": "text_available",
+          "type": "Bool"
+        },
+        {
+          "name": "generated",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.FileVersionRef",
+      "key_fields": [
+        "file",
+        "snapshot"
+      ]
+    },
+    {
+      "name": "sys.GitRepository",
+      "grouped_handle": "sys.git.repositories",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "database",
+      "purpose": "Underlying real Git repository metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.GitRepositoryRef"
+        },
+        {
+          "name": "database",
+          "type": "sys.DatabaseRef"
+        },
+        {
+          "name": "git_dir",
+          "type": "Path"
+        },
+        {
+          "name": "worktree",
+          "type": "Path?"
+        },
+        {
+          "name": "bare",
+          "type": "Bool"
+        },
+        {
+          "name": "object_format",
+          "type": "Str"
+        },
+        {
+          "name": "partial_clone",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.GitRepositoryRef",
+      "key_fields": [
+        "database"
+      ]
+    },
+    {
+      "name": "sys.Commit",
+      "grouped_handle": "sys.git.commits",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "oid",
+      "purpose": "Git commit and corresponding Orna snapshot.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.CommitRef"
+        },
+        {
+          "name": "oid",
+          "type": "sys.GitOid"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "parents",
+          "type": "Relation<sys.Commit>"
+        },
+        {
+          "name": "author",
+          "type": "sys.PersonIdentity"
+        },
+        {
+          "name": "committer",
+          "type": "sys.PersonIdentity"
+        },
+        {
+          "name": "message",
+          "type": "Str"
+        },
+        {
+          "name": "authored_at",
+          "type": "Instant"
+        },
+        {
+          "name": "committed_at",
+          "type": "Instant"
+        },
+        {
+          "name": "tree",
+          "type": "sys.GitObjectRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.CommitRef",
+      "key_fields": [
+        "oid"
+      ]
+    },
+    {
+      "name": "sys.TreeEntry",
+      "grouped_handle": "sys.git.tree_entries",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "tree + path",
+      "purpose": "Git tree entry.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TreeEntryRef"
+        },
+        {
+          "name": "tree",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "path",
+          "type": "Path"
+        },
+        {
+          "name": "mode",
+          "type": "Int"
+        },
+        {
+          "name": "object",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.GitObjectKind"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TreeEntryRef",
+      "key_fields": [
+        "tree",
+        "path"
+      ]
+    },
+    {
+      "name": "sys.Ref",
+      "grouped_handle": "sys.git.refs",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "name",
+      "purpose": "Git ref, including hidden Orna refs.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.RefRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "target",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "symbolic_target",
+          "type": "Str?"
+        },
+        {
+          "name": "hidden",
+          "type": "Bool"
+        },
+        {
+          "name": "remote",
+          "type": "sys.RemoteRef?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.RefRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Branch",
+      "grouped_handle": "sys.git.branches",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "name",
+      "purpose": "Local/remote branch projection.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.BranchRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "commit",
+          "type": "sys.CommitRef"
+        },
+        {
+          "name": "current",
+          "type": "Bool"
+        },
+        {
+          "name": "upstream",
+          "type": "sys.RefRef?"
+        },
+        {
+          "name": "ahead",
+          "type": "Int?"
+        },
+        {
+          "name": "behind",
+          "type": "Int?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.BranchRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Tag",
+      "grouped_handle": "sys.git.tags",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "name",
+      "purpose": "Git tag projection.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TagRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "object",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "annotated",
+          "type": "Bool"
+        },
+        {
+          "name": "message",
+          "type": "Str?"
+        },
+        {
+          "name": "tagger",
+          "type": "sys.PersonIdentity?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TagRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Remote",
+      "grouped_handle": "sys.git.remotes",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "name",
+      "purpose": "Git remote without plaintext credentials.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.RemoteRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "fetch_urls",
+          "type": "[Str]"
+        },
+        {
+          "name": "push_urls",
+          "type": "[Str]"
+        },
+        {
+          "name": "promisor",
+          "type": "Bool"
+        },
+        {
+          "name": "last_error",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.RemoteRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Stash",
+      "grouped_handle": "sys.git.stashes",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "index",
+      "purpose": "Git stash projection.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.StashRef"
+        },
+        {
+          "name": "index",
+          "type": "Int"
+        },
+        {
+          "name": "commit",
+          "type": "sys.CommitRef"
+        },
+        {
+          "name": "message",
+          "type": "Str"
+        },
+        {
+          "name": "created",
+          "type": "Instant?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.StashRef",
+      "key_fields": [
+        "index"
+      ]
+    },
+    {
+      "name": "sys.GitObject",
+      "grouped_handle": "sys.git.objects",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "oid",
+      "purpose": "Git object availability and type.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "oid",
+          "type": "sys.GitOid"
+        },
+        {
+          "name": "kind",
+          "type": "sys.GitObjectKind"
+        },
+        {
+          "name": "size",
+          "type": "Int?"
+        },
+        {
+          "name": "available_locally",
+          "type": "Bool"
+        },
+        {
+          "name": "promisor_remote",
+          "type": "sys.RemoteRef?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.GitObjectRef",
+      "key_fields": [
+        "oid"
+      ]
+    },
+    {
+      "name": "sys.WorktreeEntry",
+      "grouped_handle": "sys.git.worktree",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "path",
+      "purpose": "Physical Git worktree status, distinct from logical CWD state.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.WorktreeEntryRef"
+        },
+        {
+          "name": "path",
+          "type": "Path"
+        },
+        {
+          "name": "index_status",
+          "type": "sys.ChangeKind?"
+        },
+        {
+          "name": "worktree_status",
+          "type": "sys.ChangeKind?"
+        },
+        {
+          "name": "ignored",
+          "type": "Bool"
+        },
+        {
+          "name": "untracked",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.WorktreeEntryRef",
+      "key_fields": [
+        "path"
+      ]
+    },
+    {
+      "name": "sys.Query",
+      "grouped_handle": "sys.rt.queries",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Query execution observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.QueryRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.QueryId"
+        },
+        {
+          "name": "expression",
+          "type": "Str?"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef?"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.InvocationStatus"
+        },
+        {
+          "name": "rows",
+          "type": "Int?"
+        },
+        {
+          "name": "bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "duration",
+          "type": "Duration?"
+        },
+        {
+          "name": "plan",
+          "type": "sys.PlanRef?"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef?"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.QueryRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Plan",
+      "grouped_handle": "sys.rt.plans",
+      "kind": "relation",
+      "availability": "derived",
+      "key": "id",
+      "purpose": "Structured explain plan.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.PlanRef"
+        },
+        {
+          "name": "id",
+          "type": "Str"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "root",
+          "type": "sys.PlanNodeRef"
+        },
+        {
+          "name": "estimated_cost",
+          "type": "Decimal?"
+        },
+        {
+          "name": "actual_available",
+          "type": "Bool"
+        },
+        {
+          "name": "warnings",
+          "type": "[sys.Diagnostic]"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.PlanRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.PlanNode",
+      "grouped_handle": "sys.rt.plan_nodes",
+      "kind": "relation",
+      "availability": "derived",
+      "key": "plan + position",
+      "purpose": "One structured plan operation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.PlanNodeRef"
+        },
+        {
+          "name": "plan",
+          "type": "sys.PlanRef"
+        },
+        {
+          "name": "parent",
+          "type": "sys.PlanNodeRef?"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "kind",
+          "type": "sys.PlanNodeKind"
+        },
+        {
+          "name": "inputs",
+          "type": "Relation<sys.PlanNode>"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "estimated_rows",
+          "type": "Int?"
+        },
+        {
+          "name": "actual_rows",
+          "type": "Int?"
+        },
+        {
+          "name": "estimated_bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "actual_bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "predicate",
+          "type": "sys.ExpressionRef?"
+        },
+        {
+          "name": "details",
+          "type": "sys.Value"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.PlanNodeRef",
+      "key_fields": [
+        "plan",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.Invocation",
+      "grouped_handle": "sys.rt.invocations",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Function activation/invocation observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.InvocationId"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "parent",
+          "type": "sys.InvocationRef?"
+        },
+        {
+          "name": "run",
+          "type": "sys.RunRef?"
+        },
+        {
+          "name": "owner_session",
+          "type": "sys.SessionRef?"
+        },
+        {
+          "name": "transaction",
+          "type": "sys.TransactionRef?"
+        },
+        {
+          "name": "arguments",
+          "type": "Relation<sys.InvocationArgument>"
+        },
+        {
+          "name": "started",
+          "type": "Instant?"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.InvocationStatus"
+        },
+        {
+          "name": "result_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef?"
+        },
+        {
+          "name": "idempotency_key_hash",
+          "type": "Digest?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.InvocationRef",
+      "invariants": [
+        "exactly one launch owner: parent invocation or owner_session, except a top-level command run",
+        "ordinary function calls do not detach ownership",
+        "terminal state is published only after all children terminate and resources are released"
+      ],
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.InvocationArgument",
+      "grouped_handle": "sys.rt.invocation_arguments",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "invocation + position",
+      "purpose": "Redaction-safe invocation argument metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.InvocationArgumentRef"
+        },
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "Int"
+        },
+        {
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "value",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "digest",
+          "type": "Digest?"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.InvocationArgumentRef",
+      "key_fields": [
+        "invocation",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.Run",
+      "grouped_handle": "sys.rt.runs",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Top-level durable program-run observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.RunRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.RunId"
+        },
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "function",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str?"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status_at_snapshot",
+          "type": "sys.RunStatus"
+        },
+        {
+          "name": "observed_at",
+          "type": "Instant"
+        },
+        {
+          "name": "runtime_id",
+          "type": "sys.RuntimeId?"
+        },
+        {
+          "name": "live",
+          "type": "Bool"
+        },
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "checkpoint_count",
+          "type": "Int"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.RunRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Transaction",
+      "grouped_handle": "sys.rt.transactions",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "id",
+      "purpose": "Orna transaction observation and atomic write/checkpoint set.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TransactionRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.TransactionId"
+        },
+        {
+          "name": "activation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.TransactionStatus"
+        },
+        {
+          "name": "writes",
+          "type": "Relation<sys.Change>"
+        },
+        {
+          "name": "checkpoint_updates",
+          "type": "Relation<sys.CheckpointUpdate>"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "rolled_back",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TransactionRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Trace",
+      "grouped_handle": "sys.rt.traces",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Bounded structured trace.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TraceRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.TraceId"
+        },
+        {
+          "name": "root_invocation",
+          "type": "sys.InvocationRef"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "sampled",
+          "type": "Bool"
+        },
+        {
+          "name": "spans",
+          "type": "Relation<sys.Span>"
+        },
+        {
+          "name": "detail_available",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TraceRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Span",
+      "grouped_handle": "sys.rt.spans",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Nested trace span.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SpanRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.SpanId"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef"
+        },
+        {
+          "name": "parent",
+          "type": "sys.SpanRef?"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef?"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.InvocationStatus"
+        },
+        {
+          "name": "attributes",
+          "type": "sys.Value"
+        },
+        {
+          "name": "events",
+          "type": "Relation<sys.TraceEvent>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SpanRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.TraceEvent",
+      "grouped_handle": "sys.rt.events",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "span + sequence",
+      "purpose": "Trace event with redaction-safe attributes.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TraceEventRef"
+        },
+        {
+          "name": "span",
+          "type": "sys.SpanRef"
+        },
+        {
+          "name": "sequence",
+          "type": "Int"
+        },
+        {
+          "name": "time",
+          "type": "Instant"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "attributes",
+          "type": "sys.Value"
+        },
+        {
+          "name": "diagnostic",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TraceEventRef",
+      "key_fields": [
+        "span",
+        "sequence"
+      ]
+    },
+    {
+      "name": "sys.Stream",
+      "grouped_handle": "sys.rt.streams",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "run + source_identity + partition",
+      "purpose": "Finite/unbounded stream execution observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.StreamRef"
+        },
+        {
+          "name": "run",
+          "type": "sys.RunRef"
+        },
+        {
+          "name": "producer",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "consumer",
+          "type": "sys.FunctionRef?"
+        },
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str"
+        },
+        {
+          "name": "partition",
+          "type": "Str?"
+        },
+        {
+          "name": "status_at_snapshot",
+          "type": "sys.StreamStatus"
+        },
+        {
+          "name": "items_seen",
+          "type": "Int"
+        },
+        {
+          "name": "items_committed",
+          "type": "Int"
+        },
+        {
+          "name": "items_failed",
+          "type": "Int"
+        },
+        {
+          "name": "checkpoint",
+          "type": "sys.CheckpointRef?"
+        },
+        {
+          "name": "last_item_at",
+          "type": "Instant?"
+        },
+        {
+          "name": "last_failure",
+          "type": "sys.FailureRef?"
+        },
+        {
+          "name": "last_diagnostic",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "observed_at",
+          "type": "Instant"
+        },
+        {
+          "name": "live",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.StreamRef",
+      "key_fields": [
+        "run",
+        "source_identity",
+        "partition"
+      ]
+    },
+    {
+      "name": "sys.Checkpoint",
+      "grouped_handle": "sys.rt.checkpoints",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "consumer_identity + source_identity + partition",
+      "purpose": "Durable resumable consumer progress.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.CheckpointRef"
+        },
+        {
+          "name": "consumer",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str"
+        },
+        {
+          "name": "partition",
+          "type": "Str?"
+        },
+        {
+          "name": "position",
+          "type": "sys.CheckpointPosition"
+        },
+        {
+          "name": "position_format",
+          "type": "Str"
+        },
+        {
+          "name": "version",
+          "type": "sys.CheckpointVersion"
+        },
+        {
+          "name": "replayable",
+          "type": "Bool"
+        },
+        {
+          "name": "updated",
+          "type": "Instant"
+        },
+        {
+          "name": "published_snapshot",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "last_transaction",
+          "type": "sys.TransactionRef"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.CheckpointRef",
+      "key_fields": [
+        "consumer_identity",
+        "source_identity",
+        "partition"
+      ]
+    },
+    {
+      "name": "sys.CheckpointUpdate",
+      "grouped_handle": "sys.rt.checkpoint_updates",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "transaction + checkpoint",
+      "purpose": "Atomic checkpoint compare-and-set update.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.CheckpointUpdateRef"
+        },
+        {
+          "name": "transaction",
+          "type": "sys.TransactionRef"
+        },
+        {
+          "name": "checkpoint",
+          "type": "sys.CheckpointRef"
+        },
+        {
+          "name": "expected_version",
+          "type": "sys.CheckpointVersion"
+        },
+        {
+          "name": "before",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "after",
+          "type": "sys.CheckpointPosition"
+        },
+        {
+          "name": "committed",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.CheckpointUpdateRef",
+      "key_fields": [
+        "transaction",
+        "checkpoint"
+      ]
+    },
+    {
+      "name": "sys.Failure",
+      "grouped_handle": "sys.rt.failures",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "consumer_identity + source_identity + partition + position_format + position",
+      "purpose": "One durable blocked or preserved delivery; repeated attempts update this record.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.FailureRef"
+        },
+        {
+          "name": "consumer",
+          "type": "sys.FunctionRef"
+        },
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str"
+        },
+        {
+          "name": "partition",
+          "type": "Str?"
+        },
+        {
+          "name": "position_format",
+          "type": "Str"
+        },
+        {
+          "name": "position",
+          "type": "sys.CheckpointPosition"
+        },
+        {
+          "name": "position_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "version",
+          "type": "sys.FailureVersion"
+        },
+        {
+          "name": "attempt_count",
+          "type": "Int"
+        },
+        {
+          "name": "last_attempt_at",
+          "type": "Instant?"
+        },
+        {
+          "name": "payload",
+          "type": "Blob?"
+        },
+        {
+          "name": "payload_reference",
+          "type": "Str?"
+        },
+        {
+          "name": "payload_digest",
+          "type": "Digest?"
+        },
+        {
+          "name": "error",
+          "type": "sys.Diagnostic"
+        },
+        {
+          "name": "created",
+          "type": "Instant"
+        },
+        {
+          "name": "status",
+          "type": "sys.FailureStatus"
+        },
+        {
+          "name": "status_changed",
+          "type": "Instant"
+        },
+        {
+          "name": "reason",
+          "type": "Str?"
+        },
+        {
+          "name": "replayed_at",
+          "type": "Instant?"
+        },
+        {
+          "name": "replacement_invocation",
+          "type": "sys.InvocationRef?"
+        },
+        {
+          "name": "checkpoint_before",
+          "type": "sys.CheckpointPosition"
+        },
+        {
+          "name": "checkpoint_after",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "checkpoint_version_before",
+          "type": "sys.CheckpointVersion"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.FailureRef",
+      "invariants": [
+        "attempt_count starts at one after the first failure and is monotonic",
+        "version changes on every committed state transition",
+        "position digest accelerates lookup but does not substitute for canonical position equality",
+        "retry failure updates this record without creating a successor record",
+        "only one retry or replay may hold this delivery lease",
+        "payload is redacted unless the explicit privileged payload-access boundary permits disclosure"
+      ],
+      "key_fields": [
+        "consumer_identity",
+        "source_identity",
+        "partition",
+        "position_format",
+        "position"
+      ]
+    },
+    {
+      "name": "sys.Session",
+      "grouped_handle": "sys.rt.sessions",
+      "kind": "relation",
+      "availability": "live",
+      "key": "id",
+      "purpose": "Interactive/page session.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SessionRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.SessionId"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "last_seen",
+          "type": "Instant"
+        },
+        {
+          "name": "client",
+          "type": "sys.ClientRef?"
+        },
+        {
+          "name": "locale",
+          "type": "Locale"
+        },
+        {
+          "name": "timezone",
+          "type": "TimeZone"
+        },
+        {
+          "name": "renderer",
+          "type": "Str?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SessionRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Client",
+      "grouped_handle": "sys.rt.clients",
+      "kind": "relation",
+      "availability": "live",
+      "key": "id",
+      "purpose": "Attached CLI/REPL/server/renderer client.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ClientRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.ClientId"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ClientKind"
+        },
+        {
+          "name": "connected",
+          "type": "Instant"
+        },
+        {
+          "name": "last_seen",
+          "type": "Instant"
+        },
+        {
+          "name": "protocol_version",
+          "type": "Str?"
+        },
+        {
+          "name": "remote",
+          "type": "Str?"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ClientRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Lease",
+      "grouped_handle": "sys.rt.leases",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "name",
+      "purpose": "Local owner/consumer coordination lease.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.LeaseRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "holder",
+          "type": "sys.RuntimeId"
+        },
+        {
+          "name": "status",
+          "type": "sys.LeaseStatus"
+        },
+        {
+          "name": "acquired",
+          "type": "Instant"
+        },
+        {
+          "name": "expires",
+          "type": "Instant?"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.LeaseRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Listener",
+      "grouped_handle": "sys.rt.listeners",
+      "kind": "relation",
+      "availability": "live",
+      "key": "id",
+      "purpose": "Optional network listener owned by the current runtime.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.ListenerRef"
+        },
+        {
+          "name": "id",
+          "type": "Str"
+        },
+        {
+          "name": "kind",
+          "type": "sys.ListenerKind"
+        },
+        {
+          "name": "address",
+          "type": "Str"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "clients",
+          "type": "Int"
+        },
+        {
+          "name": "tls",
+          "type": "Bool"
+        },
+        {
+          "name": "authenticated",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.ListenerRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Storage",
+      "grouped_handle": "sys.storage.objects",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "object",
+      "purpose": "Logical object's physical storage status.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.StorageRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "profile",
+          "type": "sys.StorageProfile"
+        },
+        {
+          "name": "preference",
+          "type": "sys.StoragePreference"
+        },
+        {
+          "name": "rows",
+          "type": "Int?"
+        },
+        {
+          "name": "rows_exact",
+          "type": "Bool"
+        },
+        {
+          "name": "bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "pending_rows",
+          "type": "Int"
+        },
+        {
+          "name": "pending_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "compression",
+          "type": "Str?"
+        },
+        {
+          "name": "logical_generation",
+          "type": "Int"
+        },
+        {
+          "name": "last_publication",
+          "type": "Instant?"
+        },
+        {
+          "name": "last_snapshot",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "location",
+          "type": "Path?"
+        },
+        {
+          "name": "publication_policy",
+          "type": "sys.Value"
+        },
+        {
+          "name": "verification",
+          "type": "sys.VerificationStatus"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.StorageRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Segment",
+      "grouped_handle": "sys.storage.segments",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "id",
+      "purpose": "Immutable compact table segment.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SegmentRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.SegmentId"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "git_object",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "content_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "schema_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "min_key",
+          "type": "sys.Value"
+        },
+        {
+          "name": "max_key",
+          "type": "sys.Value"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "bytes",
+          "type": "Int"
+        },
+        {
+          "name": "statistics",
+          "type": "Relation<sys.Statistic>"
+        },
+        {
+          "name": "available_locally",
+          "type": "Bool"
+        },
+        {
+          "name": "promisor_remote",
+          "type": "sys.RemoteRef?"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SegmentRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Statistic",
+      "grouped_handle": "sys.storage.statistics",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "segment + column + kind",
+      "purpose": "Segment statistics used for safe planning/pruning.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.StatisticRef"
+        },
+        {
+          "name": "segment",
+          "type": "sys.SegmentRef"
+        },
+        {
+          "name": "column",
+          "type": "sys.ColumnRef"
+        },
+        {
+          "name": "kind",
+          "type": "sys.StatisticKind"
+        },
+        {
+          "name": "value",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "exact",
+          "type": "Bool"
+        },
+        {
+          "name": "valid",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.StatisticRef",
+      "key_fields": [
+        "segment",
+        "column",
+        "kind"
+      ]
+    },
+    {
+      "name": "sys.Index",
+      "grouped_handle": "sys.storage.indexes",
+      "kind": "relation",
+      "availability": "catalogue",
+      "key": "object",
+      "purpose": "Logical/physical index metadata.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.IndexRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "columns",
+          "type": "Relation<sys.Column>"
+        },
+        {
+          "name": "kind",
+          "type": "sys.IndexKind"
+        },
+        {
+          "name": "unique",
+          "type": "Bool"
+        },
+        {
+          "name": "materialized",
+          "type": "Bool"
+        },
+        {
+          "name": "valid",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.IndexRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Materialization",
+      "grouped_handle": "sys.storage.materializations",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "object + snapshot",
+      "purpose": "Cached/materialized function/query result.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.MaterializationRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "digest",
+          "type": "Digest"
+        },
+        {
+          "name": "rows",
+          "type": "Int?"
+        },
+        {
+          "name": "bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "created",
+          "type": "Instant"
+        },
+        {
+          "name": "valid",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.MaterializationRef",
+      "key_fields": [
+        "object",
+        "snapshot"
+      ]
+    },
+    {
+      "name": "sys.Allocator",
+      "grouped_handle": "sys.storage.allocators",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "table",
+      "purpose": "Automatic-key allocator state.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.AllocatorRef"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "strategy",
+          "type": "Str"
+        },
+        {
+          "name": "state",
+          "type": "sys.Value"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "updated",
+          "type": "Instant"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.AllocatorRef",
+      "key_fields": [
+        "table"
+      ]
+    },
+    {
+      "name": "sys.Hydration",
+      "grouped_handle": "sys.storage.hydrations",
+      "kind": "relation",
+      "availability": "live",
+      "key": "object",
+      "purpose": "Lazy-object hydration progress.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.HydrationRef"
+        },
+        {
+          "name": "object",
+          "type": "sys.GitObjectRef"
+        },
+        {
+          "name": "remote",
+          "type": "sys.RemoteRef?"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "bytes",
+          "type": "Int?"
+        },
+        {
+          "name": "status",
+          "type": "sys.BuildStatus"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.HydrationRef",
+      "key_fields": [
+        "object"
+      ]
+    },
+    {
+      "name": "sys.Compaction",
+      "grouped_handle": "sys.storage.compactions",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "id",
+      "purpose": "Atomic compact-segment rewrite.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.CompactionRef"
+        },
+        {
+          "name": "id",
+          "type": "Str"
+        },
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "input_segments",
+          "type": "Relation<sys.Segment>"
+        },
+        {
+          "name": "output_segments",
+          "type": "Relation<sys.Segment>"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.BuildStatus"
+        },
+        {
+          "name": "transaction",
+          "type": "sys.TransactionRef?"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.CompactionRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.MaintenanceJob",
+      "grouped_handle": "sys.storage.maintenance",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "id",
+      "purpose": "Verification/prune/flush/maintenance operation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.MaintenanceJobRef"
+        },
+        {
+          "name": "id",
+          "type": "Str"
+        },
+        {
+          "name": "kind",
+          "type": "sys.MaintenanceKind"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.BuildStatus"
+        },
+        {
+          "name": "progress",
+          "type": "Decimal?"
+        },
+        {
+          "name": "failure",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.MaintenanceJobRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.StorageFile",
+      "grouped_handle": "sys.storage.files",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "path",
+      "purpose": "Local runtime/storage file projection.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.StorageFileRef"
+        },
+        {
+          "name": "path",
+          "type": "Path"
+        },
+        {
+          "name": "kind",
+          "type": "sys.StorageFileKind"
+        },
+        {
+          "name": "bytes",
+          "type": "Int"
+        },
+        {
+          "name": "digest",
+          "type": "Digest?"
+        },
+        {
+          "name": "required",
+          "type": "Bool"
+        },
+        {
+          "name": "available",
+          "type": "Bool"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.StorageFileRef",
+      "key_fields": [
+        "path"
+      ]
+    },
+    {
+      "name": "sys.Secret",
+      "grouped_handle": "sys.catalog.secrets",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "name",
+      "purpose": "Secret availability metadata without plaintext.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SecretRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "available",
+          "type": "Bool"
+        },
+        {
+          "name": "provider",
+          "type": "Str"
+        },
+        {
+          "name": "encrypted_file",
+          "type": "sys.FileRef?"
+        },
+        {
+          "name": "recipients",
+          "type": "[Str]"
+        },
+        {
+          "name": "required_by",
+          "type": "Relation<sys.Object>"
+        },
+        {
+          "name": "last_error",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SecretRef",
+      "key_fields": [
+        "name"
+      ]
+    },
+    {
+      "name": "sys.Setting",
+      "grouped_handle": "sys.catalog.settings",
+      "kind": "relation",
+      "availability": "local-durable",
+      "key": "name + scope",
+      "purpose": "Effective configuration with explicit redaction.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.SettingRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "value",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        },
+        {
+          "name": "source",
+          "type": "sys.SettingSource"
+        },
+        {
+          "name": "scope",
+          "type": "sys.SettingScope"
+        },
+        {
+          "name": "effective_at",
+          "type": "sys.SnapshotRef?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.SettingRef",
+      "key_fields": [
+        "name",
+        "scope"
+      ]
+    },
+    {
+      "name": "sys.Build",
+      "grouped_handle": "sys.build.builds",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "id",
+      "purpose": "Reproducible build observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.BuildRef"
+        },
+        {
+          "name": "id",
+          "type": "sys.BuildId"
+        },
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "compiler",
+          "type": "Str"
+        },
+        {
+          "name": "compatibility",
+          "type": "sys.CompatibilityInfo"
+        },
+        {
+          "name": "package_lock_digest",
+          "type": "Digest?"
+        },
+        {
+          "name": "artifact_digest",
+          "type": "Digest?"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "status",
+          "type": "sys.BuildStatus"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Relation<sys.Diagnostic>"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.BuildRef",
+      "key_fields": [
+        "id"
+      ]
+    },
+    {
+      "name": "sys.Test",
+      "grouped_handle": "sys.build.tests",
+      "kind": "relation",
+      "availability": "durable-observation",
+      "key": "build + name",
+      "purpose": "Test execution observation.",
+      "fields": [
+        {
+          "name": "reference",
+          "type": "sys.TestRef"
+        },
+        {
+          "name": "build",
+          "type": "sys.BuildRef"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "status",
+          "type": "sys.TestStatus"
+        },
+        {
+          "name": "started",
+          "type": "Instant?"
+        },
+        {
+          "name": "ended",
+          "type": "Instant?"
+        },
+        {
+          "name": "duration",
+          "type": "Duration?"
+        },
+        {
+          "name": "diagnostic",
+          "type": "sys.Diagnostic?"
+        }
+      ],
+      "writable": false,
+      "reference_type": "sys.TestRef",
+      "key_fields": [
+        "build",
+        "name"
+      ]
+    }
+  ],
+  "functions": [
+    {
+      "name": "sys.meta",
+      "effect": "read",
+      "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+      "purpose": "Return safe static/nominal/codec/protocol metadata for a value."
+    },
+    {
+      "name": "sys.object",
+      "effect": "read",
+      "signature": "fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef",
+      "purpose": "Look up a stable object at a snapshot."
+    },
+    {
+      "name": "sys.resolve",
+      "effect": "read",
+      "signature": "fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef",
+      "purpose": "Resolve a semantic name with ordinary visibility/import rules."
+    },
+    {
+      "name": "sys.resolve_function",
+      "effect": "read",
+      "signature": "fn sys.resolve_function(name: Str, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.FunctionRef",
+      "purpose": "Resolve a function reference."
+    },
+    {
+      "name": "sys.describe",
+      "effect": "read",
+      "signature": "fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription",
+      "purpose": "Return structured object description."
+    },
+    {
+      "name": "sys.source(ObjectRef)",
+      "effect": "read",
+      "signature": "fn sys.source(object: sys.ObjectRef): sys.SourceDocument",
+      "purpose": "Return retained exact source/source maps for an object subject to redaction."
+    },
+    {
+      "name": "sys.source(FileRef)",
+      "effect": "read",
+      "signature": "fn sys.source(file: sys.FileRef): sys.SourceDocument",
+      "purpose": "Return retained exact source/source maps for a file subject to redaction."
+    },
+    {
+      "name": "sys.history(ObjectRef)",
+      "effect": "read",
+      "signature": "fn sys.history(object: sys.ObjectRef): Relation<sys.Revision>",
+      "purpose": "Return stable semantic-object revision history."
+    },
+    {
+      "name": "sys.history(FileRef)",
+      "effect": "read",
+      "signature": "fn sys.history(file: sys.FileRef): Relation<sys.FileVersion>",
+      "purpose": "Return retained versions of one repository file."
+    },
+    {
+      "name": "sys.blame(FileRef)",
+      "effect": "read",
+      "signature": "fn sys.blame(target: sys.FileRef): Relation<sys.Attribution>",
+      "purpose": "Return source attribution."
+    },
+    {
+      "name": "sys.blame(RowRef)",
+      "effect": "read",
+      "signature": "fn sys.blame<T>(target: sys.RowRef<T>): Relation<sys.Attribution>",
+      "purpose": "Return semantic row/field attribution."
+    },
+    {
+      "name": "sys.dependencies",
+      "effect": "read",
+      "signature": "fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+      "purpose": "Traverse outgoing dependency edges."
+    },
+    {
+      "name": "sys.dependents",
+      "effect": "read",
+      "signature": "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+      "purpose": "Traverse incoming dependency edges."
+    },
+    {
+      "name": "sys.snapshot(SnapshotRef)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: sys.SnapshotRef = sys.database.cwd): sys.SnapshotRef",
+      "purpose": "Return an already resolved snapshot reference."
+    },
+    {
+      "name": "sys.snapshot(CommitRef)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef",
+      "purpose": "Resolve a commit snapshot."
+    },
+    {
+      "name": "sys.snapshot(BranchRef)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: sys.BranchRef): sys.SnapshotRef",
+      "purpose": "Resolve the branch target observed by the reference."
+    },
+    {
+      "name": "sys.snapshot(TagRef)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: sys.TagRef): sys.SnapshotRef",
+      "purpose": "Resolve the peeled tag target."
+    },
+    {
+      "name": "sys.snapshot(GitOid)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: sys.GitOid): sys.SnapshotRef",
+      "purpose": "Resolve an exact Git object identifier."
+    },
+    {
+      "name": "sys.snapshot(Str)",
+      "effect": "read",
+      "signature": "fn sys.snapshot(reference: Str): sys.SnapshotRef",
+      "purpose": "Resolve a Git revision expression in the attached repository."
+    },
+    {
+      "name": "sys.diff",
+      "effect": "read",
+      "signature": "fn sys.diff(from: sys.SnapshotRef, to: sys.SnapshotRef, scope: sys.DiffScope = sys.DiffScope.all): Relation<sys.DiffEntry>",
+      "purpose": "Compute semantic/source/row diff."
+    },
+    {
+      "name": "sys.changes",
+      "effect": "read",
+      "signature": "fn sys.changes(snapshot: sys.SnapshotRef = sys.database.cwd, area: sys.ChangeArea? = null): Relation<sys.Change>",
+      "purpose": "Report changes represented by/relative to a state."
+    },
+    {
+      "name": "sys.explain(Query)",
+      "effect": "read",
+      "signature": "fn sys.explain<T>(query: Query<T>): sys.Plan",
+      "purpose": "Return structured query plan."
+    },
+    {
+      "name": "sys.explain(FunctionRef)",
+      "effect": "read",
+      "signature": "fn sys.explain(function: sys.FunctionRef): sys.Plan",
+      "purpose": "Return structured function/effect plan."
+    },
+    {
+      "name": "sys.explain(Diagnostic)",
+      "effect": "read",
+      "signature": "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
+      "purpose": "Return structured causal explanation."
+    },
+    {
+      "name": "sys.checkpoint",
+      "effect": "read",
+      "signature": "fn sys.checkpoint(consumer_identity: sys.ConsumerIdentity, source_identity: Str, partition: Str? = null): sys.Checkpoint?",
+      "purpose": "Read a checkpoint snapshot."
+    },
+    {
+      "name": "sys.render_diagnostic",
+      "effect": "read",
+      "signature": "fn sys.render_diagnostic(diagnostic: sys.Diagnostic, context: PresentContext = sys.current.present_context): PresentTree",
+      "purpose": "Render without altering structured diagnostic."
+    },
+    {
+      "name": "sys.rt.info",
+      "effect": "read",
+      "signature": "fn sys.rt.info(): sys.RuntimeInfo",
+      "purpose": "Return exact language/sys/storage/protocol compatibility coordinates."
+    },
+    {
+      "name": "sys.invoke(Value)",
+      "effect": "invoke",
+      "signature": "fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value",
+      "purpose": "Reflectively invoke and return an explicitly erased value envelope.",
+      "snapshot_rule": "An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."
+    },
+    {
+      "name": "sys.invoke<T>",
+      "effect": "invoke",
+      "signature": "fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T",
+      "purpose": "Reflectively invoke after validating the declared result against an explicit type witness.",
+      "snapshot_rule": "An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."
+    },
+    {
+      "name": "sys.start(Value)",
+      "effect": "invoke",
+      "signature": "fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>",
+      "purpose": "Start an awaitable invocation with an explicitly erased result.",
+      "snapshot_rule": "An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.",
+      "ownership": "Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted."
+    },
+    {
+      "name": "sys.start<T>",
+      "effect": "invoke",
+      "signature": "fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>",
+      "purpose": "Start an awaitable invocation after validating an explicit result type witness.",
+      "snapshot_rule": "An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.",
+      "ownership": "Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted."
+    },
+    {
+      "name": "sys.await",
+      "effect": "invoke",
+      "signature": "fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>",
+      "purpose": "Wait for a terminal result; timeout does not cancel."
+    },
+    {
+      "name": "sys.cancel",
+      "effect": "invoke",
+      "signature": "fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool",
+      "purpose": "Idempotently request invocation cancellation."
+    },
+    {
+      "name": "sys.admin.commit",
+      "effect": "admin",
+      "signature": "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+      "purpose": "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(SnapshotRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Validate and select an already resolved snapshot.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(CommitRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Validate and select a commit snapshot.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(BranchRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Validate and select a branch target.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(TagRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Validate and select a peeled tag target.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(GitOid)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Validate and select an exact Git object.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.checkout(Str)",
+      "effect": "admin",
+      "signature": "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+      "purpose": "Resolve, validate and select a Git revision expression.",
+      "preconditions": "Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(SnapshotRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
+      "purpose": "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(CommitRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
+      "purpose": "Create a Git branch at a commit.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(BranchRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
+      "purpose": "Create a Git branch at another branch target.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(TagRef)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
+      "purpose": "Create a Git branch at a peeled tag target.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(GitOid)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
+      "purpose": "Create a Git branch at an exact Git object.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.create_branch(Str)",
+      "effect": "admin",
+      "signature": "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
+      "purpose": "Resolve a Git revision expression and create a branch there.",
+      "preconditions": "Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.flush",
+      "effect": "admin",
+      "signature": "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
+      "purpose": "Durably seal pending rows without changing logical contents.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.compact",
+      "effect": "admin",
+      "signature": "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
+      "purpose": "Rewrite physical segments atomically.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.set_storage_preference",
+      "effect": "admin",
+      "signature": "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+      "purpose": "Set future automatic placement preference without rewriting existing rows.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.rewrite_storage",
+      "effect": "admin",
+      "signature": "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+      "purpose": "Atomically rewrite physical placement while preserving logical rows.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.verify",
+      "effect": "admin",
+      "signature": "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
+      "purpose": "Verify repository, metadata, storage and checkpoint invariants.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.cancel_run",
+      "effect": "admin",
+      "signature": "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
+      "purpose": "Cancel a durable program run.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.pause_stream",
+      "effect": "admin",
+      "signature": "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
+      "purpose": "Pause at an item/batch transaction boundary.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.resume_stream",
+      "effect": "admin",
+      "signature": "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
+      "purpose": "Resume a paused stream.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.reset_checkpoint",
+      "effect": "admin",
+      "signature": "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
+      "purpose": "Compare-and-set checkpoint reset.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.retry_failure",
+      "effect": "admin",
+      "signature": "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
+      "purpose": "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
+      "preconditions": "Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.skip_failure",
+      "effect": "admin",
+      "signature": "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
+      "purpose": "Atomically skip a supported failed position and move progress.",
+      "preconditions": "Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.replay_failure",
+      "effect": "admin",
+      "signature": "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
+      "purpose": "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
+      "preconditions": "Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.resolve_failure",
+      "effect": "admin",
+      "signature": "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
+      "purpose": "Resolve a preserved failure without marking its processing as successful.",
+      "preconditions": "Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.consumer_identity",
+      "effect": "read",
+      "signature": "fn sys.consumer_identity(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.ConsumerIdentity",
+      "purpose": "Derive durable consumer identity from database identity, stable function ObjectId and canonical typed arguments. Reject secret plaintext and unsupported argument values."
+    },
+    {
+      "name": "sys.admin.plan_checkout(SnapshotRef)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.plan_checkout(CommitRef)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.plan_checkout(BranchRef)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.plan_checkout(TagRef)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.plan_checkout(GitOid)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.plan_checkout(Str)",
+      "effect": "read",
+      "signature": "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
+      "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
+      "contract": "administrative-state-transitions"
+    }
+  ],
+  "failure_codes": [
+    "sys.version.incompatible",
+    "sys.context.repl_unavailable",
+    "sys.object.not_found",
+    "sys.object.ambiguous",
+    "sys.object.wrong_kind",
+    "sys.snapshot.not_found",
+    "sys.snapshot.incomplete",
+    "sys.source.unavailable",
+    "sys.source.redacted",
+    "sys.handle.foreign_runtime",
+    "sys.handle.expired",
+    "sys.invoke.argument_missing",
+    "sys.invoke.argument_unknown",
+    "sys.invoke.argument_type",
+    "sys.invoke.return_type",
+    "sys.invoke.effect_unavailable",
+    "sys.invoke.idempotency_mismatch",
+    "sys.invoke.await_timeout",
+    "sys.invoke.not_callable",
+    "sys.invoke.revision_unavailable",
+    "sys.checkpoint.not_found",
+    "sys.checkpoint.conflict",
+    "sys.checkpoint.not_replayable",
+    "sys.failure.state_conflict",
+    "sys.failure.skip_unsupported",
+    "sys.admin.read_only",
+    "sys.admin.busy",
+    "sys.admin.assertion_failed",
+    "sys.admin.missing_object",
+    "sys.admin.verification_failed",
+    "sys.storage.corrupt",
+    "sys.storage.unavailable",
+    "sys.storage.unrepresentable_key",
+    "sys.storage.rewrite_conflict",
+    "sys.redaction.denied",
+    "sys.invoke.snapshot_mismatch",
+    "sys.invoke.transaction_mode",
+    "sys.git.unborn_head",
+    "sys.git.uncommitted_snapshot",
+    "sys.git.dirty_conflict",
+    "sys.git.stale_plan",
+    "sys.failure.stale_version",
+    "sys.snapshot.expired",
+    "sys.git.invalid_ref",
+    "sys.git.branch_exists",
+    "sys.git.nothing_to_commit"
+  ],
+  "counts": {
+    "singletons": 4,
+    "opaque_identifiers": 21,
+    "reference_aliases": 78,
+    "value_types": 34,
+    "enums": 44,
+    "relations": 78,
+    "functions": 66,
+    "failure_codes": 46
+  },
+  "source_of_truth": "api/sys.json; normative semantics in source chapters and generated system reference"
+}
