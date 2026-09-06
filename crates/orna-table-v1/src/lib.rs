@@ -225,6 +225,14 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         self.source.max()
     }
 
+    /// Sums the relation using the element type's exact additive identity.
+    pub fn sum(self) -> Item
+    where
+        Item: std::iter::Sum<Item>,
+    {
+        self.source.sum()
+    }
+
     /// Returns whether every value satisfies the predicate, short-circuiting on false.
     pub fn every<P>(mut self, mut predicate: P) -> bool
     where
@@ -1435,5 +1443,11 @@ mod tests {
 
         assert_eq!(super::Relation::new(std::iter::empty::<u8>()).min(), None);
         assert_eq!(super::Relation::new(std::iter::empty::<u8>()).max(), None);
+    }
+
+    #[test]
+    fn relation_sum_uses_the_exact_element_identity_for_empty_input() {
+        assert_eq!(super::Relation::new([1_i64, 2, 3].into_iter()).sum(), 6);
+        assert_eq!(super::Relation::new(std::iter::empty::<i64>()).sum(), 0);
     }
 }
