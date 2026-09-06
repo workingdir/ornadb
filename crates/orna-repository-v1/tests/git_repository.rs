@@ -417,3 +417,46 @@ fn private_candidate_uses_head_and_preserves_ordinary_cwd_state() {
         head.as_str()
     );
 }
+
+#[test]
+fn private_candidate_advances_current_branch_with_compare_and_set() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "staged human edit\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged human edit\n").unwrap();
+
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                ManagedPath::new("generated/row.orna").unwrap(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    assert_eq!(repo.head().unwrap().unwrap(), *candidate.commit());
+    let index_after = repo.index_generation().unwrap();
+    assert_eq!(index_after.tree(), index_before.tree());
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged human edit"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged human edit\n"
+    );
+    let status = git(root.path(), &["status", "--short"]);
+    assert!(status.contains("ordinary.txt"));
+    assert!(status.contains("main.orna"));
+    assert!(status.contains("generated/row.orna"));
+    assert!(matches!(
+        repo.advance_current_ref(&head, &candidate),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+}
