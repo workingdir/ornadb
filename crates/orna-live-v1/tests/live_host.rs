@@ -1824,6 +1824,18 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         block_on(transport.receive(&mut socket, 2, &masked(true, 1, b"text"))),
         Err(Error::InvalidFrame)
     );
+    let close = block_on(transport.receive(&mut socket, 2, &masked(true, 8, b""))).unwrap();
+    assert_eq!(
+        close,
+        vec![
+            WebSocketOutput::Accepted(FrameOutcome::Closed),
+            WebSocketOutput::Close
+        ]
+    );
+    assert_eq!(
+        block_on(transport.receive(&mut socket, 2, &masked(true, 2, &message))),
+        Err(Error::Closed)
+    );
 }
 
 #[test]
