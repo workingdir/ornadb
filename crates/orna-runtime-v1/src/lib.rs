@@ -577,8 +577,14 @@ pub struct StreamMutationBatch {
     pub next_digest: [u8; 32],
 }
 
+pub struct StreamTableMutationBatch {
+    pub mutations: Vec<TableMutation>,
+    pub next_digest: [u8; 32],
+}
+
 pub enum StreamHandlerResult {
     Commit(StreamMutationBatch),
+    CommitTable(StreamTableMutationBatch),
     Fail(SafeDiagnostic),
     Cancelled,
 }
@@ -1444,6 +1450,34 @@ impl RuntimeState {
                     _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
                 }
             }
+            StreamHandlerResult::CommitTable(batch) => {
+                let capture = self.capture().await.map_err(StreamStepError::Runtime)?;
+                let faults = NoFault;
+                let lease_for_cleanup = lease.clone();
+                let result = self
+                    .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                        writer,
+                        expected_capture: &capture,
+                        mutations: &batch.mutations,
+                        next_digest: batch.next_digest,
+                        delivery: lease_for_cleanup.clone(),
+                        expected_stream: expected,
+                        faults: &faults,
+                    })
+                    .await
+                    .map_err(StreamStepError::Runtime)?
+                    .1;
+                match result {
+                    CommitResult::CheckpointAdvanced { checkpoint } => {
+                        Ok(StreamStep::Committed { checkpoint })
+                    }
+                    CommitResult::Rejected(reason) => {
+                        self.release_stream_lease(writer, lease_for_cleanup).await?;
+                        Ok(StreamStep::Rejected(reason))
+                    }
+                    _ => Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid)),
+                }
+            }
             StreamHandlerResult::Fail(diagnostic) => {
                 self.require_owner(&self.connection, writer)
                     .await
@@ -2209,6 +2243,25 @@ impl RuntimeState {
                 .await
                 .map(|(_, result)| result)
                 .map_err(StreamStepError::Runtime),
+            StreamHandlerResult::CommitTable(batch) => {
+                let mutations = batch
+                    .mutations
+                    .iter()
+                    .map(TableMutation::runtime_mutation)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(StreamStepError::Runtime)?;
+                self.commit_stream_replay(StreamReplayCommit {
+                    writer,
+                    expected_capture: &expected_capture,
+                    mutations: &mutations,
+                    next_digest: batch.next_digest,
+                    grant,
+                    faults: &NoFault,
+                })
+                .await
+                .map(|(_, result)| result)
+                .map_err(StreamStepError::Runtime)
+            }
             StreamHandlerResult::Fail(diagnostic) => self
                 .fail_stream_replay(writer, &grant, diagnostic)
                 .await
@@ -5188,6 +5241,20 @@ mod tests {
         }
     }
 
+    struct TableCommitHandler {
+        calls: usize,
+    }
+
+    impl StreamHandler for TableCommitHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+                mutations: vec![table_mutation(5, 1, Some(9))],
+                next_digest: digest(9),
+            })
+        }
+    }
+
     struct ReplayHandler {
         payload: Vec<u8>,
         result: Option<StreamHandlerResult>,
@@ -5540,6 +5607,48 @@ mod tests {
             }
         ));
         assert_eq!(handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_runner_routes_typed_table_delivery_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("typed:one", "typed:two");
+        let key = delivery.checkpoint_key();
+        let mut source = TestSource {
+            key: key.clone(),
+            item: Some(StreamItem {
+                delivery,
+                payload: vec![1, 2, 3],
+            }),
+            polls: 0,
+        };
+        let mut handler = TableCommitHandler { calls: 0 };
+
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(handler.calls, 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("typed delivery checkpoint")
+                .digest,
+            digest(9)
+        );
     }
 
     #[tokio::test]
