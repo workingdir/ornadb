@@ -2530,6 +2530,45 @@ impl LiveTransport {
         ))
     }
 
+    /// Drives one already-accepted TCP stream through the bounded HTTP
+    /// WebSocket upgrade and frame loop. The executable host retains bind,
+    /// accept, TLS, cancellation, attachment identity, and clock ownership;
+    /// this bridge only adapts the accepted socket to the transport's
+    /// byte-stream contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted socket-cloning, read, write, parser, framing,
+    /// protocol, or response-encoding error. This synchronous bridge blocks
+    /// the calling thread while the peer is connected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_accepted_websocket_socket<C, A>(
+        &mut self,
+        stream: std::net::TcpStream,
+        connection: &mut HttpConnection,
+        attachment: [u8; 16],
+        clock: &mut C,
+        application: &mut A,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        C: FnMut() -> u64,
+        A: LiveApplication,
+    {
+        let reader = stream.try_clone().map_err(|_| HttpIoError::Read)?;
+        let mut reader = AllowStdIo::new(reader);
+        let mut writer = AllowStdIo::new(stream);
+        let mut cancellation = std::future::pending::<()>();
+        block_on(self.serve_websocket_connection(
+            &mut reader,
+            &mut writer,
+            connection,
+            attachment,
+            clock,
+            &mut cancellation,
+            application,
+        ))
+    }
+
     /// Serves an injected HTTP byte stream with cancellation raced against
     /// every read, write, and flush. The cancellation future must wake the
     /// task when it becomes ready so a stalled peer cannot hold the task.
