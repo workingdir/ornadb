@@ -1516,9 +1516,11 @@ dependencies = [
  "orna-foundation-v1",
  "orna-project-v1",
  "orna-repository-v1",
+ "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-value-v1",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
