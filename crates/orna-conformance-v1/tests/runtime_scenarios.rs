@@ -333,12 +333,12 @@ fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner
             "PIPE-002",
             "TXN-001",
             "TXN-002",
+            "LIVE-003",
         ]
     );
     for scenario_id in [
         "LIVE-001",
         "LIVE-002",
-        "LIVE-003",
         "LIVE-004",
         "STREAM-001",
         "STREAM-002",
