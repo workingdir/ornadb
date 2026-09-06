@@ -1711,6 +1711,149 @@ pub struct WireResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpParseError {
+    Incomplete,
+    Limit,
+    Malformed,
+}
+
+impl core::fmt::Display for HttpParseError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::Incomplete => "HTTP request is incomplete",
+            Self::Limit => "HTTP request exceeds the configured limit",
+            Self::Malformed => "HTTP request is malformed",
+        })
+    }
+}
+
+impl std::error::Error for HttpParseError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsedHttpRequest {
+    pub request: WireRequest,
+    pub consumed: usize,
+}
+
+/// Decodes exactly one bounded HTTP/1.1 request from a listener read buffer.
+/// The returned byte count lets a host retain pipelined bytes for a later
+/// request; incomplete input is reported without consuming or interpreting it.
+///
+/// # Errors
+///
+/// Returns [`HttpParseError::Limit`] or [`HttpParseError::Malformed`] when the
+/// buffer cannot be admitted under the bounded HTTP framing rules.
+pub fn parse_http_request(
+    bytes: &[u8],
+    limits: TransportLimits,
+) -> std::result::Result<Option<ParsedHttpRequest>, HttpParseError> {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return if bytes.len() > limits.max_header_bytes {
+            Err(HttpParseError::Limit)
+        } else {
+            Ok(None)
+        };
+    };
+    let header_length = header_end.checked_add(4).ok_or(HttpParseError::Limit)?;
+    if header_length > limits.max_header_bytes {
+        return Err(HttpParseError::Limit);
+    }
+
+    let header_text =
+        core::str::from_utf8(&bytes[..header_end]).map_err(|_| HttpParseError::Malformed)?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().ok_or(HttpParseError::Malformed)?;
+    let mut parts = request_line.split_ascii_whitespace();
+    let method = parts.next().ok_or(HttpParseError::Malformed)?;
+    let path = parts.next().ok_or(HttpParseError::Malformed)?;
+    let version = parts.next().ok_or(HttpParseError::Malformed)?;
+    if parts.next().is_some()
+        || version != "HTTP/1.1"
+        || method.is_empty()
+        || path.is_empty()
+        || !method.bytes().all(is_http_token)
+        || path.bytes().any(is_http_control)
+    {
+        return Err(HttpParseError::Malformed);
+    }
+
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(HttpParseError::Malformed)?;
+        if name.is_empty()
+            || !name.bytes().all(is_http_token)
+            || value.bytes().any(is_http_header_control)
+        {
+            return Err(HttpParseError::Malformed);
+        }
+        let value = value.trim_matches([' ', '\t']);
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(HttpParseError::Malformed);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(HttpParseError::Malformed);
+            }
+            content_length = Some(value.parse::<usize>().map_err(|_| HttpParseError::Limit)?);
+        }
+        headers.push((name.to_owned(), value.to_owned()));
+    }
+
+    let body_length = content_length.unwrap_or(0);
+    let consumed = header_length
+        .checked_add(body_length)
+        .ok_or(HttpParseError::Limit)?;
+    if consumed > limits.max_request_bytes {
+        return Err(HttpParseError::Limit);
+    }
+    if bytes.len() < consumed {
+        return Ok(None);
+    }
+    Ok(Some(ParsedHttpRequest {
+        request: WireRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            headers,
+            body: bytes[header_length..consumed].to_vec(),
+        },
+        consumed,
+    }))
+}
+
+const fn is_http_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+const fn is_http_control(byte: u8) -> bool {
+    byte < 0x20 || byte == 0x7f
+}
+
+const fn is_http_header_control(byte: u8) -> bool {
+    (byte < 0x20 && byte != b'\t') || byte == 0x7f
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WebSocketOutput {
     Accepted(FrameOutcome),
