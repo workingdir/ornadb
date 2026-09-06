@@ -194,6 +194,7 @@ pub fn evaluate_with_functions(
         steps: 0,
         functions,
         effects: None,
+        namespace: None,
     };
     context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -220,6 +221,7 @@ pub fn evaluate_function(
         steps: 0,
         functions: &functions,
         effects: None,
+        namespace: None,
     };
     let supplied = supplied_arguments(arguments, &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
@@ -240,6 +242,7 @@ pub fn invoke_named(
         steps: 0,
         functions,
         effects: None,
+        namespace: function_namespace(name),
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -271,6 +274,7 @@ pub fn invoke_named_with_effects(
         steps: 0,
         functions,
         effects: Some(effects),
+        namespace: function_namespace(name),
     };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -762,6 +766,7 @@ struct Context<'functions, 'effects> {
     steps: u64,
     functions: &'functions Functions,
     effects: Option<&'effects mut dyn EffectHandler>,
+    namespace: Option<String>,
 }
 impl Context<'_, '_> {
     fn step(&mut self) -> Result<(), EvaluationError> {
@@ -820,6 +825,13 @@ impl Context<'_, '_> {
                     self.functions
                         .contains_key(text)
                         .then(|| Value::Function(text.clone()))
+                })
+                .or_else(|| {
+                    let namespace = self.namespace.as_deref()?;
+                    let qualified = format!("{namespace}.{text}");
+                    self.functions
+                        .contains_key(&qualified)
+                        .then_some(Value::Function(qualified))
                 })
                 .ok_or_else(|| error("ORNA-EVAL-NAME")),
             Expr::Lambda {
@@ -1268,9 +1280,7 @@ impl Context<'_, '_> {
             // field lookup. Resolve it only when the complete path was
             // explicitly admitted in the function environment; ordinary
             // record fields retain their existing semantics.
-            let callable = if let Some(name) = function_name(callee)
-                && self.functions.contains_key(&name)
-            {
+            let callable = if let Some(name) = self.resolve_function_name(callee) {
                 Value::Function(name)
             } else {
                 self.evaluate(callee, scope, depth + 1)?
@@ -1323,7 +1333,15 @@ impl Context<'_, '_> {
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
                 supplied.insert(key, value);
             }
-            return invoke_pure(self, parameters, body, captured, supplied, depth + 1);
+            let previous_namespace = self.namespace.clone();
+            self.namespace = match &callable {
+                Value::Function(name) => function_namespace(name),
+                Value::Closure(_) => None,
+                _ => unreachable!("callable was validated above"),
+            };
+            let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
+            self.namespace = previous_namespace;
+            return result;
         }
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
@@ -1335,6 +1353,18 @@ impl Context<'_, '_> {
             .collect::<Result<Vec<_>, _>>()?;
         values.extend(explicit);
         self.math(name, named_arguments(name, arguments, values, implicit)?)
+    }
+    fn resolve_function_name(&self, expression: &Expr) -> Option<String> {
+        let name = function_name(expression)?;
+        if self.functions.contains_key(&name) {
+            return Some(name);
+        }
+        if name.contains('.') {
+            return None;
+        }
+        let namespace = self.namespace.as_deref()?;
+        let qualified = format!("{namespace}.{name}");
+        self.functions.contains_key(&qualified).then_some(qualified)
     }
     fn index(&self, base: Value, index: Value) -> Result<Value, EvaluationError> {
         let Value::Int(index) = index else {
@@ -1675,6 +1705,12 @@ fn function_name(expression: &Expr) -> Option<String> {
         _ => None,
     }
 }
+
+fn function_namespace(name: &str) -> Option<String> {
+    name.rsplit_once('.')
+        .map(|(namespace, _)| namespace.to_owned())
+}
+
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
     match value {
         Value::Int(_) => Ok(Value::Int(1.into())),

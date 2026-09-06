@@ -1508,7 +1508,7 @@ mod bounded_tests {
             fixture_id: "library".into(),
             source_id: "library.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub fn twice(value: Int): Int = value * 2;".into(),
+            source: "pub fn add(left: Int, right: Int): Int = left + right; pub fn twice(value: Int): Int = add(value, value);".into(),
         };
         let main = SourceUnit {
             fixture_id: "main".into(),
