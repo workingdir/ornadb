@@ -1,8 +1,11 @@
-use futures::{executor::block_on, io::Cursor};
+use futures::{
+    executor::block_on,
+    io::{AsyncWrite, Cursor},
+};
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
-    HttpConnectionError, HttpEncodeError, HttpParseError, Limits, LiveApplication,
+    HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, LiveApplication,
     LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
     SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
     WebSocketState, WireRequest, WireResponse, parse_http_request,
@@ -25,6 +28,58 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+struct FailFirstWriter {
+    writes: usize,
+}
+
+impl AsyncWrite for FailFirstWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.writes += 1;
+        std::task::Poll::Ready(if self.writes == 1 {
+            Err(std::io::Error::other("write rejected"))
+        } else {
+            Ok(0)
+        })
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+struct CountingAuthority {
+    calls: usize,
+    times: Vec<u64>,
+}
+
+impl LiveSessionAuthority for CountingAuthority {
+    fn create_session(&mut self, database: [u8; 16], now: u64) -> Result<SessionMetadata, Error> {
+        self.calls += 1;
+        self.times.push(now);
+        Ok(SessionMetadata {
+            session: [u8::try_from(self.calls).expect("test call count fits"); 16],
+            database,
+            runtime: [3; 16],
+            expires_at: now + 100,
+            subscribe: subscribe(),
+        })
+    }
+}
 
 struct Issuer(u8, Option<[u8; 32]>);
 impl CredentialIssuer for Issuer {
@@ -402,6 +457,105 @@ fn async_http_connection_loop_writes_routed_responses_until_eof() {
     .unwrap();
     assert!(writer.into_inner().starts_with(b"HTTP/1.1 201 Created\r\n"));
     assert_eq!(connection.buffered_bytes(), 0);
+}
+
+#[test]
+fn async_http_connection_loop_rejects_truncated_eof() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut reader = Cursor::new(b"GET /orna/session HTTP/1.1\r\nHost: example\r\n".to_vec());
+    let mut writer = Cursor::new(Vec::new());
+    let mut authority = Authority;
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    assert_eq!(
+        block_on(transport.serve_http_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )),
+        Err(HttpIoError::Transport(HttpConnectionError::Parse(
+            HttpParseError::Incomplete
+        )))
+    );
+    assert!(writer.into_inner().is_empty());
+}
+
+#[test]
+fn async_http_connection_loop_writes_before_admitting_next_pipelined_request() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut reader = Cursor::new([request.as_bytes(), request.as_bytes()].concat());
+    let mut writer = FailFirstWriter { writes: 0 };
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    assert_eq!(
+        block_on(transport.serve_http_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )),
+        Err(HttpIoError::Write)
+    );
+    assert_eq!(authority.calls, 1);
+}
+
+#[test]
+fn async_http_connection_loop_samples_clock_for_each_request() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut reader = Cursor::new([request.as_bytes(), request.as_bytes()].concat());
+    let mut writer = Cursor::new(Vec::new());
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    let mut times = vec![17, 23];
+    block_on(transport.serve_http_connection_with_clock(
+        &mut reader,
+        &mut writer,
+        &mut connection,
+        &mut || times.remove(0),
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ))
+    .unwrap();
+    assert_eq!(authority.times, [17, 23]);
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
