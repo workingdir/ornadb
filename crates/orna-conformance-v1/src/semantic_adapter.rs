@@ -18,9 +18,12 @@ use orna_evaluator_v1::{
     invoke_named_with_effects,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation};
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct SemanticAdapter {
@@ -723,63 +726,14 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        if let Err(error) = self.limits.check_source(&unit.source) {
-            return StageOutcome::Failed(error.diagnostic().clone());
-        }
-        let mut syntax = SyntaxAdapter;
-        if let StageOutcome::Failed(diagnostic) = syntax.parse(unit) {
-            return StageOutcome::Failed(diagnostic);
-        }
-        let parsed = parse_module(&unit.source);
-        if let Err(error) = self.limits.check_items(parsed.value.items.len()) {
-            return StageOutcome::Failed(error.diagnostic().clone());
-        }
-        let analysis = analyze_with_catalogue(
-            &[ModuleInput::new(
-                unit.source_id.clone(),
-                unit.source.clone(),
-            )],
-            &Catalogue::authoritative_fixture(),
-        );
-        if let Some(diagnostic) = analysis.diagnostics.first() {
-            return StageOutcome::Failed(diagnostic.clone().redacted());
-        }
-        let (functions, key_fields) = match admitted_transaction_module(&parsed.value.items) {
+        let (functions, key_fields) = match admit_transaction_source(unit, self.limits, &self.entry)
+        {
             Ok(value) => value,
-            Err(reason) => return StageOutcome::Skipped { reason },
+            Err(outcome) => return *outcome,
         };
-        if let Err(error) = self.limits.check_items(functions.len()) {
-            return StageOutcome::Failed(error.diagnostic().clone());
-        }
-        if !functions.contains_key(&self.entry) {
-            return StageOutcome::Skipped {
-                reason: "configured transaction entry function is not present".into(),
-            };
-        }
-        let entry = self.entry.clone();
-        let limits = self.limits;
-        let result = self.database.activate(|activation| {
-            let mut effects = TableEffectHandler {
-                activation,
-                key_fields: &key_fields,
-            };
-            invoke_named_with_effects(
-                &entry,
-                &functions,
-                &Environment::new(),
-                limits,
-                &mut effects,
-            )
-            .map(|_| ())
-        });
-        match result {
-            Ok(()) => StageOutcome::Passed,
-            Err(ActivationError::Operation(error)) => {
-                StageOutcome::Failed(error.diagnostic().clone())
-            }
-            Err(ActivationError::Commit(error)) => {
-                StageOutcome::Failed(transaction_error_diagnostic(error))
-            }
+        match self.execute_admitted(&functions, &key_fields) {
+            Ok(_) => StageOutcome::Passed,
+            Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
     }
 
@@ -838,6 +792,107 @@ impl TransactionalEvaluator {
             _ => unreachable!("transaction scenario contract admitted only known IDs"),
         }
     }
+
+    fn execute_admitted(
+        &mut self,
+        functions: &Functions,
+        key_fields: &BTreeMap<String, String>,
+    ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
+        let entry = self.entry.clone();
+        let limits = self.limits;
+        let mut mutations = Vec::new();
+        let result = self.database.activate(|activation| {
+            let mut effects = TableEffectHandler {
+                activation,
+                key_fields,
+                mutations: &mut mutations,
+                next_mutation: 0,
+            };
+            invoke_named_with_effects(&entry, functions, &Environment::new(), limits, &mut effects)
+                .map(|_| ())
+        });
+        match result {
+            Ok(()) => Ok(mutations),
+            Err(ActivationError::Operation(error)) => Err(Box::new(error.diagnostic().clone())),
+            Err(ActivationError::Commit(error)) => {
+                Err(Box::new(transaction_error_diagnostic(error)))
+            }
+        }
+    }
+
+    fn seed_committed(
+        &mut self,
+        table: String,
+        key: Vec<u8>,
+        row: Value,
+    ) -> Result<(), RuntimeError> {
+        self.database
+            .activate(|activation| activation.insert(table, key, row))
+            .map_err(|_| RuntimeError::InvalidTableMutation)
+    }
+}
+
+/// A source evaluator whose successful root activation is committed to the
+/// durable runtime and whose next invocation rehydrates from that state.
+pub struct DurableTransactionalEvaluator {
+    entry: String,
+    limits: EvaluatorLimits,
+}
+
+impl DurableTransactionalEvaluator {
+    #[must_use]
+    pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
+        Self {
+            entry: entry.into(),
+            limits,
+        }
+    }
+
+    /// Executes one admitted source activation against durable committed rows.
+    /// Failed source evaluation never reaches the durable commit boundary.
+    pub async fn execute_source(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        unit: &SourceUnit,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let (functions, key_fields) = match admit_transaction_source(unit, self.limits, &self.entry)
+        {
+            Ok(value) => value,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let lease = state.acquire_lease(owner_id).await?;
+        let context = state.begin_activation().await?;
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        for table in key_fields.keys() {
+            for (key, row) in state.committed_table_rows(table).await? {
+                let row = Value::decode(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                evaluator.seed_committed(table.clone(), key, row)?;
+            }
+        }
+        let mutations = match evaluator.execute_admitted(&functions, &key_fields) {
+            Ok(mutations) => mutations,
+            Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
+        };
+        if mutations.is_empty() {
+            return Ok(StageOutcome::Passed);
+        }
+        let next_digest =
+            durable_activation_digest(context.capture().generation_digest(), &mutations);
+        state
+            .commit_table_activation(lease, &context, &mutations, next_digest, &NoFault)
+            .await?;
+        Ok(StageOutcome::Passed)
+    }
+}
+
+impl Default for DurableTransactionalEvaluator {
+    fn default() -> Self {
+        Self::new("main", EvaluatorLimits::default())
+    }
 }
 
 impl Default for TransactionalEvaluator {
@@ -878,6 +933,8 @@ impl RuntimeEvaluator for TransactionalEvaluator {
 struct TableEffectHandler<'activation, 'runtime> {
     activation: &'activation mut TransactionActivation<'runtime>,
     key_fields: &'activation BTreeMap<String, String>,
+    mutations: &'activation mut Vec<TableMutation>,
+    next_mutation: u64,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -886,6 +943,7 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[Value],
     ) -> Result<Option<Value>, EvaluationError> {
+        let mutation_len = self.mutations.len();
         let savepoint = self
             .activation
             .savepoint()
@@ -895,6 +953,7 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             self.activation
                 .rollback_to(savepoint)
                 .map_err(|error| transaction_error(table_error_code(error)))?;
+            self.mutations.truncate(mutation_len);
         }
         result
     }
@@ -933,8 +992,9 @@ impl TableEffectHandler<'_, '_> {
                 };
                 let key = table_key(row, key_field)?;
                 self.activation
-                    .insert(table.clone(), key, row.clone())
+                    .insert(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
+                self.record(table, key, Some(row.clone()))?;
                 Ok(Some(row.clone()))
             }
             "upsert" => {
@@ -949,14 +1009,17 @@ impl TableEffectHandler<'_, '_> {
                     .cloned()
                 {
                     let row = merge_upsert_row(&existing, row, key_field)?;
+                    let key = key.clone();
                     self.activation
-                        .update(table.clone(), key, row.clone())
+                        .update(table.clone(), key.clone(), row.clone())
                         .map_err(|error| transaction_error(table_error_code(error)))?;
+                    self.record(table, key, Some(row.clone()))?;
                     Ok(Some(row))
                 } else {
                     self.activation
-                        .insert(table.clone(), key, row.clone())
+                        .insert(table.clone(), key.clone(), row.clone())
                         .map_err(|error| transaction_error(table_error_code(error)))?;
+                    self.record(table, key, Some(row.clone()))?;
                     Ok(Some(row.clone()))
                 }
             }
@@ -971,9 +1034,11 @@ impl TableEffectHandler<'_, '_> {
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
                 let row = merge_row(&existing, patch, key_field)?;
+                let key = encoded_key(key)?;
                 self.activation
-                    .update(table.clone(), encoded_key(key)?, row.clone())
+                    .update(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
+                self.record(table, key, Some(row.clone()))?;
                 Ok(Some(row))
             }
             "delete" => {
@@ -982,8 +1047,9 @@ impl TableEffectHandler<'_, '_> {
                 };
                 let key = encoded_key(key)?;
                 self.activation
-                    .delete(table.clone(), key)
+                    .delete(table.clone(), key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
+                self.record(table, key, None)?;
                 Ok(Some(Value::unit()))
             }
             "rekey" => {
@@ -1000,14 +1066,114 @@ impl TableEffectHandler<'_, '_> {
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
                 let row = replace_record_field(&existing, key_field, new_key.clone())?;
                 self.activation
-                    .delete(table.clone(), old_key)
-                    .and_then(|()| self.activation.insert(table.clone(), new_key, row.clone()))
+                    .delete(table.clone(), old_key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
+                self.record(table, old_key, None)?;
+                self.activation
+                    .insert(table.clone(), new_key.clone(), row.clone())
+                    .map_err(|error| transaction_error(table_error_code(error)))?;
+                self.record(table, new_key, Some(row.clone()))?;
                 Ok(Some(row))
             }
             _ => Ok(None),
         }
     }
+
+    fn record(
+        &mut self,
+        table: &str,
+        key: Vec<u8>,
+        value: Option<Value>,
+    ) -> Result<(), EvaluationError> {
+        let encoded = value
+            .as_ref()
+            .map(Value::encode)
+            .transpose()
+            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+        let ordinal = self.next_mutation;
+        self.next_mutation = self.next_mutation.saturating_add(1);
+        let mut digest = Sha256::new();
+        digest.update(b"ORNA-SOURCE-MUTATION\0");
+        digest.update(table.as_bytes());
+        digest.update([0]);
+        digest.update(&key);
+        digest.update(ordinal.to_be_bytes());
+        if let Some(bytes) = &encoded {
+            digest.update([1]);
+            digest.update(bytes);
+        } else {
+            digest.update([0]);
+        }
+        let id: [u8; 16] = digest.finalize()[..16]
+            .try_into()
+            .expect("truncated digest has fixed length");
+        let mutation = TableMutation::new(id, table, key, encoded)
+            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+        self.mutations.push(mutation);
+        Ok(())
+    }
+}
+
+type AdmittedTransaction = (Functions, BTreeMap<String, String>);
+type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
+
+fn admit_transaction_source(
+    unit: &SourceUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
+    if let Err(error) = limits.check_source(&unit.source) {
+        return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+    }
+    let mut syntax = SyntaxAdapter;
+    if let StageOutcome::Failed(diagnostic) = syntax.parse(unit) {
+        return Err(Box::new(StageOutcome::Failed(diagnostic)));
+    }
+    let parsed = parse_module(&unit.source);
+    if let Err(error) = limits.check_items(parsed.value.items.len()) {
+        return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+    }
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new(
+            unit.source_id.clone(),
+            unit.source.clone(),
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+    if let Some(diagnostic) = analysis.diagnostics.first() {
+        return Err(Box::new(StageOutcome::Failed(
+            diagnostic.clone().redacted(),
+        )));
+    }
+    let (functions, key_fields) = admitted_transaction_module(&parsed.value.items)
+        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+    if let Err(error) = limits.check_items(functions.len()) {
+        return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+    }
+    if !functions.contains_key(entry) {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "configured transaction entry function is not present".into(),
+        }));
+    }
+    Ok((functions, key_fields))
+}
+
+fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-DURABLE-ACTIVATION\0");
+    digest.update(previous);
+    for mutation in mutations {
+        digest.update(mutation.id());
+        digest.update(mutation.table().as_bytes());
+        digest.update(mutation.key());
+        if let Some(value) = mutation.value() {
+            digest.update([1]);
+            digest.update(value);
+        } else {
+            digest.update([0]);
+        }
+    }
+    digest.finalize().into()
 }
 
 fn admitted_transaction_module(
@@ -1293,5 +1459,118 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     }
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
         self.runtime.run_scenario(scenario)
+    }
+}
+
+#[cfg(test)]
+mod durable_tests {
+    use super::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
+    use orna_evaluator_v1::Limits;
+    use orna_foundation_v1::Value;
+    use orna_repository_v1::Repository;
+    use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+    use std::{path::Path, process::Command};
+    use tempfile::TempDir;
+
+    fn git(path: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+
+    fn source(body: &str) -> SourceUnit {
+        SourceUnit {
+            fixture_id: "durable-txn".into(),
+            source_id: "durable-txn.orna".into(),
+            parse_as: "module_unit".into(),
+            source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn source_activation_commits_rows_and_reopens_for_the_next_activation() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_source(
+                    &repository,
+                    identity,
+                    [3; 16],
+                    [4; 32],
+                    &source(r#"Note.insert({ id: 7, text: "first" });"#),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity, [4; 32])
+            .await
+            .expect("reopened runtime");
+        let key = Value::int(7.into()).encode().expect("encoded key");
+        let expected = Value::new(orna_foundation_v1::OvbRaw::Map(vec![
+            (
+                orna_foundation_v1::OvbRaw::Text("id".into()),
+                orna_foundation_v1::OvbRaw::Int(7.into()),
+            ),
+            (
+                orna_foundation_v1::OvbRaw::Text("text".into()),
+                orna_foundation_v1::OvbRaw::Text("first".into()),
+            ),
+        ]))
+        .expect("canonical row")
+        .encode()
+        .expect("encoded row");
+        assert_eq!(
+            state.committed_table_row("Note", &key).await.unwrap(),
+            Some(expected)
+        );
+        drop(state);
+
+        assert!(matches!(
+            evaluator
+                .execute_source(
+                    &repository,
+                    identity,
+                    [3; 16],
+                    [4; 32],
+                    &source(r#"Note.update(7, { text: "changed" });"#),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity, [4; 32])
+            .await
+            .expect("reopened updated runtime");
+        let row = state
+            .committed_table_row("Note", &key)
+            .await
+            .expect("durable row read")
+            .expect("updated row");
+        let row = Value::decode(&row).expect("canonical durable row");
+        assert!(matches!(
+            row.raw(),
+            orna_foundation_v1::OvbRaw::Map(fields)
+                if fields.iter().any(|(key, value)| key
+                    == &orna_foundation_v1::OvbRaw::Text("text".into())
+                    && value
+                        == &orna_foundation_v1::OvbRaw::Text("changed".into()))
+        ));
     }
 }
