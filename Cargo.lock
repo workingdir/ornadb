@@ -1510,6 +1510,12 @@ dependencies = [
 [[package]]
 name = "orna-cli-v1"
 version = "0.1.0"
+dependencies = [
+ "orna-project-v1",
+ "orna-repository-v1",
+ "orna-semantic-v1",
+ "tempfile",
+]
 
 [[package]]
 name = "orna-client"
