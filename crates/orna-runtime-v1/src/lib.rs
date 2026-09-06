@@ -2698,6 +2698,24 @@ impl RuntimeState {
         }))
     }
 
+    /// Reconstructs a persisted publication freeze for restart recovery.
+    /// Unknown intents are reported as recovery-invalid rather than inferred
+    /// from the current checkpoint or pending mutation tail.
+    pub async fn publication_freeze(
+        &self,
+        intent_id: [u8; 16],
+    ) -> Result<PublicationFreeze, RuntimeError> {
+        validate_id(intent_id)?;
+        let checkpoint = self
+            .frozen_intent(intent_id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        Ok(PublicationFreeze {
+            intent_id,
+            checkpoint,
+        })
+    }
+
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
         let capture = self.capture().await?;
         let generation = capture
