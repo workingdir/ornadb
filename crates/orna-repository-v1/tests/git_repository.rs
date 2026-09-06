@@ -1,7 +1,9 @@
 use std::{fs, path::Path, process::Command};
 
 use fs2::FileExt;
-use orna_repository_v1::{CheckoutTarget, ManagedPath, Repository, RuntimeGeneration};
+use orna_repository_v1::{
+    CheckoutExecutionError, CheckoutTarget, ManagedPath, Repository, RuntimeGeneration,
+};
 use tempfile::TempDir;
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -508,6 +510,54 @@ fn divergent_checkout_carries_nonconflicting_git_state() {
         fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
         "untracked\n"
     );
+}
+
+#[test]
+fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("target.orna"), "target source\n").unwrap();
+    git(root.path(), &["add", "target.orna"]);
+    git(root.path(), &["commit", "-m", "target source"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    let before = repo.cwd_generation(RuntimeGeneration::new(31)).unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(31))
+        .unwrap();
+
+    assert!(matches!(
+        repo.execute_nonconflicting_git_checkout_with_validation(&plan, |repository, observed| {
+            assert_eq!(
+                repository.head().unwrap(),
+                observed.expected_head().cloned()
+            );
+            assert_eq!(observed.target().branch_name(), Some("experiment"));
+            Err::<(), _>("candidate schema assertion rejected")
+        }),
+        Err(CheckoutExecutionError::Validation(
+            "candidate schema assertion rejected"
+        ))
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(31)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged source\n"
+    );
+    assert!(!root.path().join("target.orna").exists());
 }
 
 #[test]
