@@ -522,6 +522,7 @@ pub struct StreamReplayCommit<'a> {
     pub writer: WriterLease,
     pub expected_capture: &'a CwdCapture,
     pub mutations: &'a [Mutation],
+    pub table_mutations: &'a [TableMutation],
     pub next_digest: [u8; 32],
     pub grant: ReplayGrant,
     pub faults: &'a dyn FaultInjector,
@@ -2009,12 +2010,20 @@ impl RuntimeState {
             writer,
             expected_capture,
             mutations,
+            table_mutations,
             next_digest,
             grant,
             faults,
         } = request;
         validate_id(writer.owner_id)?;
         validate_stream_mutations(mutations, next_digest)?;
+        let encoded_table_mutations = table_mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()?;
+        if !table_mutations.is_empty() && encoded_table_mutations.as_slice() != mutations {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         let current = self.capture().await?;
         if &current != expected_capture {
             return Err(RuntimeError::StaleCapture {
@@ -2041,6 +2050,9 @@ impl RuntimeState {
         if matches!(result, CommitResult::Rejected(_)) {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
+        }
+        for mutation in table_mutations {
+            apply_table_mutation_tx(&tx, mutation).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -2236,6 +2248,7 @@ impl RuntimeState {
                     writer,
                     expected_capture: &expected_capture,
                     mutations: &batch.mutations,
+                    table_mutations: &[],
                     next_digest: batch.next_digest,
                     grant,
                     faults: &NoFault,
@@ -2254,6 +2267,7 @@ impl RuntimeState {
                     writer,
                     expected_capture: &expected_capture,
                     mutations: &mutations,
+                    table_mutations: &batch.mutations,
                     next_digest: batch.next_digest,
                     grant,
                     faults: &NoFault,
@@ -7500,6 +7514,118 @@ mod tests {
                 .unwrap(),
             checkpoint
         );
+    }
+
+    #[tokio::test]
+    async fn replay_typed_table_delivery_publishes_rows_without_advancing_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("typed-replay", "typed-replay-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let (grant, checkpoint) = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let failure = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![7, 8]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected failure result: {other:?}"),
+            };
+            let skip_lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Skip,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected skip lease: {other:?}"),
+            };
+            let checkpoint = match stream
+                .apply_async(CommitIntent::Skip {
+                    lease: skip_lease,
+                    expected,
+                    expected_failure_version: failure.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+                other => panic!("unexpected skip result: {other:?}"),
+            };
+            let skipped = stream
+                .failure_async(&failure.identity)
+                .await
+                .unwrap()
+                .expect("skipped failure");
+            let grant = match stream
+                .apply_async(CommitIntent::Replay {
+                    failure: failure.identity,
+                    expected_version: skipped.version,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::ReplayGranted { grant } => grant,
+                other => panic!("unexpected replay grant: {other:?}"),
+            };
+            (grant, checkpoint)
+        };
+        let mut handler = ReplayHandler {
+            payload: Vec::new(),
+            result: Some(StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+                mutations: vec![table_mutation(31, 4, Some(12))],
+                next_digest: digest(99),
+            })),
+        };
+
+        let result = state
+            .stream_backend(writer)
+            .replay_async(grant, &mut handler)
+            .await
+            .unwrap();
+        assert!(matches!(result, CommitResult::ReplayCompleted { .. }));
+        assert_eq!(
+            state.committed_table_row("books", &[4]).await.unwrap(),
+            Some(vec![12])
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        let pending = state.pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], table_mutation(31, 4, Some(12)).runtime_mutation().unwrap());
     }
 
     #[tokio::test]
