@@ -1,10 +1,12 @@
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
+use futures::FutureExt;
 use orna_repository_v1::initialize_repository;
-use orna_server::LiveOnceHost;
+use orna_server::{LiveHostError, LiveOnceHost};
 
 struct TemporaryRepository {
     path: PathBuf,
@@ -94,4 +96,39 @@ fn loopback_host_rejects_a_session_for_another_database() {
 
     assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
     assert!(response.contains("live.database_unavailable"));
+}
+
+#[test]
+fn loopback_host_cancellation_releases_a_listener_before_accept() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+
+    assert_eq!(
+        host.serve_with_cancellation(futures::future::ready(())),
+        Err(LiveHostError::Cancelled)
+    );
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_cancellation_closes_a_stalled_connection() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let _client = TcpStream::connect(address).unwrap();
+        sender.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    });
+
+    assert_eq!(
+        host.serve_with_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
 }
