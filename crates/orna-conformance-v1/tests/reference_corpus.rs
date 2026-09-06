@@ -266,3 +266,34 @@ fn project_adapter_receives_reachable_modules_rows_and_typed_expectations() {
     )));
     assert!(report.coverage.unmapped_stage_evidence > 0);
 }
+
+#[test]
+fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let report = harness.run(&mut adapter);
+    let binding = FixtureStageBinding {
+        requirement_id: "ORNA-SOURCE-001".into(),
+        fixture_id: "valid/minimal-root.orna".into(),
+        fixture_path: "examples/valid/minimal-root.orna".into(),
+        stage: Stage::Parse,
+        implementation_ref: "orna.syntax.module-entrypoint".into(),
+        test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+    };
+    let witnesses = harness
+        .engine_witnesses(&report, std::slice::from_ref(&binding))
+        .expect("reviewed executed stage becomes a witness");
+    assert_eq!(witnesses.witnesses.len(), 1);
+    assert_eq!(
+        witnesses.witnesses[0].fixture_path,
+        "examples/valid/minimal-root.orna"
+    );
+
+    let mut bad_path = binding;
+    bad_path.fixture_path = "examples/valid/not-the-fixture.orna".into();
+    assert!(
+        harness
+            .engine_witnesses(&report, std::slice::from_ref(&bad_path))
+            .is_err()
+    );
+}
