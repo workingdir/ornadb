@@ -62,6 +62,7 @@ pub struct LoadedProject {
     modules: Vec<ModuleInput>,
     identities: Vec<ModuleIdentity>,
     standard_profile: Option<StandardDependencyProfile>,
+    standard_imports: bool,
 }
 
 impl LoadedProject {
@@ -81,6 +82,13 @@ impl LoadedProject {
     /// if this project was loaded with one.
     pub fn standard_profile(&self) -> Option<&StandardDependencyProfile> {
         self.standard_profile.as_ref()
+    }
+
+    /// Reports whether reachable project source requested the reserved
+    /// standard namespace. The loader does not treat that request as proof
+    /// that a verified standard profile was supplied.
+    pub const fn has_standard_imports(&self) -> bool {
+        self.standard_imports
     }
 
     /// Derives the semantic catalogue for this project's explicitly pinned
@@ -128,6 +136,7 @@ impl ProjectLoader {
         let mut loaded = BTreeMap::<String, LoadedModule>::new();
         let mut namespaces = BTreeMap::<Vec<String>, String>::new();
         let mut total_bytes = 0usize;
+        let mut standard_imports = false;
 
         while let Some(logical_path) = pending.pop_front() {
             if loaded.contains_key(&logical_path) {
@@ -161,6 +170,7 @@ impl ProjectLoader {
                     return Err(ProjectLoadError::UnsupportedImport);
                 }
                 if matches!(segments[0], "sys" | "std") {
+                    standard_imports |= segments[0] == "std";
                     continue;
                 }
                 imports.insert(resolve_import(&root, &segments)?);
@@ -182,6 +192,7 @@ impl ProjectLoader {
             modules,
             identities,
             standard_profile,
+            standard_imports,
         })
     }
 }
