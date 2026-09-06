@@ -237,8 +237,11 @@ pub struct ResumeRequest<'a> {
     pub attachment: [u8; 16],
     pub now: u64,
 }
-pub struct DeleteRequest {
+pub struct DeleteRequest<'a> {
     pub id: [u8; 16],
+    pub origin: &'a Origin,
+    pub credential: &'a SessionCredential,
+    pub now: u64,
 }
 
 /// HTTP boundary contract. A router maps `POST /v1/live/sessions` to create,
@@ -551,13 +554,23 @@ impl LiveHost {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DeletionFailed`] when durable deletion fails; the
-    /// in-memory session remains closed in that case.
+    /// Returns [`Error::Denied`] for a mismatched session, credential, or
+    /// Origin, [`Error::Closed`] for an expired or closed session, or
+    /// [`Error::DeletionFailed`] when durable deletion fails. The in-memory
+    /// session remains closed after a deletion-adapter failure.
     pub async fn delete(
         &mut self,
-        request: DeleteRequest,
+        request: DeleteRequest<'_>,
         deletion: &mut impl DeletionAdapter,
     ) -> Result<()> {
+        self.security
+            .validate_attach(
+                session_id(request.id),
+                request.origin,
+                &request.credential.security,
+                request.now,
+            )
+            .map_err(map_boundary)?;
         let deleted = self
             .security
             .delete(session_id(request.id), deletion)
@@ -577,7 +590,7 @@ impl LiveHost {
     /// closed both session state machines.
     pub async fn http_delete(
         &mut self,
-        request: DeleteRequest,
+        request: DeleteRequest<'_>,
         deletion: &mut impl DeletionAdapter,
     ) -> HttpResponse {
         match self.delete(request, deletion).await {
@@ -2605,11 +2618,11 @@ impl LiveTransport {
                     security: OpaqueCredential::from_bytes(token),
                     serving: ServingCredential::new(token),
                 };
-                let authorised = self
+                if !self
                     .sessions
                     .get(&id)
-                    .is_some_and(|record| record.credential == credential);
-                if !authorised {
+                    .is_some_and(|record| record.credential == credential)
+                {
                     return wire_error(410, "live.expired");
                 }
                 let retired = self
@@ -2617,7 +2630,19 @@ impl LiveTransport {
                     .attachments
                     .iter()
                     .find_map(|(attachment, session)| (*session == id).then_some(*attachment));
-                match self.host.delete(DeleteRequest { id }, deletion).await {
+                match self
+                    .host
+                    .delete(
+                        DeleteRequest {
+                            id,
+                            origin: &origin,
+                            credential: &credential,
+                            now,
+                        },
+                        deletion,
+                    )
+                    .await
+                {
                     Ok(()) => {
                         if let Some(attachment) = retired {
                             self.retired_attachments.push_back(attachment);
