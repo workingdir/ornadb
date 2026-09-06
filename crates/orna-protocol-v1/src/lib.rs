@@ -1680,6 +1680,34 @@ mod tests {
         };
         assert_eq!(Envelope::decode(&nested, low), Err(Error::Limit));
     }
+
+    #[test]
+    fn rejects_collection_and_node_limits_before_payload_allocation() {
+        let oversized_collection = wire(
+            1,
+            Some(id(1)),
+            None,
+            Node::Array(vec![Node::Null, Node::Null, Node::Null]),
+        );
+        let collection_limited = Limits {
+            max_collection_items: 2,
+            ..Limits::default()
+        };
+        assert_eq!(
+            Envelope::decode(&oversized_collection, collection_limited),
+            Err(Error::Limit)
+        );
+
+        let node_limited = Limits {
+            max_nodes: 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            Envelope::decode(&[0x81, 0xf6], node_limited),
+            Err(Error::Limit)
+        );
+    }
+
     #[test]
     fn request_status_result_rejects_malformed_result_body_maps() {
         let missing_required_fields = [
