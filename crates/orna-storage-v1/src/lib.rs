@@ -449,7 +449,7 @@ impl RuntimePublicationCoordinator {
     pub fn publish(&mut self, repository: &Repository) -> Result<IndexGeneration, Error> {
         repository
             .publish_candidate(&self.expected_index, &self.candidate, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(map_publication_repository_error)
     }
 
     /// Completes the runtime transaction first, then advances and clears the
@@ -523,7 +523,7 @@ impl RuntimePublicationCoordinator {
                 return Err(Error::PublicationPending);
             }
             Err(RepositoryError::RuntimeCompletionRequired) => {}
-            Err(_) => return Err(Error::RepositoryUnavailable),
+            Err(error) => return Err(map_publication_repository_error(error)),
         }
 
         let mut journal = repository
@@ -546,6 +546,15 @@ impl RuntimePublicationCoordinator {
             .index_generation()
             .map(Some)
             .map_err(|_| Error::RepositoryUnavailable)
+    }
+}
+
+fn map_publication_repository_error(error: RepositoryError) -> Error {
+    match error {
+        RepositoryError::StaleIndex { .. } => Error::RecoveryIndexConflict,
+        RepositoryError::StaleHead => Error::RefConflict,
+        RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
+        _ => Error::RepositoryUnavailable,
     }
 }
 
@@ -824,6 +833,7 @@ pub enum Error {
     },
     RecoveryIndexConflict,
     RefConflict,
+    ManagedWorktreeConflict,
     PublicationPending,
     InvalidTransition,
     RuntimeUnavailable,
@@ -846,6 +856,7 @@ impl fmt::Display for Error {
             Self::IndexConflict { .. } => "managed path conflicts with ordinary index",
             Self::RecoveryIndexConflict => "recovery index conflict",
             Self::RefConflict => "publication ref conflict",
+            Self::ManagedWorktreeConflict => "managed worktree content conflict",
             Self::PublicationPending => "publication remains pending before ref advance",
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
@@ -910,6 +921,38 @@ mod tests {
     }
     fn row(text: &str) -> LooseRow {
         LooseRow::new(text.as_bytes().to_vec()).unwrap()
+    }
+
+    fn prepared_publication_plan(repository: &Repository) -> RuntimePublicationCoordinator {
+        let freeze = PublicationFreeze {
+            intent_id: [41; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [42; 32],
+                mutation_sequence: 1,
+            },
+        };
+        let mutation = LooseMutation {
+            id: MutationId::new("publication-conflict").unwrap(),
+            path: LoosePath::for_key("Contact", &["Alice".into()]).unwrap(),
+            expected: None,
+            next: Some(row("published")),
+        };
+        let batch = FrozenBatch::new(
+            MutationId::new("publication-conflict-batch").unwrap(),
+            vec![mutation],
+            freeze.checkpoint.mutation_sequence,
+        )
+        .unwrap();
+        RuntimePublicationCoordinator::prepare(
+            repository,
+            &repository.head().unwrap().unwrap(),
+            repository.index_generation().unwrap(),
+            &freeze,
+            batch,
+            "orna: publish runtime data",
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1022,6 +1065,41 @@ mod tests {
                 .unwrap(),
             Some(b"row".to_vec())
         );
+    }
+
+    #[test]
+    fn coordinator_preserves_changed_index_conflict() {
+        let (temp, repository) = repository();
+        let mut plan = prepared_publication_plan(&repository);
+        fs::write(temp.path().join("ordinary.txt"), "changed\n").unwrap();
+        git(temp.path(), &["add", "ordinary.txt"]);
+
+        assert!(matches!(
+            plan.publish(&repository),
+            Err(Error::RecoveryIndexConflict)
+        ));
+    }
+
+    #[test]
+    fn coordinator_preserves_changed_managed_worktree_conflict() {
+        let (temp, repository) = repository();
+        let mut plan = prepared_publication_plan(&repository);
+        let managed = temp.path().join("Contact").join("Alice.orna");
+        fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        fs::write(managed, "edited\n").unwrap();
+
+        assert!(matches!(
+            plan.publish(&repository),
+            Err(Error::ManagedWorktreeConflict)
+        ));
+    }
+
+    #[test]
+    fn coordinator_preserves_changed_ref_conflict() {
+        assert!(matches!(
+            map_publication_repository_error(RepositoryError::StaleHead),
+            Error::RefConflict
+        ));
     }
 
     #[tokio::test]
