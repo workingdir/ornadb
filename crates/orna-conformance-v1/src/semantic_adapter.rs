@@ -1201,7 +1201,7 @@ fn admit_list_stream_source(
             reason: "literal list stream insert must target the declared table".into(),
         }));
     }
-    let payloads = values
+    let payloads: Vec<Vec<u8>> = values
         .iter()
         .map(literal_value)
         .collect::<Option<Vec<_>>>()
@@ -1209,7 +1209,7 @@ fn admit_list_stream_source(
             values
                 .into_iter()
                 .map(|value| value.encode().ok())
-                .collect()
+                .collect::<Option<Vec<_>>>()
         })
         .ok_or_else(|| {
             Box::new(StageOutcome::Skipped {
@@ -1217,7 +1217,7 @@ fn admit_list_stream_source(
             })
         })?;
     Ok(ListStreamBridge {
-        source_identity,
+        source_identity: list_source_identity(&source_identity, &payloads),
         source_id: unit.source_id.clone(),
         entry: entry.into(),
         table: table_name,
@@ -1226,6 +1226,29 @@ fn admit_list_stream_source(
         insert_row: insert_row.clone(),
         payloads,
     })
+}
+
+/// Binds a finite list source name to the complete canonical typed list.
+///
+/// Length prefixes preserve element boundaries, so different canonical value
+/// sequences cannot collide by concatenation before the digest is calculated.
+fn list_source_identity(name: &str, payloads: &[Vec<u8>]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-LIST-STREAM-IDENTITY\0");
+    for payload in payloads {
+        digest.update(
+            u64::try_from(payload.len())
+                .expect("payload length fits u64")
+                .to_be_bytes(),
+        );
+        digest.update(payload);
+    }
+    let suffix = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{name}:{suffix}")
 }
 
 fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, String, &Expr)> {
@@ -2253,13 +2276,19 @@ mod list_stream_tests {
         }
     }
 
-    fn source() -> SourceUnit {
+    fn source_with_values(values: &str) -> SourceUnit {
         SourceUnit {
             fixture_id: "list-stream".into(),
             source_id: "sensors.orna".into(),
             parse_as: "module_unit".into(),
-            source: "pub table Reading(id: Int) { value: Int, } fn main() { Stream.from_list([1, 2], source_identity: \"fixture:readings\") | for_each(value => { Reading.insert({ id: value, value: value }); }); }".into(),
+            source: format!(
+                "pub table Reading(id: Int) {{ value: Int, }} fn main() {{ Stream.from_list([{values}], source_identity: \"fixture:readings\") | for_each(value => {{ Reading.insert({{ id: value, value: value }}); }}); }}"
+            ),
         }
+    }
+
+    fn source() -> SourceUnit {
+        source_with_values("1, 2")
     }
 
     #[tokio::test]
@@ -2313,6 +2342,62 @@ mod list_stream_tests {
             first_generation,
             "an exhausted reopened source must not publish duplicate table commits"
         );
+    }
+
+    #[tokio::test]
+    async fn literal_list_stream_changed_contents_do_not_resume_a_named_predecessor() {
+        let (_temp, repository) = repository();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(&repository, identity(), [23; 16], [24; 32], &source())
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let before = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened first runtime")
+            .capture()
+            .await
+            .expect("first capture")
+            .generation()
+            .clone();
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(
+                    &repository,
+                    identity(),
+                    [23; 16],
+                    [24; 32],
+                    &source_with_values("3, 4"),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened changed-list runtime");
+        assert!(
+            state
+                .capture()
+                .await
+                .expect("changed-list capture")
+                .generation()
+                > &before
+        );
+        for value in [3, 4] {
+            let key = Value::int(value.into()).encode().expect("encoded key");
+            assert!(
+                state
+                    .committed_table_row("Reading", &key)
+                    .await
+                    .expect("durable row read")
+                    .is_some(),
+                "changed list item {value} must not resume the prior list's checkpoint"
+            );
+        }
     }
 
     struct FailingHandler;
