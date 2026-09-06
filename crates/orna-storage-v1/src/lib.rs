@@ -489,7 +489,7 @@ impl RuntimePublicationCoordinator {
     ) -> Result<Option<IndexGeneration>, Error> {
         let Some(journal) = repository
             .read_publication_journal()
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(map_publication_repository_error)?
         else {
             return Ok(None);
         };
@@ -528,7 +528,7 @@ impl RuntimePublicationCoordinator {
 
         let mut journal = repository
             .read_publication_journal()
-            .map_err(|_| Error::RepositoryUnavailable)?
+            .map_err(map_publication_repository_error)?
             .ok_or(Error::InvalidTransition)?;
         if journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled
             || journal.runtime_intent_id() != Some(intent_id)
@@ -1278,6 +1278,45 @@ mod tests {
         assert_eq!(
             repository.read_publication_journal().unwrap(),
             Some(journal)
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovery_preserves_a_malformed_journal_read() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [61; 16],
+                repository_id: [62; 16],
+            },
+            [63; 32],
+        )
+        .await
+        .unwrap();
+        fs::create_dir_all(repository.runtime_paths().root()).unwrap();
+        fs::write(
+            repository
+                .runtime_paths()
+                .root()
+                .join("publication-journal.bin"),
+            b"truncated journal",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::InvalidPublicationJournal)
+        ));
+        assert_eq!(
+            fs::read(
+                repository
+                    .runtime_paths()
+                    .root()
+                    .join("publication-journal.bin")
+            )
+            .unwrap(),
+            b"truncated journal"
         );
     }
 
