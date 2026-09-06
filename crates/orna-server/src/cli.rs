@@ -262,9 +262,7 @@ where
 {
     match args.next().as_deref() {
         None => Some(command),
-        Some(value) if is_help_flag(value) => {
-            args.next().is_none().then_some(Command::Help(topic))
-        }
+        Some(value) if is_help_flag(value) => args.next().is_none().then_some(Command::Help(topic)),
         _ => None,
     }
 }
@@ -452,9 +450,7 @@ where
             .is_none()
             .then_some(Command::Help(HelpTopic::TopLevel)),
         Some(value) if value == OsStr::new("help") => parse_help_command(args),
-        Some(value) if is_version_flag(value) => {
-            args.next().is_none().then_some(Command::Version)
-        }
+        Some(value) if is_version_flag(value) => args.next().is_none().then_some(Command::Version),
         Some(value) if value == OsStr::new("repl") => {
             if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
@@ -584,10 +580,7 @@ where
             Some(command)
         }
         Some(value) if value == OsStr::new("state") => {
-            if args
-                .peek()
-                .is_some_and(is_help_flag)
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -597,10 +590,7 @@ where
             parse_state_command(args)
         }
         Some(value) if value == OsStr::new("inspect") => {
-            if args
-                .peek()
-                .is_some_and(is_help_flag)
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
@@ -610,10 +600,7 @@ where
             parse_inspect_command(args)
         }
         Some(value) if value == OsStr::new("security") => {
-            if args
-                .peek()
-                .is_some_and(is_help_flag)
-            {
+            if args.peek().is_some_and(is_help_flag) {
                 let _ = args.next();
                 return args
                     .next()
