@@ -7,6 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::process::ExitCode;
 
+use orna_conformance_v1::{
+    BoundedEvaluator, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeEvaluator,
+    SourceUnit, StageOutcome,
+};
+
 const REPL_TARGET: &str = "std.cli.repl";
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 
@@ -405,18 +410,20 @@ fn apply(s: &mut ReferenceState, p: &Plan) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let path = match endpoint {
-        Endpoint::ManagedLocal => ".",
-        Endpoint::Path(path) => path,
-        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
-            return Err(Diagnostic::target(
-                "E2100",
-                "project checking requires a local Git worktree",
-                "use `check` with the current worktree or `--db PATH check`",
-            ));
-        }
-    };
+fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
+    match endpoint {
+        Endpoint::ManagedLocal => Ok("."),
+        Endpoint::Path(path) => Ok(path),
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => Err(Diagnostic::target(
+            "E2100",
+            "project checking requires a local Git worktree",
+            "use `check` with the current worktree or `--db PATH check`",
+        )),
+    }
+}
+
+fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
+    let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -424,7 +431,7 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    let project = orna_project_v1::ProjectLoader::default()
+    orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .map_err(|_| {
             Diagnostic::target(
@@ -432,7 +439,11 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "project source could not be loaded",
                 "fix the project module graph and source boundaries, then run check again",
             )
-        })?;
+        })
+}
+
+fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let project = load_project(endpoint)?;
     if project.has_standard_imports() {
         return Err(Diagnostic::unavailable(
             "verified v1 standard profile is unavailable",
@@ -452,6 +463,79 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "project semantic analysis failed",
             "fix the first reported source contract error, then run check again",
         ))
+    }
+}
+
+fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let modules = project
+        .modules()
+        .iter()
+        .zip(project.identities())
+        .map(|(module, identity)| SourceUnit {
+            fixture_id: "cli-project".into(),
+            source_id: identity.logical_path().into(),
+            parse_as: "module_unit".into(),
+            source: module.source.clone(),
+        })
+        .collect();
+    ProjectUnit {
+        fixture_id: "cli-project".into(),
+        project_id: "cli-project".into(),
+        environment_id: None,
+        modules,
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "Orna 1.0.0 core".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+        },
+    }
+}
+
+fn run_standard_free_seed(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let project = load_project(endpoint)?;
+    if project.has_standard_imports() {
+        return Err(Diagnostic::unavailable(
+            "verified v1 standard profile is unavailable",
+            "supply the pinned standard profile before running a project that imports `std`",
+        ));
+    }
+    let analysis = orna_semantic_v1::analyze_with_catalogue(
+        project.modules(),
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run check again",
+        ));
+    }
+
+    let mut evaluator = BoundedEvaluator::default();
+    match evaluator.evaluate_project(&execution_project(&project)) {
+        StageOutcome::Passed => {}
+        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+            return Err(Diagnostic::unavailable(
+                "reference invocation requires an executable function-only project",
+                "use standard-free modules containing functions only; tables, effects, streams, and std require the integrated runtime",
+            ));
+        }
+    }
+    match evaluator.invoke("seed") {
+        StageOutcome::Passed => {
+            println!("invocation completed");
+            Ok(())
+        }
+        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+            "reference invocation `seed` is not available",
+            "define a zero-argument `seed` function in the reachable project modules",
+        )),
     }
 }
 
@@ -476,10 +560,13 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             "the REPL runtime is not available",
             "use an Orna runtime with source execution enabled",
         )),
-        Command::Run(_) => Err(Diagnostic::unavailable(
-            "reference invocation execution is not available",
-            "use an Orna runtime with source execution enabled",
-        )),
+        Command::Run(Invocation::Seed) => run_standard_free_seed(&parsed.endpoint),
+        Command::Run(Invocation::Exercise | Invocation::SensorsIngest) => {
+            Err(Diagnostic::unavailable(
+                "reference invocation execution is not available",
+                "use an Orna runtime with source execution enabled",
+            ))
+        }
     }
 }
 
@@ -546,6 +633,35 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         assert_eq!(check_project(&endpoint), Ok(()));
+    }
+
+    #[test]
+    fn run_seed_executes_a_reachable_standard_free_project() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use library; pub fn seed(): Int = library.value();",
+        )
+        .expect("main source");
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn value(): Int = 42;",
+        )
+        .expect("library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let parsed = Parsed {
+            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
+            command: Command::Run(Invocation::Seed),
+        };
+        assert_eq!(execute(&parsed), Ok(()));
     }
 
     #[test]
