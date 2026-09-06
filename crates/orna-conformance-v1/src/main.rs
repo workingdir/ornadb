@@ -16,8 +16,9 @@ use std::collections::BTreeMap;
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
 /// duplicate-key fixture is delegated to the real table evaluator. `REPL-001`
-/// executes through the real REPL parser/evaluator boundary; all other
-/// behavioral scenarios remain explicit corpus skips until their own
+/// and `REPL-002` execute through the real REPL parser/evaluator boundary. `TXN-001` and
+/// `TXN-002` execute only through the exact-contract table activation bridge;
+/// all other behavioral scenarios remain explicit corpus skips until their own
 /// authoritative compiler/runtime witness exists.
 #[derive(Default)]
 struct CompositeEvaluator {
@@ -69,8 +70,13 @@ impl RuntimeEvaluator for CompositeEvaluator {
         &mut self,
         scenario: &Scenario,
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
-        if scenario.id == "REPL-001" {
-            return run_repl_safe_preview_scenario(scenario, Limits::default());
+        match scenario.id.as_str() {
+            "REPL-001" => return run_repl_safe_preview_scenario(scenario, Limits::default()),
+            "REPL-002" => return run_repl_effect_suppression_scenario(scenario, Limits::default()),
+            _ => {}
+        }
+        if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
+            return self.transactional.run_scenario(scenario);
         }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
@@ -97,6 +103,31 @@ fn run_repl_safe_preview_scenario(scenario: &Scenario, limits: Limits) -> StageO
         Ok(value) if value == Value::int(3.into()) => StageOutcome::Passed,
         Ok(_) => scenario_failure("safe preview did not produce 3 : Int"),
         Err(_) => scenario_failure("REPL evaluator could not produce the safe preview"),
+    }
+}
+
+fn repl_effect_suppression_contract(scenario: &Scenario) -> bool {
+    scenario.id == "REPL-002"
+        && scenario.title == "Effectful preview is suppressed"
+        && scenario.given == ["user types Contact.insert(...)"]
+        && scenario.when == ["preview system analyses expression"]
+        && scenario.then == ["no insertion occurs", "type/effect hint may appear"]
+        && scenario.requirements == ["ORNA-REPL-003"]
+}
+
+fn run_repl_effect_suppression_scenario(
+    scenario: &Scenario,
+    limits: Limits,
+) -> StageOutcome<Diagnostic> {
+    if !repl_effect_suppression_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the REPL evaluator".into(),
+        };
+    }
+    match evaluate_repl("Contact.insert(1)", &Environment::new(), limits) {
+        Err(error) if error.code() == "ORNA-EVAL-NAME" => StageOutcome::Passed,
+        Ok(_) => scenario_failure("effectful REPL preview was evaluated"),
+        Err(_) => scenario_failure("REPL evaluator did not suppress the effectful preview"),
     }
 }
 
@@ -533,12 +564,12 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the exact safe REPL preview execute; all other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, exact safe and effect-suppressed REPL previews, and frozen TXN-001/TXN-002 table-activation scenarios execute; TXN-003 and all other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
             .collect(),
-            executed_scenario_contracts: vec!["REPL-001".into()],
+            executed_scenario_contracts: vec!["REPL-001".into(), "REPL-002".into(), "TXN-001".into(), "TXN-002".into()],
         })
         .run(&mut adapter);
     println!(
