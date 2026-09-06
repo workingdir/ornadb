@@ -282,6 +282,86 @@ fn checkout_preflight_invalid_selector_is_strictly_non_mutating() {
 }
 
 #[test]
+fn checkout_preflight_revalidation_accepts_unchanged_state_and_rejects_worktree_drift() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(20))
+        .unwrap();
+    assert!(repo.verify_checkout_preflight(&plan).is_ok());
+
+    fs::write(root.path().join("main.orna"), "changed after planning\n").unwrap();
+    assert!(matches!(
+        repo.verify_checkout_preflight(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+}
+
+#[test]
+fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(21))
+        .unwrap();
+
+    fs::write(root.path().join("ordinary.txt"), "index drift\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    assert!(matches!(
+        repo.verify_checkout_preflight(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(22))
+        .unwrap();
+    git(
+        root.path(),
+        &["commit", "--allow-empty", "-m", "head drift"],
+    );
+    assert!(matches!(
+        repo.verify_checkout_preflight(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(23))
+        .unwrap();
+    let next = git(
+        root.path(),
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "tip drift",
+        ],
+    );
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/heads/experiment",
+            &next,
+            &git(root.path(), &["rev-parse", "experiment"]),
+        ],
+    );
+    assert!(matches!(
+        repo.verify_checkout_preflight(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+}
+
+#[test]
 fn verify_cwd_rejects_a_worktree_only_interleaving() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
