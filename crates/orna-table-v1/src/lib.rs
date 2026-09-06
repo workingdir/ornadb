@@ -31,6 +31,13 @@ where
     Key: Clone + Ord,
     Row: Clone,
 {
+    /// Captures an immutable view of the currently committed rows.
+    pub fn snapshot(&self) -> TableSnapshot<Key, Row> {
+        TableSnapshot {
+            committed: self.committed.clone(),
+        }
+    }
+
     /// Starts a root activation with an empty, private mutation overlay.
     pub fn begin(&mut self) -> Activation<'_, Key, Row> {
         Activation {
@@ -92,6 +99,36 @@ where
 
     /// Returns a lazy ordered relation over committed rows.
     pub fn relation(&self) -> Relation<'_, (Key, Row)> {
+        Relation::new(self.scan().map(|(key, row)| (key.clone(), row.clone())))
+    }
+}
+
+/// An immutable, owned view of one committed relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableSnapshot<Key, Row> {
+    committed: BTreeMap<Key, Row>,
+}
+
+impl<Key, Row> TableSnapshot<Key, Row>
+where
+    Key: Ord,
+{
+    /// Returns the row captured for a key, if it existed at snapshot time.
+    pub fn committed(&self, key: &Key) -> Option<&Row> {
+        self.committed.get(key)
+    }
+
+    /// Scans the captured rows in ascending canonical key order.
+    pub fn scan(&self) -> impl Iterator<Item = (&Key, &Row)> {
+        self.committed.iter()
+    }
+
+    /// Returns a lazy ordered relation over the captured rows.
+    pub fn relation(&self) -> Relation<'_, (Key, Row)>
+    where
+        Key: Clone,
+        Row: Clone,
+    {
         Relation::new(self.scan().map(|(key, row)| (key.clone(), row.clone())))
     }
 }
@@ -681,6 +718,13 @@ where
     Key: Clone + Ord,
     Row: Clone,
 {
+    /// Captures an immutable view of every currently committed relation.
+    pub fn snapshot(&self) -> DatabaseSnapshot<Table, Key, Row> {
+        DatabaseSnapshot {
+            committed: self.committed.clone(),
+        }
+    }
+
     /// Starts a root activation spanning all named relations.
     pub fn begin(&mut self) -> DatabaseActivation<'_, Table, Key, Row> {
         DatabaseActivation {
@@ -753,6 +797,46 @@ where
 
     /// Returns a lazy ordered relation over one committed relation.
     pub fn relation(&self, table: &Table) -> Relation<'_, (Key, Row)> {
+        Relation::new(
+            self.scan(table)
+                .map(|(key, row)| (key.clone(), row.clone())),
+        )
+    }
+}
+
+/// An immutable, owned view of all committed relations at one point in time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseSnapshot<Table, Key, Row> {
+    committed: BTreeMap<Table, BTreeMap<Key, Row>>,
+}
+
+impl<Table, Key, Row> DatabaseSnapshot<Table, Key, Row>
+where
+    Table: Ord,
+{
+    /// Returns the row captured for a relation/key pair, if it existed at
+    /// snapshot time.
+    pub fn committed(&self, table: &Table, key: &Key) -> Option<&Row>
+    where
+        Key: Ord,
+    {
+        self.committed.get(table)?.get(key)
+    }
+
+    /// Scans one captured relation in ascending canonical key order.
+    pub fn scan(&self, table: &Table) -> impl Iterator<Item = (&Key, &Row)> {
+        self.committed
+            .get(table)
+            .into_iter()
+            .flat_map(BTreeMap::iter)
+    }
+
+    /// Returns a lazy ordered relation over one captured relation.
+    pub fn relation<'a>(&'a self, table: &'a Table) -> Relation<'a, (Key, Row)>
+    where
+        Key: Clone,
+        Row: Clone,
+    {
         Relation::new(
             self.scan(table)
                 .map(|(key, row)| (key.clone(), row.clone())),
@@ -1411,6 +1495,30 @@ mod tests {
     }
 
     #[test]
+    fn table_snapshot_remains_stable_after_later_commit() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        table
+            .activate(|activation| {
+                activation.insert(1, "old")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        let snapshot = table.snapshot();
+
+        table
+            .activate(|activation| {
+                activation.update(1, "new")?;
+                activation.insert(2, "later")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.committed(&1), Some(&"old"));
+        assert_eq!(snapshot.committed(&2), None);
+        assert_eq!(snapshot.relation().collect::<Vec<_>>(), vec![(1, "old")]);
+    }
+
+    #[test]
     fn committed_database_scans_are_in_ascending_key_order() {
         let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
         database
@@ -1427,6 +1535,36 @@ mod tests {
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         assert_eq!(keys, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn database_snapshot_remains_stable_across_cross_relation_commit() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        database
+            .activate(|activation| {
+                activation.insert("orders", 1, "old")?;
+                activation.insert("audits", 1, "before")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        let snapshot = database.snapshot();
+
+        database
+            .activate(|activation| {
+                activation.update("orders", 1, "new")?;
+                activation.delete("audits", 1)?;
+                activation.insert("orders", 2, "later")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.committed(&"orders", &1), Some(&"old"));
+        assert_eq!(snapshot.committed(&"orders", &2), None);
+        assert_eq!(snapshot.committed(&"audits", &1), Some(&"before"));
+        assert_eq!(
+            snapshot.relation(&"orders").collect::<Vec<_>>(),
+            vec![(1, "old")]
+        );
     }
 
     #[test]
