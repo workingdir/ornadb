@@ -747,9 +747,7 @@ fn rejects_trailing_commas_in_client_calls_without_partial_declarations() {
         let diagnostic = &parsed.diagnostics()[0];
         assert_eq!(diagnostic.code, "ORNA0001");
         assert_eq!(diagnostic.message, "expected a CLIENT expression");
-        let close_start = source
-            .find(trailing_marker)
-            .expect("trailing comma marker")
+        let close_start = source.find(trailing_marker).expect("trailing comma marker")
             + trailing_marker.len()
             - 1;
         assert_eq!(
