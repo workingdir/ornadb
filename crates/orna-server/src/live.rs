@@ -4,8 +4,9 @@
 //! accepts one local HTTP connection; the cancellable entry point retains
 //! transport/session state across sequential connections and hands the live
 //! WebSocket path to the bounded transport driver. TLS, remote exposure,
-//! durable live-session rows, and application dispatch are deliberately
-//! outside this slice.
+//! durable session credentials, and application dispatch are deliberately
+//! outside this slice. Verified runtime request reservations and terminal
+//! outcomes are retained through the existing runtime state boundary.
 
 use futures::{Future, executor::block_on, io::AsyncReadExt};
 use orna_live_v1::{
@@ -86,13 +87,14 @@ impl LiveOnceHost {
             .map_err(|_| LiveHostError::Configuration)?;
         let bare_localhost =
             Origin::parse("http://localhost").map_err(|_| LiveHostError::Configuration)?;
-        let host = LiveHost::new(
+        let host = LiveHost::with_runtime_state(
             Limits::default(),
             SessionBoundary::new(
                 OriginPolicy::new([bare_localhost, localhost, loopback], []),
                 30_000,
             ),
             Serving::new(ServingLimits::default()).map_err(|_| LiveHostError::Configuration)?,
+            state,
         )
         .map_err(|_| LiveHostError::Configuration)?;
         let transport = LiveTransport::new(host, TransportLimits::default())
