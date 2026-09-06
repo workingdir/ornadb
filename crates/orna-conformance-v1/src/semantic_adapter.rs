@@ -38,6 +38,16 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         message if message.starts_with("table write field has an incompatible type:") => {
             "E2001".into()
         }
+        message if message.starts_with("missing required field `") => "E2002".into(),
+        message
+            if message.starts_with("computed field `") && message.ends_with("during insert") =>
+        {
+            "E3010".into()
+        }
+        message if message.starts_with("computed field `") && message.ends_with("directly") => {
+            "E3011".into()
+        }
+        "primary keys are immutable through update" => "E3002".into(),
         "cannot add Time and Energy" => "E5001".into(),
         "cannot add two absolute affine temperatures" => "E5002".into(),
         "cannot sum absolute affine quantities" => "E5003".into(),
