@@ -1173,6 +1173,55 @@ impl DurableTransactionalEvaluator {
         .await
     }
 
+    /// Runs the deliberately narrow finite-list stream shape from independently
+    /// admitted project modules. The root and its zero-argument list producer
+    /// remain qualified module functions; arbitrary stream expressions stay
+    /// outside this execution seam.
+    pub async fn execute_project_stream(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        if !root_entry.contains('.') {
+            return Ok(StageOutcome::Skipped {
+                reason: "project stream roots must be namespace-qualified".into(),
+            });
+        }
+        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+            Ok(value) => value,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let mut bridge = match admit_project_list_stream(project, admitted, root_entry, identity) {
+            Ok(bridge) => bridge,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let writer = state.acquire_lease(owner_id).await?;
+        let key = bridge.checkpoint_key()?;
+        let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
+        let mut handler = ListTableHandler::new(bridge);
+        match state
+            .run_stream(
+                writer,
+                &key,
+                &mut source,
+                &mut handler,
+                &orna_runtime_v1::NeverCancelled,
+            )
+            .await
+        {
+            Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
+            Ok(_) => Ok(StageOutcome::Skipped {
+                reason: "project literal list stream did not exhaust".into(),
+            }),
+            Err(error) => Ok(StageOutcome::Failed(stream_error_diagnostic(error))),
+        }
+    }
+
     async fn execute_admitted_project(
         &self,
         repository: &Repository,
@@ -1300,10 +1349,13 @@ impl DurableTransactionalEvaluator {
 
 struct ListStreamBridge {
     source_identity: String,
-    source_id: String,
     entry: String,
+    consumer_principal: String,
+    consumer_root: String,
+    consumer_binding: String,
+    partition: String,
     table: String,
-    key_field: String,
+    key_fields: Vec<String>,
     parameter: String,
     insert_row: Expr,
     payloads: Vec<Vec<u8>>,
@@ -1316,15 +1368,15 @@ impl ListStreamBridge {
         }
         Ok(CheckpointKey {
             consumer: ConsumerIdentity {
-                principal: component("conformance")?,
-                root: component(&self.source_id)?,
+                principal: component(&self.consumer_principal)?,
+                root: component(&self.consumer_root)?,
                 function: component(&self.entry)?,
-                binding: component("from_list")?,
+                binding: component(&self.consumer_binding)?,
             },
             source_format: component("orna-stream-v1")?,
             source: component(&self.source_identity)?,
             partition_format: component("literal-list")?,
-            partition: component("default")?,
+            partition: component(&self.partition)?,
             position_format: component("ordinal")?,
         })
     }
@@ -1357,7 +1409,7 @@ impl StreamHandler for ListTableHandler {
                 Some(row) => row,
                 None => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
             };
-        let key = match table_key(&row, std::slice::from_ref(&self.bridge.key_field)) {
+        let key = match table_key(&row, &self.bridge.key_fields) {
             Ok(key) => key,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
         };
@@ -1437,11 +1489,11 @@ fn admit_list_stream_source(
             reason: "literal list stream bridge requires Stream.from_list piped to one for_each insert body".into(),
         }))?;
     let (table_name, key_fields) = key_fields.into_iter().next().expect("one table checked");
-    let [key_field] = key_fields.as_slice() else {
+    if key_fields.is_empty() {
         return Err(Box::new(StageOutcome::Skipped {
-            reason: "literal list stream bridge requires a single-field table key".into(),
+            reason: "literal list stream bridge requires an explicit table key".into(),
         }));
-    };
+    }
     if table != table_name {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream insert must target the declared table".into(),
@@ -1464,14 +1516,244 @@ fn admit_list_stream_source(
         })?;
     Ok(ListStreamBridge {
         source_identity: list_source_identity(&source_identity, &payloads),
-        source_id: unit.source_id.clone(),
         entry: entry.into(),
+        consumer_principal: "conformance".into(),
+        consumer_root: unit.source_id.clone(),
+        consumer_binding: "from_list".into(),
+        partition: "default".into(),
         table: table_name,
-        key_field: key_field.clone(),
+        key_fields,
         parameter,
         insert_row: insert_row.clone(),
         payloads,
     })
+}
+
+/// Admits exactly one project root of the form `producer() | for_each(...)`,
+/// where `producer` is a zero-argument sibling function returning a literal
+/// `Stream.from_list`. The project function map is already namespace-qualified
+/// by `admit_transaction_project`, so this does not combine module text.
+fn admit_project_list_stream(
+    _project: &ProjectUnit,
+    admitted: AdmittedTransaction,
+    root_entry: &str,
+    identity: RuntimeIdentity,
+) -> Result<ListStreamBridge, AdmissionFailure> {
+    let (functions, key_fields, _, _) = admitted;
+    let root = functions.get(root_entry).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "configured qualified project stream root is not present".into(),
+        })
+    })?;
+    if !root.parameters.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must have canonical zero-argument bindings".into(),
+        }));
+    }
+    let Expr::Block {
+        statements,
+        tail: None,
+        ..
+    } = &root.body
+    else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must contain one producer pipeline".into(),
+        }));
+    };
+    let [Statement::Expression { value, .. }] = statements.as_slice() else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must contain one producer pipeline".into(),
+        }));
+    };
+    let Expr::Binary { lhs, op, rhs, .. } = value else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must pipe a producer into for_each".into(),
+        }));
+    };
+    if op != "|" {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must pipe a producer into for_each".into(),
+        }));
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = lhs.as_ref()
+    else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must be a zero-argument sibling call".into(),
+        }));
+    };
+    let Expr::Name { text: producer, .. } = callee.as_ref() else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must be a zero-argument sibling call".into(),
+        }));
+    };
+    if !arguments.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must have canonical zero-argument bindings"
+                .into(),
+        }));
+    }
+    let (namespace, _) = root_entry.rsplit_once('.').ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project stream root must have a module namespace".into(),
+        })
+    })?;
+    let producer_entry = format!("{namespace}.{producer}");
+    let producer = functions.get(&producer_entry).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must resolve in the root module".into(),
+        })
+    })?;
+    if !producer.parameters.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must have canonical zero-argument bindings"
+                .into(),
+        }));
+    }
+    let (values, source_identity) = literal_list_source(&producer.body).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream producer must return literal Stream.from_list".into(),
+        })
+    })?;
+    let (parameter, table, insert_row) = list_for_each_body(rhs).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream root must use one for_each table insert body".into(),
+        })
+    })?;
+    let keys = key_fields.get(&table).ok_or_else(|| {
+        Box::new(StageOutcome::Skipped {
+            reason: "project list stream insert must target a declared keyed table".into(),
+        })
+    })?;
+    if keys.is_empty() {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "project list stream insert target must have an explicit table key".into(),
+        }));
+    }
+    let payloads = canonical_list_payloads(values)?;
+    let database = identity
+        .database_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(ListStreamBridge {
+        source_identity,
+        entry: root_entry.into(),
+        consumer_principal: format!("database:{database}"),
+        consumer_root: "public-function".into(),
+        consumer_binding: "arguments:[]".into(),
+        partition: "null".into(),
+        table,
+        key_fields: keys.clone(),
+        parameter,
+        insert_row: insert_row.clone(),
+        payloads,
+    })
+}
+
+fn canonical_list_payloads(values: &[Expr]) -> Result<Vec<Vec<u8>>, AdmissionFailure> {
+    values
+        .iter()
+        .map(literal_value)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|values| {
+            values
+                .into_iter()
+                .map(|value| value.encode().ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| {
+            Box::new(StageOutcome::Skipped {
+                reason: "literal list stream values must be canonical literals".into(),
+            })
+        })
+}
+
+fn literal_list_source(body: &Expr) -> Option<(&[Expr], String)> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = body
+    else {
+        return None;
+    };
+    if qualified_expr_path(callee).as_deref() != Some(["Stream", "from_list"].as_slice()) {
+        return None;
+    }
+    let [values, identity] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::List { elements, .. } = &values.value else {
+        return None;
+    };
+    let (
+        Some(name),
+        Expr::Literal {
+            text: source_identity,
+            kind: orna_syntax_v1::LiteralKind::String,
+            ..
+        },
+    ) = (&identity.name, &identity.value)
+    else {
+        return None;
+    };
+    let source_identity = literal_string(source_identity)?;
+    (name == "source_identity" && Component::new(source_identity.clone()).is_ok())
+        .then_some((elements.as_slice(), source_identity))
+}
+
+fn list_for_each_body(rhs: &Expr) -> Option<(String, String, &Expr)> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs
+    else {
+        return None;
+    };
+    if qualified_expr_path(callee).as_deref() != Some(["for_each"].as_slice()) {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(parameter, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Block {
+        statements,
+        tail: None,
+        ..
+    } = body.as_ref()
+    else {
+        return None;
+    };
+    let [Statement::Expression { value: insert, .. }] = statements.as_slice() else {
+        return None;
+    };
+    let Expr::Call {
+        callee, arguments, ..
+    } = insert
+    else {
+        return None;
+    };
+    let Expr::Field { base, name, .. } = callee.as_ref() else {
+        return None;
+    };
+    let Expr::Name { text: table, .. } = base.as_ref() else {
+        return None;
+    };
+    let [row] = arguments.as_slice() else {
+        return None;
+    };
+    (name == "insert").then_some((parameter.clone(), table.clone(), &row.value))
 }
 
 /// Binds a finite list source name to the complete canonical typed list.
@@ -1624,6 +1906,7 @@ fn literal_value(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::Literal { text, kind, .. } => match kind {
             orna_syntax_v1::LiteralKind::Integer => text.parse::<BigInt>().ok().map(Value::int),
+            orna_syntax_v1::LiteralKind::Decimal => literal_decimal(text),
             orna_syntax_v1::LiteralKind::String => {
                 literal_string(text).and_then(|text| Value::new(OvbRaw::Text(text)).ok())
             }
@@ -1644,18 +1927,44 @@ fn literal_value(expr: &Expr) -> Option<Value> {
                 ))
                 .ok()
             }),
-        Expr::Record { fields, .. } => fields
-            .iter()
-            .map(|field| {
-                Some((
-                    OvbRaw::Text(field.name.clone()),
-                    literal_value(&field.value)?.raw().clone(),
-                ))
-            })
-            .collect::<Option<Vec<_>>>()
-            .and_then(|fields| Value::new(OvbRaw::Map(fields)).ok()),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            let mut fields = fields
+                .iter()
+                .map(|field| {
+                    Some((
+                        field.name.clone(),
+                        literal_value(&field.value)?.raw().clone(),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            fields.sort_by_cached_key(|(name, _)| {
+                Value::new(OvbRaw::Text(name.clone()))
+                    .expect("text field key is a valid value")
+                    .encode()
+                    .expect("text field key encodes canonically")
+            });
+            Value::new(OvbRaw::Map(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| (OvbRaw::Text(name), value))
+                    .collect(),
+            ))
+            .ok()
+        }
         _ => None,
     }
+}
+
+fn literal_decimal(text: &str) -> Option<Value> {
+    let text = text.replace('_', "");
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(index) => (&text[..index], text[index + 1..].parse::<i64>().ok()?),
+        None => (text.as_str(), 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.')?;
+    let coefficient = BigInt::parse_bytes(format!("{whole}{fraction}").as_bytes(), 10)?;
+    let exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    Value::decimal(coefficient, BigInt::from(exponent)).ok()
 }
 
 fn literal_string(text: &str) -> Option<String> {
@@ -1670,18 +1979,32 @@ fn substitute_list_item(expr: &Expr, parameter: &str, item: &Value) -> Option<Va
             Expr::Name { text, .. } if text == parameter => record_field(item, name),
             _ => None,
         },
-        Expr::Record { fields, .. } => fields
-            .iter()
-            .map(|field| {
-                Some((
-                    OvbRaw::Text(field.name.clone()),
-                    substitute_list_item(&field.value, parameter, item)?
-                        .raw()
-                        .clone(),
-                ))
-            })
-            .collect::<Option<Vec<_>>>()
-            .and_then(|fields| Value::new(OvbRaw::Map(fields)).ok()),
+        Expr::Record { fields, .. } => {
+            let mut fields = fields
+                .iter()
+                .map(|field| {
+                    Some((
+                        field.name.clone(),
+                        substitute_list_item(&field.value, parameter, item)?
+                            .raw()
+                            .clone(),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            fields.sort_by_cached_key(|(name, _)| {
+                Value::new(OvbRaw::Text(name.clone()))
+                    .expect("text field key is a valid value")
+                    .encode()
+                    .expect("text field key encodes canonically")
+            });
+            Value::new(OvbRaw::Map(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| (OvbRaw::Text(name), value))
+                    .collect(),
+            ))
+            .ok()
+        }
         _ => literal_value(expr),
     }
 }
@@ -3443,10 +3766,12 @@ mod durable_tests {
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
-        DurableTransactionalEvaluator, SourceUnit, StageOutcome, stream_handler_diagnostic,
+        DurableTransactionalEvaluator, SourceUnit, StageOutcome, admit_project_list_stream,
+        admit_transaction_project, stream_handler_diagnostic, substitute_list_item, table_key,
     };
+    use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
-    use orna_foundation_v1::Value;
+    use orna_foundation_v1::{OvbRaw, Value};
     use orna_repository_v1::Repository;
     use orna_runtime_v1::{
         ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult,
@@ -3499,6 +3824,107 @@ mod list_stream_tests {
 
     fn source() -> SourceUnit {
         source_with_values("1, 2")
+    }
+
+    fn authoritative_sensor_project() -> ProjectUnit {
+        ProjectUnit {
+            fixture_id: "reference".into(),
+            project_id: "reference".into(),
+            environment_id: None,
+            modules: vec![SourceUnit {
+                fixture_id: "reference".into(),
+                source_id: "sensors.orna".into(),
+                parse_as: "module_unit".into(),
+                source: r#"
+                    pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
+                    pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+                    pub fn input() = Stream.from_list([
+                        Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+                        Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
+                        Sample { sensor: "greenhouse", sequence: 2, value: 18.75 },
+                    ], source_identity: "example:sensors:v1");
+                    pub fn ingest() { input() | for_each(sample => {
+                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
+                    }); }
+                "#.into(),
+            }],
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn project_stream_admits_authoritative_nominal_decimal_composite_readings() {
+        let (_temp, repository) = repository();
+        let project = authoritative_sensor_project();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        let outcome = evaluator
+            .execute_project_stream(
+                &repository,
+                identity(),
+                [23; 16],
+                [24; 32],
+                &project,
+                "sensors.ingest",
+            )
+            .await;
+        assert!(matches!(outcome, Ok(StageOutcome::Passed)), "{outcome:?}");
+
+        let bridge = admit_project_list_stream(
+            &project,
+            admit_transaction_project(&project, Limits::default(), "sensors.ingest")
+                .expect("authoritative project admission"),
+            "sensors.ingest",
+            identity(),
+        )
+        .expect("authoritative stream admission");
+        assert_eq!(bridge.source_identity, "example:sensors:v1");
+        assert_eq!(bridge.key_fields, ["sensor", "sequence"]);
+        let sample = Value::decode(&bridge.payloads[0]).expect("nominal sample payload");
+        assert!(matches!(
+            sample.raw(),
+            OvbRaw::Map(fields) if fields.iter().any(|(name, value)| {
+                matches!(name, OvbRaw::Text(name) if name == "value")
+                    && matches!(value, OvbRaw::Tag(60000, _))
+            })
+        ));
+        let row = substitute_list_item(&bridge.insert_row, &bridge.parameter, &sample)
+            .expect("Reading row projection");
+        assert_eq!(
+            table_key(&row, &bridge.key_fields).expect("composite Reading key"),
+            Value::new(OvbRaw::Array(vec![
+                OvbRaw::Text("greenhouse".into()),
+                OvbRaw::Int(0.into()),
+            ]))
+            .expect("canonical key")
+            .encode()
+            .expect("encoded key")
+        );
+
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened runtime");
+        assert_eq!(
+            state.committed_table_rows("Reading").await.unwrap().len(),
+            3
+        );
+        let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&bridge.checkpoint_key().expect("checkpoint key"))
+            .await
+            .expect("checkpoint");
+        assert_eq!(checkpoint.committed.unwrap().token.as_str(), "3");
     }
 
     #[tokio::test]
