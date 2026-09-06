@@ -692,6 +692,57 @@ fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
 }
 
 #[test]
+fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("untracked.txt"), "untracked\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(32))
+        .unwrap();
+    let token = plan.force_token();
+    let before = repo.cwd_generation(RuntimeGeneration::new(32)).unwrap();
+
+    assert!(matches!(
+        repo.validate_checkout_discard_set_with_validation(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            |repository, observed| {
+                assert_eq!(
+                    repository.head().unwrap(),
+                    observed.expected_head().cloned()
+                );
+                assert_eq!(observed.target().branch_name(), Some("experiment"));
+                Err::<(), _>("candidate schema assertion rejected")
+            },
+        ),
+        Err(orna_repository_v1::CheckoutExecutionError::Validation(
+            "candidate schema assertion rejected"
+        ))
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(32)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked\n"
+    );
+}
+
+#[test]
 fn verify_cwd_rejects_a_worktree_only_interleaving() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
