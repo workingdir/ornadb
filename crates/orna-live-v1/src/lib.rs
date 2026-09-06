@@ -7,7 +7,12 @@
 //! are decoded canonically.
 
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
+    io,
+    pin::Pin,
+};
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
@@ -1870,6 +1875,7 @@ impl std::error::Error for HttpConnectionError {}
 pub enum HttpIoError {
     Read,
     Write,
+    Cancelled,
     Transport(HttpConnectionError),
 }
 
@@ -1878,12 +1884,34 @@ impl core::fmt::Display for HttpIoError {
         match self {
             Self::Read => formatter.write_str("HTTP connection read failed"),
             Self::Write => formatter.write_str("HTTP connection write failed"),
+            Self::Cancelled => formatter.write_str("HTTP connection cancelled"),
             Self::Transport(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for HttpIoError {}
+
+async fn await_http_io<T, F, C>(
+    operation: F,
+    cancellation: &mut C,
+    failure: HttpIoError,
+) -> std::result::Result<T, HttpIoError>
+where
+    F: Future<Output = io::Result<T>> + Unpin,
+    C: Future<Output = ()> + Unpin,
+{
+    let mut operation = operation;
+    futures::future::poll_fn(|context| {
+        if Pin::new(&mut *cancellation).poll(context).is_ready() {
+            return std::task::Poll::Ready(Err(HttpIoError::Cancelled));
+        }
+        Pin::new(&mut operation)
+            .poll(context)
+            .map(|result| result.map_err(|_| failure))
+    })
+    .await
+}
 
 impl HttpConnection {
     #[must_use]
@@ -2339,12 +2367,52 @@ impl LiveTransport {
         W: AsyncWrite + Unpin,
         C: FnMut() -> u64,
     {
+        let mut cancellation = std::future::pending::<()>();
+        self.serve_http_connection_with_cancellation(
+            reader,
+            writer,
+            connection,
+            clock,
+            &mut cancellation,
+            authority,
+            issuer,
+            deletion,
+        )
+        .await
+    }
+
+    /// Serves an injected HTTP byte stream with cancellation raced against
+    /// every read, write, and flush. The cancellation future must wake the
+    /// task when it becomes ready so a stalled peer cannot hold the task.
+    /// Cancellation may occur after a partial response write; callers must
+    /// dispose of the reader and writer and must not reuse this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted read, write, cancellation, parser, or response-
+    /// encoding error, or an incomplete-request error at EOF.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve_http_connection_with_cancellation<R, W, C, X>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        connection: &mut HttpConnection,
+        clock: &mut C,
+        cancellation: &mut X,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+        C: FnMut() -> u64,
+        X: Future<Output = ()> + Unpin,
+    {
         let mut chunk = [0; 8192];
         loop {
-            let read = reader
-                .read(&mut chunk)
-                .await
-                .map_err(|_| HttpIoError::Read)?;
+            let read =
+                await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read).await?;
             if read == 0 {
                 return if connection.buffered_bytes() == 0 {
                     Ok(())
@@ -2365,11 +2433,13 @@ impl LiveTransport {
                     .encode_http(self.limits)
                     .map_err(HttpConnectionError::Encode)
                     .map_err(HttpIoError::Transport)?;
-                writer
-                    .write_all(&response)
-                    .await
-                    .map_err(|_| HttpIoError::Write)?;
-                writer.flush().await.map_err(|_| HttpIoError::Write)?;
+                await_http_io(
+                    writer.write_all(&response),
+                    cancellation,
+                    HttpIoError::Write,
+                )
+                .await?;
+                await_http_io(writer.flush(), cancellation, HttpIoError::Write).await?;
                 next_request = connection
                     .push_one(&[])
                     .map_err(HttpConnectionError::Parse)
