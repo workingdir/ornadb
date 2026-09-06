@@ -402,6 +402,30 @@ impl Repository {
         result
     }
 
+    /// Advances the symbolic current branch to a previously built private
+    /// candidate using Git's compare-and-set ref transaction. It does not
+    /// reconcile the ordinary index or worktree; callers must keep the
+    /// publication journal until that separate recovery boundary is complete.
+    pub fn advance_current_ref(
+        &self,
+        expected_head: &GitCommitRef,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &actual != expected_head {
+            return Err(RepositoryError::StaleHead);
+        }
+        let reference = self
+            .git(["symbolic-ref", "--quiet", "HEAD"])
+            .map_err(|_| RepositoryError::DetachedHead)?;
+        self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
+        if self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(())
+    }
+
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
@@ -1017,6 +1041,42 @@ impl Repository {
             Err(RepositoryError::StaleHead)
         }
     }
+
+    fn advance_ref_transaction(
+        &self,
+        reference: &str,
+        old: &GitCommitRef,
+        new: &GitCommitRef,
+    ) -> Result<(), RepositoryError> {
+        let mut command = self.command();
+        command
+            .args(["update-ref", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let input = format!(
+            "start\nupdate {reference} {} {}\nprepare\ncommit\n",
+            new.as_str(),
+            old.as_str()
+        );
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?
+            .write_all(input.as_bytes())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(RepositoryError::StaleHead)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1102,6 +1162,7 @@ pub enum RepositoryError {
     InvalidSelector,
     InvalidBranchName,
     InvalidCommitMessage,
+    DetachedHead,
     UnsafeManagedPath,
     NoManagedPaths,
     UnbornHead,
@@ -1135,6 +1196,7 @@ impl fmt::Display for RepositoryError {
             Self::InvalidSelector => f.write_str("invalid Git snapshot selector"),
             Self::InvalidBranchName => f.write_str("invalid Git branch name"),
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
+            Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
