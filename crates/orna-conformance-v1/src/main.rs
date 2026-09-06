@@ -2,18 +2,23 @@ use orna_conformance_v1::{
     BoundedEvaluator, Corpus, Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator,
     Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
+#[cfg(test)]
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+#[cfg(test)]
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
+#[cfg(test)]
 use orna_semantic_v1::{ModuleInput, analyze};
+#[cfg(test)]
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; only the two
 /// exact transactional scenario contracts and the authoritative duplicate-key
-/// fixture are delegated to the real table evaluator. The live revision-gap
-/// contract is delegated to the serving state machine. Unsupported scenarios
-/// remain explicit skips.
+/// fixture are delegated to the real table evaluator. Direct serving and
+/// semantic adapter contracts remain explicit corpus skips: their unit tests
+/// do not constitute Orna-engine execution evidence.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -66,22 +71,24 @@ impl RuntimeEvaluator for CompositeEvaluator {
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
         if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
             self.transactional.run_scenario(scenario)
-        } else if live_keyed_update_contract(scenario) {
-            run_live_keyed_update_scenario(scenario)
-        } else if live_unkeyed_update_contract(scenario) {
-            run_live_unkeyed_update_scenario(scenario)
-        } else if live_fallback_contract(scenario) {
-            run_live_fallback_scenario(scenario)
-        } else if live_resync_contract(scenario) {
-            run_live_resync_scenario(scenario)
-        } else if sys_rt_rename_contract(scenario) {
-            run_sys_rt_rename_scenario(scenario)
+        } else if direct_adapter_contract(scenario) {
+            StageOutcome::Skipped {
+                reason: "scenario is covered by direct serving or semantic adapter tests, not Orna-engine execution".into(),
+            }
         } else {
             self.bounded.run_scenario(scenario)
         }
     }
 }
 
+fn direct_adapter_contract(scenario: &Scenario) -> bool {
+    matches!(
+        scenario.id.as_str(),
+        "LIVE-001" | "LIVE-002" | "LIVE-003" | "LIVE-004" | "SYS-RT-RENAME-100"
+    )
+}
+
+#[cfg(test)]
 fn live_resync_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-003"
         && scenario.title == "Missing revision resynchronizes"
@@ -91,6 +98,7 @@ fn live_resync_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-004"]
 }
 
+#[cfg(test)]
 fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
     StageOutcome::Failed(
         Diagnostic::new(
@@ -102,6 +110,7 @@ fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
     )
 }
 
+#[cfg(test)]
 fn live_keyed_update_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-001"
         && scenario.title == "Keyed row update sends contextual delta"
@@ -111,6 +120,7 @@ fn live_keyed_update_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-001", "ORNA-LIVE-003"]
 }
 
+#[cfg(test)]
 fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_keyed_update_contract(scenario) {
         return StageOutcome::Skipped {
@@ -204,6 +214,7 @@ fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnosti
     StageOutcome::Passed
 }
 
+#[cfg(test)]
 fn live_unkeyed_update_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-002"
         && scenario.title == "Unkeyed value still updates"
@@ -213,6 +224,7 @@ fn live_unkeyed_update_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-002"]
 }
 
+#[cfg(test)]
 fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_unkeyed_update_contract(scenario) {
         return StageOutcome::Skipped {
@@ -282,6 +294,7 @@ fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     StageOutcome::Passed
 }
 
+#[cfg(test)]
 fn live_fallback_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-004"
         && scenario.title == "Subtree replacement is universal live-update fallback"
@@ -301,6 +314,7 @@ fn live_fallback_contract(scenario: &Scenario) -> bool {
             ]
 }
 
+#[cfg(test)]
 fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_fallback_contract(scenario) {
         return StageOutcome::Skipped {
@@ -371,6 +385,7 @@ fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
+#[cfg(test)]
 fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_resync_contract(scenario) {
         return StageOutcome::Skipped {
@@ -440,6 +455,7 @@ fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
+#[cfg(test)]
 fn sys_rt_rename_contract(scenario: &Scenario) -> bool {
     scenario.id == "SYS-RT-RENAME-100"
         && scenario.title == "The runtime root is sys.rt"
@@ -454,6 +470,7 @@ fn sys_rt_rename_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-SYS-005", "ORNA-SYS-105"]
 }
 
+#[cfg(test)]
 fn run_sys_rt_rename_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !sys_rt_rename_contract(scenario) {
         return StageOutcome::Skipped {
@@ -505,7 +522,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, keyed/unkeyed/fallback-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the two bounded transactional scenarios execute; direct serving and semantic adapter contracts plus module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -516,11 +533,6 @@ fn main() {
                 "PIPE-002",
                 "TXN-001",
                 "TXN-002",
-                "LIVE-001",
-                "LIVE-002",
-                "LIVE-003",
-                "LIVE-004",
-                "SYS-RT-RENAME-100",
             ]
             .into_iter()
             .map(str::to_owned)
