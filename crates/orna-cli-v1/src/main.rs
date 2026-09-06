@@ -217,9 +217,11 @@ fn parse_repl_input(input: &str) -> Result<ReplInput, Diagnostic> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionState {
     Open,
+    Closing,
     Closed,
 }
 trait SessionAdapter {
+    fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic>;
     fn cancel(&mut self, child: u64) -> Result<(), Diagnostic>;
     fn drain_terminal(&mut self) -> Result<(), Diagnostic>;
     fn close_transport(&mut self) -> Result<(), Diagnostic>;
@@ -236,7 +238,7 @@ impl Session {
         }
     }
     fn own(&mut self, child: u64) -> Result<(), Diagnostic> {
-        if self.state == SessionState::Closed {
+        if self.state != SessionState::Open {
             return Err(Diagnostic::target(
                 "E1201",
                 "cannot add an invocation to a closed session",
@@ -250,8 +252,11 @@ impl Session {
         if self.state == SessionState::Closed {
             return Ok(false);
         }
-        for child in &self.owned {
-            adapter.cancel(*child)?;
+        self.state = SessionState::Closing;
+        for child in self.owned.iter().copied() {
+            if !adapter.is_terminal(child)? {
+                adapter.cancel(child)?;
+            }
         }
         adapter.drain_terminal()?;
         adapter.close_transport()?;
@@ -784,14 +789,27 @@ mod tests {
     #[derive(Default)]
     struct Recording {
         calls: Vec<String>,
+        terminal: BTreeSet<u64>,
+        fail_drain: bool,
     }
     impl SessionAdapter for Recording {
+        fn is_terminal(&mut self, child: u64) -> Result<bool, Diagnostic> {
+            self.calls.push(format!("terminal:{child}"));
+            Ok(self.terminal.contains(&child))
+        }
         fn cancel(&mut self, child: u64) -> Result<(), Diagnostic> {
             self.calls.push(format!("cancel:{child}"));
             Ok(())
         }
         fn drain_terminal(&mut self) -> Result<(), Diagnostic> {
             self.calls.push("drain".into());
+            if self.fail_drain {
+                return Err(Diagnostic::target(
+                    "E1202",
+                    "session cleanup is incomplete",
+                    "retry close after child cleanup completes",
+                ));
+            }
             Ok(())
         }
         fn close_transport(&mut self) -> Result<(), Diagnostic> {
@@ -800,15 +818,51 @@ mod tests {
         }
     }
     #[test]
-    fn close_cancels_only_owned_children_then_drains_and_is_idempotent() {
+    fn close_cancels_only_owned_unfinished_children_then_drains_and_is_idempotent() {
         let mut session = Session::new();
         session.own(9).expect("open");
         session.own(2).expect("open");
-        let mut adapter = Recording::default();
+        let mut adapter = Recording {
+            terminal: BTreeSet::from([9]),
+            ..Recording::default()
+        };
         assert_eq!(session.close(&mut adapter), Ok(true));
-        assert_eq!(adapter.calls, ["cancel:2", "cancel:9", "drain", "close"]);
+        assert_eq!(
+            adapter.calls,
+            ["terminal:2", "cancel:2", "terminal:9", "drain", "close"]
+        );
         assert_eq!(session.close(&mut adapter), Ok(false));
-        assert_eq!(adapter.calls.len(), 4);
+        assert_eq!(adapter.calls.len(), 5);
+    }
+    #[test]
+    fn failed_close_keeps_the_session_closed_to_new_children_until_cleanup_retries() {
+        let mut session = Session::new();
+        session.own(2).expect("open");
+        let mut adapter = Recording {
+            fail_drain: true,
+            ..Recording::default()
+        };
+
+        assert_eq!(
+            session.close(&mut adapter).expect_err("drain failure").code,
+            "E1202"
+        );
+        assert_eq!(session.own(3).expect_err("admission sealed").code, "E1201");
+
+        adapter.fail_drain = false;
+        assert_eq!(session.close(&mut adapter), Ok(true));
+        assert_eq!(
+            adapter.calls,
+            [
+                "terminal:2",
+                "cancel:2",
+                "drain",
+                "terminal:2",
+                "cancel:2",
+                "drain",
+                "close"
+            ]
+        );
     }
     #[test]
     fn identity_is_declared_for_adapter_integration() {
