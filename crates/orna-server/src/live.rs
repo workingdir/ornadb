@@ -122,7 +122,7 @@ impl LiveOnceHost {
     pub fn serve(mut self) -> Result<(), LiveHostError> {
         let mut connection = HttpConnection::new(TransportLimits::default());
         let mut issuer = SystemCredentialIssuer::default();
-        let mut clock = system_seconds;
+        let mut clock = system_milliseconds;
         self.transport
             .serve_one_http_listener(
                 self.listener.listener(),
@@ -204,7 +204,7 @@ impl LiveOnceHost {
         reader.replay(initial);
         let mut connection = HttpConnection::new(TransportLimits::default());
         let mut issuer = SystemCredentialIssuer::default();
-        let mut clock = system_seconds;
+        let mut clock = system_milliseconds;
         if websocket {
             let mut application = RejectLiveApplication;
             let attachment = opaque_attachment().map_err(|_| LiveHostError::Configuration)?;
@@ -465,8 +465,23 @@ fn subscribe_payload() -> Vec<u8> {
     .expect("static subscribe payload")
 }
 
-fn system_seconds() -> u64 {
+fn system_milliseconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
+        .map_or(0, duration_milliseconds)
+}
+
+fn duration_milliseconds(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::duration_milliseconds;
+    use std::time::Duration;
+
+    #[test]
+    fn live_clock_uses_milliseconds_for_the_advertised_lease() {
+        assert_eq!(duration_milliseconds(Duration::from_secs(30)), 30_000);
+    }
 }
