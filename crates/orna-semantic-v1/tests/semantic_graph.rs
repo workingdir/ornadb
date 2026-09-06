@@ -1883,6 +1883,30 @@ fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
 }
 
 #[test]
+fn runtime_root_and_info_function_use_the_current_sys_names() {
+    let current = analyze(&[ModuleInput::new(
+        "runtime.orna",
+        "pub fn view() = sys.rt; pub fn info() = sys.rt.info();",
+    )]);
+    assert!(
+        current.is_ok(),
+        "current sys runtime names: {:?}",
+        current.diagnostics
+    );
+
+    let legacy = analyze(&[ModuleInput::new(
+        "runtime.orna",
+        "pub fn bad() = sys.runtime_info();",
+    )]);
+    assert!(
+        legacy
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "`sys.runtime` was renamed to `sys.rt`" })
+    );
+}
+
+#[test]
 fn replay_status_default_does_not_waive_the_version_precondition() {
     for expression in [
         "sys.admin.replay_failure(failure.reference, expected_version: failure.version)",
