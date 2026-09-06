@@ -1280,7 +1280,7 @@ impl Context<'_, '_> {
             // field lookup. Resolve it only when the complete path was
             // explicitly admitted in the function environment; ordinary
             // record fields retain their existing semantics.
-            let callable = if let Some(name) = self.resolve_function_name(callee) {
+            let callable = if let Some(name) = self.resolve_function_name(callee, scope) {
                 Value::Function(name)
             } else {
                 self.evaluate(callee, scope, depth + 1)?
@@ -1354,7 +1354,12 @@ impl Context<'_, '_> {
         values.extend(explicit);
         self.math(name, named_arguments(name, arguments, values, implicit)?)
     }
-    fn resolve_function_name(&self, expression: &Expr) -> Option<String> {
+    fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
+        if let Some(root) = function_root_name(expression)
+            && scope.0.contains_key(root)
+        {
+            return None;
+        }
         let name = function_name(expression)?;
         if self.functions.contains_key(&name) {
             return Some(name);
@@ -1709,6 +1714,14 @@ fn function_name(expression: &Expr) -> Option<String> {
 fn function_namespace(name: &str) -> Option<String> {
     name.rsplit_once('.')
         .map(|(namespace, _)| namespace.to_owned())
+}
+
+fn function_root_name(expression: &Expr) -> Option<&str> {
+    match expression {
+        Expr::Name { text, .. } => Some(text),
+        Expr::Field { base, .. } => function_root_name(base),
+        _ => None,
+    }
 }
 
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
