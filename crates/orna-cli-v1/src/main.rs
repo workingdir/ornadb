@@ -512,7 +512,10 @@ mod tests {
             parsed.endpoint,
             Endpoint::RemoteTls("orna://host/reference".into())
         );
-        assert_eq!(parse_cli(&["check".into()]).unwrap().command, Command::Check);
+        assert_eq!(
+            parse_cli(&["check".into()]).unwrap().command,
+            Command::Check
+        );
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
     }
