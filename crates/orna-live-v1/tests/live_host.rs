@@ -269,6 +269,20 @@ impl SessionDeletionAdapter for Delete {
 }
 
 #[derive(Default)]
+struct RecordingDelete {
+    calls: usize,
+}
+
+impl SessionDeletionAdapter for RecordingDelete {
+    type Error = ();
+
+    fn delete(&mut self, _: orna_security_v1::SessionId) -> Result<(), Self::Error> {
+        self.calls += 1;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct UnitApplication {
     calls: usize,
     reject: bool,
@@ -1704,9 +1718,157 @@ fn http_contract_has_stable_status_headers_and_redacted_errors() {
             ("sec-websocket-protocol", SUBPROTOCOL),
         ]
     );
-    let deleted = block_on(host.http_delete(DeleteRequest { id: [1; 16] }, &mut Delete(true)));
+    let origin = origin();
+    let deleted = block_on(host.http_delete(
+        DeleteRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            now: 1,
+        },
+        &mut Delete(true),
+    ));
     assert_eq!(deleted.status, 204);
     assert_eq!(deleted.body, HttpBody::Empty);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn delete_requires_current_unexpired_bearer_and_original_origin() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(created.status, 201);
+    let credential = token(&created);
+
+    let mut wrong_origin = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    wrong_origin.headers[0].1 = "https://other.example".into();
+    wrong_origin
+        .headers
+        .push(("authorization".into(), format!("Bearer {credential}")));
+    assert_eq!(
+        block_on(transport.handle(wrong_origin, 1, &mut authority, &mut issuer, &mut deletion,))
+            .status,
+        403
+    );
+    assert_eq!(deletion.calls, 0);
+
+    let resumed = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+            &format!(r#"{{"resume_token":"{credential}","protocol":"orna.present.v1"}}"#),
+        ),
+        2,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(resumed.status, 200);
+    let rotated = token(&resumed);
+
+    let mut stale = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    stale
+        .headers
+        .push(("authorization".into(), format!("Bearer {credential}")));
+    assert_eq!(
+        block_on(transport.handle(stale, 3, &mut authority, &mut issuer, &mut deletion,)).status,
+        410
+    );
+    assert_eq!(deletion.calls, 0);
+
+    let mut cookie_only = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    cookie_only
+        .headers
+        .push(("cookie".into(), format!("orna_session={rotated}")));
+    assert_eq!(
+        block_on(transport.handle(cookie_only, 3, &mut authority, &mut issuer, &mut deletion,))
+            .status,
+        401
+    );
+    assert_eq!(deletion.calls, 0);
+
+    let mut valid = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    valid
+        .headers
+        .push(("authorization".into(), format!("Bearer {rotated}")));
+    assert_eq!(
+        block_on(transport.handle(valid, 3, &mut authority, &mut issuer, &mut deletion,)).status,
+        204
+    );
+    assert_eq!(deletion.calls, 1);
+
+    let mut expired_transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut expired_authority = Authority;
+    let mut expired_issuer = Issuer(1, None);
+    let mut expired_deletion = RecordingDelete::default();
+    let expired_created = block_on(expired_transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut expired_authority,
+        &mut expired_issuer,
+        &mut expired_deletion,
+    ));
+    let expired_credential = token(&expired_created);
+    let mut expired = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    expired.headers.push((
+        "authorization".into(),
+        format!("Bearer {expired_credential}"),
+    ));
+    assert_eq!(
+        block_on(expired_transport.handle(
+            expired,
+            100,
+            &mut expired_authority,
+            &mut expired_issuer,
+            &mut expired_deletion,
+        ))
+        .status,
+        410
+    );
+    assert_eq!(expired_deletion.calls, 0);
 }
 
 #[test]
@@ -2416,7 +2578,15 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
     assert!(!rendered.contains("5a"));
     assert!(!rendered.contains("app.example"));
     assert_eq!(
-        block_on(host.delete(DeleteRequest { id: [1; 16] }, &mut Delete(false))),
+        block_on(host.delete(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin(),
+                credential: &credential,
+                now: 1,
+            },
+            &mut Delete(false),
+        )),
         Err(Error::DeletionFailed)
     );
     assert_eq!(
