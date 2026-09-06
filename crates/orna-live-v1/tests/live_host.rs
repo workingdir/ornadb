@@ -185,11 +185,11 @@ fn http_decoder_handles_partial_body_and_pipelined_bytes() {
     let request = b"POST /orna/session HTTP/1.1\r\nHost: example\r\nContent-Length: 4\r\n\r\nbodyGET /orna/session HTTP/1.1\r\n\r\n";
     assert_eq!(parse_http_request(&request[..68], limits).unwrap(), None);
     let parsed = parse_http_request(request, limits).unwrap().unwrap();
-    assert_eq!(parsed.request.method, "POST");
-    assert_eq!(parsed.request.path, "/orna/session");
-    assert_eq!(parsed.request.body, b"body");
+    assert_eq!(parsed.request().method, "POST");
+    assert_eq!(parsed.request().path, "/orna/session");
+    assert_eq!(parsed.request().body, b"body");
     assert_eq!(
-        &request[parsed.consumed..],
+        &request[parsed.consumed()..],
         b"GET /orna/session HTTP/1.1\r\n\r\n"
     );
 }
@@ -198,10 +198,11 @@ fn http_decoder_handles_partial_body_and_pipelined_bytes() {
 fn http_decoder_rejects_ambiguous_or_unsupported_framing() {
     let limits = TransportLimits::default();
     for raw in [
-        b"POST /orna/session HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx"
+        b"POST /orna/session HTTP/1.1\r\nHost: example\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx"
             .as_slice(),
-        b"POST /orna/session HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
-        b"GET /orna/session HTTP/1.0\r\n\r\n".as_slice(),
+        b"POST /orna/session HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .as_slice(),
+        b"GET /orna/session HTTP/1.0\r\nHost: example\r\n\r\n".as_slice(),
     ] {
         assert_eq!(
             parse_http_request(raw, limits),
@@ -230,7 +231,7 @@ fn http_decoder_applies_header_and_request_limits_before_body_materialisation() 
     };
     assert_eq!(
         parse_http_request(
-            b"POST /orna/session HTTP/1.1\r\nContent-Length: 100\r\n\r\n",
+            b"POST /orna/session HTTP/1.1\r\nHost: example\r\nContent-Length: 100\r\n\r\n",
             limits
         ),
         Err(HttpParseError::Limit)

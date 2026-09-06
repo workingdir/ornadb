@@ -1732,8 +1732,20 @@ impl std::error::Error for HttpParseError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedHttpRequest {
-    pub request: WireRequest,
-    pub consumed: usize,
+    request: WireRequest,
+    consumed: usize,
+}
+
+impl ParsedHttpRequest {
+    #[must_use]
+    pub fn request(&self) -> &WireRequest {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn consumed(&self) -> usize {
+        self.consumed
+    }
 }
 
 /// Decodes exactly one bounded HTTP/1.1 request from a listener read buffer.
@@ -1764,14 +1776,17 @@ pub fn parse_http_request(
         core::str::from_utf8(&bytes[..header_end]).map_err(|_| HttpParseError::Malformed)?;
     let mut lines = header_text.split("\r\n");
     let request_line = lines.next().ok_or(HttpParseError::Malformed)?;
-    let mut parts = request_line.split_ascii_whitespace();
-    let method = parts.next().ok_or(HttpParseError::Malformed)?;
-    let path = parts.next().ok_or(HttpParseError::Malformed)?;
-    let version = parts.next().ok_or(HttpParseError::Malformed)?;
-    if parts.next().is_some()
-        || version != "HTTP/1.1"
-        || method.is_empty()
+    let parts = request_line.split(' ').collect::<Vec<_>>();
+    let [method, path, version] = parts.as_slice() else {
+        return Err(HttpParseError::Malformed);
+    };
+    if !matches!(*method, "GET" | "POST" | "DELETE")
+        || *version != "HTTP/1.1"
         || path.is_empty()
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains('?')
+        || *path == "*"
         || !method.bytes().all(is_http_token)
         || path.bytes().any(is_http_control)
     {
@@ -1779,6 +1794,7 @@ pub fn parse_http_request(
     }
 
     let mut headers = Vec::new();
+    let mut header_names = BTreeSet::new();
     let mut content_length = None;
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(HttpParseError::Malformed)?;
@@ -1786,6 +1802,9 @@ pub fn parse_http_request(
             || !name.bytes().all(is_http_token)
             || value.bytes().any(is_http_header_control)
         {
+            return Err(HttpParseError::Malformed);
+        }
+        if !header_names.insert(name.to_ascii_lowercase()) {
             return Err(HttpParseError::Malformed);
         }
         let value = value.trim_matches([' ', '\t']);
@@ -1803,6 +1822,9 @@ pub fn parse_http_request(
         }
         headers.push((name.to_owned(), value.to_owned()));
     }
+    if !header_names.contains("host") {
+        return Err(HttpParseError::Malformed);
+    }
 
     let body_length = content_length.unwrap_or(0);
     let consumed = header_length
@@ -1816,8 +1838,8 @@ pub fn parse_http_request(
     }
     Ok(Some(ParsedHttpRequest {
         request: WireRequest {
-            method: method.to_owned(),
-            path: path.to_owned(),
+            method: (*method).to_owned(),
+            path: (*path).to_owned(),
             headers,
             body: bytes[header_length..consumed].to_vec(),
         },
