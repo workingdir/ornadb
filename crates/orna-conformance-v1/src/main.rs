@@ -2,8 +2,7 @@ use orna_conformance_v1::{
     BoundedEvaluator, Corpus, Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator,
     Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
-use orna_evaluator_v1::{Environment, Limits, evaluate_repl};
-use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
+use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 #[cfg(test)]
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 #[cfg(test)]
@@ -16,11 +15,8 @@ use std::collections::BTreeMap;
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
 /// duplicate-key fixture and exact unsafe row-key repeat admission check use
-/// their owning table/row boundaries. `REPL-001`
-/// and `REPL-002` execute through the real REPL parser/evaluator boundary. `TXN-001` and
-/// `TXN-002` execute only through the exact-contract table activation bridge;
-/// all other behavioral scenarios remain explicit corpus skips until their own
-/// authoritative compiler/runtime witness exists.
+/// their owning table/row boundaries. Behavioral scenarios remain explicit
+/// corpus skips until their own authoritative compiler/runtime witness exists.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -67,18 +63,7 @@ impl RuntimeEvaluator for CompositeEvaluator {
         self.bounded.validate_resolved_rows(project, analysis)
     }
 
-    fn run_scenario(
-        &mut self,
-        scenario: &Scenario,
-    ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
-        match scenario.id.as_str() {
-            "REPL-001" => return run_repl_safe_preview_scenario(scenario, Limits::default()),
-            "REPL-002" => return run_repl_effect_suppression_scenario(scenario, Limits::default()),
-            _ => {}
-        }
-        if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
-            return self.transactional.run_scenario(scenario);
-        }
+    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<orna_foundation_v1::Diagnostic> {
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
@@ -103,53 +88,6 @@ fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diag
     ))
 }
 
-fn repl_safe_preview_contract(scenario: &Scenario) -> bool {
-    scenario.id == "REPL-001"
-        && scenario.title == "Typed safe preview"
-        && scenario.given == ["user types 1+2 without submit"]
-        && scenario.when == ["preview evaluator runs"]
-        && scenario.then == ["ghost preview shows 3 : Int"]
-        && scenario.requirements == ["ORNA-REPL-003"]
-}
-
-fn run_repl_safe_preview_scenario(scenario: &Scenario, limits: Limits) -> StageOutcome<Diagnostic> {
-    if !repl_safe_preview_contract(scenario) {
-        return StageOutcome::Skipped {
-            reason: "scenario has no implemented execution contract in the REPL evaluator".into(),
-        };
-    }
-    match evaluate_repl("1+2", &Environment::new(), limits) {
-        Ok(value) if value == Value::int(3.into()) => StageOutcome::Passed,
-        Ok(_) => scenario_failure("safe preview did not produce 3 : Int"),
-        Err(_) => scenario_failure("REPL evaluator could not produce the safe preview"),
-    }
-}
-
-fn repl_effect_suppression_contract(scenario: &Scenario) -> bool {
-    scenario.id == "REPL-002"
-        && scenario.title == "Effectful preview is suppressed"
-        && scenario.given == ["user types Contact.insert(...)"]
-        && scenario.when == ["preview system analyses expression"]
-        && scenario.then == ["no insertion occurs", "type/effect hint may appear"]
-        && scenario.requirements == ["ORNA-REPL-003"]
-}
-
-fn run_repl_effect_suppression_scenario(
-    scenario: &Scenario,
-    limits: Limits,
-) -> StageOutcome<Diagnostic> {
-    if !repl_effect_suppression_contract(scenario) {
-        return StageOutcome::Skipped {
-            reason: "scenario has no implemented execution contract in the REPL evaluator".into(),
-        };
-    }
-    match evaluate_repl("Contact.insert(1)", &Environment::new(), limits) {
-        Err(error) if error.code() == "ORNA-EVAL-NAME" => StageOutcome::Passed,
-        Ok(_) => scenario_failure("effectful REPL preview was evaluated"),
-        Err(_) => scenario_failure("REPL evaluator did not suppress the effectful preview"),
-    }
-}
-
 #[cfg(test)]
 fn live_resync_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-003"
@@ -160,6 +98,7 @@ fn live_resync_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-004"]
 }
 
+#[cfg(test)]
 fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
     StageOutcome::Failed(
         Diagnostic::new(
@@ -583,12 +522,12 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, exact safe and effect-suppressed REPL previews, and frozen TXN-001/TXN-002 table-activation scenarios execute; TXN-003 and all other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units and the authoritative duplicate-key fixture execute; all behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
             .collect(),
-            executed_scenario_contracts: vec!["REPL-001".into(), "REPL-002".into(), "TXN-001".into(), "TXN-002".into()],
+            executed_scenario_contracts: vec![],
         })
         .run(&mut adapter);
     println!(
@@ -600,10 +539,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositeEvaluator, Corpus, Harness, Limits, RuntimeAdapter, Scenario, StageOutcome,
+        CompositeEvaluator, Corpus, Harness, RuntimeAdapter, Scenario, StageOutcome,
         run_live_fallback_scenario, run_live_keyed_update_scenario, run_live_resync_scenario,
-        run_live_unkeyed_update_scenario, run_repl_safe_preview_scenario,
-        run_sys_rt_rename_scenario,
+        run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
     };
 
     #[test]
@@ -630,44 +568,6 @@ mod tests {
                 .and_then(|value| value["code"].as_str()),
             Some("E3004")
         );
-    }
-
-    fn repl_preview_scenario() -> Scenario {
-        Scenario {
-            id: "REPL-001".into(),
-            title: "Typed safe preview".into(),
-            given: vec!["user types 1+2 without submit".into()],
-            when: vec!["preview evaluator runs".into()],
-            then: vec!["ghost preview shows 3 : Int".into()],
-            requirements: vec!["ORNA-REPL-003".into()],
-            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
-        }
-    }
-
-    #[test]
-    fn repl_safe_preview_executes_only_the_exact_contract() {
-        let scenario = repl_preview_scenario();
-        assert!(matches!(
-            run_repl_safe_preview_scenario(&scenario, Limits::default()),
-            StageOutcome::Passed
-        ));
-
-        let mut changed = scenario.clone();
-        changed.then.push("preview retains session bindings".into());
-        assert!(matches!(
-            run_repl_safe_preview_scenario(&changed, Limits::default()),
-            StageOutcome::Skipped { .. }
-        ));
-        assert!(matches!(
-            run_repl_safe_preview_scenario(
-                &scenario,
-                Limits {
-                    max_source_bytes: 1,
-                    ..Limits::default()
-                },
-            ),
-            StageOutcome::Failed(_)
-        ));
     }
 
     #[test]
