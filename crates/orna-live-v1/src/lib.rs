@@ -6,7 +6,10 @@
 //! All public failures are stable redacted codes and inbound protocol bytes
 //! are decoded canonically.
 
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::{
+    executor::block_on,
+    io::{AllowStdIo, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
@@ -2486,6 +2489,45 @@ impl LiveTransport {
             deletion,
         )
         .await
+    }
+
+    /// Drives the bounded HTTP session loop over one already-accepted TCP
+    /// stream. The executable host retains bind, accept, TLS, cancellation,
+    /// and clock ownership; this bridge only adapts the accepted socket to the
+    /// transport's byte-stream contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted socket-cloning, read, write, parser, or
+    /// response-encoding error. This synchronous bridge blocks the calling
+    /// thread while the peer is connected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_accepted_http_socket<C>(
+        &mut self,
+        stream: std::net::TcpStream,
+        connection: &mut HttpConnection,
+        clock: &mut C,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        C: FnMut() -> u64,
+    {
+        let reader = stream.try_clone().map_err(|_| HttpIoError::Read)?;
+        let mut reader = AllowStdIo::new(reader);
+        let mut writer = AllowStdIo::new(stream);
+        let mut cancellation = std::future::pending::<()>();
+        block_on(self.serve_http_connection_with_cancellation(
+            &mut reader,
+            &mut writer,
+            connection,
+            clock,
+            &mut cancellation,
+            authority,
+            issuer,
+            deletion,
+        ))
     }
 
     /// Serves an injected HTTP byte stream with cancellation raced against
