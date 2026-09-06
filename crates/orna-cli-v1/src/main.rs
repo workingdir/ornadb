@@ -147,6 +147,7 @@ enum Command {
     Repl,
     Init,
     Check,
+    Invoke(String),
     Run(Invocation),
     Help,
     Version,
@@ -173,6 +174,18 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         None | Some("repl") => Command::Repl,
         Some("init") => Command::Init,
         Some("check") => Command::Check,
+        Some("invoke") => Command::Invoke(
+            words
+                .next()
+                .ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`invoke` needs a function target",
+                        "supply a reachable zero-argument pure function name after `invoke`",
+                    )
+                })?
+                .to_owned(),
+        ),
         Some("--help" | "-h" | "help") => Command::Help,
         Some("--version" | "-V") => Command::Version,
         Some("run") => match words.next() {
@@ -543,7 +556,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
-fn run_standard_free_seed(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -560,19 +573,19 @@ fn run_standard_free_seed(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         StageOutcome::Passed => {}
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
-                "reference invocation requires an executable function-only project",
-                "use standard-free modules containing functions only; tables, effects, streams, and std require the integrated runtime",
+                "one-shot invocation requires an executable function-only project",
+                "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
             ));
         }
     }
-    match evaluator.invoke("seed") {
+    match evaluator.invoke(target) {
         StageOutcome::Passed => {
             println!("invocation completed");
             Ok(())
         }
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
-            "reference invocation `seed` is not available",
-            "define a zero-argument `seed` function in the reachable project modules",
+            "requested invocation is not available",
+            "define a reachable zero-argument pure function with the requested name",
         )),
     }
 }
@@ -581,7 +594,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl|init|check|run seed|run exercise|run sensors.ingest]"
+                "orna-cli-v1 [--db ENDPOINT] [repl|init|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
             );
             Ok(())
         }
@@ -594,11 +607,12 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             "use an Orna runtime with repository initialization enabled",
         )),
         Command::Check => check_project(&parsed.endpoint),
+        Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl => Err(Diagnostic::unavailable(
             "the REPL runtime is not available",
             "use an Orna runtime with source execution enabled",
         )),
-        Command::Run(Invocation::Seed) => run_standard_free_seed(&parsed.endpoint),
+        Command::Run(Invocation::Seed) => run_pure_invocation(&parsed.endpoint, "seed"),
         Command::Run(Invocation::Exercise | Invocation::SensorsIngest) => {
             Err(Diagnostic::unavailable(
                 "reference invocation execution is not available",
@@ -646,6 +660,18 @@ mod tests {
         assert_eq!(
             parse_cli(&["check".into()]).unwrap().command,
             Command::Check
+        );
+        assert_eq!(
+            parse_cli(&["invoke".into(), "library.value".into()])
+                .expect("parses")
+                .command,
+            Command::Invoke("library.value".into())
+        );
+        assert_eq!(
+            parse_cli(&["invoke".into()])
+                .expect_err("target is required")
+                .code,
+            "E1001"
         );
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
@@ -698,6 +724,35 @@ mod tests {
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Run(Invocation::Seed),
+        };
+        assert_eq!(execute(&parsed), Ok(()));
+    }
+
+    #[test]
+    fn invoke_executes_a_qualified_reachable_pure_function() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use library; pub fn seed(): Int = library.value();",
+        )
+        .expect("main source");
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn value(): Int = 42;",
+        )
+        .expect("library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let parsed = Parsed {
+            endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
+            command: Command::Invoke("library.value".into()),
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
