@@ -3891,6 +3891,15 @@ fn infer_success_pipeline(
         };
     }
     if let Expr::Name { text, .. } = rhs
+        && let Type::Relation(element) = &input.ty
+        && let Some(ty) = infer_relation_sum(text, element, diagnostics)
+    {
+        return Inferred {
+            ty,
+            effects: input.effects,
+        };
+    }
+    if let Expr::Name { text, .. } = rhs
         && text == "count"
         && matches!(input.ty, Type::List(_))
     {
@@ -4319,6 +4328,36 @@ fn infer_affine_collection_aggregate(
         }
         _ => None,
     }
+}
+
+/// Checks the relation `sum` aggregate without coercing exact numeric inputs
+/// to binary Float. The matching list rules remain intentionally unchanged.
+fn infer_relation_sum(
+    operation: &str,
+    element: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if operation != "sum" {
+        return None;
+    }
+    if is_absolute_affine_temperature(element) {
+        diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+        return Some(Type::Error);
+    }
+    if is_sum_numeric(element) {
+        return Some(element.clone());
+    }
+    diagnostics.push(diag(DIAG_TYPE, "sum requires a numeric element type"));
+    Some(Type::Error)
+}
+
+fn is_sum_numeric(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Decimal | Type::Float)
+        || matches!(
+            ty,
+            Type::Applied { base, .. }
+                if matches!(base.as_str(), "Int" | "Decimal" | "Float" | "Money")
+        )
 }
 
 fn infer_callback(
