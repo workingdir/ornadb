@@ -2562,6 +2562,7 @@ fn live_http_routes_are_exact_origin_checked_and_rotate_scoped_tokens() {
         block_on(transport.handle(deleted, 2, &mut authority, &mut issuer, &mut deletion)).status,
         204
     );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
 }
 
 #[test]
