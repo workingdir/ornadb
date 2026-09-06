@@ -731,6 +731,59 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_reference_project_checks_but_init_and_seed_fail_closed() {
+        let directory = tempfile::tempdir().expect("temporary reference project");
+        let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../reference/Orna-1.0.0/examples/reference");
+        for name in [
+            "main.orna",
+            "library.orna",
+            "warehouse.orna",
+            "sensors.orna",
+            "values.orna",
+        ] {
+            std::fs::copy(reference.join(name), directory.path().join(name))
+                .expect("reference source");
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "."])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+        let endpoint = Endpoint::Path(directory.path().display().to_string());
+        assert_eq!(
+            execute(&Parsed {
+                endpoint: endpoint.clone(),
+                command: Command::Check,
+            }),
+            Ok(())
+        );
+        for command in [
+            Command::Init,
+            Command::Run(Invocation::Seed),
+            Command::Invoke("seed".into()),
+        ] {
+            let error = execute(&Parsed {
+                endpoint: endpoint.clone(),
+                command,
+            })
+            .expect_err("effectful reference workflow is outside the bounded CLI slice");
+            assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
+        }
+    }
+
+    #[test]
     fn run_seed_executes_a_reachable_standard_free_project() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
