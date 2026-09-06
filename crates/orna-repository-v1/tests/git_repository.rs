@@ -400,6 +400,51 @@ fn checkout_force_authorization_is_canonical_and_stale_state_is_rejected() {
 }
 
 #[test]
+fn checkout_subplan_classifies_target_and_local_path_sets() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(25))
+        .unwrap();
+    let ordinary = ManagedPath::new("ordinary.txt").unwrap();
+    assert_eq!(plan.git().affected_paths(), std::slice::from_ref(&ordinary));
+    assert_eq!(
+        plan.git().conflicting_paths(),
+        std::slice::from_ref(&ordinary)
+    );
+    assert_eq!(
+        plan.git().discardable_paths(),
+        std::slice::from_ref(&ordinary)
+    );
+
+    fs::write(root.path().join("main.orna"), "carried\n").unwrap();
+    let carried = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(25))
+        .unwrap();
+    assert_eq!(
+        carried.git().affected_paths(),
+        &[
+            ManagedPath::new("main.orna").unwrap(),
+            ManagedPath::new("ordinary.txt").unwrap()
+        ]
+    );
+    assert_eq!(
+        carried.git().conflicting_paths(),
+        plan.git().conflicting_paths()
+    );
+    assert_ne!(carried.force_token(), plan.force_token());
+}
+
+#[test]
 fn verify_cwd_rejects_a_worktree_only_interleaving() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

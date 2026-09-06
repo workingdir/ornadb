@@ -465,6 +465,31 @@ pub struct CheckoutPreflight {
     target: CheckoutTarget,
     expected_head: Option<GitCommitRef>,
     cwd: CwdGeneration,
+    git: CheckoutGitSubplan,
+}
+
+/// The read-only Git portion of a checkout plan. Paths are repository-relative
+/// and classified from the current worktree and target commit without
+/// changing the ref, index, or worktree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckoutGitSubplan {
+    affected_paths: Vec<ManagedPath>,
+    conflicting_paths: Vec<ManagedPath>,
+    discardable_paths: Vec<ManagedPath>,
+}
+
+impl CheckoutGitSubplan {
+    pub fn affected_paths(&self) -> &[ManagedPath] {
+        &self.affected_paths
+    }
+
+    pub fn conflicting_paths(&self) -> &[ManagedPath] {
+        &self.conflicting_paths
+    }
+
+    pub fn discardable_paths(&self) -> &[ManagedPath] {
+        &self.discardable_paths
+    }
 }
 
 /// A domain-separated authorization witness for one exact checkout
@@ -490,6 +515,10 @@ impl CheckoutPreflight {
 
     pub fn cwd(&self) -> &CwdGeneration {
         &self.cwd
+    }
+
+    pub fn git(&self) -> &CheckoutGitSubplan {
+        &self.git
     }
 
     /// Derives a stable authorization witness over the complete preflight,
@@ -524,6 +553,9 @@ impl CheckoutPreflight {
         );
         token_bytes(&mut bytes, self.cwd.worktree.as_porcelain_v2_z());
         bytes.extend_from_slice(&self.cwd.runtime.get().to_be_bytes());
+        token_paths(&mut bytes, &self.git.affected_paths);
+        token_paths(&mut bytes, &self.git.conflicting_paths);
+        token_paths(&mut bytes, &self.git.discardable_paths);
         CheckoutPlanToken(Sha256::digest(bytes).into())
     }
 
@@ -559,6 +591,24 @@ fn token_optional_string(output: &mut Vec<u8>, value: Option<&str>) {
         }
         None => output.push(0),
     }
+}
+
+fn token_paths(output: &mut Vec<u8>, paths: &[ManagedPath]) {
+    output.extend_from_slice(&(paths.len() as u64).to_be_bytes());
+    for path in paths {
+        token_string(
+            output,
+            path.as_path()
+                .to_str()
+                .expect("validated checkout path is UTF-8"),
+        );
+    }
+}
+
+fn sorted_paths(paths: HashSet<ManagedPath>) -> Vec<ManagedPath> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort_by(|left, right| left.as_path().cmp(right.as_path()));
+    paths
 }
 
 /// Git-resolved local paths for one worktree's private Orna runtime area.
@@ -1298,10 +1348,12 @@ impl Repository {
         let _lock = self.acquire_coordination_lock()?;
         let target = self.resolve_checkout_target(selector)?;
         let cwd = self.cwd_generation_locked(runtime)?;
+        let git = self.checkout_git_subplan(cwd.head.as_ref(), target.commit())?;
         Ok(CheckoutPreflight {
             expected_head: cwd.head.clone(),
             target,
             cwd,
+            git,
         })
     }
 
@@ -1317,6 +1369,9 @@ impl Repository {
         if current_cwd != plan.cwd {
             return Err(RepositoryError::CheckoutPlanStale);
         }
+        if self.checkout_git_subplan(current_cwd.head.as_ref(), plan.target.commit())? != plan.git {
+            return Err(RepositoryError::CheckoutPlanStale);
+        }
         let selector = plan
             .target
             .branch_name()
@@ -1326,6 +1381,72 @@ impl Repository {
             return Err(RepositoryError::CheckoutPlanStale);
         }
         Ok(())
+    }
+
+    fn checkout_git_subplan(
+        &self,
+        current_head: Option<&GitCommitRef>,
+        target: &GitCommitRef,
+    ) -> Result<CheckoutGitSubplan, RepositoryError> {
+        let target_paths = match current_head {
+            Some(current) => self.git_nul_paths(&[
+                "diff".into(),
+                "--name-only".into(),
+                "-z".into(),
+                current.as_str().into(),
+                target.as_str().into(),
+                "--".into(),
+            ])?,
+            None => self.git_nul_paths(&[
+                "ls-tree".into(),
+                "-r".into(),
+                "--name-only".into(),
+                "-z".into(),
+                target.as_str().into(),
+                "--".into(),
+            ])?,
+        };
+        let mut local_paths = HashSet::new();
+        for arguments in [
+            vec![
+                "diff".into(),
+                "--name-only".into(),
+                "-z".into(),
+                "--".into(),
+            ],
+            vec![
+                "diff".into(),
+                "--cached".into(),
+                "--name-only".into(),
+                "-z".into(),
+                "--".into(),
+            ],
+            vec![
+                "ls-files".into(),
+                "--others".into(),
+                "--exclude-standard".into(),
+                "-z".into(),
+                "--".into(),
+            ],
+        ] {
+            local_paths.extend(self.git_nul_paths(&arguments)?);
+        }
+        let affected_paths = target_paths
+            .union(&local_paths)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let conflicting_paths = target_paths
+            .intersection(&local_paths)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let affected_paths = sorted_paths(affected_paths);
+        let conflicting_paths = sorted_paths(conflicting_paths);
+        let discardable_paths = conflicting_paths.clone();
+        Ok(CheckoutGitSubplan {
+            affected_paths,
+            conflicting_paths,
+            discardable_paths,
+        })
     }
 
     /// Revalidates and authorizes the exact preflight for a force-capable
@@ -1564,6 +1685,20 @@ impl Repository {
         let mut command = self.command();
         command.args(args);
         Ok(self.run(command)?.stdout)
+    }
+    fn git_nul_paths(&self, args: &[String]) -> Result<HashSet<ManagedPath>, RepositoryError> {
+        let mut command = self.command();
+        command.args(args);
+        self.run(command)?
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let path = String::from_utf8(path.to_vec())
+                    .map_err(|_| RepositoryError::UnsafeManagedPath)?;
+                ManagedPath::new(path)
+            })
+            .collect()
     }
 
     fn hash_object(&self, bytes: &[u8]) -> Result<String, RepositoryError> {
