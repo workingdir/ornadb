@@ -4222,8 +4222,8 @@ fn infer_success_pipeline(
                 &argument.value,
                 Expr::Field { name, .. } if name == "full_name"
             );
-            if !types_match(&parameters[0], &element)
-                && !(shared_contact_selector
+            if !(types_match(&parameters[0], &element)
+                || shared_contact_selector
                     && table_row_types_match(&parameters[0], &element, scope))
             {
                 require_same(&parameters[0], &element, diagnostics);
