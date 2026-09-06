@@ -455,11 +455,11 @@ impl CheckoutTarget {
     }
 }
 
-/// Read-only checkout preconditions. It is intentionally not an executable
-/// checkout plan yet: force consent, logical validation, and durable recovery
-/// remain separate boundaries owned by the higher repository layers. Capturing
-/// it may initialize private coordination metadata, but never changes visible
-/// Git state.
+/// Checkout preconditions. The bounded same-commit operation can consume this
+/// plan, but forceful/divergent checkout, logical validation, and durable
+/// recovery remain separate boundaries owned by higher repository layers.
+/// Capturing it may initialize private coordination metadata, but never
+/// changes visible Git state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckoutPreflight {
     target: CheckoutTarget,
@@ -1365,6 +1365,13 @@ impl Repository {
         plan: &CheckoutPreflight,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(plan)
+    }
+
+    fn verify_checkout_preflight_locked(
+        &self,
+        plan: &CheckoutPreflight,
+    ) -> Result<(), RepositoryError> {
         let current_cwd = self.cwd_generation_locked(plan.cwd.runtime)?;
         if current_cwd != plan.cwd {
             return Err(RepositoryError::CheckoutPlanStale);
@@ -1379,6 +1386,40 @@ impl Repository {
         let current_target = self.resolve_checkout_target(&selector)?;
         if current_target != plan.target {
             return Err(RepositoryError::CheckoutPlanStale);
+        }
+        Ok(())
+    }
+
+    /// Switches only between attachments of the already-selected commit.
+    ///
+    /// This narrow checkout form cannot replace target files, so Git retains
+    /// ordinary staged, unstaged, and untracked paths. It deliberately accepts
+    /// neither a force flag nor a token: divergent checkout remains outside
+    /// this API until its discard set and recovery journal are implemented.
+    pub fn execute_same_commit_checkout(
+        &self,
+        plan: &CheckoutPreflight,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(plan)?;
+        if plan.expected_head.as_ref() != Some(plan.target.commit()) {
+            return Err(RepositoryError::CheckoutExecutionUnsafe);
+        }
+
+        let mut command = self.command();
+        match plan.target() {
+            CheckoutTarget::Branch { name, .. } => {
+                command.args(["switch", "--"]).arg(name);
+            }
+            CheckoutTarget::Detached { commit } => {
+                command
+                    .args(["switch", "--detach", "--"])
+                    .arg(commit.as_str());
+            }
+        }
+        self.run(command)?;
+        if self.head()?.as_ref() != Some(plan.target.commit()) {
+            return Err(RepositoryError::GitOperationFailed);
         }
         Ok(())
     }
@@ -2432,6 +2473,7 @@ pub enum RepositoryError {
     StaleHead,
     PublicationPending,
     CheckoutPlanStale,
+    CheckoutExecutionUnsafe,
     RuntimeCompletionRequired,
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
@@ -2477,6 +2519,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("publication remains pending before Git ref advancement")
             }
             Self::CheckoutPlanStale => f.write_str("checkout preflight is stale"),
+            Self::CheckoutExecutionUnsafe => {
+                f.write_str("checkout target does not match the current commit")
+            }
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
             }
