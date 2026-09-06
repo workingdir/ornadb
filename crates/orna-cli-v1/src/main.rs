@@ -127,6 +127,7 @@ enum Invocation {
 enum Command {
     Repl,
     Init,
+    Check,
     Run(Invocation),
     Help,
     Version,
@@ -152,6 +153,7 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let command = match words.next() {
         None | Some("repl") => Command::Repl,
         Some("init") => Command::Init,
+        Some("check") => Command::Check,
         Some("--help" | "-h" | "help") => Command::Help,
         Some("--version" | "-V") => Command::Version,
         Some("run") => match words.next() {
@@ -403,11 +405,55 @@ fn apply(s: &mut ReferenceState, p: &Plan) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = match endpoint {
+        Endpoint::ManagedLocal => ".",
+        Endpoint::Path(path) => path,
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
+            return Err(Diagnostic::target(
+                "E2100",
+                "project checking requires a local Git worktree",
+                "use `check` with the current worktree or `--db PATH check`",
+            ));
+        }
+    };
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "project Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "project source could not be loaded",
+                "fix the project module graph and source boundaries, then run check again",
+            )
+        })?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(
+        project.modules(),
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+    );
+    if analysis.is_ok() {
+        println!("project valid");
+        Ok(())
+    } else {
+        Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run check again",
+        ))
+    }
+}
+
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl|init|run seed|run exercise|run sensors.ingest]"
+                "orna-cli-v1 [--db ENDPOINT] [repl|init|check|run seed|run exercise|run sensors.ingest]"
             );
             Ok(())
         }
@@ -419,6 +465,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             "database initialization is not available",
             "use an Orna runtime with repository initialization enabled",
         )),
+        Command::Check => check_project(&parsed.endpoint),
         Command::Repl => Err(Diagnostic::unavailable(
             "the REPL runtime is not available",
             "use an Orna runtime with source execution enabled",
@@ -465,8 +512,52 @@ mod tests {
             parsed.endpoint,
             Endpoint::RemoteTls("orna://host/reference".into())
         );
+        assert_eq!(parse_cli(&["check".into()]).unwrap().command, Command::Check);
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    }
+    #[test]
+    fn check_loads_reachable_project_sources_and_ignores_unreachable_modules() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use library; pub fn run() {}",
+        )
+        .expect("main source");
+        std::fs::write(directory.path().join("library.orna"), "pub fn seed() {}").expect("library");
+        std::fs::write(directory.path().join("unused.orna"), "not a module").expect("unused");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        assert_eq!(check_project(&endpoint), Ok(()));
+    }
+    #[test]
+    fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "pub fn run(): Int = true;",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let error = check_project(&endpoint).expect_err("semantic error");
+        assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
     }
     #[test]
     fn endpoints_reject_secrets() {
