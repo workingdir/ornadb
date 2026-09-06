@@ -628,6 +628,17 @@ impl Runtime {
             .cancellation
             .is_cancelled())
     }
+    fn request_cancellation_for_all(&mut self) {
+        for invocation in self.invocations.values_mut() {
+            if invocation.terminal.is_none() {
+                invocation.cancellation_requested = true;
+                invocation
+                    .cancellation
+                    .requested
+                    .store(true, Ordering::Release);
+            }
+        }
+    }
     fn cancellation_token<T>(
         &self,
         handle: &InvocationHandle<T>,
@@ -699,12 +710,16 @@ impl Runtime {
 #[derive(Clone, Debug)]
 pub struct RuntimeSupervisor {
     runtime: Arc<Mutex<Runtime>>,
+    workers: Arc<Mutex<BTreeMap<InvocationId, thread::JoinHandle<()>>>>,
+    control: Arc<Mutex<()>>,
 }
 
 impl RuntimeSupervisor {
     pub fn new(id: RuntimeId) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(Runtime::new(id))),
+            workers: Arc::new(Mutex::new(BTreeMap::new())),
+            control: Arc::new(Mutex::new(())),
         }
     }
 
@@ -723,6 +738,26 @@ impl RuntimeSupervisor {
     }
 
     pub fn restart(&self) -> Result<RuntimeId, AdmissionError> {
+        let _control = self
+            .control
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+        let workers = {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?;
+            runtime.request_cancellation_for_all();
+            std::mem::take(
+                &mut *self
+                    .workers
+                    .lock()
+                    .map_err(|_| AdmissionError::RuntimeUnavailable)?,
+            )
+        };
+        for (_, worker) in workers {
+            let _ = worker.join();
+        }
         self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)
@@ -740,6 +775,10 @@ impl RuntimeSupervisor {
     where
         E: InvocationExecutor + Send + 'static,
     {
+        let _control = self
+            .control
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
         if request.mode != InvocationMode::Start {
             return Err(AdmissionError::StartMode);
         }
@@ -761,7 +800,7 @@ impl RuntimeSupervisor {
 
         if let Some((boundary, worker_handle, cancellation)) = boundary {
             let runtime = Arc::clone(&self.runtime);
-            let _ = thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     executor.execute_controlled(&boundary, &cancellation)
                 }))
@@ -779,6 +818,10 @@ impl RuntimeSupervisor {
                     let _ = runtime.classify_terminal(&worker_handle, TerminalClass::Orphaned);
                 }
             });
+            self.workers
+                .lock()
+                .map_err(|_| AdmissionError::RuntimeUnavailable)?
+                .insert(handle.invocation.clone(), worker);
         }
         Ok(handle)
     }
@@ -1537,6 +1580,32 @@ mod tests {
         assert_ne!(new_id, old_id);
         assert_eq!(supervisor.id(), Ok(new_id));
         assert_eq!(supervisor.generation(), Ok(2));
+    }
+
+    #[test]
+    fn restart_cancels_and_joins_started_workers_before_rotating_owner() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let observed = Arc::new(AtomicBool::new(false));
+        let handle = supervisor
+            .start(
+                request,
+                CancellableExecutor {
+                    observed: Arc::clone(&observed),
+                },
+            )
+            .unwrap();
+
+        let new_id = supervisor.restart().unwrap();
+
+        assert!(observed.load(Ordering::SeqCst));
+        assert_ne!(handle.runtime(), &new_id);
+        assert_eq!(
+            supervisor.state(&handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
     }
 
     #[test]
