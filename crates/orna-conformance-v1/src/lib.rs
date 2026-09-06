@@ -692,6 +692,7 @@ pub struct ImplementationClaim {
     pub profile: String,
     pub command: String,
     pub environment: BTreeMap<String, String>,
+    pub executed_scenario_contracts: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageReport {
@@ -715,6 +716,7 @@ impl Harness {
                     "adapter".into(),
                     "SyntaxAdapter (parse-only)".into(),
                 )]),
+                executed_scenario_contracts: Vec::new(),
             },
         }
     }

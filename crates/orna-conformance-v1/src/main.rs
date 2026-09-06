@@ -91,6 +91,16 @@ fn main() {
             ]
             .into_iter()
             .collect(),
+            executed_scenario_contracts: [
+                "LET-REBIND-091",
+                "PIPE-001",
+                "PIPE-002",
+                "TXN-001",
+                "TXN-002",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         })
         .run(&mut adapter);
     println!(
