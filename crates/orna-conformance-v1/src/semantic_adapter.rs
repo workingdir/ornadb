@@ -857,12 +857,17 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let (functions, key_fields, assertions) =
+        let (functions, key_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => return *outcome,
             };
-        match self.execute_admitted(&functions, &key_fields, &assertions) {
+        match self.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
@@ -880,12 +885,18 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let (functions, _, assertions) = match admit_transaction_source(unit, self.limits, "bad") {
-            Ok(value) => value,
-            Err(outcome) => return Some(*outcome),
-        };
+        let (functions, _, table_assertions, module_assertions) =
+            match admit_transaction_source(unit, self.limits, "bad") {
+                Ok(value) => value,
+                Err(outcome) => return Some(*outcome),
+            };
         let key_fields = BTreeMap::from([(String::from("Contact"), String::from("id"))]);
-        let outcome = match evaluator.execute_admitted(&functions, &key_fields, &assertions) {
+        let outcome = match evaluator.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         };
@@ -965,7 +976,8 @@ impl TransactionalEvaluator {
         &mut self,
         functions: &Functions,
         key_fields: &BTreeMap<String, String>,
-        assertions: &TableAssertions,
+        table_assertions: &TableAssertions,
+        module_assertions: &[Expr],
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         let entry = self.entry.clone();
         let limits = self.limits;
@@ -978,7 +990,10 @@ impl TransactionalEvaluator {
                 next_mutation: 0,
             };
             invoke_named_with_effects(&entry, functions, &Environment::new(), limits, &mut effects)
-                .and_then(|_| validate_table_assertions(activation, assertions, functions, limits))
+                .and_then(|_| {
+                    validate_table_assertions(activation, table_assertions, functions, limits)?;
+                    validate_module_assertions(activation, module_assertions, functions, limits)
+                })
         });
         match result {
             Ok(()) => Ok(mutations),
@@ -1027,7 +1042,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields, assertions) =
+        let (functions, key_fields, table_assertions, module_assertions) =
             match admit_transaction_source(unit, self.limits, &self.entry) {
                 Ok(value) => value,
                 Err(outcome) => return Ok(*outcome),
@@ -1044,7 +1059,12 @@ impl DurableTransactionalEvaluator {
                 evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
-        let mutations = match evaluator.execute_admitted(&functions, &key_fields, &assertions) {
+        let mutations = match evaluator.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
             Ok(mutations) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
         };
@@ -1256,7 +1276,7 @@ fn admit_list_stream_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (_, key_fields, _) = admit_transaction_source(unit, limits, entry)?;
+    let (_, key_fields, _, _) = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -1745,7 +1765,13 @@ impl TableEffectHandler<'_, '_> {
 }
 
 type TableAssertions = BTreeMap<String, Vec<Expr>>;
-type AdmittedTransaction = (Functions, BTreeMap<String, String>, TableAssertions);
+type ModuleAssertions = Vec<Expr>;
+type AdmittedTransaction = (
+    Functions,
+    BTreeMap<String, String>,
+    TableAssertions,
+    ModuleAssertions,
+);
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
 
 fn admit_transaction_source(
@@ -1776,8 +1802,9 @@ fn admit_transaction_source(
             diagnostic.clone().redacted(),
         )));
     }
-    let (functions, key_fields, assertions) = admitted_transaction_module(&parsed.value.items)
-        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+    let (functions, key_fields, table_assertions, module_assertions) =
+        admitted_transaction_module(&parsed.value.items)
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
@@ -1786,7 +1813,7 @@ fn admit_transaction_source(
             reason: "configured transaction entry function is not present".into(),
         }));
     }
-    Ok((functions, key_fields, assertions))
+    Ok((functions, key_fields, table_assertions, module_assertions))
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -1809,10 +1836,11 @@ fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) ->
 
 fn admitted_transaction_module(
     items: &[orna_syntax_v1::Item],
-) -> Result<(Functions, BTreeMap<String, String>, TableAssertions), String> {
+) -> Result<AdmittedTransaction, String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
     let mut assertions = TableAssertions::new();
+    let mut module_assertions = ModuleAssertions::new();
     for item in items {
         match &item.declaration {
             Declaration::Function { signature, body } => {
@@ -1848,13 +1876,14 @@ fn admitted_transaction_module(
                     assertions.insert(name.clone(), expressions);
                 }
             }
+            Declaration::Assertion { value } => module_assertions.push(value.clone()),
             Declaration::Use { .. } => {
                 return Err("transactional source seam does not load module imports yet".into());
             }
             _ => return Err("transactional source seam admits only tables and functions".into()),
         }
     }
-    Ok((functions, key_fields, assertions))
+    Ok((functions, key_fields, assertions, module_assertions))
 }
 
 /// Checks every candidate row before the root activation can publish. This
@@ -1898,6 +1927,123 @@ fn validate_table_assertions(
         }
     }
     Ok(())
+}
+
+/// Checks the exact module-level quantifier form already admitted by the
+/// semantic checker. A quantifier names a declared table and binds one row;
+/// its body may use ordinary pure expressions or another such quantifier. It
+/// does not materialize a general relation value or expose query operators.
+fn validate_module_assertions(
+    activation: &TransactionActivation<'_>,
+    assertions: &[Expr],
+    functions: &Functions,
+    limits: EvaluatorLimits,
+) -> Result<(), EvaluationError> {
+    for assertion in assertions {
+        let value = evaluate_module_assertion(
+            activation,
+            assertion,
+            &Environment::new(),
+            functions,
+            limits,
+        )?;
+        if !matches!(value.raw(), OvbRaw::Bool(true)) {
+            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_module_assertion(
+    activation: &TransactionActivation<'_>,
+    expression: &Expr,
+    environment: &Environment,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+) -> Result<Value, EvaluationError> {
+    let Some((kind, table, binding, body)) = module_assertion_quantifier(expression) else {
+        return evaluate_with_functions(expression, environment, functions, limits);
+    };
+    let table = table.to_owned();
+    let relation = activation
+        .candidate_relation(&table)
+        .map_err(|error| transaction_error(table_error_code(error)))?;
+    match kind {
+        ModuleAssertionKind::Every => {
+            for (_, row) in relation {
+                let mut local = environment.clone();
+                local.insert(binding.to_owned(), row);
+                if !matches!(
+                    evaluate_module_assertion(activation, body, &local, functions, limits)?.raw(),
+                    OvbRaw::Bool(true)
+                ) {
+                    return canonical_bool(false);
+                }
+            }
+            canonical_bool(true)
+        }
+        ModuleAssertionKind::Exists => {
+            for (_, row) in relation {
+                let mut local = environment.clone();
+                local.insert(binding.to_owned(), row);
+                if matches!(
+                    evaluate_module_assertion(activation, body, &local, functions, limits)?.raw(),
+                    OvbRaw::Bool(true)
+                ) {
+                    return canonical_bool(true);
+                }
+            }
+            canonical_bool(false)
+        }
+    }
+}
+
+fn canonical_bool(value: bool) -> Result<Value, EvaluationError> {
+    Value::new(OvbRaw::Bool(value)).map_err(|_| transaction_error("ORNA-EVAL-MODULE-ASSERT"))
+}
+
+#[derive(Clone, Copy)]
+enum ModuleAssertionKind {
+    Every,
+    Exists,
+}
+
+fn module_assertion_quantifier(
+    expression: &Expr,
+) -> Option<(ModuleAssertionKind, &str, &str, &Expr)> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = expression
+    else {
+        return None;
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        return None;
+    };
+    let kind = match text.as_str() {
+        "every" => ModuleAssertionKind::Every,
+        "exists" => ModuleAssertionKind::Exists,
+        _ => return None,
+    };
+    let [table, predicate] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Name { text: table, .. } = &table.value else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &predicate.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    Some((kind, table, binding, body))
 }
 
 #[derive(Clone, Copy)]
