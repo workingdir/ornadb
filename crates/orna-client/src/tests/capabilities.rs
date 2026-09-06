@@ -1545,6 +1545,98 @@ fn retained_v11_math_functions_execute_through_the_normal_client_path() {
 }
 
 #[test]
+fn retained_v11_standard_math_function_is_admitted_as_a_direct_root() {
+    let standard = orna_standard::verify_standard_library_v11_snapshot(
+        orna_standard::retained_standard_library_v11_snapshot().expect("retained V11 snapshot"),
+    )
+    .expect("verified V11 standard snapshot");
+    let active = empty_version_two_active(&standard);
+    let definition = standard
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().to_string() == "std.math.increment")
+        .expect("standard increment definition");
+    let executable = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == definition.id())
+        .expect("standard increment executable");
+    let principal = PrincipalId::from_bytes([0x7b; 16]);
+    let security = SecuritySnapshot::new_with_function_targets(
+        active.pair(),
+        vec![
+            orna_core::security::SecurityFunctionTarget::verified_standard(
+                definition.id(),
+                standard.revision(),
+                executable.revision().id(),
+            ),
+        ],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![ExecuteGrant::new(principal, definition.id())],
+    )
+    .expect("standard security target");
+    let session = security
+        .bind_authenticated_session(principal, vec![])
+        .expect("standard security session");
+    let target = InvocationTarget::verified_standard(
+        definition.id(),
+        active.pair(),
+        standard.revision(),
+        executable.revision().id(),
+    );
+    let ExecuteDecision::Allowed(authorisation) = security.authorise_execute(&session, target)
+    else {
+        panic!("standard root must be authorised");
+    };
+    let parameter = definition.parameters()[0].id();
+    let argument = FunctionArgument::new(parameter, RuntimeValue::Integer(4))
+        .expect("standard integer argument");
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    )
+    .expect("verified standard root must be admitted");
+    let result = super::super::vm::execute_admitted_pure_client_function(
+        &active,
+        &authorisation,
+        &host,
+        &admission,
+        &[argument],
+    )
+    .expect("verified standard root must execute");
+
+    assert_eq!(result.value(), &RuntimeValue::Integer(5));
+}
+
+#[test]
 fn retained_v11_math_fixture_evaluates_all_functions() {
     let snapshot = orna_standard::retained_standard_library_v11_snapshot()
         .expect("retained V11 standard snapshot");
