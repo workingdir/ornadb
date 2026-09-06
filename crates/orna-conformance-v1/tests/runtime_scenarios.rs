@@ -5,6 +5,7 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::Limits;
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_storage_v1::LoosePath;
 use std::process::Command;
 use std::{fs, path::Path, process::Command as ProcessCommand};
 use tempfile::TempDir;
@@ -245,6 +246,69 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
     for table in ["Order", "Payment", "Audit"] {
         assert_eq!(state.committed_table_rows(table).await.unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let identity = RuntimeIdentity {
+        database_id: [61; 16],
+        repository_id: [62; 16],
+    };
+    let source = durable_source(
+        "PUB-001",
+        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"published\" }); }",
+    );
+    assert!(matches!(
+        evaluator
+            .execute_source(&repository, identity, [63; 16], [64; 32], &source)
+            .await
+            .unwrap(),
+        StageOutcome::Passed
+    ));
+    let state = RuntimeState::open(&repository, identity, [64; 32])
+        .await
+        .expect("reopen runtime before publication");
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .unwrap()
+        .expect("durable source checkpoint");
+    let published = evaluator
+        .publish_pending(
+            &repository,
+            &state,
+            [65; 16],
+            &checkpoint,
+            |mutation| {
+                let key = mutation
+                    .key()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                LoosePath::for_key(mutation.table(), &[key])
+            },
+            "orna: publish durable source",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(repository.head().unwrap(), published.head().cloned());
+    assert!(state.pending().await.unwrap().is_empty());
+    let key = orna_foundation_v1::Value::int(7.into())
+        .encode()
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let managed = LoosePath::for_key("Note", &[key]).unwrap();
+    assert!(
+        repository
+            .managed_file_bytes(managed.as_managed_path())
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
