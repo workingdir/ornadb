@@ -2,6 +2,15 @@
 
 A developing CLI for the current Orna 1.0 source language.
 
+`init [DIRECTORY]` initializes a local Git-backed database, using the current
+directory when no target is supplied. It creates missing repository metadata
+and an empty root module without staging files or creating a commit. Existing
+root source is preserved, and repeated initialization retains the database
+identity. Partial, malformed, or unsupported metadata is reported rather than
+overwritten. Git's configured defaults determine the initial branch.
+Use a positional directory for initialization, not `--db`.
+Creating a new database is currently supported on Linux.
+
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional
 `--db PATH` argument selects a local project explicitly.
@@ -31,8 +40,8 @@ a separate evaluation entrypoint that cannot change session state or perform
 external effects. Input, evaluation, and structural output have resource bounds.
 
 The interactive session does not yet implement the complete language or console
-command set, durable table execution, watches, or remote transport. `init` and
-unsupported reference workflows report that execution is unavailable. Planner
+command set, durable table execution, watches, or remote transport. Unsupported
+reference workflows report that execution is unavailable. Planner
 tests alone do not establish reference-database execution.
 Input is currently line-oriented. Submissions are checked against the session's
 types and imports before execution. A type error or execution failure leaves
