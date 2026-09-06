@@ -2674,7 +2674,7 @@ impl LiveTransport {
     /// Returns a redacted read, write, cancellation, framing, protocol, or
     /// WebSocket-output error. After cancellation or a partial write, callers
     /// must dispose of the stream.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn serve_websocket_connection<R, W, C, X, A>(
         &mut self,
         reader: &mut R,
@@ -2746,7 +2746,25 @@ impl LiveTransport {
         loop {
             if initial.is_empty() {
                 let read =
-                    await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read).await?;
+                    match await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read)
+                        .await
+                    {
+                        Ok(read) => read,
+                        Err(error @ HttpIoError::Cancelled) => {
+                            self.host
+                                .dispatch_frame(
+                                    socket.attachment,
+                                    clock(),
+                                    Frame::Close,
+                                    application,
+                                )
+                                .await
+                                .map_err(HttpConnectionError::Protocol)
+                                .map_err(HttpIoError::Transport)?;
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
+                    };
                 if read == 0 {
                     self.host
                         .dispatch_frame(socket.attachment, clock(), Frame::Close, application)

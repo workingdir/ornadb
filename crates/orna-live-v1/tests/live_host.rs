@@ -83,6 +83,23 @@ impl AsyncRead for PendingReader {
     }
 }
 
+struct PrefixThenPendingReader {
+    prefix: Cursor<Vec<u8>>,
+}
+
+impl AsyncRead for PrefixThenPendingReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        bytes: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match std::pin::Pin::new(&mut self.prefix).poll_read(context, bytes) {
+            std::task::Poll::Ready(Ok(0)) => std::task::Poll::Pending,
+            result => result,
+        }
+    }
+}
+
 struct PendingWriter;
 
 impl AsyncWrite for PendingWriter {
@@ -950,6 +967,66 @@ fn websocket_connection_driver_preserves_a_co_read_frame_after_upgrade() {
             .any(|window| window == b"Content-Length: ")
     );
     assert_eq!(&output[header_end + 4..], b"\x8a\x02hi");
+}
+
+#[test]
+fn websocket_connection_driver_cancellation_disconnects_its_attachment() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let input = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        token(&created)
+    );
+    let mut reader = PrefixThenPendingReader {
+        prefix: Cursor::new(input.into_bytes()),
+    };
+    let mut writer = Cursor::new(Vec::new());
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut application = UnitApplication::default();
+    let mut clock = || 1;
+    let mut cancellation = CancelAfterPolls {
+        polls: 0,
+        ready_after: 4,
+    };
+    assert_eq!(
+        block_on(transport.serve_websocket_connection(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            [5; 16],
+            &mut clock,
+            &mut cancellation,
+            &mut application,
+        )),
+        Err(HttpIoError::Cancelled)
+    );
+    assert_eq!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([5; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        )),
+        Err(Error::Closed)
+    );
 }
 
 #[test]
