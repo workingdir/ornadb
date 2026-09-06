@@ -132,6 +132,22 @@ pub enum StandardProfileError {
     DigestMismatch,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandardCatalogueError {
+    Profile(StandardProfileError),
+    InvalidModulePath,
+    DuplicateModule,
+    MissingModule,
+    InvalidSource,
+    DuplicateDeclaration,
+}
+
+impl From<StandardProfileError> for StandardCatalogueError {
+    fn from(error: StandardProfileError) -> Self {
+        Self::Profile(error)
+    }
+}
+
 fn digest_source(source: &str) -> [u8; 32] {
     Sha256::digest(source.as_bytes()).into()
 }
@@ -319,6 +335,55 @@ pub struct Catalogue {
 impl Catalogue {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Builds a declaration catalogue from source bytes that match one
+    /// explicitly pinned standard dependency profile. The source is parsed to
+    /// derive declarations, but bodies are not executed and the bytes are not
+    /// retained after this call.
+    pub fn from_standard_sources(
+        profile: &StandardDependencyProfile,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, StandardCatalogueError> {
+        let mut catalogue = Self::empty();
+        let mut seen = BTreeSet::new();
+        let mut supplied = BTreeSet::new();
+        for (logical_path, source) in sources {
+            profile.verify_source(&logical_path, &source)?;
+            if !seen.insert(logical_path.clone()) {
+                return Err(StandardCatalogueError::DuplicateModule);
+            }
+            let namespace = namespace_for_path(&logical_path, &mut Vec::new())
+                .ok_or(StandardCatalogueError::InvalidModulePath)?;
+            if namespace.0.first().map(String::as_str) != Some("std") {
+                return Err(StandardCatalogueError::InvalidModulePath);
+            }
+            let parsed = parse_module_with_file(&source, &logical_path);
+            if !parsed.is_ok() {
+                return Err(StandardCatalogueError::InvalidSource);
+            }
+            let mut diagnostics = Vec::new();
+            let header = collect_header(
+                &namespace,
+                &parsed.value,
+                &BTreeSet::new(),
+                &mut diagnostics,
+            );
+            if diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DIAG_DUPLICATE)
+            {
+                return Err(StandardCatalogueError::DuplicateDeclaration);
+            }
+            if catalogue.modules.insert(namespace, header).is_some() {
+                return Err(StandardCatalogueError::DuplicateModule);
+            }
+            supplied.insert(logical_path);
+        }
+        if supplied != profile.module_digests.keys().cloned().collect() {
+            return Err(StandardCatalogueError::MissingModule);
+        }
+        Ok(catalogue)
     }
 
     /// The stable core surface represented by the authoritative `stdlib/std`
@@ -5965,6 +6030,40 @@ mod tests {
                 ],
             ),
             Err(StandardProfileError::DuplicateModule)
+        );
+    }
+
+    #[test]
+    fn pinned_standard_sources_become_a_semantic_catalogue_without_execution() {
+        let source = "pub fn increment(value: Int): Int = value + 1;";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-1",
+            [("std/math.orna".into(), source.into())],
+        )
+        .unwrap();
+        let catalogue =
+            Catalogue::from_standard_sources(&profile, [("std/math.orna".into(), source.into())])
+                .unwrap();
+        let analysis = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "client.orna",
+                "use std.math.{increment}; fn next(value: Int): Int = increment(value);",
+            )],
+            &catalogue,
+        );
+        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+        assert_eq!(
+            Catalogue::from_standard_sources(
+                &profile,
+                [("std/math.orna".into(), "pub fn broken( = 1;".into())],
+            ),
+            Err(StandardCatalogueError::Profile(
+                StandardProfileError::DigestMismatch
+            ))
+        );
+        assert_eq!(
+            Catalogue::from_standard_sources(&profile, []),
+            Err(StandardCatalogueError::MissingModule)
         );
     }
     #[test]
