@@ -1,10 +1,10 @@
 use futures::executor::block_on;
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
-    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpParseError, Limits,
-    LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport,
-    ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
-    WebSocketOutput, WebSocketState, WireRequest, parse_http_request,
+    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpEncodeError,
+    HttpParseError, Limits, LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
+    LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
+    WebSocketOutput, WebSocketState, WireRequest, WireResponse, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -236,6 +236,49 @@ fn http_decoder_applies_header_and_request_limits_before_body_materialisation() 
         ),
         Err(HttpParseError::Limit)
     );
+}
+
+#[test]
+fn http_response_encoder_serializes_bounded_responses_and_owns_content_length() {
+    let response = WireResponse {
+        status: 201,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: br#"{"ok":true}"#.to_vec(),
+    };
+    let encoded = response.encode_http(TransportLimits::default()).unwrap();
+    assert_eq!(
+        encoded,
+        b"HTTP/1.1 201 Created\r\ncontent-type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+    );
+
+    let limited = TransportLimits {
+        max_outgoing_bytes: encoded.len() - 1,
+        ..TransportLimits::default()
+    };
+    assert_eq!(response.encode_http(limited), Err(HttpEncodeError::Limit));
+
+    for response in [
+        WireResponse {
+            status: 200,
+            headers: vec![("Content-Length".into(), "1".into())],
+            body: vec![b'x'],
+        },
+        WireResponse {
+            status: 200,
+            headers: vec![("x-test".into(), "ok\r\nInjected: yes".into())],
+            body: Vec::new(),
+        },
+        WireResponse {
+            status: 204,
+            headers: Vec::new(),
+            body: vec![b'x'],
+        },
+    ] {
+        assert_eq!(
+            response.encode_http(TransportLimits::default()),
+            Err(HttpEncodeError::Malformed)
+        );
+    }
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
