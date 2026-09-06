@@ -20,6 +20,7 @@ missing_errors_doc = "allow"
 
 [dependencies]
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
+orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
