@@ -20,6 +20,10 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::Raw;
 
+mod repl;
+
+pub use repl::ReplSession;
+
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
 const DEFAULT_STEPS: u64 = 10_000;
 const DEFAULT_DEPTH: usize = 64;
@@ -193,6 +197,11 @@ pub fn evaluate_with_functions(
         limits,
         steps: 0,
         functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
         effects: None,
         namespace: None,
     };
@@ -220,6 +229,11 @@ pub fn evaluate_function(
         limits,
         steps: 0,
         functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
         effects: None,
         namespace: None,
     };
@@ -241,6 +255,11 @@ pub fn invoke_named(
         limits,
         steps: 0,
         functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
         effects: None,
         namespace: function_namespace(name),
     };
@@ -273,6 +292,11 @@ pub fn invoke_named_with_effects(
         limits,
         steps: 0,
         functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
         effects: Some(effects),
         namespace: function_namespace(name),
     };
@@ -743,7 +767,7 @@ impl Value {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Scope(BTreeMap<String, Value>, BTreeSet<String>);
+struct Scope(BTreeMap<String, Value>, BTreeSet<String>, BTreeSet<String>);
 impl Scope {
     fn from_environment(
         environment: &Environment,
@@ -757,7 +781,7 @@ impl Scope {
             }
             values.insert(name.clone(), Value::from_canonical(value, context, 0)?);
         }
-        Ok(Self(values, BTreeSet::new()))
+        Ok(Self(values, BTreeSet::new(), BTreeSet::new()))
     }
 }
 
@@ -765,6 +789,11 @@ struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
     functions: &'functions Functions,
+    aliases: Option<&'functions BTreeMap<String, String>>,
+    session_functions: Option<&'functions BTreeSet<String>>,
+    repl_bindings: bool,
+    restrict_function_names: bool,
+    reject_unhandled_field_calls: bool,
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
 }
@@ -822,9 +851,15 @@ impl Context<'_, '_> {
                 .get(text)
                 .cloned()
                 .or_else(|| {
-                    self.functions
-                        .contains_key(text)
+                    (!self.restrict_function_names && self.functions.contains_key(text))
                         .then(|| Value::Function(text.clone()))
+                })
+                .or_else(|| {
+                    self.aliases
+                        .and_then(|aliases| aliases.get(text))
+                        .filter(|name| self.functions.contains_key(*name))
+                        .cloned()
+                        .map(Value::Function)
                 })
                 .or_else(|| {
                     let namespace = self.namespace.as_deref()?;
@@ -961,6 +996,12 @@ impl Context<'_, '_> {
                 }
                 Ok(Value::Null)
             }
+            Expr::ReplBinding { text, .. } if self.repl_bindings => scope
+                .0
+                .get(text)
+                .cloned()
+                .ok_or_else(|| error("ORNA-EVAL-NAME")),
+            Expr::ReplBinding { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -1276,6 +1317,12 @@ impl Context<'_, '_> {
                     return Value::from_canonical(&value, self, depth + 1);
                 }
             }
+            if self.reject_unhandled_field_calls
+                && matches!(callee, Expr::Field { .. })
+                && self.resolve_function_name(callee, scope).is_none()
+            {
+                return Err(error("ORNA-EVAL-UNSUPPORTED"));
+            }
             // A qualified module function is a callable path, not a record
             // field lookup. Resolve it only when the complete path was
             // explicitly admitted in the function environment; ordinary
@@ -1286,20 +1333,35 @@ impl Context<'_, '_> {
                 self.evaluate(callee, scope, depth + 1)?
             };
             let functions = self.functions;
-            let (parameters, body, captured) = match &callable {
+            let (parameters, body, mut captured, session_owned) = match &callable {
                 Value::Function(name) => {
                     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
                     (
                         &function.parameters,
                         &function.body,
                         Scope::from_environment(&function.environment, self)?,
+                        self.session_functions
+                            .is_some_and(|functions| functions.contains(name)),
                     )
                 }
-                Value::Closure(closure) => {
-                    (&closure.parameters, &closure.body, closure.captured.clone())
-                }
+                Value::Closure(closure) => (
+                    &closure.parameters,
+                    &closure.body,
+                    closure.captured.clone(),
+                    self.repl_bindings,
+                ),
                 _ => return Err(error("ORNA-EVAL-TYPE")),
             };
+            captured.2.extend(
+                scope
+                    .2
+                    .iter()
+                    .filter(|name| captured.0.contains_key(*name))
+                    .cloned(),
+            );
+            if session_owned && let Some(last_success) = scope.0.get("$_").cloned() {
+                captured.0.insert("$_".into(), last_success);
+            }
             self.depth(depth + 1)?;
             self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
@@ -1333,6 +1395,8 @@ impl Context<'_, '_> {
                 let value = self.evaluate(&argument.value, scope, depth + 1)?;
                 supplied.insert(key, value);
             }
+            let previous_repl_bindings = self.repl_bindings;
+            self.repl_bindings = session_owned;
             let previous_namespace = self.namespace.clone();
             self.namespace = match &callable {
                 Value::Function(name) => function_namespace(name),
@@ -1341,6 +1405,7 @@ impl Context<'_, '_> {
             };
             let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
             self.namespace = previous_namespace;
+            self.repl_bindings = previous_repl_bindings;
             return result;
         }
         let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
@@ -1355,13 +1420,29 @@ impl Context<'_, '_> {
         self.math(name, named_arguments(name, arguments, values, implicit)?)
     }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
+        let name = function_name(expression)?;
         if let Some(root) = function_root_name(expression)
             && scope.0.contains_key(root)
+            && !scope.2.contains(root)
         {
             return None;
         }
-        let name = function_name(expression)?;
-        if self.functions.contains_key(&name) {
+        if let Some(namespace) = self.namespace.as_deref() {
+            if !name.contains('.') {
+                let qualified = format!("{namespace}.{name}");
+                if self.functions.contains_key(&qualified) {
+                    return Some(qualified);
+                }
+            } else if self.functions.contains_key(&name) {
+                return Some(name);
+            }
+        }
+        if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))
+            && self.functions.contains_key(alias)
+        {
+            return Some(alias.clone());
+        }
+        if !self.restrict_function_names && self.functions.contains_key(&name) {
             return Some(name);
         }
         if name.contains('.') {
@@ -1493,6 +1574,7 @@ fn bind(
             }
             scope.0.insert(name.clone(), value);
             scope.1.remove(name);
+            scope.2.remove(name);
             Ok(true)
         }
         Pattern::Wildcard(_) => Ok(true),
