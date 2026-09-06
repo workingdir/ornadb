@@ -12,3 +12,6 @@ orna-repository-v1 = { path = "../orna-repository-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 sha2 = "0.10.9"
+
+[dev-dependencies]
+tempfile = "3.23.0"
