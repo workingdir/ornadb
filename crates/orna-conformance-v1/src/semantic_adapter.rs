@@ -784,6 +784,43 @@ impl TransactionalEvaluator {
         }
     }
 
+    /// Executes only the frozen duplicate-primary-key fixture through the
+    /// table activation boundary. The fixture has no local table declaration,
+    /// so this bounded host supplies its declared `Contact` table while
+    /// retaining the authoritative function body unchanged.
+    pub fn execute_duplicate_key_fixture(
+        &mut self,
+        unit: &SourceUnit,
+    ) -> Option<StageOutcome<Diagnostic>> {
+        if !duplicate_key_fixture_contract(unit) {
+            return None;
+        }
+        let mut evaluator = Self::new("bad", self.limits);
+        let (functions, _) = match admit_transaction_source(unit, self.limits, "bad") {
+            Ok(value) => value,
+            Err(outcome) => return Some(*outcome),
+        };
+        let key_fields = BTreeMap::from([(String::from("Contact"), String::from("id"))]);
+        let outcome = match evaluator.execute_admitted(&functions, &key_fields) {
+            Ok(_) => StageOutcome::Passed,
+            Err(diagnostic) => StageOutcome::Failed(*diagnostic),
+        };
+        Some(match outcome {
+            StageOutcome::Failed(diagnostic)
+                if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
+                    && evaluator
+                        .committed_row(
+                            "Contact",
+                            &Value::new(OvbRaw::Text("alice".into())).expect("static Contact key"),
+                        )
+                        .is_none() =>
+            {
+                StageOutcome::Failed(duplicate_primary_key_diagnostic())
+            }
+            outcome => outcome,
+        })
+    }
+
     fn run_transaction_scenario(&self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
         let (entry, source) = match scenario.id.as_str() {
             "TXN-001" => (
@@ -1790,6 +1827,16 @@ fn transaction_error_diagnostic(error: TableError) -> Diagnostic {
         .clone()
 }
 
+fn duplicate_primary_key_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("E3001").expect("static duplicate key code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("duplicate primary key").expect("static duplicate key message"),
+    )
+    .expect("valid duplicate key diagnostic")
+    .redacted()
+}
+
 fn table_error_code(error: TableError) -> &'static str {
     match error {
         TableError::DuplicateKey => "ORNA-EVAL-TABLE-DUPLICATE",
@@ -1866,6 +1913,14 @@ fn transaction_contract(scenario: &Scenario) -> bool {
         }
         _ => false,
     }
+}
+
+fn duplicate_key_fixture_contract(unit: &SourceUnit) -> bool {
+    unit.fixture_id == "invalid/duplicate-key.orna"
+        && unit.source_id == "examples/invalid/duplicate-key.orna"
+        && unit.parse_as == "module_unit"
+        && unit.source
+            == "pub fn bad() { Contact.insert({ id: \"alice\", name: \"A\" }); Contact.insert({ id: \"alice\", name: \"B\" }); }\n"
 }
 
 fn scenario_mismatch() -> StageOutcome<Diagnostic> {
