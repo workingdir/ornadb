@@ -431,6 +431,53 @@ impl CwdGeneration {
     }
 }
 
+/// The immutable target selected by a checkout preview. A local branch keeps
+/// its attachment; every other accepted selector is a detached commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckoutTarget {
+    Branch { name: String, commit: GitCommitRef },
+    Detached { commit: GitCommitRef },
+}
+
+impl CheckoutTarget {
+    pub fn commit(&self) -> &GitCommitRef {
+        match self {
+            Self::Branch { commit, .. } | Self::Detached { commit } => commit,
+        }
+    }
+
+    pub fn branch_name(&self) -> Option<&str> {
+        match self {
+            Self::Branch { name, .. } => Some(name),
+            Self::Detached { .. } => None,
+        }
+    }
+}
+
+/// Read-only checkout preconditions. It is intentionally not an executable
+/// checkout plan yet: force consent, logical validation, and durable recovery
+/// remain separate boundaries owned by the higher repository layers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckoutPreflight {
+    target: CheckoutTarget,
+    expected_head: Option<GitCommitRef>,
+    cwd: CwdGeneration,
+}
+
+impl CheckoutPreflight {
+    pub fn target(&self) -> &CheckoutTarget {
+        &self.target
+    }
+
+    pub fn expected_head(&self) -> Option<&GitCommitRef> {
+        self.expected_head.as_ref()
+    }
+
+    pub fn cwd(&self) -> &CwdGeneration {
+        &self.cwd
+    }
+}
+
 /// Git-resolved local paths for one worktree's private Orna runtime area.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePaths {
@@ -1111,6 +1158,13 @@ impl Repository {
         runtime: RuntimeGeneration,
     ) -> Result<CwdGeneration, RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.cwd_generation_locked(runtime)
+    }
+
+    fn cwd_generation_locked(
+        &self,
+        runtime: RuntimeGeneration,
+    ) -> Result<CwdGeneration, RepositoryError> {
         // Do not return a torn CWD if another Git process changes the index
         // while status is being read.  The lock serializes Orna writers; the
         // bounded recheck detects external Git writers.
@@ -1140,6 +1194,27 @@ impl Repository {
         } else {
             Err(RepositoryError::StaleCwd)
         }
+    }
+
+    /// Resolves a checkout target and captures all Git CWD preconditions while
+    /// holding the repository coordination lock. This operation never writes
+    /// refs, the index, the worktree, or the private runtime area.
+    pub fn plan_checkout(
+        &self,
+        selector: &str,
+        runtime: RuntimeGeneration,
+    ) -> Result<CheckoutPreflight, RepositoryError> {
+        if selector.is_empty() || selector.starts_with('-') || selector.contains('\0') {
+            return Err(RepositoryError::InvalidSelector);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        let target = self.resolve_checkout_target(selector)?;
+        let cwd = self.cwd_generation_locked(runtime)?;
+        Ok(CheckoutPreflight {
+            expected_head: cwd.head.clone(),
+            target,
+            cwd,
+        })
     }
 
     /// Explicitly resolves a Git selector to an immutable commit. This is the
@@ -1539,6 +1614,42 @@ impl Repository {
             }
         }
         Ok(false)
+    }
+
+    fn resolve_checkout_target(&self, selector: &str) -> Result<CheckoutTarget, RepositoryError> {
+        let branch =
+            valid_branch_name(selector) && self.ref_exists(&format!("refs/heads/{selector}"))?;
+        let tag =
+            valid_branch_name(selector) && self.ref_exists(&format!("refs/tags/{selector}"))?;
+        if branch && tag {
+            return Err(RepositoryError::InvalidSelector);
+        }
+        let commit = self.resolve_snapshot(selector)?;
+        if branch {
+            Ok(CheckoutTarget::Branch {
+                name: selector.to_owned(),
+                commit,
+            })
+        } else {
+            Ok(CheckoutTarget::Detached { commit })
+        }
+    }
+
+    fn ref_exists(&self, reference: &str) -> Result<bool, RepositoryError> {
+        let mut command = self.command();
+        command
+            .args(["show-ref", "--verify", "--quiet", "--"])
+            .arg(reference);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            Ok(true)
+        } else if output.status.code() == Some(1) && output.stderr.is_empty() {
+            Ok(false)
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
     }
 
     fn snapshot_from_native_oid(&self, oid: String) -> Result<GitCommitRef, RepositoryError> {
