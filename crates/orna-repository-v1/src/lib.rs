@@ -504,6 +504,14 @@ impl CheckoutPlanToken {
     }
 }
 
+/// The failure boundary for a checkout that validates its logical candidate
+/// while the repository mutation lock is held.
+#[derive(Debug)]
+pub enum CheckoutExecutionError<E> {
+    Repository(RepositoryError),
+    Validation(E),
+}
+
 impl CheckoutPreflight {
     pub fn target(&self) -> &CheckoutTarget {
         &self.target
@@ -1457,13 +1465,45 @@ impl Repository {
         &self,
         plan: &CheckoutPreflight,
     ) -> Result<(), RepositoryError> {
-        let _lock = self.acquire_coordination_lock()?;
-        self.verify_checkout_preflight_locked(plan)?;
+        self.execute_nonconflicting_git_checkout_with_validation(plan, |_repository, _plan| {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|error| match error {
+            CheckoutExecutionError::Repository(error) => error,
+            CheckoutExecutionError::Validation(never) => match never {},
+        })
+    }
+
+    /// Executes the safe Git carry-forward phase only after `validate` has
+    /// accepted the isolated logical candidate under the same mutation lock.
+    ///
+    /// The validator may inspect the target commit and its logical state using
+    /// the repository and immutable preflight. A rejected candidate leaves
+    /// `HEAD`, the index, and the worktree untouched. This does not authorize
+    /// conflicting or forced checkout; journaled destructive recovery remains
+    /// a separate higher-level boundary.
+    pub fn execute_nonconflicting_git_checkout_with_validation<E, F>(
+        &self,
+        plan: &CheckoutPreflight,
+        validate: F,
+    ) -> Result<(), CheckoutExecutionError<E>>
+    where
+        F: FnOnce(&Repository, &CheckoutPreflight) -> Result<(), E>,
+    {
+        let _lock = self
+            .acquire_coordination_lock()
+            .map_err(CheckoutExecutionError::Repository)?;
+        self.verify_checkout_preflight_locked(plan)
+            .map_err(CheckoutExecutionError::Repository)?;
         if plan.expected_head.as_ref() == Some(plan.target.commit())
             || !plan.git.conflicting_paths().is_empty()
         {
-            return Err(RepositoryError::CheckoutExecutionUnsafe);
+            return Err(CheckoutExecutionError::Repository(
+                RepositoryError::CheckoutExecutionUnsafe,
+            ));
         }
+
+        validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
 
         let mut command = self.command();
         match plan.target() {
@@ -1476,9 +1516,17 @@ impl Repository {
                     .arg(commit.as_str());
             }
         }
-        self.run(command)?;
-        if self.head()?.as_ref() != Some(plan.target.commit()) {
-            return Err(RepositoryError::GitOperationFailed);
+        self.run(command)
+            .map_err(CheckoutExecutionError::Repository)?;
+        if self
+            .head()
+            .map_err(CheckoutExecutionError::Repository)?
+            .as_ref()
+            != Some(plan.target.commit())
+        {
+            return Err(CheckoutExecutionError::Repository(
+                RepositoryError::GitOperationFailed,
+            ));
         }
         Ok(())
     }
