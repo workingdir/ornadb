@@ -2558,6 +2558,23 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "parallel")
+                && let [argument] = arguments.as_slice()
+                && let Expr::List { elements, .. } = &argument.value
+            {
+                let mut consumers = BTreeSet::new();
+                for element in elements {
+                    if let Some(path) = qualified_path(element)
+                        && !consumers.insert(path.join("."))
+                    {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "same durable source consumed twice without distinct consumer identity",
+                        ));
+                        break;
+                    }
+                }
+            }
             if matches!(
                 callee.as_ref(),
                 Expr::Name { text, .. } if matches!(text.as_str(), "Ok" | "Err")
@@ -5128,6 +5145,10 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
     match name {
         "now" => Some(function(Vec::new(), Type::Instant)),
         "log" => Some(function(vec![Type::Text], Type::Null)),
+        "parallel" => Some(function(
+            vec![Type::List(Box::new(Type::Error))],
+            Type::Stream(Box::new(Type::Error)),
+        )),
         "half_even" => Some(Type::Named("std.Rounding".into())),
         "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,

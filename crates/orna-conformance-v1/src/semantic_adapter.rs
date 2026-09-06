@@ -94,6 +94,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         "relation equality is ambiguous; choose sequence or row-set comparison explicitly" => {
             "E4107".into()
         }
+        "same durable source consumed twice without distinct consumer identity" => "E9101".into(),
         _ => diagnostic.code().into(),
     }
 }
