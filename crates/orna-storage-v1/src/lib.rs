@@ -12,8 +12,10 @@ use std::{
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
 use orna_repository_v1::{
-    GitCommitRef, ManagedFileChange, ManagedPath, PrivateCommit, Repository, RepositoryError,
+    GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
+    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
 };
+use orna_runtime_v1::{PublicationCommitId, PublicationFreeze, RuntimeState, TableMutation};
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
 };
@@ -301,6 +303,192 @@ pub fn build_private_publication_candidate(
     repository
         .build_private_commit(expected_head, &changes, message)
         .map_err(|_| Error::RepositoryUnavailable)
+}
+
+/// Converts the runtime's validated typed table prefix into the loose-row
+/// representation. Key decoding remains schema-owned: this function refuses
+/// to invent path components for an opaque runtime key.
+pub fn lower_runtime_table_mutations(
+    freeze: &PublicationFreeze,
+    mutations: &[TableMutation],
+    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
+) -> Result<FrozenBatch, Error> {
+    if mutations.is_empty() {
+        return Err(Error::IncompleteStaging);
+    }
+    let batch_id = MutationId::new(hex_id(freeze.intent_id))?;
+    let mut lowered = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        let path = path_for(mutation)?;
+        let expected_bytes = expected_bytes_for(&path)?;
+        let expected = expected_bytes.as_deref().map(RowHash::of);
+        let next = mutation
+            .value()
+            .map(|bytes| LooseRow::new(bytes.to_vec()))
+            .transpose()?;
+        lowered.push(LooseMutation {
+            id: MutationId::new(hex_id(mutation.id()))?,
+            path,
+            expected,
+            next,
+        });
+    }
+    FrozenBatch::new(batch_id, lowered, freeze.checkpoint.mutation_sequence)
+}
+
+/// A prepared, runtime-bound publication. Preparation creates only private
+/// Git objects and a durable journal; `publish` and `complete` are separate so
+/// a crash can be recovered at each PUB-1 boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationCoordinator {
+    expected_index: IndexGeneration,
+    candidate: PrivateCommit,
+    journal: PublicationJournal,
+}
+
+impl RuntimePublicationCoordinator {
+    /// Reads the exact typed prefix named by `freeze`, then prepares its
+    /// canonical loose-row candidate. The resolver is the schema boundary for
+    /// turning a typed table key into representable path components.
+    pub async fn prepare_from_runtime(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+        message: &str,
+    ) -> Result<Self, Error> {
+        let mutations = runtime
+            .pending_table_mutations_through(freeze)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        let batch = lower_runtime_table_mutations(freeze, &mutations, path_for, |path| {
+            repository
+                .managed_file_bytes(path.as_managed_path())
+                .map_err(|_| Error::RepositoryUnavailable)
+        })?;
+        Self::prepare(
+            repository,
+            expected_head,
+            expected_index,
+            freeze,
+            batch,
+            message,
+        )
+    }
+
+    /// Prepares a candidate from a validated runtime freeze and already
+    /// lowered loose mutations. The journal captures the runtime intent and
+    /// exact worktree expectations before any visible Git change.
+    pub fn prepare(
+        repository: &Repository,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        batch: FrozenBatch,
+        message: &str,
+    ) -> Result<Self, Error> {
+        if batch.watermark != freeze.checkpoint.mutation_sequence {
+            return Err(Error::IncompleteStaging);
+        }
+        let candidate =
+            build_private_publication_candidate(repository, expected_head, &batch, message)?;
+        let entries = batch
+            .mutations
+            .iter()
+            .map(|mutation| {
+                let expected = repository
+                    .managed_file_bytes(mutation.path.as_managed_path())
+                    .map_err(|_| Error::RepositoryUnavailable)?;
+                let actual = expected.as_deref().map(RowHash::of);
+                if actual != mutation.expected {
+                    return Err(Error::ExternalConflict {
+                        path: mutation.path.clone(),
+                        expected: mutation.expected,
+                        actual,
+                    });
+                }
+                Ok(PublicationJournalEntry::new(
+                    mutation.path.as_managed_path().clone(),
+                    expected,
+                    mutation.next.as_ref().map(|row| row.bytes().to_vec()),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let base_index_tree = expected_index
+            .tree()
+            .cloned()
+            .ok_or(Error::IncompleteStaging)?;
+        let journal = PublicationJournal::new_with_runtime_intent(
+            expected_head.clone(),
+            candidate.commit().clone(),
+            base_index_tree,
+            freeze.intent_id,
+            entries,
+        )
+        .map_err(|_| Error::RepositoryUnavailable)?;
+        Ok(Self {
+            expected_index,
+            candidate,
+            journal,
+        })
+    }
+
+    pub fn candidate(&self) -> &PrivateCommit {
+        &self.candidate
+    }
+
+    pub fn journal(&self) -> &PublicationJournal {
+        &self.journal
+    }
+
+    /// Executes repository ref, index, and worktree boundaries. The journal
+    /// intentionally remains at `WorktreeReconciled` after this returns.
+    pub fn publish(&mut self, repository: &Repository) -> Result<IndexGeneration, Error> {
+        repository
+            .publish_candidate(&self.expected_index, &self.candidate, &mut self.journal)
+            .map_err(|_| Error::RepositoryUnavailable)
+    }
+
+    /// Completes the runtime transaction first, then advances and clears the
+    /// repository journal. Runtime completion is idempotent, so a failure
+    /// between these two durable steps remains recoverable.
+    pub async fn complete(
+        &mut self,
+        repository: &Repository,
+        runtime: &RuntimeState,
+        freeze: &PublicationFreeze,
+    ) -> Result<(), Error> {
+        if freeze.intent_id
+            != self
+                .journal
+                .runtime_intent_id()
+                .ok_or(Error::InvalidTransition)?
+        {
+            return Err(Error::InvalidTransition);
+        }
+        let commit = PublicationCommitId::new(self.candidate.commit().as_str().as_bytes().to_vec())
+            .map_err(|_| Error::InvalidObjectId)?;
+        runtime
+            .complete_publication(freeze, &commit)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        repository
+            .mark_runtime_complete(freeze.intent_id, &mut self.journal)
+            .map_err(|_| Error::RepositoryUnavailable)
+    }
+}
+
+fn hex_id(id: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(32);
+    for byte in id {
+        text.push(HEX[(byte >> 4) as usize] as char);
+        text.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    text
 }
 
 fn validate_portable_paths<'a>(
@@ -653,6 +841,49 @@ mod tests {
     fn row(text: &str) -> LooseRow {
         LooseRow::new(text.as_bytes().to_vec()).unwrap()
     }
+
+    #[test]
+    fn runtime_table_prefix_lowers_into_a_bound_publication() {
+        let (_temp, repository) = repository();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let freeze = PublicationFreeze {
+            intent_id: [7; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [8; 32],
+                mutation_sequence: 1,
+            },
+        };
+        let mutation =
+            TableMutation::new([9; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
+                .unwrap();
+        let batch = lower_runtime_table_mutations(
+            &freeze,
+            std::slice::from_ref(&mutation),
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            |_path| Ok(None),
+        )
+        .unwrap();
+        let plan = RuntimePublicationCoordinator::prepare(
+            &repository,
+            &head,
+            index,
+            &freeze,
+            batch,
+            "orna: publish runtime data",
+        )
+        .unwrap();
+        assert_ne!(plan.candidate().commit(), &head);
+        assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
+        assert_eq!(plan.journal().entries().len(), 1);
+    }
+
     #[test]
     fn logical_keys_are_encoded_before_path_safety_validation() {
         for (key, encoded) in [
