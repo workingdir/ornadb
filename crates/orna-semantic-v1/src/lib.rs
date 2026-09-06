@@ -2588,6 +2588,16 @@ fn infer(
                     }
                 }
             }
+            if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "merge_streams")
+                && let [argument] = arguments.as_slice()
+                && let Expr::List { elements, .. } = &argument.value
+                && elements.len() > 1
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "a durable consumer function may own only one checkpointed source root",
+                ));
+            }
             if matches!(
                 callee.as_ref(),
                 Expr::Name { text, .. } if matches!(text.as_str(), "Ok" | "Err")
@@ -5162,6 +5172,10 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
             vec![Type::List(Box::new(Type::Error))],
             Type::Stream(Box::new(Type::Error)),
         )),
+        "merge_streams" => Some(function(
+            vec![Type::List(Box::new(Type::Error))],
+            Type::Stream(Box::new(Type::Error)),
+        )),
         "half_even" => Some(Type::Named("std.Rounding".into())),
         "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,
@@ -6370,6 +6384,21 @@ mod tests {
         assert!(a.diagnostics.iter().any(|diagnostic| {
             diagnostic.message()
                 == "same durable source consumed twice without distinct consumer identity"
+        }));
+    }
+
+    #[test]
+    fn durable_consumer_cannot_merge_multiple_source_roots() {
+        let a = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "m.orna",
+                "pub fn main() = merge_streams([google.mail(), openbanking.transactions()]);",
+            )],
+            &Catalogue::authoritative_fixture(),
+        );
+        assert!(a.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message()
+                == "a durable consumer function may own only one checkpointed source root"
         }));
     }
     #[test]
