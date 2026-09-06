@@ -1698,6 +1698,7 @@ dependencies = [
  "fs2",
  "num-bigint",
  "orna-foundation-v1",
+ "sha2 0.11.0",
  "tempfile",
 ]
 
