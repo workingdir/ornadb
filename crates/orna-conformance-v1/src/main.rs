@@ -1,9 +1,11 @@
 use futures::executor::block_on;
 use orna_conformance_v1::{
-    BoundedEvaluator, Corpus, DurableTransactionalEvaluator, Harness, ImplementationClaim,
-    RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
+    AdmittedReplSession, BoundedEvaluator, Corpus, DurableTransactionalEvaluator, Harness,
+    ImplementationClaim, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
+    TransactionalEvaluator,
 };
-use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_evaluator_v1::Limits as EvaluatorLimits;
+use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 #[cfg(test)]
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 use orna_repository_v1::Repository;
@@ -75,12 +77,40 @@ impl RuntimeEvaluator for CompositeEvaluator {
         &mut self,
         scenario: &Scenario,
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
+        if repl_preview_contract(scenario) {
+            return run_repl_preview_scenario();
+        }
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
         }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
+    }
+}
+
+fn repl_preview_contract(scenario: &Scenario) -> bool {
+    scenario.id == "REPL-001"
+        && scenario.title == "Typed safe preview"
+        && scenario.given == ["user types 1+2 without submit"]
+        && scenario.when == ["preview evaluator runs"]
+        && scenario.then == ["ghost preview shows 3 : Int"]
+        && scenario.requirements == ["ORNA-REPL-003"]
+}
+
+fn run_repl_preview_scenario() -> StageOutcome<Diagnostic> {
+    let session = AdmittedReplSession::new(EvaluatorLimits::default());
+    match session.preview("1+2") {
+        Ok(value) if value == Value::int(3.into()) => StageOutcome::Passed,
+        _ => StageOutcome::Failed(
+            Diagnostic::new(
+                SafeText::new("ORNA-CONFORMANCE-REPL-PREVIEW").expect("static code"),
+                DiagnosticSeverity::Error,
+                SafeText::new("safe preview did not produce canonical 3 : Int")
+                    .expect("static message"),
+            )
+            .expect("valid diagnostic"),
+        ),
     }
 }
 
@@ -651,7 +681,11 @@ fn main() {
             ]
             .into_iter()
             .collect(),
-            executed_scenario_contracts: vec!["TXN-001".into(), "TXN-002".into()],
+            executed_scenario_contracts: vec![
+                "REPL-001".into(),
+                "TXN-001".into(),
+                "TXN-002".into(),
+            ],
         })
         .run(&mut adapter);
     println!(
