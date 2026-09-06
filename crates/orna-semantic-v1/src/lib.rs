@@ -18,6 +18,10 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+mod repl;
+
+pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
+
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
 pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
@@ -1834,7 +1838,7 @@ fn check_item(
     table_rows: &BTreeMap<String, Type>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> Option<Inferred> {
     match &item.declaration {
         Declaration::Let {
             pattern,
@@ -1845,13 +1849,21 @@ fn check_item(
                 let inferred =
                     infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
                 require_same(&expected, &inferred.ty, diagnostics);
-                bind_pattern(pattern, inferred.ty, symbols, diagnostics);
+                bind_pattern(pattern, inferred.ty.clone(), symbols, diagnostics);
+                return Some(inferred);
             } else {
                 let inferred = infer(value, scope, &BTreeMap::new(), diagnostics);
-                bind_pattern(pattern, inferred.ty, symbols, diagnostics);
+                bind_pattern(pattern, inferred.ty.clone(), symbols, diagnostics);
+                return Some(inferred);
             }
         }
-        Declaration::Function { .. } => check_function(item, symbols, scope, diagnostics),
+        Declaration::Function { signature, .. } => {
+            check_function(item, symbols, scope, diagnostics);
+            return symbols.get(&signature.name).map(|symbol| Inferred {
+                ty: symbol.ty.clone(),
+                effects: symbol.effects.clone(),
+            });
+        }
         Declaration::Protocol { name, members, .. } if name == "Currency" => {
             for member in members {
                 if let ProtocolMember::Static { name, .. } = member
@@ -2001,6 +2013,7 @@ fn check_item(
         }
         _ => {}
     }
+    None
 }
 
 fn implementation_has_write(implementation: &orna_syntax_v1::Implementation) -> bool {
@@ -2163,6 +2176,7 @@ fn bind_pattern(
         )),
     }
 }
+#[derive(Clone)]
 struct Inferred {
     ty: Type,
     effects: EffectSummary,
@@ -2317,7 +2331,7 @@ fn infer(
                 effects,
             }
         }
-        Expr::Name { text, .. } => {
+        Expr::Name { text, .. } | Expr::ReplBinding { text, .. } => {
             if let Some(ty) = intrinsic_value_type(text) {
                 return Inferred {
                     ty,
