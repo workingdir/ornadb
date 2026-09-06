@@ -566,6 +566,16 @@ impl BoundedEvaluator {
         }
     }
 
+    /// Creates an independent ephemeral session from the admitted pure namespace.
+    /// Session declarations and imports never mutate the retained project.
+    pub fn repl_session(&self) -> Result<orna_evaluator_v1::ReplSession, EvaluationError> {
+        orna_evaluator_v1::ReplSession::with_bindings(
+            self.limits,
+            self.environment.clone(),
+            self.functions.clone(),
+        )
+    }
+
     /// Explicitly invokes one zero-argument function retained during module
     /// loading. Loading a module never evaluates a retained function body.
     pub fn invoke(&self, function: &str) -> StageOutcome<Diagnostic> {
@@ -2635,6 +2645,41 @@ mod bounded_tests {
         )
         .expect("qualified module call");
         assert_eq!(result, Value::int(42.into()));
+    }
+
+    #[test]
+    fn repl_sessions_import_admitted_functions_without_mutating_the_project() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let library = SourceUnit {
+            fixture_id: "session-library".into(),
+            source_id: "library.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub fn add(left: Int, right: Int): Int = left + right; pub fn twice(value: Int): Int = add(value, value);".into(),
+        };
+        assert!(matches!(
+            evaluator.evaluate_module_with_namespace(&library, Some("library")),
+            StageOutcome::Passed
+        ));
+        let mut session = evaluator.repl_session().expect("admitted session");
+        assert_eq!(session.submit("use library.twice as double;"), Ok(None));
+        assert_eq!(session.submit("let n = 21;"), Ok(None));
+        assert_eq!(session.submit("double(n)"), Ok(Some(Value::int(42.into()))));
+        assert!(session.submit("missing()").is_err());
+        assert_eq!(session.submit("$_"), Ok(Some(Value::int(42.into()))));
+
+        let mut fresh = evaluator.repl_session().expect("fresh admitted session");
+        for expression in ["n", "double(21)", "$_"] {
+            assert!(fresh.submit(expression).is_err(), "session state escaped");
+        }
+        assert_eq!(fresh.submit("use library;"), Ok(None));
+        assert_eq!(
+            fresh.submit("library.twice(21)"),
+            Ok(Some(Value::int(42.into())))
+        );
+        assert_eq!(
+            fresh.submit("library.twice($_)"),
+            Ok(Some(Value::int(84.into())))
+        );
     }
 
     #[test]
