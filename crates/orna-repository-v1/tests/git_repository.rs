@@ -323,6 +323,10 @@ fn managed_materialization_is_atomic_and_conflict_fenced() {
     repo.materialize_managed_file(&path, None, Some(b"first"))
         .unwrap();
     assert_eq!(
+        repo.managed_file_bytes(&path).unwrap(),
+        Some(b"first".to_vec())
+    );
+    assert_eq!(
         fs::read(root.path().join(path.as_path())).unwrap(),
         b"first"
     );
