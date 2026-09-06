@@ -2779,7 +2779,7 @@ impl LiveTransport {
                 {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(error @ HttpIoError::Cancelled) => {
+                    Err(error @ (HttpIoError::Cancelled | HttpIoError::Write)) => {
                         self.close_websocket_attachment(socket.attachment, clock(), application)
                             .await?;
                         return Err(error);
@@ -2801,7 +2801,7 @@ impl LiveTransport {
                 {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(error @ HttpIoError::Cancelled) => {
+                    Err(error @ (HttpIoError::Cancelled | HttpIoError::Write)) => {
                         self.close_websocket_attachment(socket.attachment, clock(), application)
                             .await?;
                         return Err(error);
