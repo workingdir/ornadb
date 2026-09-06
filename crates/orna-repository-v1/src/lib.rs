@@ -1323,6 +1323,19 @@ impl Repository {
         Ok(())
     }
 
+    /// Revalidates and authorizes the exact preflight for a force-capable
+    /// checkout operation. The witness alone is insufficient after any Git
+    /// or runtime generation drift.
+    pub fn authorize_checkout_force(
+        &self,
+        plan: &CheckoutPreflight,
+        force: bool,
+        token: Option<&CheckoutPlanToken>,
+    ) -> Result<(), RepositoryError> {
+        self.verify_checkout_preflight(plan)?;
+        plan.authorize_force(force, token)
+    }
+
     /// Explicitly resolves a Git selector to an immutable commit. This is the
     /// repository primitive behind `sys.snapshot(selector)`, not new source
     /// grammar for bare branch expressions.

@@ -362,6 +362,44 @@ fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {
 }
 
 #[test]
+fn checkout_force_authorization_is_canonical_and_stale_state_is_rejected() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let branch = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(24))
+        .unwrap();
+    let unchanged = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(24))
+        .unwrap();
+    assert_eq!(branch.force_token(), unchanged.force_token());
+    assert!(
+        repo.authorize_checkout_force(&branch, true, Some(&branch.force_token()))
+            .is_ok()
+    );
+    assert!(matches!(
+        repo.authorize_checkout_force(&branch, false, Some(&branch.force_token())),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+    assert!(matches!(
+        repo.authorize_checkout_force(&branch, true, None),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let detached = repo
+        .plan_checkout(&head, RuntimeGeneration::new(24))
+        .unwrap();
+    assert_ne!(branch.force_token(), detached.force_token());
+
+    fs::write(root.path().join("main.orna"), "changed after planning\n").unwrap();
+    assert!(matches!(
+        repo.authorize_checkout_force(&branch, true, Some(&branch.force_token())),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+}
+
+#[test]
 fn verify_cwd_rejects_a_worktree_only_interleaving() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
