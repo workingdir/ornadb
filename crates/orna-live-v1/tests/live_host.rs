@@ -1,10 +1,11 @@
 use futures::executor::block_on;
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
-    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpEncodeError,
-    HttpParseError, Limits, LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
-    LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
-    WebSocketOutput, WebSocketState, WireRequest, WireResponse, parse_http_request,
+    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
+    HttpEncodeError, HttpParseError, Limits, LiveApplication, LiveCredentialIssuer, LiveHost,
+    LiveSessionAuthority, LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential,
+    SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState, WireRequest, WireResponse,
+    parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -279,6 +280,33 @@ fn http_response_encoder_serializes_bounded_responses_and_owns_content_length() 
             Err(HttpEncodeError::Malformed)
         );
     }
+}
+
+#[test]
+fn http_connection_retains_partial_reads_and_drains_pipelined_requests() {
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let request = b"GET /orna/session HTTP/1.1\r\nHost: example\r\n\r\nGET /orna/session HTTP/1.1\r\nHost: example\r\n\r\n";
+    assert!(connection.push(&request[..20]).unwrap().is_empty());
+    assert_eq!(connection.buffered_bytes(), 20);
+    let requests = connection.push(&request[20..]).unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].request().path, "/orna/session");
+    assert_eq!(requests[1].request().method, "GET");
+    assert_eq!(connection.buffered_bytes(), 0);
+}
+
+#[test]
+fn http_connection_bounds_an_incomplete_request_before_append() {
+    let limits = TransportLimits {
+        max_request_bytes: 32,
+        ..TransportLimits::default()
+    };
+    let mut connection = HttpConnection::new(limits);
+    assert_eq!(
+        connection.push(b"GET /orna/session HTTP/1.1\r\nHost: "),
+        Err(HttpParseError::Limit)
+    );
+    assert_eq!(connection.buffered_bytes(), 0);
 }
 fn subscribe() -> Vec<u8> {
     Envelope {

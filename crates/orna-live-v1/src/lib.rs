@@ -1829,6 +1829,69 @@ impl ParsedHttpRequest {
     }
 }
 
+/// Bounded connection-local HTTP read state. It retains incomplete bytes and
+/// drains complete pipelined requests without exposing the backing buffer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpConnection {
+    limits: TransportLimits,
+    buffered: Vec<u8>,
+}
+
+impl HttpConnection {
+    #[must_use]
+    pub fn new(limits: TransportLimits) -> Self {
+        Self {
+            limits,
+            buffered: Vec::new(),
+        }
+    }
+
+    /// Adds one listener read and returns every complete request available in
+    /// it. The connection retains only one bounded incomplete request.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser's fail-closed framing or size error. On error, the
+    /// connection state is unchanged by the rejected read.
+    pub fn push(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::result::Result<Vec<ParsedHttpRequest>, HttpParseError> {
+        let mut incoming = bytes;
+        let mut parsed = Vec::new();
+        let mut buffered = self.buffered.clone();
+        while !incoming.is_empty() {
+            if let Some(request) = parse_http_request(&buffered, self.limits)? {
+                buffered.drain(..request.consumed());
+                parsed.push(request);
+                continue;
+            }
+            let available = self
+                .limits
+                .max_request_bytes
+                .checked_sub(buffered.len())
+                .ok_or(HttpParseError::Limit)?;
+            if available == 0 {
+                return Err(HttpParseError::Limit);
+            }
+            let take = incoming.len().min(available);
+            buffered.extend_from_slice(&incoming[..take]);
+            incoming = &incoming[take..];
+        }
+        while let Some(request) = parse_http_request(&buffered, self.limits)? {
+            buffered.drain(..request.consumed());
+            parsed.push(request);
+        }
+        self.buffered = buffered;
+        Ok(parsed)
+    }
+
+    #[must_use]
+    pub const fn buffered_bytes(&self) -> usize {
+        self.buffered.len()
+    }
+}
+
 /// Decodes exactly one bounded HTTP/1.1 request from a listener read buffer.
 /// The returned byte count lets a host retain pipelined bytes for a later
 /// request; incomplete input is reported without consuming or interpreting it.
