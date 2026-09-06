@@ -3,6 +3,7 @@ use orna_conformance_v1::{
     RuntimeEvaluator, Scenario, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
+use std::process::Command;
 
 fn scenario(id: &str) -> Scenario {
     let corpus = Corpus::load_default().expect("frozen corpus loads");
@@ -141,4 +142,49 @@ fn transaction_scenarios_execute_through_the_real_table_evaluator() {
         runtime.run_scenario(&scenario("TXN-002")),
         StageOutcome::Passed
     ));
+}
+
+#[test]
+fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner() {
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
+        .output()
+        .expect("conformance binary runs");
+    assert!(output.status.success(), "conformance binary failed");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("conformance report is JSON");
+    let declared = report["implementation_claim"]["executed_scenario_contracts"]
+        .as_array()
+        .expect("scenario execution claim is an array")
+        .iter()
+        .map(|value| value.as_str().expect("scenario ID is text"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declared,
+        [
+            "LET-REBIND-091",
+            "PIPE-001",
+            "PIPE-002",
+            "TXN-001",
+            "TXN-002",
+        ]
+    );
+    for scenario_id in [
+        "LIVE-001",
+        "LIVE-002",
+        "LIVE-003",
+        "LIVE-004",
+        "STREAM-001",
+        "STREAM-002",
+    ] {
+        let result = report["scenarios"]
+            .as_array()
+            .expect("scenario results are an array")
+            .iter()
+            .find(|result| result["scenario"] == scenario_id)
+            .expect("scenario is present");
+        assert_eq!(
+            result["status"], "skipped",
+            "{scenario_id} must remain skipped"
+        );
+    }
 }
