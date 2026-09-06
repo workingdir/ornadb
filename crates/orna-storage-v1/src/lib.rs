@@ -14,7 +14,6 @@ use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIden
 use orna_repository_v1::{
     GitCommitRef, ManagedFileChange, ManagedPath, PrivateCommit, Repository, RepositoryError,
 };
-use orna_runtime_v1::{PublicationCommitId, PublicationFreeze, RuntimeState};
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
 };
@@ -545,23 +544,6 @@ pub const fn runtime_freeze_id(freeze: &orna_runtime_v1::PublicationFreeze) -> [
     freeze.intent_id
 }
 
-/// Completes the runtime side of publication after the repository adapter has
-/// verified the candidate's ref, index, and managed worktree boundaries.
-/// Repeating the same candidate is safe; newer runtime mutations remain in the
-/// pending tail because the runtime consumes only the supplied freeze prefix.
-pub async fn complete_runtime_publication(
-    state: &RuntimeState,
-    freeze: &PublicationFreeze,
-    candidate: &PrivateCommit,
-) -> Result<(), Error> {
-    let commit = PublicationCommitId::new(candidate.commit().as_str().as_bytes().to_vec())
-        .map_err(|_| Error::RuntimeUnavailable)?;
-    state
-        .complete_publication(freeze, &commit)
-        .await
-        .map_err(|_| Error::RuntimeUnavailable)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidMutationId,
@@ -618,7 +600,6 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_runtime_v1::{RuntimeIdentity, TableMutation};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1136,54 +1117,6 @@ mod tests {
             ),
             "published"
         );
-    }
-
-    #[tokio::test]
-    async fn runtime_completion_consumes_only_the_frozen_publication_prefix() {
-        let (_root, repository) = repository();
-        let identity = RuntimeIdentity {
-            database_id: [1; 16],
-            repository_id: [2; 16],
-        };
-        let state = RuntimeState::open(&repository, identity, [3; 32])
-            .await
-            .unwrap();
-        let lease = state.acquire_lease([4; 16]).await.unwrap();
-        let context = state.begin_activation().await.unwrap();
-        state
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [5; 16],
-                    "sensor",
-                    b"one".to_vec(),
-                    Some(b"published".to_vec()),
-                )
-                .unwrap()],
-                [6; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-        let freeze = state.freeze([7; 16], &checkpoint).await.unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let candidate = build_private_publication_candidate(
-            &repository,
-            &head,
-            &batch(None, Some(row("published"))),
-            "orna: publish runtime data",
-        )
-        .unwrap();
-
-        complete_runtime_publication(&state, &freeze, &candidate)
-            .await
-            .unwrap();
-        assert!(state.pending().await.unwrap().is_empty());
-        complete_runtime_publication(&state, &freeze, &candidate)
-            .await
-            .unwrap();
     }
 
     #[test]
