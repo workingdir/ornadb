@@ -544,16 +544,18 @@ where
             ActivationState::RolledBack => return Err(TableError::UseAfterClose),
             ActivationState::Open => {}
         }
+        let mut committed = self.runtime.committed.clone();
         for (key, mutation) in &self.overlay {
             match mutation {
                 Some(row) => {
-                    self.runtime.committed.insert(key.clone(), row.clone());
+                    committed.insert(key.clone(), row.clone());
                 }
                 None => {
-                    self.runtime.committed.remove(key);
+                    committed.remove(key);
                 }
             }
         }
+        self.runtime.committed = committed;
         self.state = ActivationState::Committed;
         Ok(())
     }
@@ -928,8 +930,9 @@ where
             ActivationState::RolledBack => return Err(TableError::UseAfterClose),
             ActivationState::Open => {}
         }
+        let mut committed = self.runtime.committed.clone();
         for (table, overlay) in &self.overlay {
-            let relation = self.runtime.committed.entry(table.clone()).or_default();
+            let relation = committed.entry(table.clone()).or_default();
             for (key, mutation) in overlay {
                 match mutation {
                     Some(row) => {
@@ -941,6 +944,7 @@ where
                 }
             }
         }
+        self.runtime.committed = committed;
         self.state = ActivationState::Committed;
         Ok(())
     }
@@ -1057,6 +1061,22 @@ where
 mod tests {
     use super::{ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime};
     use std::panic::AssertUnwindSafe;
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PanicOnClone {
+        value: &'static str,
+        panic_on_clone: bool,
+    }
+
+    impl Clone for PanicOnClone {
+        fn clone(&self) -> Self {
+            assert!(!self.panic_on_clone, "test row clone panic");
+            Self {
+                value: self.value,
+                panic_on_clone: self.panic_on_clone,
+            }
+        }
+    }
 
     #[test]
     fn nested_insert_then_root_rollback_leaves_committed_relation_empty() {
@@ -1283,6 +1303,94 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(database.committed(&"orders", &1), None);
+        assert_eq!(database.committed(&"audits", &1), None);
+    }
+
+    #[test]
+    fn table_commit_panic_does_not_publish_a_partial_overlay() {
+        let mut table = TableRuntime::<u64, PanicOnClone>::default();
+        table
+            .activate(|activation| {
+                activation.insert(
+                    1,
+                    PanicOnClone {
+                        value: "old",
+                        panic_on_clone: false,
+                    },
+                )?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            table.activate(|activation| {
+                activation.update(
+                    1,
+                    PanicOnClone {
+                        value: "new",
+                        panic_on_clone: false,
+                    },
+                )?;
+                activation.insert(
+                    2,
+                    PanicOnClone {
+                        value: "panic",
+                        panic_on_clone: true,
+                    },
+                )?;
+                Ok::<_, TableError>(())
+            })
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(table.committed(&1).map(|row| row.value), Some("old"));
+        assert_eq!(table.committed(&2), None);
+    }
+
+    #[test]
+    fn database_commit_panic_does_not_publish_a_partial_cross_relation_overlay() {
+        let mut database = DatabaseRuntime::<&'static str, u64, PanicOnClone>::default();
+        database
+            .activate(|activation| {
+                activation.insert(
+                    "orders",
+                    1,
+                    PanicOnClone {
+                        value: "old",
+                        panic_on_clone: false,
+                    },
+                )?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            database.activate(|activation| {
+                activation.update(
+                    "orders",
+                    1,
+                    PanicOnClone {
+                        value: "new",
+                        panic_on_clone: false,
+                    },
+                )?;
+                activation.insert(
+                    "audits",
+                    1,
+                    PanicOnClone {
+                        value: "panic",
+                        panic_on_clone: true,
+                    },
+                )?;
+                Ok::<_, TableError>(())
+            })
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(
+            database.committed(&"orders", &1).map(|row| row.value),
+            Some("old")
+        );
         assert_eq!(database.committed(&"audits", &1), None);
     }
 
