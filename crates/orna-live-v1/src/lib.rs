@@ -1827,6 +1827,10 @@ impl ParsedHttpRequest {
     pub const fn consumed(&self) -> usize {
         self.consumed
     }
+
+    fn into_request(self) -> WireRequest {
+        self.request
+    }
 }
 
 /// Bounded connection-local HTTP read state. It retains incomplete bytes and
@@ -1836,6 +1840,27 @@ pub struct HttpConnection {
     limits: TransportLimits,
     buffered: Vec<u8>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpConnectionError {
+    Parse(HttpParseError),
+    Encode(HttpEncodeError),
+}
+
+impl core::fmt::Display for HttpConnectionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(formatter),
+            Self::Encode(error) => formatter.write_str(match error {
+                HttpEncodeError::Limit => "HTTP response exceeds the configured limit",
+                HttpEncodeError::Malformed => "HTTP response is malformed",
+                HttpEncodeError::UnsupportedStatus => "HTTP response status is unsupported",
+            }),
+        }
+    }
+}
+
+impl std::error::Error for HttpConnectionError {}
 
 impl HttpConnection {
     #[must_use]
@@ -2194,6 +2219,38 @@ impl LiveTransport {
             }
             _ => wire_error(400, "live.malformed_request"),
         }
+    }
+
+    /// Routes complete HTTP requests from a bounded connection and serializes
+    /// each response for the listener write side. WebSocket upgrade requests
+    /// remain explicit through [`Self::upgrade`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed parser or response-encoding error. Routed HTTP
+    /// failures are encoded as ordinary protocol responses in the result.
+    pub async fn handle_http_read(
+        &mut self,
+        connection: &mut HttpConnection,
+        bytes: &[u8],
+        now: u64,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<Vec<Vec<u8>>, HttpConnectionError> {
+        let requests = connection.push(bytes).map_err(HttpConnectionError::Parse)?;
+        let mut responses = Vec::with_capacity(requests.len());
+        for request in requests {
+            let response = self
+                .handle(request.into_request(), now, authority, issuer, deletion)
+                .await;
+            responses.push(
+                response
+                    .encode_http(self.limits)
+                    .map_err(HttpConnectionError::Encode)?,
+            );
+        }
+        Ok(responses)
     }
 
     /// Validates the RFC 6455 handshake and attaches the cookie-authenticated
