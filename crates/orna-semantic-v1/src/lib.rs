@@ -5267,6 +5267,10 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             }
             .effects,
         },
+        ["sys", "FailureStatus", "open" | "skipped"] => Inferred {
+            ty: Type::Named("sys.FailureStatus".into()),
+            effects: EffectSummary::default(),
+        },
         ["sys", "rt", "streams"] => Inferred {
             ty: Type::Relation(Box::new(Type::Named("sys.Stream".into()))),
             effects: EffectSummary {
@@ -6432,6 +6436,32 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn explicit_failure_cas_default_statuses_keep_version_required() {
+        for (operation, status) in [("retry_failure", "open"), ("replay_failure", "skipped")] {
+            let valid = checked(&[ModuleInput::new(
+                "failure-cas.orna",
+                format!(
+                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
+                ),
+            )]);
+            assert!(valid.is_ok(), "{operation}: {:#?}", valid.diagnostics);
+
+            let missing_version = checked(&[ModuleInput::new(
+                "failure-cas.orna",
+                format!(
+                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_status: sys.FailureStatus.{status});"
+                ),
+            )]);
+            assert!(
+                has(&missing_version, DIAG_TYPE),
+                "{operation}: {:#?}",
+                missing_version.diagnostics
+            );
+        }
+    }
+
     #[test]
     fn named_alias_glob_and_prelude_imports_resolve() {
         let source = "pub fn f(x: Int): Int = x; pub fn p(): Bool = true;";
