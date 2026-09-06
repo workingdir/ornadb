@@ -654,6 +654,27 @@ mod tests {
         );
     }
     #[test]
+    fn repl_and_transaction_implementation_scenarios_remain_gaps_without_engine_evidence() {
+        let report = generate(corpus()).expect("valid corpus");
+        for (scenario_id, requirements) in [
+            ("REPL-001", &["ORNA-REPL-003"][..]),
+            ("REPL-002", &["ORNA-REPL-003"][..]),
+            (
+                "TXN-001",
+                &["ORNA-TXN-001", "ORNA-TXN-002", "ORNA-TXN-003"][..],
+            ),
+            ("TXN-002", &["ORNA-TXN-001"][..]),
+        ] {
+            let scenario = report
+                .behavioral_scenarios
+                .iter()
+                .find(|scenario| scenario.scenario_id == scenario_id)
+                .expect("published scenario");
+            assert_eq!(scenario.requirements, requirements, "{scenario_id}");
+            assert_eq!(scenario.status, Status::JustifiedGap, "{scenario_id}");
+        }
+    }
+    #[test]
     fn aggregate_requires_all_applicable_boundaries_to_execute() {
         let cases = [
             (
