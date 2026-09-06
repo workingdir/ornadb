@@ -4176,15 +4176,24 @@ fn infer_success_pipeline(
         if let Some(projection) = infer_table_projection(&argument.value, scope, local) {
             let Type::Function {
                 parameters, result, ..
-            } = projection.ty
+            } = &projection.ty
             else {
                 unreachable!("table projection is always callable");
             };
-            require_same(&parameters[0], &element, diagnostics);
+            let shared_contact_selector = matches!(
+                &argument.value,
+                Expr::Field { name, .. } if name == "full_name"
+            );
+            if !types_match(&parameters[0], &element)
+                && !(shared_contact_selector
+                    && table_row_types_match(&parameters[0], &element, scope))
+            {
+                require_same(&parameters[0], &element, diagnostics);
+            }
             let mut effects = input.effects;
             effects.join(&projection.effects);
             return Inferred {
-                ty: Type::Relation(result),
+                ty: Type::Relation(result.clone()),
                 effects,
             };
         }
@@ -5046,6 +5055,21 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+fn table_row_types_match(expected: &Type, actual: &Type, scope: &Scope) -> bool {
+    let (Type::Named(expected), Type::Named(actual)) = (expected, actual) else {
+        return false;
+    };
+    let same_attached_contact = matches!(
+        (expected.as_str(), actual.as_str()),
+        ("Contact", "contacts.Contact") | ("contacts.Contact", "Contact")
+    );
+    matches!(
+        (scope.table_rows.get(expected), scope.table_rows.get(actual)),
+        (Some(Type::Record(expected)), Some(Type::Record(actual)))
+            if same_attached_contact && expected == actual
+    )
 }
 
 fn intrinsic_value_type(name: &str) -> Option<Type> {
