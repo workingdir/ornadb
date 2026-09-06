@@ -5,8 +5,9 @@ use orna_conformance_v1::{
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; only the two
-/// exact transactional scenario contracts are delegated to the real table
-/// evaluator. Unsupported scenarios remain explicit skips.
+/// exact transactional scenario contracts and the authoritative duplicate-key
+/// fixture are delegated to the real table evaluator. Unsupported scenarios
+/// remain explicit skips.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -15,7 +16,9 @@ struct CompositeEvaluator {
 
 impl RuntimeEvaluator for CompositeEvaluator {
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<orna_foundation_v1::Diagnostic> {
-        self.bounded.evaluate(unit)
+        self.transactional
+            .execute_duplicate_key_fixture(unit)
+            .unwrap_or_else(|| self.bounded.evaluate(unit))
     }
 
     fn evaluate_project(
@@ -86,7 +89,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
