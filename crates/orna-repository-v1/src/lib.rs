@@ -1244,7 +1244,11 @@ impl Repository {
             "--verify",
             &tree_expression,
         ])?)?;
-        Ok(PrivateCommit { tree, commit })
+        let candidate = PrivateCommit { tree, commit };
+        if !self.candidate_entries_match_journal(&candidate, journal.entries())? {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(candidate)
     }
 
     fn recover_publication_worktree(
@@ -1929,6 +1933,29 @@ impl Repository {
                         return Ok(false);
                     }
                 }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Verifies that recovery's persisted loose-file intent is exactly the
+    /// content committed by the private publication candidate. Without this
+    /// binding, a malformed journal could reconcile the index to one blob and
+    /// materialise different bytes after the ref-advance crash boundary.
+    fn candidate_entries_match_journal(
+        &self,
+        candidate: &PrivateCommit,
+        entries: &[PublicationJournalEntry],
+    ) -> Result<bool, RepositoryError> {
+        for entry in entries {
+            match (
+                entry.next(),
+                self.candidate_tree_entry(candidate, &entry.path)?,
+            ) {
+                (None, None) => {}
+                (Some(next), Some((_mode, object)))
+                    if self.git_bytes(["cat-file", "blob", &object])? == next => {}
                 _ => return Ok(false),
             }
         }

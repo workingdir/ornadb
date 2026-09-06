@@ -1229,6 +1229,48 @@ fn recovery_keeps_a_pre_ref_publication_pending() {
 }
 
 #[test]
+fn recovery_rejects_a_post_ref_journal_whose_bytes_differ_from_the_candidate() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [19; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"journal row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::InvalidPublicationJournal)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(candidate.commit().clone()));
+    assert_eq!(repo.index_generation().unwrap().tree(), index_before.tree());
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+#[test]
 fn recovery_rejects_a_journal_candidate_outside_the_recorded_head_lineage() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
