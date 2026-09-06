@@ -5,10 +5,10 @@
 //! WebSocket handoff, durable live-session rows, and application dispatch are
 //! deliberately outside this slice.
 
-use futures::executor::block_on;
+use futures::{Future, executor::block_on};
 use orna_live_v1::{
-    HttpConnection, Limits, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
-    SystemCredentialIssuer, TransportLimits,
+    HttpConnection, HttpIoError, Limits, LiveHost, LiveSessionAuthority, LiveTransport,
+    SessionMetadata, SystemCredentialIssuer, TransportLimits,
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{Repository, inspect_metadata};
@@ -18,8 +18,10 @@ use orna_serving_v1::{Limits as ServingLimits, Serving};
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    fmt,
+    fmt, io,
+    pin::Pin,
     rc::Rc,
+    task::{Context, Poll},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +33,7 @@ pub enum LiveHostError {
     Configuration,
     Listener,
     Connection,
+    Cancelled,
 }
 
 impl fmt::Display for LiveHostError {
@@ -41,6 +44,7 @@ impl fmt::Display for LiveHostError {
             Self::Configuration => "orna: live host configuration unavailable",
             Self::Listener => "orna: live loopback listener unavailable",
             Self::Connection => "orna: live HTTP connection failed",
+            Self::Cancelled => "orna: live host cancelled",
         })
     }
 }
@@ -116,6 +120,99 @@ impl LiveOnceHost {
                 &mut self.deletion,
             )
             .map_err(|_| LiveHostError::Connection)
+    }
+
+    /// Serves one loopback connection while racing accept and connection I/O
+    /// against the caller-owned cancellation future. The host owns the
+    /// listener and accepted socket for the complete task lifetime.
+    pub fn serve_with_cancellation<C>(mut self, mut cancellation: C) -> Result<(), LiveHostError>
+    where
+        C: Future<Output = ()> + Unpin,
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .map_err(|_| LiveHostError::Configuration)?;
+        runtime.block_on(self.serve_with_cancellation_async(&mut cancellation))
+    }
+
+    async fn serve_with_cancellation_async<C>(
+        &mut self,
+        cancellation: &mut C,
+    ) -> Result<(), LiveHostError>
+    where
+        C: Future<Output = ()> + Unpin,
+    {
+        let listener = self
+            .listener
+            .listener()
+            .try_clone()
+            .map_err(|_| LiveHostError::Listener)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| LiveHostError::Listener)?;
+        let listener =
+            tokio::net::TcpListener::from_std(listener).map_err(|_| LiveHostError::Listener)?;
+        let (stream, _) = tokio::select! {
+            result = listener.accept() => result.map_err(|_| LiveHostError::Connection)?,
+            () = &mut *cancellation => return Err(LiveHostError::Cancelled),
+        };
+        let (reader, writer) = stream.into_split();
+        let mut reader = TokioReader(reader);
+        let mut writer = TokioWriter(writer);
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut issuer = SystemCredentialIssuer::default();
+        let mut clock = system_seconds;
+        self.transport
+            .serve_http_connection_with_cancellation(
+                &mut reader,
+                &mut writer,
+                &mut connection,
+                &mut clock,
+                cancellation,
+                &mut self.authority,
+                &mut issuer,
+                &mut self.deletion,
+            )
+            .await
+            .map_err(|error| match error {
+                HttpIoError::Cancelled => LiveHostError::Cancelled,
+                _ => LiveHostError::Connection,
+            })
+    }
+}
+
+struct TokioReader(tokio::net::tcp::OwnedReadHalf);
+
+impl futures::io::AsyncRead for TokioReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        let mut read_buffer = tokio::io::ReadBuf::new(buffer);
+        tokio::io::AsyncRead::poll_read(Pin::new(&mut self.0), context, &mut read_buffer)
+            .map(|result| result.map(|()| read_buffer.filled().len()))
+    }
+}
+
+struct TokioWriter(tokio::net::tcp::OwnedWriteHalf);
+
+impl futures::io::AsyncWrite for TokioWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.0), context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.0), context)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), context)
     }
 }
 
