@@ -2748,6 +2748,11 @@ impl LiveTransport {
                 let read =
                     await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read).await?;
                 if read == 0 {
+                    self.host
+                        .dispatch_frame(socket.attachment, clock(), Frame::Close, application)
+                        .await
+                        .map_err(HttpConnectionError::Protocol)
+                        .map_err(HttpIoError::Transport)?;
                     return Ok(());
                 }
                 if self
