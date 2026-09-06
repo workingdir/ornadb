@@ -898,19 +898,26 @@ mod tests {
     #[test]
     fn digest_bound_engine_witnesses_add_only_explicit_executed_boundaries() {
         let root = corpus();
-        let base = generate(&root).expect("valid corpus");
-        let witnesses = EngineWitnesses {
-            publication_digests: base.publication_digests.clone(),
-            witnesses: vec![orna_conformance_v1::EngineWitness {
-                requirement_id: "ORNA-SOURCE-001".into(),
-                fixture_id: "valid/minimal-root.orna".into(),
-                fixture_path: "examples/valid/minimal-root.orna".into(),
-                stage: Stage::Parse,
-                implementation_ref: "orna.syntax.module-entrypoint".into(),
-                test_ref: "conformance.reference_corpus.engine_witnesses".into(),
-                observed_status: orna_conformance_v1::EvidenceStatus::Passed,
-            }],
-        };
+        let harness = orna_conformance_v1::Harness::new(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
+            orna_conformance_v1::BoundedEvaluator::default(),
+        );
+        let conformance_report = harness.run(&mut adapter);
+        let witnesses = harness
+            .engine_witnesses(
+                &conformance_report,
+                &[orna_conformance_v1::FixtureStageBinding {
+                    requirement_id: "ORNA-SOURCE-001".into(),
+                    fixture_id: "valid/minimal-root.orna".into(),
+                    fixture_path: "examples/valid/minimal-root.orna".into(),
+                    stage: Stage::Parse,
+                    implementation_ref: "orna.syntax.module-entrypoint".into(),
+                    test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+                }],
+            )
+            .expect("conformance report produces a witness");
         let report = generate_with_engine_witnesses(&root, &witnesses)
             .expect("digest-bound witness is accepted");
         let requirement = report
