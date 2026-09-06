@@ -312,7 +312,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_skips_all_scenarios_without_authoritative_runtime_witnesses() {
+fn published_report_declares_only_the_repl_preview_executed_through_the_runtime_boundary() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -325,12 +325,16 @@ fn published_report_skips_all_scenarios_without_authoritative_runtime_witnesses(
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert!(declared.is_empty());
+    assert_eq!(declared, ["REPL-001"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
     assert_eq!(scenarios.len(), 144);
     for result in scenarios {
+        if result["scenario"] == "REPL-001" {
+            assert_eq!(result["status"], "passed");
+            continue;
+        }
         assert_eq!(
             result["status"], "skipped",
             "{} must remain skipped",
