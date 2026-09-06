@@ -12,10 +12,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use orna_conformance_v1::{
-    AdmittedReplSession, BoundedEvaluator, ProjectEnvironment, ProjectExpectations, ProjectUnit,
-    ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
+    AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
+    ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
+use orna_runtime_v1::RuntimeIdentity;
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
@@ -576,6 +577,121 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
+fn runtime_identity(
+    repository: &orna_repository_v1::Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
+    let metadata = orna_repository_v1::inspect_metadata(repository).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "repository runtime metadata is unavailable",
+            "initialize the Orna repository before running a durable project invocation",
+        )
+    })?;
+    let Some(metadata) = metadata else {
+        return Err(Diagnostic::target(
+            "E2200",
+            "repository runtime metadata is unavailable",
+            "initialize the Orna repository before running a durable project invocation",
+        ));
+    };
+
+    let database_id = *metadata.database_id().as_bytes();
+    let mut repository_id = database_id;
+    for (index, byte) in repository_id.iter_mut().enumerate() {
+        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
+        let salt = u8::try_from(index).expect("fixed identity length");
+        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
+    }
+    if repository_id == [0; 16] {
+        repository_id[0] = 1;
+    }
+
+    let mut initial_digest = [0; 32];
+    initial_digest[..16].copy_from_slice(&database_id);
+    initial_digest[16..].copy_from_slice(&repository_id);
+    if initial_digest == [0; 32] {
+        initial_digest[0] = 1;
+    }
+    Ok((
+        RuntimeIdentity {
+            database_id,
+            repository_id,
+        },
+        initial_digest,
+    ))
+}
+
+fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
+    // The embedded runtime persists one local writer lease in the worktree's
+    // private state. Reusing the repository-derived owner lets a later CLI
+    // process resume that same local owner without stealing an unknown lease.
+    identity.repository_id
+}
+
+fn run_project_invocation(endpoint: &Endpoint, root_entry: &str) -> Result<(), Diagnostic> {
+    let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "project runtime could not be discovered",
+                "run the command inside an initialized local Git worktree",
+            )
+        })?;
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error, then run the project again",
+        ));
+    }
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let project = execution_project(&project);
+    let owner_id = invocation_owner_id(identity);
+    let outcome = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "project runtime could not start",
+                "retry the durable project invocation",
+            )
+        })?
+        .block_on(DurableTransactionalEvaluator::default().execute_project(
+            &repository,
+            identity,
+            owner_id,
+            initial_digest,
+            &project,
+            root_entry,
+        ))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "durable project invocation failed",
+                "retry the project transaction after checking its durable state",
+            )
+        })?;
+    match outcome {
+        StageOutcome::Passed => {
+            println!("invocation completed");
+            Ok(())
+        }
+        StageOutcome::Failed(_) => Err(Diagnostic::target(
+            "E2200",
+            "durable project invocation was rejected",
+            "the project transaction failed atomically; no partial changes were committed",
+        )),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+            "durable project invocation is not available",
+            "use a supported table transaction; stream roots require the explicit stream runtime",
+        )),
+    }
+}
+
 fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
@@ -772,13 +888,14 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
-        Command::Run(Invocation::Seed) => run_pure_invocation(&parsed.endpoint, "seed"),
-        Command::Run(Invocation::Exercise | Invocation::SensorsIngest) => {
-            Err(Diagnostic::unavailable(
-                "reference invocation execution is not available",
-                "use an Orna runtime with source execution enabled",
-            ))
+        Command::Run(Invocation::Seed) => run_project_invocation(&parsed.endpoint, "main.seed"),
+        Command::Run(Invocation::Exercise) => {
+            run_project_invocation(&parsed.endpoint, "main.exercise")
         }
+        Command::Run(Invocation::SensorsIngest) => Err(Diagnostic::unavailable(
+            "stream invocation execution is not available",
+            "use the explicit finite-list stream runtime for `sensors.ingest`",
+        )),
     }
 }
 
@@ -975,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_reference_project_checks_but_runtime_commands_fail_closed() {
+    fn authoritative_reference_project_runs_seed_and_fails_closed_for_unsupported_roots() {
         let directory = tempfile::tempdir().expect("temporary reference project");
         let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../reference/Orna-1.0.0/examples/reference");
@@ -1005,6 +1122,7 @@ mod tests {
                 .expect("git")
                 .success()
         );
+        orna_repository_v1::initialize_repository(directory.path()).expect("runtime metadata");
         let endpoint = Endpoint::Path(directory.path().display().to_string());
         assert_eq!(
             execute(&Parsed {
@@ -1013,17 +1131,32 @@ mod tests {
             }),
             Ok(())
         );
-        for command in [
-            Command::Run(Invocation::Seed),
-            Command::Invoke("seed".into()),
-        ] {
-            let error = execute(&Parsed {
+        assert_eq!(
+            execute(&Parsed {
                 endpoint: endpoint.clone(),
-                command,
-            })
-            .expect_err("effectful reference workflow is outside the bounded CLI slice");
-            assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
-        }
+                command: Command::Run(Invocation::Seed),
+            }),
+            Ok(())
+        );
+        let error = execute(&Parsed {
+            endpoint: endpoint.clone(),
+            command: Command::Run(Invocation::Seed),
+        })
+        .expect_err("duplicate seed must be rejected");
+        assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
+        assert_eq!(
+            execute(&Parsed {
+                endpoint: endpoint.clone(),
+                command: Command::Run(Invocation::Exercise),
+            }),
+            Ok(())
+        );
+        let error = execute(&Parsed {
+            endpoint: endpoint.clone(),
+            command: Command::Run(Invocation::SensorsIngest),
+        })
+        .expect_err("stream root remains explicitly unsupported");
+        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
     }
 
     #[test]
@@ -1047,6 +1180,7 @@ mod tests {
                 .expect("git")
                 .success()
         );
+        orna_repository_v1::initialize_repository(directory.path()).expect("runtime metadata");
 
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
@@ -1076,7 +1210,6 @@ mod tests {
                 .expect("git")
                 .success()
         );
-
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
             command: Command::Invoke("library.value".into()),
@@ -1128,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn run_seed_executes_a_pinned_standard_function() {
+    fn invoke_executes_a_pinned_standard_function() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1143,16 +1276,15 @@ mod tests {
                 .expect("git")
                 .success()
         );
-
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Run(Invocation::Seed),
+            command: Command::Invoke("seed".into()),
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
 
     #[test]
-    fn run_seed_executes_composed_source_defined_standard_math() {
+    fn invoke_executes_composed_source_defined_standard_math() {
         let directory = tempfile::tempdir().expect("temporary project");
         std::fs::write(
             directory.path().join("main.orna"),
@@ -1167,10 +1299,9 @@ mod tests {
                 .expect("git")
                 .success()
         );
-
         let parsed = Parsed {
             endpoint: Endpoint::Path(directory.path().to_string_lossy().into_owned()),
-            command: Command::Run(Invocation::Seed),
+            command: Command::Invoke("seed".into()),
         };
         assert_eq!(execute(&parsed), Ok(()));
     }
