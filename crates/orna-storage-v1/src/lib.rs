@@ -519,6 +519,9 @@ impl RuntimePublicationCoordinator {
 
         match repository.recover_publication() {
             Ok(index) => return Ok(index),
+            Err(RepositoryError::PublicationPending) => {
+                return Err(Error::PublicationPending);
+            }
             Err(RepositoryError::RuntimeCompletionRequired) => {}
             Err(_) => return Err(Error::RepositoryUnavailable),
         }
@@ -821,6 +824,7 @@ pub enum Error {
     },
     RecoveryIndexConflict,
     RefConflict,
+    PublicationPending,
     InvalidTransition,
     RuntimeUnavailable,
     RepositoryUnavailable,
@@ -842,6 +846,7 @@ impl fmt::Display for Error {
             Self::IndexConflict { .. } => "managed path conflicts with ordinary index",
             Self::RecoveryIndexConflict => "recovery index conflict",
             Self::RefConflict => "publication ref conflict",
+            Self::PublicationPending => "publication remains pending before ref advance",
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
             Self::RepositoryUnavailable => "repository projection is unavailable",
@@ -1016,6 +1021,88 @@ mod tests {
                 .managed_file_bytes(managed.as_managed_path())
                 .unwrap(),
             Some(b"row".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovery_reports_pre_ref_publication_as_pending() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [35; 16],
+                    "Contact",
+                    b"Carol".to_vec(),
+                    Some(b"row".to_vec()),
+                )
+                .unwrap()],
+                [36; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [37; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [36; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index.clone(),
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        repository
+            .write_publication_journal(plan.journal())
+            .unwrap();
+        let pending = runtime.pending().await.unwrap();
+
+        assert!(matches!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::PublicationPending)
+        ));
+        assert_eq!(repository.head().unwrap(), Some(head));
+        assert_eq!(repository.index_generation().unwrap(), index);
+        assert_eq!(runtime.pending().await.unwrap(), pending);
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .stage(),
+            orna_repository_v1::PublicationJournalStage::Prepared
         );
     }
 
