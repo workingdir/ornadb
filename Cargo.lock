@@ -1764,14 +1764,22 @@ dependencies = [
 name = "orna-server"
 version = "1.0.0"
 dependencies = [
+ "futures",
+ "getrandom 0.3.4",
  "nix",
  "orna-artifact",
  "orna-client",
  "orna-compiler",
  "orna-core",
+ "orna-live-v1",
  "orna-postgres",
  "orna-protocol",
+ "orna-protocol-v1",
+ "orna-repository-v1",
  "orna-runtime-tty",
+ "orna-runtime-v1",
+ "orna-security-v1",
+ "orna-serving-v1",
  "orna-sqlite",
  "orna-standard",
  "orna-storage",
