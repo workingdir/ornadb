@@ -896,6 +896,47 @@ fn recovery_resumes_after_ref_and_index_boundaries() {
 }
 
 #[test]
+fn recovery_keeps_a_pre_ref_publication_pending() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [8; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&journal).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.index_generation().unwrap(), index_before);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+#[test]
 fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
