@@ -28,6 +28,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -598,6 +599,66 @@ fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
 
     assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
     assert!(response.windows(4).any(|window| window == b"\r\n\r\n"));
+}
+
+#[test]
+fn accepted_tcp_socket_hands_off_an_upgrade_to_the_websocket_driver() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut authority = Authority;
+        let mut issuer = Issuer(7, None);
+        let mut deletion = Delete(true);
+        let created = block_on(transport.handle(
+            wire(
+                "POST",
+                "/orna/session",
+                &format!(
+                    r#"{{"database":"{}","protocol":"{}"}}"#,
+                    uuid(2),
+                    SUBPROTOCOL
+                ),
+            ),
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ));
+        sender.send(token(&created)).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut application = UnitApplication::default();
+        transport.serve_accepted_websocket_socket(
+            stream,
+            &mut connection,
+            [5; 16],
+            &mut || 1,
+            &mut application,
+        )
+    });
+
+    let request = format!(
+        "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
+        uuid(1),
+        SUBPROTOCOL,
+        receiver.recv().unwrap()
+    );
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client.write_all(&masked(true, 9, b"hi")).unwrap();
+    client.write_all(&masked(true, 8, b"")).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap().unwrap();
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("serialized handshake response");
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    assert_eq!(&response[header_end + 4..], b"\x8a\x02hi\x88\x00");
 }
 
 #[test]
