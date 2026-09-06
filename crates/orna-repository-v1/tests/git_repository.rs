@@ -361,3 +361,59 @@ fn managed_materialization_rejects_symlinked_parents() {
     ));
     assert!(!outside.path().join("row.orna").exists());
 }
+
+#[test]
+fn private_candidate_uses_head_and_preserves_ordinary_cwd_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "staged human edit\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged human edit\n").unwrap();
+
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let worktree_before = repo.worktree_state().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                ManagedPath::new("generated/row.orna").unwrap(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+
+    assert_ne!(candidate.commit(), &head);
+    assert_eq!(repo.head().unwrap().unwrap(), head);
+    assert_eq!(repo.index_generation().unwrap(), index_before);
+    assert_eq!(repo.worktree_state().unwrap(), worktree_before);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged human edit"
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &[
+                "show",
+                &format!("{}:generated/row.orna", candidate.commit())
+            ]
+        ),
+        "candidate row"
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["show", &format!("{}:ordinary.txt", candidate.commit())]
+        ),
+        "base"
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["rev-parse", &format!("{}^", candidate.commit())]
+        ),
+        head.as_str()
+    );
+}

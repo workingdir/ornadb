@@ -1,11 +1,12 @@
 //! Git-valid repository state for Orna 1.0.
 //!
 //! This crate intentionally models only the repository boundary.  It does not
-//! write `.orna/` metadata or publish a commit.  In particular,
+//! write `.orna/` metadata or advance an ordinary ref.  In particular,
 //! [`Repository::stage_managed`] delegates to Git's ordinary index and touches
 //! only the supplied worktree-relative paths.
 
 use std::{
+    collections::HashSet,
     fmt, fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -60,6 +61,45 @@ impl IndexTreeRef {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// One managed file entry for a private publication candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedFileChange {
+    path: ManagedPath,
+    bytes: Option<Vec<u8>>,
+}
+
+impl ManagedFileChange {
+    pub fn new(path: ManagedPath, bytes: Option<Vec<u8>>) -> Self {
+        Self { path, bytes }
+    }
+
+    pub fn path(&self) -> &ManagedPath {
+        &self.path
+    }
+
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+}
+
+/// The Git objects for a candidate publication.  The candidate is private:
+/// building it never changes the ordinary index, worktree, or ref namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateCommit {
+    tree: IndexTreeRef,
+    commit: GitCommitRef,
+}
+
+impl PrivateCommit {
+    pub fn tree(&self) -> &IndexTreeRef {
+        &self.tree
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
     }
 }
 
@@ -249,6 +289,117 @@ impl Repository {
     /// unborn `HEAD`; it never substitutes CWD/runtime state.
     pub fn head(&self) -> Result<Option<GitCommitRef>, RepositoryError> {
         self.commit_optional("HEAD^{commit}")
+    }
+
+    /// Builds a real Git tree and commit from `expected_head` plus the supplied
+    /// managed-file changes, using a private temporary index. The ordinary
+    /// index and worktree are never inputs to this operation and the ordinary
+    /// refs are not advanced; unreachable candidate objects are permitted when
+    /// a later publication step fails.
+    pub fn build_private_commit(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[ManagedFileChange],
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        if changes.is_empty() {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        if message.is_empty() || message.contains('\0') {
+            return Err(RepositoryError::InvalidCommitMessage);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &actual != expected_head {
+            return Err(RepositoryError::StaleHead);
+        }
+        let mut paths = HashSet::new();
+        for change in changes {
+            if !paths.insert(change.path.clone()) || change.path.as_path().to_str().is_none() {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+        }
+
+        self.runtime.ensure_exists()?;
+        fs::create_dir_all(self.runtime.locks())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let index = self.runtime.locks().join(format!(
+            "private-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                .as_nanos()
+        ));
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+
+        let result = (|| {
+            let mut read_tree = self.command();
+            read_tree
+                .env("GIT_INDEX_FILE", &index)
+                .args(["read-tree", expected_head.as_str()]);
+            self.run(read_tree)?;
+
+            for change in changes {
+                if let Some(bytes) = change.bytes() {
+                    let object = self.hash_object(bytes)?;
+                    let cacheinfo = format!(
+                        "100644,{object},{}",
+                        change
+                            .path
+                            .as_path()
+                            .to_str()
+                            .ok_or(RepositoryError::UnsafeManagedPath)?
+                    );
+                    let mut update = self.command();
+                    update.env("GIT_INDEX_FILE", &index).args([
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &cacheinfo,
+                    ]);
+                    self.run(update)?;
+                } else {
+                    let mut update = self.command();
+                    update
+                        .env("GIT_INDEX_FILE", &index)
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(change.path.as_path());
+                    self.run(update)?;
+                }
+            }
+
+            let mut write_tree = self.command();
+            write_tree
+                .env("GIT_INDEX_FILE", &index)
+                .args(["write-tree"]);
+            let tree =
+                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
+
+            let mut commit_tree = self.command();
+            commit_tree
+                .args([
+                    "commit-tree",
+                    tree.as_str(),
+                    "-p",
+                    expected_head.as_str(),
+                    "-m",
+                ])
+                .arg(message);
+            let commit =
+                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
+            if self.head()?.as_ref() != Some(expected_head) {
+                return Err(RepositoryError::StaleHead);
+            }
+            Ok(PrivateCommit { tree, commit })
+        })();
+        let _ = fs::remove_file(&index);
+        result
     }
 
     /// Observes the ordinary Git index without modifying it.
@@ -531,6 +682,30 @@ impl Repository {
         let mut command = self.command();
         command.args(args);
         Ok(self.run(command)?.stdout)
+    }
+
+    fn hash_object(&self, bytes: &[u8]) -> Result<String, RepositoryError> {
+        let mut command = self.command();
+        command.args(["hash-object", "-w", "--stdin"]);
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?
+            .write_all(bytes)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if output.status.success() {
+            Ok(trim_output(&output.stdout))
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
     }
     fn git_at<const N: usize>(
         directory: &Path,
@@ -926,6 +1101,7 @@ pub enum RepositoryError {
     SnapshotNotReachable,
     InvalidSelector,
     InvalidBranchName,
+    InvalidCommitMessage,
     UnsafeManagedPath,
     NoManagedPaths,
     UnbornHead,
@@ -958,6 +1134,7 @@ impl fmt::Display for RepositoryError {
             }
             Self::InvalidSelector => f.write_str("invalid Git snapshot selector"),
             Self::InvalidBranchName => f.write_str("invalid Git branch name"),
+            Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
