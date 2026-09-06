@@ -283,9 +283,9 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
     let witnesses = harness
         .engine_witnesses(&report, std::slice::from_ref(&binding))
         .expect("reviewed executed stage becomes a witness");
-    assert_eq!(witnesses.witnesses.len(), 1);
+    assert_eq!(witnesses.witnesses().len(), 1);
     assert_eq!(
-        witnesses.witnesses[0].fixture_path,
+        witnesses.witnesses()[0].fixture_path(),
         "examples/valid/minimal-root.orna"
     );
 
@@ -294,6 +294,20 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
     assert!(
         harness
             .engine_witnesses(&report, std::slice::from_ref(&bad_path))
+            .is_err()
+    );
+
+    let project_evaluation = FixtureStageBinding {
+        requirement_id: "ORNA-STREAM-002".into(),
+        fixture_id: "PROJECT-REFERENCE".into(),
+        fixture_path: "examples/reference".into(),
+        stage: Stage::Evaluate,
+        implementation_ref: "orna.project-runtime".into(),
+        test_ref: "conformance.project_runtime".into(),
+    };
+    assert!(
+        harness
+            .engine_witnesses(&report, std::slice::from_ref(&project_evaluation))
             .is_err()
     );
 }
