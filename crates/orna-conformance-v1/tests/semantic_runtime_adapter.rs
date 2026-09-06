@@ -887,6 +887,38 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 }
 
 #[test]
+fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
+    let source = "pub fn increment(value: Int): Int = value + 1;";
+    let profile = orna_semantic_v1::StandardDependencyProfile::from_sources(
+        "std-snapshot-1",
+        [("std/math.orna".into(), source.into())],
+    )
+    .unwrap();
+    let mut evaluator = BoundedEvaluator::default();
+    assert_eq!(
+        evaluator.load_standard_sources(&profile, [("std/math.orna".into(), source.into())],),
+        StageOutcome::Passed
+    );
+    assert_eq!(
+        evaluator.invoke_with(
+            "increment",
+            &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())),)])
+        ),
+        StageOutcome::Passed
+    );
+    assert!(matches!(
+        evaluator.load_standard_sources(
+            &profile,
+            [(
+                "std/math.orna".into(),
+                "pub fn increment(value: Int): Int = value;".into()
+            )],
+        ),
+        StageOutcome::Failed(_)
+    ));
+}
+
+#[test]
 fn module_admission_checks_source_and_zero_limits_before_parsing() {
     let unit = SourceUnit {
         fixture_id: "module-admission".into(),
