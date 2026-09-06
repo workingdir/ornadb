@@ -1824,7 +1824,12 @@ fn websocket_upgrade_fragmentation_and_controls_are_checked_and_forwarded() {
         block_on(transport.receive(&mut socket, 2, &masked(true, 1, b"text"))),
         Err(Error::InvalidFrame)
     );
-    let close = block_on(transport.receive(&mut socket, 2, &masked(true, 8, b""))).unwrap();
+    let close = block_on(transport.receive(
+        &mut socket,
+        2,
+        &[masked(true, 8, b""), masked(true, 9, b"ignored ping")].concat(),
+    ))
+    .unwrap();
     assert_eq!(
         close,
         vec![
@@ -1918,6 +1923,23 @@ fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
         encode_websocket_output(&WebSocketOutput::Pong(vec![7; 126]), control_limits),
         Err(orna_live_v1::WebSocketEncodeError::Limit)
     );
+}
+
+#[test]
+fn websocket_close_payloads_require_valid_codes_and_utf8_reasons() {
+    for payload in [
+        vec![0x03],
+        vec![0x03, 0xed],
+        vec![0x03, 0xec],
+        vec![0x03, 0xe8, 0xff],
+    ] {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([5; 16]);
+        assert_eq!(
+            block_on(transport.receive(&mut socket, 2, &masked(true, 8, &payload))),
+            Err(Error::InvalidFrame)
+        );
+    }
 }
 
 #[test]
