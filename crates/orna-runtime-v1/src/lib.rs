@@ -267,6 +267,8 @@ pub enum FaultPoint {
     AfterMutation,
     AfterCheckpoint,
     AfterCapture,
+    AfterFailureRecord,
+    AfterFailurePayload,
 }
 
 /// Deterministic seam for proving transaction rollback. Production callers use
@@ -990,6 +992,18 @@ impl RuntimeState {
         diagnostic: SafeDiagnostic,
         payload: StreamFailurePayload,
     ) -> Result<CommitResult, RuntimeError> {
+        self.fail_stream_delivery_with_faults(writer, lease, diagnostic, payload, &NoFault)
+            .await
+    }
+
+    async fn fail_stream_delivery_with_faults(
+        &self,
+        writer: WriterLease,
+        lease: DeliveryLease,
+        diagnostic: SafeDiagnostic,
+        payload: StreamFailurePayload,
+        faults: &dyn FaultInjector,
+    ) -> Result<CommitResult, RuntimeError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1011,6 +1025,7 @@ impl RuntimeState {
         let result =
             apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic }).await?;
         if let CommitResult::Failed { failure } = &result {
+            faults.check(FaultPoint::AfterFailureRecord)?;
             transaction
                 .execute(
                     "INSERT INTO stream_failure_payload
@@ -1027,6 +1042,7 @@ impl RuntimeState {
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            faults.check(FaultPoint::AfterFailurePayload)?;
         }
         transaction
             .commit()
@@ -7195,6 +7211,94 @@ mod tests {
             assert!(state.pending().await.unwrap().is_empty());
             assert_eq!(state.latest_checkpoint().await.unwrap(), None);
             assert_eq!(state.capture().await.unwrap(), capture);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_metadata_rolls_back_at_each_metadata_fault_boundary() {
+        for (value, point) in [
+            (5, FaultPoint::AfterFailureRecord),
+            (6, FaultPoint::AfterFailurePayload),
+        ] {
+            let (_temp, repo) = repository();
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(4)).await.unwrap();
+            let delivery = stream_delivery(&format!("failure:{value}"), "failure:next");
+            let key = delivery.checkpoint_key();
+            let expected = CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            };
+            let lease = match state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected delivery lease: {other:?}"),
+            };
+            let before = state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .unwrap();
+            let before_capture = state.capture().await.unwrap();
+            let result = state
+                .fail_stream_delivery_with_faults(
+                    writer,
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![value]),
+                    &Fail(point),
+                )
+                .await;
+
+            assert_eq!(result, Err(RuntimeError::FaultInjected(point)));
+            assert_eq!(state.pending().await.unwrap(), Vec::<Mutation>::new());
+            assert_eq!(state.capture().await.unwrap(), before_capture);
+            assert_eq!(
+                state
+                    .stream_backend(writer)
+                    .checkpoint_async(&key)
+                    .await
+                    .unwrap(),
+                before
+            );
+            let stream = state.stream_backend(writer);
+            assert!(
+                stream
+                    .failure_async(&FailureIdentity(delivery.clone()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                stream
+                    .failure_payload_metadata_async(&FailureIdentity(delivery.clone()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                state
+                    .stream_backend(writer)
+                    .apply_async(CommitIntent::Acquire {
+                        delivery,
+                        expected,
+                        purpose: LeasePurpose::Deliver,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
+            );
         }
     }
 
