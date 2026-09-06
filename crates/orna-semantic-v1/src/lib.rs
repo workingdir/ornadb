@@ -2425,7 +2425,9 @@ fn infer(
             }
             if let Some(path) = qualified_path(expr)
                 && path.first() == Some(&"sys")
-                && path.get(1) == Some(&"runtime")
+                && path
+                    .get(1)
+                    .is_some_and(|member| matches!(*member, "runtime" | "runtime_info"))
             {
                 diagnostics.push(diag(
                     DIAG_LEGACY_SYS_RUNTIME,
@@ -5370,6 +5372,17 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
             },
             effects: EffectSummary {
                 effects: BTreeSet::from(["admin".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "rt"] => Inferred {
+            ty: Type::Named("sys.RuntimeView".into()),
+            effects: EffectSummary::default(),
+        },
+        ["sys", "rt", "info"] => Inferred {
+            ty: function(Vec::new(), Type::Named("sys.RuntimeInfo".into())),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["database read".into()]),
                 may_fail: true,
             },
         },
