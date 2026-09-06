@@ -2530,6 +2530,33 @@ impl LiveTransport {
         ))
     }
 
+    /// Accepts and serves exactly one HTTP connection from a caller-owned
+    /// listener. Binding, listener lifetime, TLS, cancellation, and clock
+    /// ownership remain with the executable host. This is a bounded
+    /// synchronous handoff, not a production listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted accept, socket-cloning, read, write, parser, or
+    /// response-encoding error. This function blocks until one peer connects
+    /// and then while that peer remains connected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_one_http_listener<C>(
+        &mut self,
+        listener: &std::net::TcpListener,
+        connection: &mut HttpConnection,
+        clock: &mut C,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        C: FnMut() -> u64,
+    {
+        let (stream, _) = listener.accept().map_err(|_| HttpIoError::Read)?;
+        self.serve_accepted_http_socket(stream, connection, clock, authority, issuer, deletion)
+    }
+
     /// Drives one already-accepted TCP stream through the bounded HTTP
     /// WebSocket upgrade and frame loop. The executable host retains bind,
     /// accept, TLS, cancellation, attachment identity, and clock ownership;

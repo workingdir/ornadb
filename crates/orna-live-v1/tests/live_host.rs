@@ -614,14 +614,13 @@ fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
         let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
         let mut connection = HttpConnection::new(TransportLimits::default());
         let mut authority = Authority;
         let mut issuer = Issuer(7, None);
         let mut deletion = Delete(true);
-        transport.serve_accepted_http_socket(
-            stream,
+        transport.serve_one_http_listener(
+            &listener,
             &mut connection,
             &mut || 0,
             &mut authority,
