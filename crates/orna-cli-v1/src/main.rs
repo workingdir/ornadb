@@ -3,8 +3,11 @@
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
 
+mod repl;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::{self, BufReader};
 use std::process::ExitCode;
 
 use orna_conformance_v1::{
@@ -12,7 +15,6 @@ use orna_conformance_v1::{
     SourceUnit, StageOutcome,
 };
 
-const REPL_TARGET: &str = "std.cli.repl";
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
 const STD_MATH_SOURCE: &str = include_str!("stdlib/std/math.orna");
@@ -226,22 +228,6 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     Ok(Parsed { endpoint, command })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReplInput {
-    Quit,
-    Expression,
-}
-fn parse_repl_input(input: &str) -> Result<ReplInput, Diagnostic> {
-    match input.trim() {
-        ":quit" => Ok(ReplInput::Quit),
-        text if text.starts_with(':') => Err(Diagnostic::usage(
-            "E1101",
-            "REPL console command is not supported by this bounded slice",
-            "use `:quit` or submit an Orna expression for the session adapter",
-        )),
-        _ => Ok(ReplInput::Expression),
-    }
-}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionState {
     Open,
@@ -591,27 +577,96 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
     }
 }
 
-/// Runs one pure REPL expression without retaining session state or admitting
-/// declarations. Interactive ownership remains behind the session adapter.
-fn run_repl_expression(expression: &str) -> Result<(), Diagnostic> {
-    match parse_repl_input(expression)? {
-        ReplInput::Quit => {
-            println!("session closed");
+fn repl_session(endpoint: &Endpoint) -> Result<orna_evaluator_v1::ReplSession, Diagnostic> {
+    let mut evaluator = BoundedEvaluator::default();
+    let project_context = match endpoint {
+        Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").is_ok(),
+        Endpoint::Path(_) | Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => true,
+    };
+    if project_context {
+        let project = load_project(endpoint)?;
+        let catalogue = semantic_catalogue(&project)?;
+        let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+        if !analysis.is_ok() {
+            return Err(Diagnostic::target(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error before starting a project REPL session",
+            ));
+        }
+        match evaluator.evaluate_project(&execution_project(&project)) {
+            StageOutcome::Passed => {}
+            StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::unavailable(
+                    "project REPL session is not available",
+                    "use a function-only project with ordinary imports; tables, effects, streams, and persistence require the integrated runtime",
+                ));
+            }
+        }
+    }
+    evaluator.repl_session().map_err(|_| {
+        Diagnostic::unavailable(
+            "REPL session could not be created",
+            "use source and bindings within the configured evaluator limits",
+        )
+    })
+}
+
+fn run_repl_submission<W: std::io::Write>(
+    session: &mut orna_evaluator_v1::ReplSession,
+    source: &str,
+    writer: &mut W,
+) -> Result<(), Diagnostic> {
+    if source.trim() == ":quit" {
+        return Ok(());
+    }
+    match session.submit(source) {
+        Ok(Some(value)) => {
+            writeln!(writer, "{}", repl::inspect(&value)).map_err(|_| {
+                Diagnostic::target(
+                    "E2200",
+                    "REPL console I/O failed",
+                    "check the terminal input and output streams, then start a new session",
+                )
+            })?;
             Ok(())
         }
-        ReplInput::Expression => orna_evaluator_v1::evaluate_repl(
-            expression,
-            &orna_evaluator_v1::Environment::new(),
-            orna_evaluator_v1::Limits::default(),
-        )
-        .map(|_| println!("expression completed"))
-        .map_err(|_| {
-            Diagnostic::unavailable(
-                "REPL expression is not available in the pure evaluator",
-                "use a bounded pure expression; declarations, tables, effects, streams, and persistence require the integrated runtime",
-            )
-        }),
+        Ok(None) => Ok(()),
+        Err(error) => {
+            writeln!(writer, "error[{}]", error.code()).map_err(|_| {
+                Diagnostic::target(
+                    "E2200",
+                    "REPL console I/O failed",
+                    "check the terminal input and output streams, then start a new session",
+                )
+            })?;
+            Err(Diagnostic::unavailable(
+                "REPL submission failed",
+                "use source supported by the current evaluator session",
+            ))
+        }
     }
+}
+
+fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnostic> {
+    let mut session = repl_session(endpoint)?;
+    if let Some(source) = expression {
+        return run_repl_submission(&mut session, source, &mut io::stdout().lock());
+    }
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    repl::run(
+        &mut BufReader::new(stdin.lock()),
+        &mut stdout.lock(),
+        &mut session,
+    )
+    .map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "REPL console I/O failed",
+            "check the terminal input and output streams, then start a new session",
+        )
+    })
 }
 
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
@@ -632,11 +687,7 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         )),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
-        Command::Repl(Some(ref expression)) => run_repl_expression(expression),
-        Command::Repl(None) => Err(Diagnostic::unavailable(
-            "the interactive REPL runtime is not available",
-            "supply one bounded pure expression after `repl`, or use an Orna runtime with source execution enabled",
-        )),
+        Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
         Command::Run(Invocation::Seed) => run_pure_invocation(&parsed.endpoint, "seed"),
         Command::Run(Invocation::Exercise | Invocation::SensorsIngest) => {
             Err(Diagnostic::unavailable(
@@ -706,6 +757,79 @@ mod tests {
         );
         let error = parse_cli(&["serve".into()]).expect_err("unsupported");
         assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    }
+
+    #[test]
+    fn project_repl_factory_retains_imports_in_a_scripted_session() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use library; pub fn run(): Int = library.twice(21);",
+        )
+        .expect("main source");
+        std::fs::write(
+            directory.path().join("library.orna"),
+            "pub fn twice(value: Int): Int = value + value;",
+        )
+        .expect("library source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let mut session = repl_session(&endpoint).expect("project session");
+        let mut input = b"use library.twice as double;\nlet n = 21;\ndouble(n)\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        repl::run(&mut input, &mut output, &mut session).expect("scripted session");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > > 42 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn single_expression_repl_reports_visible_success_failure_and_quit() {
+        let mut session = orna_evaluator_v1::ReplSession::new(orna_evaluator_v1::Limits::default());
+        let mut output = Vec::new();
+        assert_eq!(
+            run_repl_submission(&mut session, "1 + 2", &mut output),
+            Ok(())
+        );
+        let error = run_repl_submission(&mut session, "missing()", &mut output)
+            .expect_err("failure is reported");
+        assert_eq!(error.code, "E2000");
+        assert_eq!(
+            run_repl_submission(&mut session, ":quit", &mut output),
+            Ok(())
+        );
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.starts_with("3 : Int\nerror[ORNA-EVAL-"));
+        assert_eq!(output.matches('\n').count(), 2);
+    }
+
+    struct BrokenWriter;
+
+    impl std::io::Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("writer failed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
+        let mut session = orna_evaluator_v1::ReplSession::new(orna_evaluator_v1::Limits::default());
+        let error =
+            run_repl_submission(&mut session, "1", &mut BrokenWriter).expect_err("writer failure");
+        assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
     }
     #[test]
     fn check_loads_reachable_project_sources_and_ignores_unreachable_modules() {
@@ -966,34 +1090,6 @@ mod tests {
                 .expect_err("no database")
                 .code,
             "E1004"
-        );
-    }
-    #[test]
-    fn repl_is_function_backed_and_console_is_bounded() {
-        assert_eq!(REPL_TARGET, "std.cli.repl");
-        assert_eq!(parse_repl_input(":quit"), Ok(ReplInput::Quit));
-        assert_eq!(
-            parse_repl_input(":watch x").expect_err("not in slice").code,
-            "E1101"
-        );
-    }
-    #[test]
-    fn repl_expression_uses_the_pure_evaluator_without_persisting_a_session() {
-        let parsed = Parsed {
-            endpoint: Endpoint::ManagedLocal,
-            command: Command::Repl(Some("std.math.min(7, 3)".into())),
-        };
-        assert_eq!(execute(&parsed), Ok(()));
-
-        let declaration = Parsed {
-            endpoint: Endpoint::ManagedLocal,
-            command: Command::Repl(Some("pub fn retained() = 1;".into())),
-        };
-        assert_eq!(
-            execute(&declaration)
-                .expect_err("declarations are outside the pure slice")
-                .code,
-            "E2000"
         );
     }
     #[test]
