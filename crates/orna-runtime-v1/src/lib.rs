@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS pending_mutation (
     payload BLOB NOT NULL,
     digest BLOB NOT NULL CHECK (length(digest) = 32)
 );
+CREATE TABLE IF NOT EXISTS table_row (
+    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    row_value BLOB NOT NULL,
+    row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
+    PRIMARY KEY (table_id, row_key)
+);
 CREATE TABLE IF NOT EXISTS checkpoint (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     generation INTEGER NOT NULL UNIQUE CHECK (generation >= 0),
@@ -183,6 +190,66 @@ pub struct Mutation {
     pub digest: [u8; 32],
 }
 
+const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
+
+/// A schema-independent durable table change.
+///
+/// This is the first typed boundary between table execution and the durable
+/// runtime.  The runtime persists the canonical table/key/value operation in
+/// the same transaction as its mutation ledger and CWD checkpoint; schema
+/// admission and evaluator integration remain owned by their respective
+/// layers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableMutation {
+    id: [u8; 16],
+    table: String,
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+}
+
+impl TableMutation {
+    pub fn new(
+        id: [u8; 16],
+        table: impl Into<String>,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_mutation(id, &table, &key, value.as_deref())?;
+        Ok(Self {
+            id,
+            table,
+            key,
+            value,
+        })
+    }
+
+    pub fn id(&self) -> [u8; 16] {
+        self.id
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    fn runtime_mutation(&self) -> Result<Mutation, RuntimeError> {
+        let payload = encode_table_mutation(self)?;
+        Ok(Mutation {
+            id: self.id,
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriterLease {
     pub owner_id: [u8; 16],
@@ -297,6 +364,7 @@ pub enum RuntimeError {
     StaleCapture { current: Box<CwdCapture> },
     InvalidCapture,
     EmptyMutationBatch,
+    InvalidTableMutation,
     ConflictingPublicationIntent,
     RequestUnknown,
     RequestFingerprintMismatch,
@@ -319,6 +387,7 @@ impl fmt::Display for RuntimeError {
             Self::StaleCapture { .. } => "runtime capture is stale",
             Self::InvalidCapture => "invalid runtime capture",
             Self::EmptyMutationBatch => "empty runtime mutation batch",
+            Self::InvalidTableMutation => "invalid durable table mutation",
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::RequestUnknown => "runtime request is unknown",
             Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
@@ -864,6 +933,69 @@ impl RuntimeState {
     ) -> Result<CwdCapture, RuntimeError> {
         self.commit_batch(lease, context.capture(), mutations, next_digest, faults)
             .await
+    }
+
+    /// Atomically publishes typed table changes, their durable mutation
+    /// records, one checkpoint, and the next CWD capture.
+    pub async fn commit_table_activation(
+        &self,
+        lease: WriterLease,
+        context: &RuntimeActivationContext,
+        mutations: &[TableMutation],
+        next_digest: [u8; 32],
+        faults: &dyn FaultInjector,
+    ) -> Result<CwdCapture, RuntimeError> {
+        if mutations.is_empty() {
+            return Err(RuntimeError::EmptyMutationBatch);
+        }
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_mutations(&encoded, next_digest)?;
+        let current = self.capture().await?;
+        if &current != context.capture() {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, lease).await?;
+        for mutation in mutations {
+            apply_table_mutation_tx(&tx, mutation).await?;
+        }
+        let next =
+            append_mutations_tx(&tx, context.capture(), &encoded, next_digest, faults).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(next)
+    }
+
+    /// Reads a committed table row after reopening the durable runtime.
+    pub async fn committed_table_row(
+        &self,
+        table: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+        validate_table_identity(table, key)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT row_value FROM table_row WHERE table_id = ?1 AND row_key = ?2",
+                params![table, key.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        rows.next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
+            .transpose()
     }
 
     async fn record_stream_provider_failure(
@@ -3958,6 +4090,97 @@ fn validate_stream_mutations(
     validate_digest(next_digest)
 }
 
+fn validate_table_identity(table: &str, key: &[u8]) -> Result<(), RuntimeError> {
+    if table.is_empty()
+        || table.len() > MAX_TABLE_MUTATION_BYTES
+        || table.contains('\0')
+        || key.is_empty()
+        || key.len() > MAX_TABLE_MUTATION_BYTES
+    {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(())
+}
+
+fn validate_table_mutation(
+    id: [u8; 16],
+    table: &str,
+    key: &[u8],
+    value: Option<&[u8]>,
+) -> Result<(), RuntimeError> {
+    validate_id(id)?;
+    validate_table_identity(table, key)?;
+    if value.is_some_and(|value| value.len() > MAX_TABLE_MUTATION_BYTES) {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(())
+}
+
+fn encode_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"ORNA-TABLE-MUTATION\0");
+    append_length_prefixed(&mut payload, mutation.table.as_bytes())?;
+    append_length_prefixed(&mut payload, &mutation.key)?;
+    match &mutation.value {
+        Some(value) => {
+            payload.push(1);
+            append_length_prefixed(&mut payload, value)?;
+        }
+        None => payload.push(0),
+    }
+    if payload.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(payload)
+}
+
+fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) -> Result<(), RuntimeError> {
+    target.extend_from_slice(
+        &u32::try_from(value.len())
+            .map_err(|_| RuntimeError::InvalidTableMutation)?
+            .to_be_bytes(),
+    );
+    target.extend_from_slice(value);
+    Ok(())
+}
+
+async fn apply_table_mutation_tx(
+    connection: &Connection,
+    mutation: &TableMutation,
+) -> Result<(), RuntimeError> {
+    match &mutation.value {
+        Some(value) => {
+            let digest: [u8; 32] = Sha256::digest(value).into();
+            connection
+                .execute(
+                    "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(table_id, row_key) DO UPDATE SET
+                       row_value = excluded.row_value,
+                       row_digest = excluded.row_digest",
+                    params![
+                        mutation.table.clone(),
+                        mutation.key.clone(),
+                        value.clone(),
+                        digest.to_vec()
+                    ],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        None => {
+            connection
+                .execute(
+                    "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
+                    params![mutation.table.clone(), mutation.key.clone()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+    }
+    Ok(())
+}
+
 async fn append_mutations_tx(
     connection: &Connection,
     expected: &CwdCapture,
@@ -4095,6 +4318,15 @@ mod tests {
             digest: digest(value),
         }
     }
+    fn table_mutation(id_value: u8, key: u8, value: Option<u8>) -> TableMutation {
+        TableMutation::new(
+            id(id_value),
+            "books",
+            vec![key],
+            value.map(|value| vec![value]),
+        )
+        .unwrap()
+    }
     fn request(session: u8, request: u8) -> RequestIdentity {
         RequestIdentity {
             session_id: id(session),
@@ -4156,6 +4388,87 @@ mod tests {
         assert_eq!(context.activation_time(), started);
         assert_ne!(next, captured);
         assert_eq!(state.capture().await.unwrap(), next);
+    }
+
+    #[tokio::test]
+    async fn typed_table_activation_is_reopenable_and_deletes_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 1, Some(9))],
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        drop(state);
+
+        let state = open_state(&repo).await;
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        let lease = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(8, 1, None)],
+                digest(10),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_table_activation_rolls_back_rows_with_runtime_faults() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        for point in [
+            FaultPoint::AfterMutation,
+            FaultPoint::AfterCheckpoint,
+            FaultPoint::AfterCapture,
+        ] {
+            assert_eq!(
+                state
+                    .commit_table_activation(
+                        lease,
+                        &context,
+                        &[table_mutation(point as u8 + 10, point as u8 + 1, Some(7))],
+                        digest(11),
+                        &Fail(point),
+                    )
+                    .await,
+                Err(RuntimeError::FaultInjected(point))
+            );
+            assert_eq!(
+                state
+                    .committed_table_row("books", &[point as u8 + 1])
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert!(state.pending().await.unwrap().is_empty());
+            assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+            assert_eq!(state.capture().await.unwrap(), *context.capture());
+        }
     }
 
     fn stream_delivery(position: &str, successor: &str) -> DeliveryIdentity {
