@@ -8,6 +8,7 @@ mod repl;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, BufReader};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use orna_conformance_v1::{
@@ -148,7 +149,7 @@ enum Invocation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     Repl(Option<String>),
-    Init,
+    Init(Option<PathBuf>),
     Check,
     Invoke(String),
     Run(Invocation),
@@ -162,9 +163,11 @@ struct Parsed {
 }
 fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
+    let mut has_explicit_endpoint = false;
     let mut words = arguments.iter().map(String::as_str).peekable();
     while matches!(words.peek(), Some(&"--db")) {
         words.next();
+        has_explicit_endpoint = true;
         endpoint = Endpoint::parse(words.next().ok_or_else(|| {
             Diagnostic::usage(
                 "E1001",
@@ -176,7 +179,36 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let command = match words.next() {
         None => Command::Repl(None),
         Some("repl") => Command::Repl(words.next().map(str::to_owned)),
-        Some("init") => Command::Init,
+        Some("init") => {
+            let first = words.next();
+            let literal_target = first == Some("--");
+            let target = if literal_target { words.next() } else { first }.map(PathBuf::from);
+            if !literal_target
+                && let Some(target) = target.as_deref()
+                && target.as_os_str().to_string_lossy().starts_with('-')
+            {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "`init` option is not supported",
+                    "use `init` or `init DIRECTORY` without Git options",
+                ));
+            }
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1003",
+                    "`init` accepts at most one directory",
+                    "use `init` or `init DIRECTORY`",
+                ));
+            }
+            if has_explicit_endpoint {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "`init` does not accept `--db`",
+                    "use `init` or `init DIRECTORY` to choose a local repository",
+                ));
+            }
+            Command::Init(target)
+        }
         Some("check") => Command::Check,
         Some("invoke") => Command::Invoke(
             words
@@ -668,22 +700,75 @@ fn run_repl(endpoint: &Endpoint, expression: Option<&str>) -> Result<(), Diagnos
     })
 }
 
+fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -> Diagnostic {
+    let code = error.code();
+    let (title, help) = match error {
+        orna_repository_v1::RepositoryInitError::GitUnavailable => (
+            "Git is not available",
+            "install or enable Git, then retry `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::GitOperationFailed => (
+            "Git could not initialize the repository",
+            "check that Git can initialize the target directory, then retry `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::LocalStateUnavailable => (
+            "local repository state is unavailable",
+            "check local filesystem access for the target directory, then retry `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::UnsafeMetadataPath => (
+            "repository metadata has an unsafe path",
+            "replace unsafe metadata links or non-regular entries before retrying `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::MetadataIncomplete => (
+            "repository metadata is incomplete",
+            "restore complete metadata from a valid snapshot or initialize a new repository",
+        ),
+        orna_repository_v1::RepositoryInitError::MetadataMalformed => (
+            "repository metadata is invalid",
+            "restore valid metadata from a compatible repository snapshot before retrying",
+        ),
+        orna_repository_v1::RepositoryInitError::MetadataUnsupported => (
+            "repository metadata format is unsupported",
+            "use an Orna version that supports this repository format",
+        ),
+        orna_repository_v1::RepositoryInitError::MetadataChanged => (
+            "repository metadata changed during initialization",
+            "ensure no other process changes repository metadata, then retry `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::RepositoryBusy => (
+            "repository initialization is already in progress",
+            "wait for the other initialization to finish, then retry `orna init`",
+        ),
+        orna_repository_v1::RepositoryInitError::PlatformUnsupported => (
+            "repository initialization is unsupported on this platform",
+            "use a supported platform to initialize this repository",
+        ),
+    };
+    Diagnostic::target(code, title, help)
+}
+
+fn initialize_repository(target: Option<&std::path::Path>) -> Result<(), Diagnostic> {
+    let target = target.unwrap_or_else(|| std::path::Path::new("."));
+    orna_repository_v1::initialize_repository(target)
+        .map_err(|error| repository_init_diagnostic(&error))?;
+    println!("initialized Orna repository");
+    Ok(())
+}
+
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command {
         Command::Help => {
             println!(
-                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|init|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
+                "orna-cli-v1 [--db ENDPOINT] [repl [EXPRESSION]|check|invoke TARGET|run seed|run exercise|run sensors.ingest]"
             );
+            println!("orna-cli-v1 init [DIRECTORY]");
             Ok(())
         }
         Command::Version => {
             println!("orna-cli-v1 0.1.0");
             Ok(())
         }
-        Command::Init => Err(Diagnostic::unavailable(
-            "database initialization is not available",
-            "use an Orna runtime with repository initialization enabled",
-        )),
+        Command::Init(ref target) => initialize_repository(target.as_deref()),
         Command::Check => check_project(&parsed.endpoint),
         Command::Invoke(ref target) => run_pure_invocation(&parsed.endpoint, target),
         Command::Repl(ref expression) => run_repl(&parsed.endpoint, expression.as_deref()),
@@ -747,6 +832,40 @@ mod tests {
                 .expect("parses")
                 .command,
             Command::Repl(Some("1 + 2".into()))
+        );
+        assert_eq!(
+            parse_cli(&["init".into()]).expect("parses").command,
+            Command::Init(None)
+        );
+        assert_eq!(
+            parse_cli(&["init".into(), "project".into()])
+                .expect("parses")
+                .command,
+            Command::Init(Some(PathBuf::from("project")))
+        );
+        assert_eq!(
+            parse_cli(&["init".into(), "--".into(), "--bare".into()])
+                .expect("literal target parses")
+                .command,
+            Command::Init(Some(PathBuf::from("--bare")))
+        );
+        assert_eq!(
+            parse_cli(&["--db".into(), "project".into(), "init".into()])
+                .expect_err("init must not use a database endpoint")
+                .code,
+            "E1002"
+        );
+        assert_eq!(
+            parse_cli(&["init".into(), "--bare".into()])
+                .expect_err("unsupported init option")
+                .code,
+            "E1002"
+        );
+        assert_eq!(
+            parse_cli(&["init".into(), "one".into(), "two".into()])
+                .expect_err("only one target is accepted")
+                .code,
+            "E1003"
         );
         assert_eq!(
             parse_cli(&["invoke".into()])
@@ -856,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_reference_project_checks_but_init_and_seed_fail_closed() {
+    fn authoritative_reference_project_checks_but_runtime_commands_fail_closed() {
         let directory = tempfile::tempdir().expect("temporary reference project");
         let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../reference/Orna-1.0.0/examples/reference");
@@ -895,7 +1014,6 @@ mod tests {
             Ok(())
         );
         for command in [
-            Command::Init,
             Command::Run(Invocation::Seed),
             Command::Invoke("seed".into()),
         ] {
@@ -1226,9 +1344,70 @@ mod tests {
         assert_eq!(SENSOR_SOURCE_IDENTITY, "example:sensors:v1");
     }
     #[test]
-    fn planned_commands_fail_closed_instead_of_claiming_success() {
-        let parsed = parse_cli(&["init".into()]).expect("parses");
-        let error = execute(&parsed).expect_err("not implemented");
-        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
+    fn init_parse_defaults_to_the_current_directory_target() {
+        assert_eq!(
+            parse_cli(&["init".into()]).expect("parses").command,
+            Command::Init(None)
+        );
+    }
+
+    #[test]
+    fn repository_initialization_errors_keep_codes_and_give_specific_remedies() {
+        for (error, code, help) in [
+            (
+                orna_repository_v1::RepositoryInitError::GitUnavailable,
+                "ORNA-REPO-INIT-001",
+                "install or enable Git, then retry `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::GitOperationFailed,
+                "ORNA-REPO-INIT-002",
+                "check that Git can initialize the target directory, then retry `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::LocalStateUnavailable,
+                "ORNA-REPO-INIT-003",
+                "check local filesystem access for the target directory, then retry `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::UnsafeMetadataPath,
+                "ORNA-REPO-INIT-004",
+                "replace unsafe metadata links or non-regular entries before retrying `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::MetadataIncomplete,
+                "ORNA-REPO-INIT-005",
+                "restore complete metadata from a valid snapshot or initialize a new repository",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::MetadataMalformed,
+                "ORNA-REPO-INIT-006",
+                "restore valid metadata from a compatible repository snapshot before retrying",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::MetadataUnsupported,
+                "ORNA-REPO-INIT-007",
+                "use an Orna version that supports this repository format",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::MetadataChanged,
+                "ORNA-REPO-INIT-008",
+                "ensure no other process changes repository metadata, then retry `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::RepositoryBusy,
+                "ORNA-REPO-INIT-009",
+                "wait for the other initialization to finish, then retry `orna init`",
+            ),
+            (
+                orna_repository_v1::RepositoryInitError::PlatformUnsupported,
+                "ORNA-REPO-INIT-010",
+                "use a supported platform to initialize this repository",
+            ),
+        ] {
+            let diagnostic = repository_init_diagnostic(&error);
+            assert_eq!(diagnostic.code, code);
+            assert_eq!(diagnostic.help, help);
+        }
     }
 }
