@@ -49,6 +49,9 @@ impl Diagnostic {
             exit: Exit::Target,
         }
     }
+    const fn unavailable(title: &'static str, help: &'static str) -> Self {
+        Self::target("E2000", title, help)
+    }
 }
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -400,6 +403,33 @@ fn apply(s: &mut ReferenceState, p: &Plan) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
+    match parsed.command {
+        Command::Help => {
+            println!(
+                "orna-cli-v1 [--db ENDPOINT] [repl|init|run seed|run exercise|run sensors.ingest]"
+            );
+            Ok(())
+        }
+        Command::Version => {
+            println!("orna-cli-v1 0.1.0");
+            Ok(())
+        }
+        Command::Init => Err(Diagnostic::unavailable(
+            "database initialization is not available",
+            "use an Orna runtime with repository initialization enabled",
+        )),
+        Command::Repl => Err(Diagnostic::unavailable(
+            "the REPL runtime is not available",
+            "use an Orna runtime with source execution enabled",
+        )),
+        Command::Run(_) => Err(Diagnostic::unavailable(
+            "reference invocation execution is not available",
+            "use an Orna runtime with source execution enabled",
+        )),
+    }
+}
+
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let parsed = match parse_cli(&args) {
@@ -409,20 +439,13 @@ fn main() -> ExitCode {
             return ExitCode::from(error.exit as u8);
         }
     };
-    match parsed.command {
-        Command::Help => println!(
-            "orna-cli-v1 [--db ENDPOINT] [repl|init|run seed|run exercise|run sensors.ingest]"
-        ),
-        Command::Version => println!("orna-cli-v1 0.1.0"),
-        Command::Init => println!("planned reference initialization; no repository was created"),
-        Command::Repl => {
-            println!("{REPL_TARGET}: planned only; an adapter must execute the invocation");
-        }
-        Command::Run(invocation) => {
-            println!("{invocation:?}: planned only; an adapter must execute the invocation");
+    match execute(&parsed) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(error.exit as u8)
         }
     }
-    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -551,5 +574,11 @@ mod tests {
     #[test]
     fn identity_is_declared_for_adapter_integration() {
         assert_eq!(SENSOR_SOURCE_IDENTITY, "example:sensors:v1");
+    }
+    #[test]
+    fn planned_commands_fail_closed_instead_of_claiming_success() {
+        let parsed = parse_cli(&["init".into()]).expect("parses");
+        let error = execute(&parsed).expect_err("not implemented");
+        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
     }
 }
