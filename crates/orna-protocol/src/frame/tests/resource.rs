@@ -2889,7 +2889,10 @@ fn resource_connection_rejects_stale_cancel_confirmation_identity_without_mutati
         Err(ResourceConnectionError::MismatchedRequest { stream_id })
     );
     assert_eq!(connection, before);
-    assert_eq!(connection.resource_credit(stream_id, request_id), credit_before);
+    assert_eq!(
+        connection.resource_credit(stream_id, request_id),
+        credit_before
+    );
     assert_eq!(connection.live_resources(), live_before);
 
     assert_eq!(
