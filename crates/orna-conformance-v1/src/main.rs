@@ -1,16 +1,24 @@
+use futures::executor::block_on;
 use orna_conformance_v1::{
-    BoundedEvaluator, Corpus, Harness, ImplementationClaim, RuntimeAdapter, RuntimeEvaluator,
-    Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
+    BoundedEvaluator, Corpus, DurableTransactionalEvaluator, Harness, ImplementationClaim,
+    RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome, TransactionalEvaluator,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 #[cfg(test)]
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 #[cfg(test)]
 use orna_semantic_v1::{ModuleInput, analyze};
 #[cfg(test)]
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 #[cfg(test)]
 use std::collections::BTreeMap;
+use std::{
+    fs,
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
@@ -63,11 +71,127 @@ impl RuntimeEvaluator for CompositeEvaluator {
         self.bounded.validate_resolved_rows(project, analysis)
     }
 
-    fn run_scenario(&mut self, _: &Scenario) -> StageOutcome<orna_foundation_v1::Diagnostic> {
+    fn run_scenario(
+        &mut self,
+        scenario: &Scenario,
+    ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
+        if transaction_contract(scenario) {
+            return run_durable_transaction_scenario(scenario);
+        }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
     }
+}
+
+fn transaction_contract(scenario: &Scenario) -> bool {
+    match scenario.id.as_str() {
+        "TXN-001" => {
+            scenario.title == "Activation rolls back nested writes"
+                && scenario.given == ["parent calls child; child inserts Note"]
+                && scenario.when == ["parent later propagates error"]
+                && scenario.then == ["child insert is rolled back"]
+                && scenario.requirements == ["ORNA-TXN-001", "ORNA-TXN-002", "ORNA-TXN-003"]
+        }
+        "TXN-002" => {
+            scenario.title == "Successful activation commits together"
+                && scenario.given == ["activation inserts Order, Payment, Audit"]
+                && scenario.when == ["activation returns success"]
+                && scenario.then == ["all three appear together in CWD"]
+                && scenario.requirements == ["ORNA-TXN-001"]
+        }
+        _ => false,
+    }
+}
+
+fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    let root = std::env::temp_dir().join(format!(
+        "orna-conformance-transaction-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    if fs::create_dir(&root).is_err() {
+        return durable_scenario_failure();
+    }
+    let result = (|| {
+        let status = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        let repository = Repository::discover(&root).ok()?;
+        let (entry, source) = match scenario.id.as_str() {
+            "TXN-001" => (
+                "parent",
+                "pub table Note(id: Int) { text: Str, } fn child() { Note.insert({ id: 7, text: \"nested\" }); } fn parent() { child(); assert false; }",
+            ),
+            "TXN-002" => (
+                "main",
+                "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+            ),
+            _ => return None,
+        };
+        let unit = SourceUnit {
+            fixture_id: scenario.id.clone(),
+            source_id: format!("{}.orna", scenario.id.to_lowercase()),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        };
+        let evaluator = DurableTransactionalEvaluator::new(entry, Default::default());
+        let identity = RuntimeIdentity {
+            database_id: [41; 16],
+            repository_id: [42; 16],
+        };
+        let outcome = match block_on(evaluator.execute_source(
+            &repository,
+            identity,
+            [43; 16],
+            [44; 32],
+            &unit,
+        )) {
+            Ok(outcome) => outcome,
+            Err(_) => return None,
+        };
+        let state = block_on(RuntimeState::open(&repository, identity, [44; 32])).ok()?;
+        let matches = match scenario.id.as_str() {
+            "TXN-001" => {
+                matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+                    && block_on(state.committed_table_rows("Note"))
+                        .ok()?
+                        .is_empty()
+            }
+            "TXN-002" => {
+                matches!(outcome, StageOutcome::Passed)
+                    && ["Order", "Payment", "Audit"].into_iter().all(|table| {
+                        block_on(state.committed_table_rows(table))
+                            .is_ok_and(|rows| rows.len() == 1)
+                    })
+            }
+            _ => false,
+        };
+        matches.then_some(StageOutcome::Passed)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap_or_else(durable_scenario_failure)
+}
+
+fn durable_scenario_failure() -> StageOutcome<Diagnostic> {
+    StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("ORNA-CONFORMANCE-DURABLE-SCENARIO").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("durable transaction scenario did not satisfy its exact contract")
+                .expect("static message"),
+        )
+        .expect("valid diagnostic"),
+    )
 }
 
 fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diagnostic>> {
@@ -527,7 +651,7 @@ fn main() {
             ]
             .into_iter()
             .collect(),
-            executed_scenario_contracts: vec![],
+            executed_scenario_contracts: vec!["TXN-001".into(), "TXN-002".into()],
         })
         .run(&mut adapter);
     println!(
