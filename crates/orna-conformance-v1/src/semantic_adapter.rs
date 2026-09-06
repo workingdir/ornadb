@@ -527,6 +527,14 @@ impl BoundedEvaluator {
     }
 
     fn evaluate_module(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        self.evaluate_module_with_namespace(unit, None)
+    }
+
+    fn evaluate_module_with_namespace(
+        &mut self,
+        unit: &SourceUnit,
+        namespace: Option<&str>,
+    ) -> StageOutcome<Diagnostic> {
         if let Err(error) = self.limits.check_source(&unit.source) {
             return StageOutcome::Failed(error.diagnostic().clone());
         }
@@ -563,8 +571,11 @@ impl BoundedEvaluator {
         for item in parsed.value.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
+                    let function_name = namespace
+                        .map(|namespace| format!("{namespace}.{}", signature.name))
+                        .unwrap_or_else(|| signature.name.clone());
                     functions.insert(
-                        signature.name,
+                        function_name,
                         RetainedFunction {
                             body,
                             environment: self.environment.clone(),
@@ -645,7 +656,8 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
         let mut staged = self.clone();
         for module in &project.modules {
-            match staged.evaluate_module(module) {
+            let namespace = module_namespace(module);
+            match staged.evaluate_module_with_namespace(module, namespace.as_deref()) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
@@ -699,6 +711,17 @@ impl RuntimeEvaluator for BoundedEvaluator {
             reason: "scenario has no implemented execution contract in the bounded runtime".into(),
         }
     }
+}
+
+fn module_namespace(unit: &SourceUnit) -> Option<String> {
+    let mut components = unit.source_id.split('/').collect::<Vec<_>>();
+    let file = components.pop()?;
+    let stem = file.strip_suffix(".orna")?;
+    if components.is_empty() && stem == "main" {
+        return None;
+    }
+    components.push(stem);
+    Some(components.join("."))
 }
 
 type TransactionDatabase = DatabaseRuntime<String, Vec<u8>, Value>;
@@ -1469,6 +1492,56 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     }
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
         self.runtime.run_scenario(scenario)
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::{BoundedEvaluator, SourceUnit, StageOutcome};
+    use orna_evaluator_v1::{Environment, Limits, evaluate_expression_with_functions};
+    use orna_foundation_v1::Value;
+
+    #[test]
+    fn project_modules_retain_qualified_pure_functions() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let library = SourceUnit {
+            fixture_id: "library".into(),
+            source_id: "library.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub fn twice(value: Int): Int = value * 2;".into(),
+        };
+        let main = SourceUnit {
+            fixture_id: "main".into(),
+            source_id: "main.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub fn answer(): Int = library.twice(21);".into(),
+        };
+
+        assert!(matches!(
+            evaluator.evaluate_module_with_namespace(&library, Some("library")),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(
+            evaluator.evaluate_module_with_namespace(&main, None),
+            StageOutcome::Passed
+        ));
+        let result = evaluate_expression_with_functions(
+            "answer()",
+            &Environment::new(),
+            &evaluator.functions,
+            Limits::default(),
+        )
+        .expect("qualified module call");
+        assert_eq!(result, Value::int(42.into()));
+
+        let result = evaluate_expression_with_functions(
+            "library.twice(21)",
+            &Environment::new(),
+            &evaluator.functions,
+            Limits::default(),
+        )
+        .expect("qualified module call");
+        assert_eq!(result, Value::int(42.into()));
     }
 }
 

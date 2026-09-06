@@ -1264,7 +1264,17 @@ impl Context<'_, '_> {
                     return Value::from_canonical(&value, self, depth + 1);
                 }
             }
-            let callable = self.evaluate(callee, scope, depth + 1)?;
+            // A qualified module function is a callable path, not a record
+            // field lookup. Resolve it only when the complete path was
+            // explicitly admitted in the function environment; ordinary
+            // record fields retain their existing semantics.
+            let callable = if let Some(name) = function_name(callee)
+                && self.functions.contains_key(&name)
+            {
+                Value::Function(name)
+            } else {
+                self.evaluate(callee, scope, depth + 1)?
+            };
             let functions = self.functions;
             let (parameters, body, captured) = match &callable {
                 Value::Function(name) => {
@@ -1656,6 +1666,14 @@ fn math_name(expression: &Expr) -> Option<&str> {
         return None;
     };
     (text == "std" && module == "math").then_some(name.as_str())
+}
+
+fn function_name(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", function_name(base)?, name)),
+        _ => None,
+    }
 }
 fn one_like(value: &Value) -> Result<Value, EvaluationError> {
     match value {
