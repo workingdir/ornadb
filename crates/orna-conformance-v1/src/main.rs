@@ -70,6 +70,8 @@ impl RuntimeEvaluator for CompositeEvaluator {
             run_live_keyed_update_scenario(scenario)
         } else if live_unkeyed_update_contract(scenario) {
             run_live_unkeyed_update_scenario(scenario)
+        } else if live_fallback_contract(scenario) {
+            run_live_fallback_scenario(scenario)
         } else if live_resync_contract(scenario) {
             run_live_resync_scenario(scenario)
         } else if sys_rt_rename_contract(scenario) {
@@ -280,6 +282,95 @@ fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     StageOutcome::Passed
 }
 
+fn live_fallback_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LIVE-004"
+        && scenario.title == "Subtree replacement is universal live-update fallback"
+        && scenario.given == ["a Present value without stable fine-grained child identity"]
+        && scenario.when == ["its dependency changes"]
+        && scenario.then
+            == [
+                "the server replaces the nearest valid subtree",
+                "the client reaches the same final value as a fresh snapshot",
+            ]
+        && scenario.requirements
+            == [
+                "ORNA-LIVE-002",
+                "ORNA-LIVE-004",
+                "ORNA-WIRE-001",
+                "ORNA-WIRE-002",
+            ]
+}
+
+fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if !live_fallback_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the serving runtime".into(),
+        };
+    }
+    let mut serving = match Serving::new(ServingLimits::default()) {
+        Ok(serving) => serving,
+        Err(_) => return scenario_failure("serving limits rejected the fallback scenario"),
+    };
+    let subscribe = Envelope {
+        request: Some([31; 16]),
+        watch: None,
+        message: Message::Subscribe {
+            resource: [32; 16],
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".into(),
+                supported_kinds: vec!["text".into()],
+            },
+        },
+        extensions: BTreeMap::new(),
+    };
+    if serving
+        .admit(
+            [33; 16],
+            Credential::new([34; 32]),
+            Origin([35; 16]),
+            &subscribe,
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the fallback session admission");
+    }
+    for (revision, value) in [(1, "rendered-v1"), (2, "rendered-v2")] {
+        if serving
+            .apply_patch(
+                [33; 16],
+                revision - 1,
+                revision,
+                &[Patch::Set {
+                    key: "page/present/root".into(),
+                    value: value.into(),
+                }],
+                RetainedPin {
+                    revision,
+                    fingerprint: [revision as u8; 32],
+                },
+            )
+            .is_err()
+        {
+            return scenario_failure("serving rejected the fallback subtree replacement");
+        }
+    }
+    let replay = match serving.resync([33; 16], 1) {
+        Ok(replay) => replay,
+        Err(_) => return scenario_failure("serving could not replay the fallback update"),
+    };
+    let fresh = BTreeMap::from([(
+        String::from("page/present/root"),
+        String::from("rendered-v2"),
+    )]);
+    if replay.len() != 1 || replay[0].revision != 2 || replay[0].page != fresh {
+        return scenario_failure("fallback replay does not match a fresh snapshot");
+    }
+    StageOutcome::Passed
+}
+
 fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_resync_contract(scenario) {
         return StageOutcome::Skipped {
@@ -414,7 +505,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, keyed/unkeyed-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, keyed/unkeyed/fallback-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -428,6 +519,7 @@ fn main() {
                 "LIVE-001",
                 "LIVE-002",
                 "LIVE-003",
+                "LIVE-004",
                 "SYS-RT-RENAME-100",
             ]
             .into_iter()
@@ -444,9 +536,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Scenario, StageOutcome, run_live_keyed_update_scenario, run_live_resync_scenario,
-        run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
+        Scenario, StageOutcome, run_live_fallback_scenario, run_live_keyed_update_scenario,
+        run_live_resync_scenario, run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
     };
+
+    #[test]
+    fn fallback_live_update_matches_a_fresh_snapshot() {
+        let scenario = Scenario {
+            id: "LIVE-004".into(),
+            title: "Subtree replacement is universal live-update fallback".into(),
+            given: vec!["a Present value without stable fine-grained child identity".into()],
+            when: vec!["its dependency changes".into()],
+            then: vec![
+                "the server replaces the nearest valid subtree".into(),
+                "the client reaches the same final value as a fresh snapshot".into(),
+            ],
+            requirements: vec![
+                "ORNA-LIVE-002".into(),
+                "ORNA-LIVE-004".into(),
+                "ORNA-WIRE-001".into(),
+                "ORNA-WIRE-002".into(),
+            ],
+            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
+        };
+        assert!(matches!(
+            run_live_fallback_scenario(&scenario),
+            StageOutcome::Passed
+        ));
+    }
 
     #[test]
     fn unkeyed_live_update_replaces_the_stable_subtree() {
