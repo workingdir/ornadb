@@ -1074,6 +1074,14 @@ impl DurableTransactionalEvaluator {
                 Ok(value) => value,
                 Err(outcome) => return Ok(*outcome),
             };
+        if functions
+            .get(&self.entry)
+            .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
+        {
+            return self
+                .execute_list_stream_source(repository, identity, owner_id, initial_digest, unit)
+                .await;
+        }
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
@@ -2852,7 +2860,7 @@ mod list_stream_tests {
 
         assert!(matches!(
             evaluator
-                .execute_list_stream_source(&repository, identity(), [23; 16], [24; 32], &source())
+                .execute_source(&repository, identity(), [23; 16], [24; 32], &source())
                 .await,
             Ok(StageOutcome::Passed)
         ));
@@ -2879,7 +2887,7 @@ mod list_stream_tests {
 
         assert!(matches!(
             evaluator
-                .execute_list_stream_source(&repository, identity(), [23; 16], [24; 32], &source())
+                .execute_source(&repository, identity(), [23; 16], [24; 32], &source())
                 .await,
             Ok(StageOutcome::Passed)
         ));
