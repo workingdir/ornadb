@@ -318,23 +318,43 @@ pub fn lower_runtime_table_mutations(
         return Err(Error::IncompleteStaging);
     }
     let batch_id = MutationId::new(hex_id(freeze.intent_id))?;
-    let mut lowered = Vec::with_capacity(mutations.len());
+    let mut lowered: BTreeMap<LoosePath, LooseMutation> = BTreeMap::new();
     for mutation in mutations {
         let path = path_for(mutation)?;
-        let expected_bytes = expected_bytes_for(&path)?;
-        let expected = expected_bytes.as_deref().map(RowHash::of);
         let next = mutation
             .value()
             .map(|bytes| LooseRow::new(bytes.to_vec()))
             .transpose()?;
-        lowered.push(LooseMutation {
-            id: MutationId::new(hex_id(mutation.id()))?,
-            path,
-            expected,
-            next,
-        });
+        let id = MutationId::new(hex_id(mutation.id()))?;
+        if let Some(previous) = lowered.get_mut(&path) {
+            let expected = previous.expected;
+            *previous = LooseMutation {
+                id,
+                path,
+                expected,
+                next,
+            };
+        } else {
+            let expected = expected_bytes_for(&path)?.as_deref().map(RowHash::of);
+            lowered.insert(
+                path.clone(),
+                LooseMutation {
+                    id,
+                    path,
+                    expected,
+                    next,
+                },
+            );
+        }
     }
-    FrozenBatch::new(batch_id, lowered, freeze.checkpoint.mutation_sequence)
+    FrozenBatch::new(
+        batch_id,
+        lowered
+            .into_values()
+            .filter(|mutation| mutation.next.is_some() || mutation.expected.is_some())
+            .collect(),
+        freeze.checkpoint.mutation_sequence,
+    )
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -997,6 +1017,61 @@ mod tests {
         .unwrap();
         assert_ne!(plan.candidate().commit(), &head);
         assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
+        assert_eq!(plan.journal().entries().len(), 1);
+    }
+
+    #[test]
+    fn runtime_table_prefix_folds_repeated_key_to_final_row() {
+        let (_temp, repository) = repository();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let freeze = PublicationFreeze {
+            intent_id: [17; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [18; 32],
+                mutation_sequence: 2,
+            },
+        };
+        let first = TableMutation::new(
+            [19; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"first".to_vec()),
+        )
+        .unwrap();
+        let final_mutation = TableMutation::new(
+            [20; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"final".to_vec()),
+        )
+        .unwrap();
+        let batch = lower_runtime_table_mutations(
+            &freeze,
+            &[first, final_mutation],
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            |_path| Ok(None),
+        )
+        .unwrap();
+
+        assert_eq!(batch.mutations.len(), 1);
+        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), b"final");
+        assert_eq!(batch.mutations[0].expected, None);
+        let plan = RuntimePublicationCoordinator::prepare(
+            &repository,
+            &head,
+            index,
+            &freeze,
+            batch,
+            "orna: publish folded runtime data",
+        )
+        .unwrap();
         assert_eq!(plan.journal().entries().len(), 1);
     }
 
