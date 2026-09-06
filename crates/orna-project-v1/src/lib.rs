@@ -13,7 +13,7 @@ use std::{
 };
 
 use orna_repository_v1::{Repository, RepositoryError};
-use orna_semantic_v1::{ModuleInput, StandardDependencyProfile};
+use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, parse_module};
 use unicode_normalization::UnicodeNormalization;
 
@@ -81,6 +81,20 @@ impl LoadedProject {
     /// if this project was loaded with one.
     pub fn standard_profile(&self) -> Option<&StandardDependencyProfile> {
         self.standard_profile.as_ref()
+    }
+
+    /// Derives the semantic catalogue for this project's explicitly pinned
+    /// standard dependency. Source bytes remain caller-supplied and are
+    /// verified against the profile; ordinary project loading never discovers
+    /// a host standard library.
+    pub fn standard_catalogue(
+        &self,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Option<Catalogue>, StandardCatalogueError> {
+        self.standard_profile
+            .as_ref()
+            .map(|profile| Catalogue::from_standard_sources(profile, sources))
+            .transpose()
     }
 }
 
