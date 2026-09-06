@@ -1624,13 +1624,51 @@ impl Repository {
         token: Option<&CheckoutPlanToken>,
         discard_paths: &[ManagedPath],
     ) -> Result<(), RepositoryError> {
-        let _lock = self.acquire_coordination_lock()?;
-        self.verify_checkout_preflight_locked(plan)?;
-        plan.authorize_force(force, token)?;
+        self.validate_checkout_discard_set_with_validation(
+            plan,
+            force,
+            token,
+            discard_paths,
+            |_repository, _plan| Ok::<(), std::convert::Infallible>(()),
+        )
+        .map_err(|error| match error {
+            CheckoutExecutionError::Repository(error) => error,
+            CheckoutExecutionError::Validation(never) => match never {},
+        })
+    }
+
+    /// Admits a force discard set only after `validate` accepts the isolated
+    /// logical candidate while the checkout mutation lock is held.
+    ///
+    /// This remains an admission boundary: it never changes the ref, index,
+    /// worktree, or runtime state. A rejected logical candidate cannot be
+    /// converted into a force-authorized plan, and a future journaled executor
+    /// must still consume this exact validated discard set.
+    pub fn validate_checkout_discard_set_with_validation<E, F>(
+        &self,
+        plan: &CheckoutPreflight,
+        force: bool,
+        token: Option<&CheckoutPlanToken>,
+        discard_paths: &[ManagedPath],
+        validate: F,
+    ) -> Result<(), CheckoutExecutionError<E>>
+    where
+        F: FnOnce(&Repository, &CheckoutPreflight) -> Result<(), E>,
+    {
+        let _lock = self
+            .acquire_coordination_lock()
+            .map_err(CheckoutExecutionError::Repository)?;
+        self.verify_checkout_preflight_locked(plan)
+            .map_err(CheckoutExecutionError::Repository)?;
+        validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
+        plan.authorize_force(force, token)
+            .map_err(CheckoutExecutionError::Repository)?;
         if discard_paths == plan.git.discardable_paths() {
             Ok(())
         } else {
-            Err(RepositoryError::CheckoutDiscardSetMismatch)
+            Err(CheckoutExecutionError::Repository(
+                RepositoryError::CheckoutDiscardSetMismatch,
+            ))
         }
     }
 
