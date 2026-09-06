@@ -2400,6 +2400,64 @@ mod list_stream_tests {
         }
     }
 
+    #[tokio::test]
+    async fn literal_list_stream_identity_preserves_payload_boundaries() {
+        let (_temp, repository) = repository();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(
+                    &repository,
+                    identity(),
+                    [23; 16],
+                    [24; 32],
+                    &source_with_values("1, 23"),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let before = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened first runtime")
+            .capture()
+            .await
+            .expect("first capture")
+            .generation()
+            .clone();
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(
+                    &repository,
+                    identity(),
+                    [23; 16],
+                    [24; 32],
+                    &source_with_values("12, 3"),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened second runtime");
+        assert!(
+            state.capture().await.expect("second capture").generation() > &before,
+            "distinct canonical payload boundaries must select a fresh checkpoint"
+        );
+        for value in [12, 3] {
+            let key = Value::int(value.into()).encode().expect("encoded key");
+            assert!(
+                state
+                    .committed_table_row("Reading", &key)
+                    .await
+                    .expect("durable row read")
+                    .is_some(),
+                "boundary-distinct list item {value} must be delivered"
+            );
+        }
+    }
+
     struct FailingHandler;
 
     impl StreamHandler for FailingHandler {
