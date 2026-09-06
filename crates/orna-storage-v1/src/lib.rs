@@ -479,6 +479,71 @@ impl RuntimePublicationCoordinator {
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
             .map_err(|_| Error::RepositoryUnavailable)
     }
+
+    /// Recovers a persisted runtime publication after a process interruption.
+    /// Repository reconciliation is completed before the runtime prefix is
+    /// consumed; every mismatch leaves the journal and pending tail intact.
+    pub async fn recover(
+        repository: &Repository,
+        runtime: &RuntimeState,
+    ) -> Result<Option<IndexGeneration>, Error> {
+        let Some(journal) = repository
+            .read_publication_journal()
+            .map_err(|_| Error::RepositoryUnavailable)?
+        else {
+            return Ok(None);
+        };
+        let intent_id = journal
+            .runtime_intent_id()
+            .ok_or(Error::InvalidTransition)?;
+        let freeze = runtime
+            .publication_freeze(intent_id)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        let commit = PublicationCommitId::new(journal.new_head().as_str().as_bytes().to_vec())
+            .map_err(|_| Error::InvalidObjectId)?;
+
+        if matches!(
+            journal.stage(),
+            orna_repository_v1::PublicationJournalStage::RuntimeCompleted
+                | orna_repository_v1::PublicationJournalStage::Complete
+        ) {
+            runtime
+                .complete_publication(&freeze, &commit)
+                .await
+                .map_err(|_| Error::RuntimeUnavailable)?;
+            return repository
+                .recover_publication()
+                .map_err(|_| Error::RepositoryUnavailable);
+        }
+
+        match repository.recover_publication() {
+            Ok(index) => return Ok(index),
+            Err(RepositoryError::RuntimeCompletionRequired) => {}
+            Err(_) => return Err(Error::RepositoryUnavailable),
+        }
+
+        let mut journal = repository
+            .read_publication_journal()
+            .map_err(|_| Error::RepositoryUnavailable)?
+            .ok_or(Error::InvalidTransition)?;
+        if journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+            || journal.runtime_intent_id() != Some(intent_id)
+        {
+            return Err(Error::InvalidTransition);
+        }
+        runtime
+            .complete_publication(&freeze, &commit)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        repository
+            .mark_runtime_complete(intent_id, &mut journal)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        repository
+            .index_generation()
+            .map(Some)
+            .map_err(|_| Error::RepositoryUnavailable)
+    }
 }
 
 fn hex_id(id: [u8; 16]) -> String {
@@ -952,6 +1017,162 @@ mod tests {
                 .unwrap(),
             Some(b"row".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovers_after_repository_publication_before_runtime_completion() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [11; 16],
+                repository_id: [12; 16],
+            },
+            [13; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([14; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [15; 16],
+                    "Contact",
+                    b"Alice".to_vec(),
+                    Some(b"row".to_vec()),
+                )
+                .unwrap()],
+                [16; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [17; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [16; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index,
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        plan.publish(&repository).unwrap();
+        drop(plan);
+
+        assert!(!runtime.pending().await.unwrap().is_empty());
+        assert!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(runtime.pending().await.unwrap().is_empty());
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        assert_eq!(
+            repository
+                .managed_file_bytes(managed.as_managed_path())
+                .unwrap(),
+            Some(b"row".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovery_is_idempotent_after_runtime_completion() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [21; 16],
+                repository_id: [22; 16],
+            },
+            [23; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([24; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[
+                    TableMutation::new([25; 16], "Contact", b"Bob".to_vec(), Some(b"row".to_vec()))
+                        .unwrap(),
+                ],
+                [26; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [27; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [26; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index,
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        plan.publish(&repository).unwrap();
+        let commit =
+            PublicationCommitId::new(plan.candidate().commit().as_str().as_bytes().to_vec())
+                .unwrap();
+        runtime
+            .complete_publication(&freeze, &commit)
+            .await
+            .unwrap();
+        drop(plan);
+
+        RuntimePublicationCoordinator::recover(&repository, &runtime)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.pending().await.unwrap().is_empty());
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[test]
