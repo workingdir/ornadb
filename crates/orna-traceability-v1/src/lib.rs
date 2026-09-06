@@ -150,6 +150,7 @@ struct InvalidFixture {
     diagnostic: String,
     message_contains: String,
 }
+#[allow(clippy::struct_field_names)]
 #[derive(Deserialize)]
 struct Scenarios {
     version: String,
@@ -171,6 +172,13 @@ struct Model {
     name: String,
 }
 
+/// Generate the frozen traceability report without implementation execution
+/// witnesses.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle or its publication digests are
+/// invalid.
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
     generate_inner(root.as_ref(), None)
 }
@@ -178,6 +186,11 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
 /// Generate the frozen report with an execution register produced by the
 /// conformance harness. The register is accepted only when it carries the
 /// exact publication digest inventory loaded from the same reference root.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the witness
+/// register is invalid.
 pub fn generate_with_engine_witnesses(
     root: impl AsRef<Path>,
     witnesses: &EngineWitnesses,
@@ -703,7 +716,7 @@ mod tests {
             let entry = entry.expect("entry");
             let out = to.join(entry.file_name());
             if entry.file_type().expect("type").is_dir() {
-                copy_dir(&entry.path(), &out)
+                copy_dir(&entry.path(), &out);
             } else {
                 fs::copy(entry.path(), out).expect("copy");
             }
