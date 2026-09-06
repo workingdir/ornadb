@@ -57,6 +57,7 @@ pub struct ModuleInput {
 pub struct StandardDependencyProfile {
     snapshot: String,
     module_digests: BTreeMap<String, [u8; 32]>,
+    prelude_exports: BTreeSet<String>,
 }
 
 impl StandardDependencyProfile {
@@ -69,6 +70,7 @@ impl StandardDependencyProfile {
         Ok(Self {
             snapshot,
             module_digests: BTreeMap::new(),
+            prelude_exports: BTreeSet::new(),
         })
     }
 
@@ -102,6 +104,21 @@ impl StandardDependencyProfile {
         &self.module_digests
     }
 
+    /// Records the exact public names exported by the pinned root prelude.
+    /// The names are metadata only until the matching `std.orna` source is
+    /// verified and parsed by `Catalogue::from_standard_sources`.
+    pub fn with_prelude_exports(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.prelude_exports = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn prelude_exports(&self) -> &BTreeSet<String> {
+        &self.prelude_exports
+    }
+
     /// Verifies one source unit against the exact pinned module digest.
     pub fn verify_source(
         &self,
@@ -130,6 +147,7 @@ pub enum StandardProfileError {
     DuplicateModule,
     MissingModule,
     DigestMismatch,
+    InvalidPreludeExport,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -363,17 +381,28 @@ impl Catalogue {
                 return Err(StandardCatalogueError::InvalidSource);
             }
             let mut diagnostics = Vec::new();
-            let header = collect_header(
-                &namespace,
-                &parsed.value,
-                &BTreeSet::new(),
-                &mut diagnostics,
-            );
+            let prelude_exports = if namespace == Namespace(vec!["std".into()]) {
+                &profile.prelude_exports
+            } else {
+                &BTreeSet::new()
+            };
+            let header =
+                collect_header(&namespace, &parsed.value, prelude_exports, &mut diagnostics);
             if diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code() == DIAG_DUPLICATE)
             {
                 return Err(StandardCatalogueError::DuplicateDeclaration);
+            }
+            if namespace == Namespace(vec!["std".into()])
+                && !profile
+                    .prelude_exports
+                    .iter()
+                    .all(|name| header.exports.contains_key(name))
+            {
+                return Err(StandardCatalogueError::Profile(
+                    StandardProfileError::InvalidPreludeExport,
+                ));
             }
             if catalogue.modules.insert(namespace, header).is_some() {
                 return Err(StandardCatalogueError::DuplicateModule);
@@ -382,6 +411,15 @@ impl Catalogue {
         }
         if supplied != profile.module_digests.keys().cloned().collect() {
             return Err(StandardCatalogueError::MissingModule);
+        }
+        if !profile.prelude_exports.is_empty()
+            && !catalogue
+                .modules
+                .contains_key(&Namespace(vec!["std".into()]))
+        {
+            return Err(StandardCatalogueError::Profile(
+                StandardProfileError::InvalidPreludeExport,
+            ));
         }
         Ok(catalogue)
     }
@@ -6144,6 +6182,41 @@ mod tests {
         assert_eq!(
             Catalogue::from_standard_sources(&profile, []),
             Err(StandardCatalogueError::MissingModule)
+        );
+    }
+
+    #[test]
+    fn pinned_standard_root_prelude_is_explicit_and_source_defined() {
+        let source = "pub fn answer(): Int = 42;";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-1",
+            [("std/main.orna".into(), source.into())],
+        )
+        .unwrap()
+        .with_prelude_exports(["answer"]);
+        let catalogue =
+            Catalogue::from_standard_sources(&profile, [("std/main.orna".into(), source.into())])
+                .unwrap();
+        let analysis = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "client.orna",
+                "use std as _; pub fn run(): Int = answer();",
+            )],
+            &catalogue,
+        );
+        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+
+        let invalid = StandardDependencyProfile::from_sources(
+            "std-snapshot-1",
+            [("std/main.orna".into(), source.into())],
+        )
+        .unwrap()
+        .with_prelude_exports(["missing"]);
+        assert_eq!(
+            Catalogue::from_standard_sources(&invalid, [("std/main.orna".into(), source.into())]),
+            Err(StandardCatalogueError::Profile(
+                StandardProfileError::InvalidPreludeExport,
+            ))
         );
     }
     #[test]
