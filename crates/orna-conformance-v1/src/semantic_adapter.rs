@@ -845,6 +845,26 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[Value],
     ) -> Result<Option<Value>, EvaluationError> {
+        let savepoint = self
+            .activation
+            .savepoint()
+            .map_err(|error| transaction_error(table_error_code(error)))?;
+        let result = self.handle_inner(callee, arguments);
+        if result.is_err() {
+            self.activation
+                .rollback_to(savepoint)
+                .map_err(|error| transaction_error(table_error_code(error)))?;
+        }
+        result
+    }
+}
+
+impl TableEffectHandler<'_, '_> {
+    fn handle_inner(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
