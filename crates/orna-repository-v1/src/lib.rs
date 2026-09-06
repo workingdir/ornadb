@@ -164,6 +164,7 @@ impl PublicationJournalEntry {
 pub struct PublicationJournal {
     old_head: GitCommitRef,
     new_head: GitCommitRef,
+    base_index_tree: Option<IndexTreeRef>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
 }
@@ -172,6 +173,24 @@ impl PublicationJournal {
     pub fn new(
         old_head: GitCommitRef,
         new_head: GitCommitRef,
+        entries: Vec<PublicationJournalEntry>,
+    ) -> Result<Self, RepositoryError> {
+        Self::new_with_base_index_tree(old_head, new_head, None, entries)
+    }
+
+    pub fn new_with_index_tree(
+        old_head: GitCommitRef,
+        new_head: GitCommitRef,
+        base_index_tree: IndexTreeRef,
+        entries: Vec<PublicationJournalEntry>,
+    ) -> Result<Self, RepositoryError> {
+        Self::new_with_base_index_tree(old_head, new_head, Some(base_index_tree), entries)
+    }
+
+    fn new_with_base_index_tree(
+        old_head: GitCommitRef,
+        new_head: GitCommitRef,
+        base_index_tree: Option<IndexTreeRef>,
         entries: Vec<PublicationJournalEntry>,
     ) -> Result<Self, RepositoryError> {
         if entries.is_empty() {
@@ -186,6 +205,7 @@ impl PublicationJournal {
         Ok(Self {
             old_head,
             new_head,
+            base_index_tree,
             entries,
             stage: PublicationJournalStage::Prepared,
         })
@@ -197,6 +217,10 @@ impl PublicationJournal {
 
     pub fn new_head(&self) -> &GitCommitRef {
         &self.new_head
+    }
+
+    pub fn base_index_tree(&self) -> Option<&IndexTreeRef> {
+        self.base_index_tree.as_ref()
     }
 
     pub fn entries(&self) -> &[PublicationJournalEntry] {
@@ -221,6 +245,10 @@ impl PublicationJournal {
         bytes.push(1);
         put_string(&mut bytes, self.old_head.as_str())?;
         put_string(&mut bytes, self.new_head.as_str())?;
+        put_optional_string(
+            &mut bytes,
+            self.base_index_tree.as_ref().map(IndexTreeRef::as_str),
+        )?;
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
         for entry in &self.entries {
@@ -251,6 +279,9 @@ impl PublicationJournal {
             GitCommitRef::from_verified_commit(take_string(bytes, &mut cursor)?, object_id_length)?;
         let new_head =
             GitCommitRef::from_verified_commit(take_string(bytes, &mut cursor)?, object_id_length)?;
+        let base_index_tree = take_optional_string(bytes, &mut cursor)?
+            .map(|value| IndexTreeRef::from_verified_tree(value, object_id_length))
+            .transpose()?;
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
         let count = take_u32(bytes, &mut cursor)? as usize;
         if count == 0 {
@@ -273,6 +304,7 @@ impl PublicationJournal {
         Ok(Self {
             old_head,
             new_head,
+            base_index_tree,
             entries,
             stage,
         })
@@ -799,6 +831,7 @@ impl Repository {
         if journal.stage() != PublicationJournalStage::Prepared
             || expected_index.head() != Some(journal.old_head())
             || journal.new_head() != candidate.commit()
+            || journal.base_index_tree() != expected_index.tree()
         {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -1591,6 +1624,16 @@ fn put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), RepositoryError> {
     Ok(())
 }
 
+fn put_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) -> Result<(), RepositoryError> {
+    match value {
+        Some(value) => put_string(bytes, value),
+        None => {
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            Ok(())
+        }
+    }
+}
+
 fn put_optional_bytes(bytes: &mut Vec<u8>, value: Option<&[u8]>) -> Result<(), RepositoryError> {
     match value {
         Some(value) => {
@@ -1638,6 +1681,31 @@ fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryErr
         .ok_or(RepositoryError::InvalidPublicationJournal)?;
     *cursor = end;
     String::from_utf8(value.to_vec()).map_err(|_| RepositoryError::InvalidPublicationJournal)
+}
+
+fn take_optional_string(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<String>, RepositoryError> {
+    let length = take_u32(bytes, cursor)?;
+    if length == u32::MAX {
+        return Ok(None);
+    }
+    let length = usize::try_from(length).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    if length > MAX_JOURNAL_BYTES {
+        return Err(RepositoryError::InvalidPublicationJournal);
+    }
+    let end = cursor
+        .checked_add(length)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    Ok(Some(
+        String::from_utf8(value.to_vec())
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?,
+    ))
 }
 
 fn take_optional_bytes(
