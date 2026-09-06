@@ -11,7 +11,9 @@ use std::{
 };
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
-use orna_repository_v1::{ManagedPath, Repository, RepositoryError};
+use orna_repository_v1::{
+    GitCommitRef, ManagedFileChange, ManagedPath, PrivateCommit, Repository, RepositoryError,
+};
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
 };
@@ -269,6 +271,36 @@ pub fn materialize_loose_mutation(
         }
         Err(_) => Err(Error::RepositoryUnavailable),
     }
+}
+
+/// Builds the real Git candidate for a frozen batch without advancing a ref.
+/// The runtime batch remains authoritative until the caller journals, performs
+/// index/worktree reconciliation, and completes the publication boundary.
+pub fn build_private_publication_candidate(
+    repository: &Repository,
+    expected_head: &GitCommitRef,
+    batch: &FrozenBatch,
+    message: &str,
+) -> Result<PrivateCommit, Error> {
+    validate_portable_paths(
+        batch
+            .mutations
+            .iter()
+            .filter_map(|mutation| mutation.next.as_ref().map(|_| &mutation.path)),
+    )?;
+    let changes = batch
+        .mutations
+        .iter()
+        .map(|mutation| {
+            ManagedFileChange::new(
+                mutation.path.as_managed_path().clone(),
+                mutation.next.as_ref().map(|row| row.bytes().to_vec()),
+            )
+        })
+        .collect::<Vec<_>>();
+    repository
+        .build_private_commit(expected_head, &changes, message)
+        .map_err(|_| Error::RepositoryUnavailable)
 }
 
 fn validate_portable_paths<'a>(
@@ -580,6 +612,23 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    fn git_output(directory: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end_matches(['\r', '\n'])
+            .to_owned()
     }
 
     fn repository() -> (TempDir, Repository) {
@@ -1041,6 +1090,32 @@ mod tests {
         assert_eq!(
             result.get(&managed).unwrap().as_ref().unwrap().bytes(),
             b"published"
+        );
+    }
+
+    #[test]
+    fn frozen_batch_builds_a_real_private_candidate_without_advancing_head() {
+        let (root, repository) = repository();
+        let head = repository.head().unwrap().unwrap();
+        let candidate = build_private_publication_candidate(
+            &repository,
+            &head,
+            &batch(None, Some(row("published"))),
+            "orna: publish runtime data",
+        )
+        .unwrap();
+
+        assert_ne!(candidate.commit(), &head);
+        assert_eq!(repository.head().unwrap().unwrap(), head);
+        assert_eq!(
+            git_output(
+                root.path(),
+                &[
+                    "show",
+                    &format!("{}:tables/sensor/one.orna", candidate.commit())
+                ]
+            ),
+            "published"
         );
     }
 
