@@ -1065,6 +1065,56 @@ fn recovery_resumes_after_ref_and_index_boundaries() {
 }
 
 #[test]
+fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head,
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [28; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    repo.publish_candidate(&index_before, &candidate, &mut journal)
+        .unwrap();
+    fs::write(root.path().join("ordinary.txt"), "ordinary commit\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(
+        root.path(),
+        &["commit", "-m", "ordinary commit after publication"],
+    );
+
+    assert!(matches!(
+        repo.mark_runtime_complete([28; 16], &mut journal),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(
+        journal.stage(),
+        orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+    );
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+#[test]
 fn recovery_keeps_a_pre_ref_publication_pending() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
