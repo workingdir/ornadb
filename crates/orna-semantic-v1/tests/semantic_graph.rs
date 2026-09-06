@@ -1131,6 +1131,34 @@ fn relation_pairs_preserve_element_type_in_overlapping_tuples() {
 }
 
 #[test]
+fn relation_extrema_preserve_element_type_as_optional_values() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "extrema.orna",
+            "pub fn smallest() = sys.Failure | min(); pub fn largest() = sys.Failure | max();",
+        )],
+        &Catalogue::authoritative_fixture(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .get(&orna_semantic_v1::Namespace(vec!["extrema".into()]))
+        .expect("extrema module");
+    for name in ["smallest", "largest"] {
+        assert_eq!(
+            module.exports.get(name).expect("extrema function").ty,
+            Type::Function {
+                parameters: Vec::new(),
+                parameter_names: Some(Vec::new()),
+                result: Box::new(Type::Optional(Box::new(Type::Named("sys.Failure".into(),)))),
+                default_parameters: Default::default(),
+            }
+        );
+    }
+}
+
+#[test]
 fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
         "inferred.orna",
