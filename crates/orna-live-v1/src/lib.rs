@@ -14,6 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     io,
+    net::{Ipv4Addr, SocketAddr, TcpListener},
     pin::Pin,
 };
 
@@ -1689,6 +1690,64 @@ pub struct TransportLimits {
     pub tls: bool,
 }
 
+/// The operator-visible exposure selected when a live listener was bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListenerExposure {
+    /// The default loopback-only listener.
+    Loopback,
+    /// An address deliberately selected by the operator.
+    Explicit,
+}
+
+/// The address and exposure class that a bound live listener reports to its
+/// executable host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListenerStatus {
+    pub address: SocketAddr,
+    pub exposure: ListenerExposure,
+}
+
+/// A live listener whose binding policy is explicit at the transport edge.
+///
+/// It owns only the bound socket. Accept loops, TLS, cancellation, clocks,
+/// and application authority remain host-owned.
+pub struct LiveListener {
+    listener: TcpListener,
+    status: ListenerStatus,
+}
+
+impl LiveListener {
+    /// Returns the caller-owned accept handle.
+    #[must_use]
+    pub const fn listener(&self) -> &TcpListener {
+        &self.listener
+    }
+
+    /// Returns the address and exposure class for host status reporting.
+    #[must_use]
+    pub const fn status(&self) -> ListenerStatus {
+        self.status
+    }
+}
+
+/// A redacted live-listener binding failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListenerBindError {
+    Bind,
+    NonLoopback,
+}
+
+impl core::fmt::Display for ListenerBindError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::Bind => "live listener bind failed",
+            Self::NonLoopback => "live listener requires TLS for non-loopback exposure",
+        })
+    }
+}
+
+impl std::error::Error for ListenerBindError {}
+
 impl Default for TransportLimits {
     fn default() -> Self {
         Self {
@@ -2244,6 +2303,50 @@ pub struct LiveTransport {
 }
 
 impl LiveTransport {
+    /// Binds the default live listener to IPv4 loopback only.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted bind error when the loopback listener cannot be
+    /// created.
+    pub fn bind_default_listener(
+        port: u16,
+    ) -> std::result::Result<LiveListener, ListenerBindError> {
+        Self::bind_listener(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            ListenerExposure::Loopback,
+        )
+    }
+
+    /// Binds a loopback listener at an address explicitly selected by the
+    /// operator. Non-loopback addresses fail before binding because this
+    /// transport boundary does not own TLS.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted bind error when the requested listener is not
+    /// loopback or cannot be created.
+    pub fn bind_explicit_listener(
+        address: SocketAddr,
+    ) -> std::result::Result<LiveListener, ListenerBindError> {
+        if !address.ip().is_loopback() {
+            return Err(ListenerBindError::NonLoopback);
+        }
+        Self::bind_listener(address, ListenerExposure::Explicit)
+    }
+
+    fn bind_listener(
+        address: SocketAddr,
+        exposure: ListenerExposure,
+    ) -> std::result::Result<LiveListener, ListenerBindError> {
+        let listener = TcpListener::bind(address).map_err(|_| ListenerBindError::Bind)?;
+        let address = listener.local_addr().map_err(|_| ListenerBindError::Bind)?;
+        Ok(LiveListener {
+            listener,
+            status: ListenerStatus { address, exposure },
+        })
+    }
+
     /// # Errors
     ///
     /// Returns [`Error::Limit`] for an invalid transport bound.
