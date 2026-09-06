@@ -11,9 +11,10 @@ use std::io::{self, BufReader};
 use std::process::ExitCode;
 
 use orna_conformance_v1::{
-    BoundedEvaluator, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeEvaluator,
-    SourceUnit, StageOutcome,
+    AdmittedReplSession, BoundedEvaluator, ProjectEnvironment, ProjectExpectations, ProjectUnit,
+    ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
+use orna_evaluator_v1::Limits;
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
@@ -577,43 +578,41 @@ fn run_pure_invocation(endpoint: &Endpoint, target: &str) -> Result<(), Diagnost
     }
 }
 
-fn repl_session(endpoint: &Endpoint) -> Result<orna_evaluator_v1::ReplSession, Diagnostic> {
-    let mut evaluator = BoundedEvaluator::default();
+fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> {
     let project_context = match endpoint {
         Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").is_ok(),
         Endpoint::Path(_) | Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => true,
     };
     if project_context {
         let project = load_project(endpoint)?;
-        let catalogue = semantic_catalogue(&project)?;
-        let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
-        if !analysis.is_ok() {
-            return Err(Diagnostic::target(
-                "E2101",
-                "project semantic analysis failed",
-                "fix the first reported source contract error before starting a project REPL session",
-            ));
-        }
-        match evaluator.evaluate_project(&execution_project(&project)) {
-            StageOutcome::Passed => {}
-            StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
-                return Err(Diagnostic::unavailable(
-                    "project REPL session is not available",
-                    "use a function-only project with ordinary imports; tables, effects, streams, and persistence require the integrated runtime",
-                ));
-            }
-        }
-    }
-    evaluator.repl_session().map_err(|_| {
-        Diagnostic::unavailable(
-            "REPL session could not be created",
-            "use source and bindings within the configured evaluator limits",
+        return AdmittedReplSession::from_loaded_project(
+            &project,
+            standard_sources(),
+            Limits::default(),
         )
-    })
+        .map_err(|error| repl_session_error(&error));
+    }
+    Ok(AdmittedReplSession::new(Limits::default()))
+}
+
+fn repl_session_error(error: &ReplError) -> Diagnostic {
+    if error.code().starts_with("ORNA-S") || error.code() == "ORNA-REPL-SEMANTIC" {
+        Diagnostic::target(
+            "E2101",
+            "project semantic analysis failed",
+            "fix the first reported source contract error before starting a project REPL session",
+        )
+    } else {
+        Diagnostic::target(
+            "E2200",
+            "project REPL session is not available",
+            "use a project supported by the configured REPL runtime",
+        )
+    }
 }
 
 fn run_repl_submission<W: std::io::Write>(
-    session: &mut orna_evaluator_v1::ReplSession,
+    session: &mut AdmittedReplSession,
     source: &str,
     writer: &mut W,
 ) -> Result<(), Diagnostic> {
@@ -769,7 +768,7 @@ mod tests {
         .expect("main source");
         std::fs::write(
             directory.path().join("library.orna"),
-            "pub fn twice(value: Int): Int = value + value;",
+            "pub fn twice(value: Int): Int = value + value; fn hidden(value: Int): Int = value;",
         )
         .expect("library source");
         assert!(
@@ -783,18 +782,20 @@ mod tests {
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let mut session = repl_session(&endpoint).expect("project session");
-        let mut input = b"use library.twice as double;\nlet n = 21;\ndouble(n)\n:quit\n".as_slice();
+        let mut input =
+            b"use library;\nlet n: Int = 21;\nlibrary.hidden(n)\nlibrary.twice(n)\n:quit\n"
+                .as_slice();
         let mut output = Vec::new();
         repl::run(&mut input, &mut output, &mut session).expect("scripted session");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > > 42 : Int\n> "
+            "> > > error[ORNA-S012-UNRESOLVED]\n> 42 : Int\n> "
         );
     }
 
     #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
-        let mut session = orna_evaluator_v1::ReplSession::new(orna_evaluator_v1::Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         let mut output = Vec::new();
         assert_eq!(
             run_repl_submission(&mut session, "1 + 2", &mut output),
@@ -808,7 +809,7 @@ mod tests {
             Ok(())
         );
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("3 : Int\nerror[ORNA-EVAL-"));
+        assert!(output.starts_with("3 : Int\nerror[ORNA-S012-UNRESOLVED]"));
         assert_eq!(output.matches('\n').count(), 2);
     }
 
@@ -826,7 +827,7 @@ mod tests {
 
     #[test]
     fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
-        let mut session = orna_evaluator_v1::ReplSession::new(orna_evaluator_v1::Limits::default());
+        let mut session = AdmittedReplSession::new(Limits::default());
         let error =
             run_repl_submission(&mut session, "1", &mut BrokenWriter).expect_err("writer failure");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
