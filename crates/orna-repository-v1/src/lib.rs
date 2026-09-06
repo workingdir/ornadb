@@ -787,6 +787,54 @@ impl Repository {
         Ok(())
     }
 
+    /// Executes the non-crashing PUB-1 publication path over one prepared
+    /// journal. Every durable stage is written before the next boundary; a
+    /// returned error leaves the journal available for recovery.
+    pub fn publish_candidate(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+    ) -> Result<IndexGeneration, RepositoryError> {
+        if journal.stage() != PublicationJournalStage::Prepared
+            || expected_index.head() != Some(journal.old_head())
+            || journal.new_head() != candidate.commit()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let paths = journal
+            .entries()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        self.write_publication_journal(journal)?;
+        self.advance_current_ref(journal.old_head(), candidate)?;
+
+        journal.advance(PublicationJournalStage::RefAdvanced)?;
+        self.write_publication_journal(journal)?;
+        let reconciled = self.reconcile_published_index(expected_index, candidate, &paths)?;
+
+        journal.advance(PublicationJournalStage::IndexReconciled)?;
+        self.write_publication_journal(journal)?;
+        for entry in journal.entries() {
+            let current = self.managed_file_bytes(&entry.path)?;
+            if current.as_deref() == entry.next() {
+                continue;
+            }
+            if current.as_deref() != entry.expected() {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            self.materialize_managed_file(&entry.path, entry.expected(), entry.next())?;
+        }
+
+        journal.advance(PublicationJournalStage::WorktreeReconciled)?;
+        self.write_publication_journal(journal)?;
+        journal.advance(PublicationJournalStage::Complete)?;
+        self.write_publication_journal(journal)?;
+        self.clear_publication_journal()?;
+        Ok(reconciled)
+    }
+
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
