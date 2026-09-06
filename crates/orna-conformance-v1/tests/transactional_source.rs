@@ -13,6 +13,17 @@ fn source(parent_body: &str) -> SourceUnit {
     }
 }
 
+fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-source".into(),
+        source_id: "txn-source.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Note(id: Int) {{ text: Str, assert {assertion}; }} fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 #[test]
 fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
@@ -139,6 +150,56 @@ fn parsed_rekey_collision_rolls_back_all_activation_writes() {
         outcome,
         StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-DUPLICATE"
     ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
+
+#[test]
+fn table_every_assertion_observes_all_candidate_rows_before_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_table_assertion(
+        r#"every(note => note.text != "")"#,
+        r#"Note.insert({ id: 7, text: "valid" }); Note.insert({ id: 8, text: "" });"#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
+
+#[test]
+fn table_every_assertion_permits_atomic_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_table_assertion(
+        r#"every(note => note.text != "")"#,
+        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
+}
+
+#[test]
+fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_table_assertion(
+        r#"every(note => note.text[1] == "x")"#,
+        r#"Note.insert({ id: 7, text: "a" }); Note.insert({ id: 8, text: "" });"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Failed(_)));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
 }
