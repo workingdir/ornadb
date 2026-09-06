@@ -551,6 +551,7 @@ impl RuntimePublicationCoordinator {
 
 fn map_publication_repository_error(error: RepositoryError) -> Error {
     match error {
+        RepositoryError::InvalidPublicationJournal => Error::InvalidPublicationJournal,
         RepositoryError::StaleIndex { .. } => Error::RecoveryIndexConflict,
         RepositoryError::StaleHead => Error::RefConflict,
         RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
@@ -835,6 +836,7 @@ pub enum Error {
     RefConflict,
     ManagedWorktreeConflict,
     PublicationPending,
+    InvalidPublicationJournal,
     InvalidTransition,
     RuntimeUnavailable,
     RepositoryUnavailable,
@@ -858,6 +860,7 @@ impl fmt::Display for Error {
             Self::RefConflict => "publication ref conflict",
             Self::ManagedWorktreeConflict => "managed worktree content conflict",
             Self::PublicationPending => "publication remains pending before ref advance",
+            Self::InvalidPublicationJournal => "invalid publication journal",
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
             Self::RepositoryUnavailable => "repository projection is unavailable",
@@ -1181,6 +1184,100 @@ mod tests {
                 .unwrap()
                 .stage(),
             orna_repository_v1::PublicationJournalStage::Prepared
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [51; 16],
+                repository_id: [52; 16],
+            },
+            [53; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([54; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [55; 16],
+                    "Contact",
+                    b"Alice".to_vec(),
+                    Some(b"candidate row".to_vec()),
+                )
+                .unwrap()],
+                [56; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [57; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [56; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index.clone(),
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        let journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            plan.candidate().commit().clone(),
+            index.tree().unwrap().clone(),
+            freeze.intent_id,
+            vec![PublicationJournalEntry::new(
+                path.as_managed_path().clone(),
+                None,
+                Some(b"journal row".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .advance_current_ref(&head, plan.candidate())
+            .unwrap();
+
+        assert!(matches!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::InvalidPublicationJournal)
+        ));
+        assert_eq!(
+            repository.head().unwrap(),
+            Some(plan.candidate().commit().clone())
+        );
+        assert_eq!(repository.index_generation().unwrap().tree(), index.tree());
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(
+            repository.read_publication_journal().unwrap(),
+            Some(journal)
         );
     }
 
