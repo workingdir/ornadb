@@ -433,6 +433,12 @@ fn check_project(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "fix the project module graph and source boundaries, then run check again",
             )
         })?;
+    if project.has_standard_imports() {
+        return Err(Diagnostic::unavailable(
+            "verified v1 standard profile is unavailable",
+            "supply the pinned standard profile before checking a project that imports `std`",
+        ));
+    }
     let analysis = orna_semantic_v1::analyze_with_catalogue(
         project.modules(),
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -541,6 +547,29 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         assert_eq!(check_project(&endpoint), Ok(()));
     }
+
+    #[test]
+    fn check_rejects_standard_imports_without_a_verified_profile() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "use std.math; pub fn run() {}",
+        )
+        .expect("main source");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+
+        let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let error = check_project(&endpoint).expect_err("missing standard profile");
+        assert_eq!((error.code, error.exit), ("E2000", Exit::Target));
+    }
+
     #[test]
     fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
         let directory = tempfile::tempdir().expect("temporary project");
