@@ -2,7 +2,7 @@ use std::process::{Command, Output};
 
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{CheckpointKey, Component, ConsumerIdentity, RuntimeIdentity, RuntimeState};
 use tempfile::TempDir;
 
 fn reference_project() -> TempDir {
@@ -116,6 +116,37 @@ fn integer(row: &[u8], name: &str) -> i64 {
     }
 }
 
+fn decimal(coefficient: i64, exponent10: i64) -> OvbRaw {
+    Value::decimal(coefficient.into(), exponent10.into())
+        .expect("exact decimal")
+        .raw()
+        .clone()
+}
+
+fn checkpoint_component(value: impl Into<String>) -> Component {
+    Component::new(value).expect("checkpoint component")
+}
+
+fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
+    let database = database_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: checkpoint_component(format!("database:{database}")),
+            root: checkpoint_component("public-function"),
+            function: checkpoint_component("sensors.ingest"),
+            binding: checkpoint_component("arguments:[]"),
+        },
+        source_format: checkpoint_component("orna-stream-v1"),
+        source: checkpoint_component("example:sensors:v1"),
+        partition_format: checkpoint_component("literal-list"),
+        partition: checkpoint_component("null"),
+        position_format: checkpoint_component("ordinal"),
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
@@ -214,4 +245,81 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             && text(row, "sku") == "pencil"
             && integer(row, "quantity") == 7
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
+    let directory = reference_project();
+    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", directory.path().to_str().expect("UTF-8 path")])
+        .output()
+        .expect("CLI process");
+    assert!(init.status.success());
+    assert_eq!(init.stdout, b"initialized Orna repository\n");
+    assert!(init.stderr.is_empty());
+
+    let first = invoke(directory.path(), "run", "sensors.ingest");
+    assert!(first.status.success(), "sensors invocation failed");
+    assert_eq!(first.stdout, b"invocation completed\n");
+    assert!(first.stderr.is_empty());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after sensors invocation");
+    let readings = state
+        .committed_table_rows("Reading")
+        .await
+        .expect("read durable readings");
+    assert_eq!(readings.len(), 3);
+    for (sequence, value) in [
+        (0, decimal(1825, -2)),
+        (1, decimal(1850, -2)),
+        (2, decimal(1875, -2)),
+    ] {
+        assert!(readings.iter().any(|(_, row)| {
+            text(row, "sensor") == "greenhouse"
+                && integer(row, "sequence") == sequence
+                && field(row, "value") == Some(value.clone())
+        }));
+    }
+
+    let key = sensors_checkpoint_key(runtime_identity.database_id);
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("read sensors checkpoint");
+    assert_eq!(
+        checkpoint
+            .committed
+            .as_ref()
+            .map(|position| position.token.as_str()),
+        Some("3")
+    );
+    drop(state);
+
+    let second = invoke(directory.path(), "run", "sensors.ingest");
+    assert!(second.status.success(), "second sensors invocation failed");
+    assert_eq!(second.stdout, b"invocation completed\n");
+    assert!(second.stderr.is_empty());
+
+    let reopened = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after second sensors invocation");
+    assert_eq!(
+        reopened
+            .committed_table_rows("Reading")
+            .await
+            .expect("read durable readings after restart"),
+        readings
+    );
+    assert_eq!(
+        reopened
+            .stream_checkpoint(&key)
+            .await
+            .expect("read sensors checkpoint after restart"),
+        checkpoint
+    );
 }
