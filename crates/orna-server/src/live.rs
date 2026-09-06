@@ -136,6 +136,26 @@ impl LiveOnceHost {
         runtime.block_on(self.serve_with_cancellation_async(&mut cancellation))
     }
 
+    /// Accepts sequential loopback connections until the caller cancels.
+    /// Transport/session state remains owned by this host across connections.
+    pub fn serve_until_cancellation<C>(mut self, mut cancellation: C) -> Result<(), LiveHostError>
+    where
+        C: Future<Output = ()> + Unpin,
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .map_err(|_| LiveHostError::Configuration)?;
+        runtime.block_on(async {
+            loop {
+                match self.serve_with_cancellation_async(&mut cancellation).await {
+                    Ok(()) | Err(LiveHostError::Connection) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+    }
+
     async fn serve_with_cancellation_async<C>(
         &mut self,
         cancellation: &mut C,
