@@ -12,14 +12,6 @@ use std::{
 
 const VERSION: &str = "1.0.0";
 const NORMATIVE_PAYLOAD_COUNT: usize = 46;
-const IMPLEMENTED_TRANSPORT_BOUNDARIES: &[(&str, &str)] = &[
-    (
-        "ORNA-PROTO-001",
-        "live.transport.complete_message_admission",
-    ),
-    ("ORNA-WIRE-005", "live.transport.cbor_admission_bounds"),
-    ("ORNA-WIRE-011", "live.transport.origin_credential_fencing"),
-];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -208,7 +200,7 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
         .iter()
         .map(|requirement| {
             let entry = evidence_by_id[requirement.id.as_str()];
-            let mut boundaries = entry
+            let boundaries = entry
                 .tests
                 .iter()
                 .map(|test| Boundary {
@@ -217,7 +209,6 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
                     status: test_status(test, &entry.implementation_result),
                 })
                 .collect::<Vec<_>>();
-            boundaries.extend(implemented_transport_boundaries(&requirement.id));
             RequirementTrace {
                 requirement_id: requirement.id.clone(),
                 chapter: requirement.chapter.clone(),
@@ -263,18 +254,6 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
             })
             .collect(),
     })
-}
-
-fn implemented_transport_boundaries(requirement_id: &str) -> Vec<Boundary> {
-    IMPLEMENTED_TRANSPORT_BOUNDARIES
-        .iter()
-        .filter(|(id, _)| *id == requirement_id)
-        .map(|(_, logical_id)| Boundary {
-            kind: "implementation transport boundary".into(),
-            logical_id: (*logical_id).into(),
-            status: Status::Executed,
-        })
-        .collect()
 }
 
 fn validate(
@@ -767,55 +746,20 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn transport_overlay_records_only_its_verified_boundaries() {
+    fn transport_requirements_remain_justified_gaps_without_execution_register() {
         let report = generate(corpus()).expect("valid corpus");
-        for (requirement_id, boundary_id) in IMPLEMENTED_TRANSPORT_BOUNDARIES {
-            let requirement = report
-                .requirements
-                .iter()
-                .find(|item| item.requirement_id == *requirement_id)
-                .expect("overlay requirement");
-            assert_eq!(requirement.status, Status::PartiallyExecuted);
-            assert!(requirement.boundaries.iter().any(|boundary| {
-                boundary.logical_id == *boundary_id && boundary.status == Status::Executed
-            }));
-        }
-        let framing = report
-            .requirements
-            .iter()
-            .find(|item| item.requirement_id == "ORNA-WIRE-005")
-            .expect("framing requirement");
-        assert_eq!(framing.status, Status::PartiallyExecuted);
-        assert_eq!(
-            framing
-                .boundaries
-                .iter()
-                .filter(|boundary| boundary.status == Status::Executed)
-                .map(|boundary| boundary.logical_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["live.transport.cbor_admission_bounds"]
-        );
-        for requirement_id in [
-            "ORNA-LIVE-001",
-            "ORNA-LIVE-002",
-            "ORNA-LIVE-003",
-            "ORNA-LIVE-004",
-            "ORNA-WIRE-001",
-            "ORNA-WIRE-002",
-            "ORNA-PROTO-003",
-        ] {
+        for requirement_id in ["ORNA-PROTO-001", "ORNA-WIRE-005", "ORNA-WIRE-011"] {
             let requirement = report
                 .requirements
                 .iter()
                 .find(|item| item.requirement_id == requirement_id)
-                .expect("known requirement");
-            assert_ne!(requirement.status, Status::Executed);
+                .expect("transport requirement");
+            assert_eq!(requirement.status, Status::JustifiedGap);
             assert!(
                 requirement
                     .boundaries
                     .iter()
-                    .all(|boundary| boundary.logical_id
-                        != "live.transport.complete_message_admission")
+                    .all(|boundary| boundary.status != Status::Executed)
             );
         }
     }
