@@ -698,18 +698,30 @@ impl Repository {
         let _lock = self.acquire_coordination_lock()?;
         self.ensure_atomic_index_install_supported()?;
         self.ensure_no_git_index_lock()?;
+        let index = self.git_path("index")?;
+        let base_index = self.capture_index_for_expected(expected_index, &index)?;
+        let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
+        self.reconcile_published_index_locked(
+            expected_index,
+            candidate,
+            paths,
+            &base_index,
+            git_lock,
+        )
+    }
+
+    fn reconcile_published_index_locked(
+        &self,
+        _expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        paths: &[ManagedPath],
+        base_index: &[u8],
+        git_lock: GitIndexLock,
+    ) -> Result<IndexGeneration, RepositoryError> {
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
         let index = self.git_path("index")?;
-        let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let actual = self.index_generation()?;
-        if actual.tree() != expected_index.tree() {
-            return Err(RepositoryError::StaleIndex {
-                expected: expected_index.clone(),
-                actual,
-            });
-        }
         let mut unique = HashSet::new();
         if paths.iter().any(|path| !unique.insert(path.clone())) {
             return Err(RepositoryError::UnsafeManagedPath);
@@ -726,7 +738,7 @@ impl Repository {
                     .map_err(|_| RepositoryError::LocalStateUnavailable)?
                     .as_nanos()
             ));
-        fs::write(&candidate_index, &base_index)
+        fs::write(&candidate_index, base_index)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let result = (|| {
             for path in paths {
@@ -750,11 +762,9 @@ impl Repository {
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
             let current_index =
                 fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
             if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
-                drop(git_lock);
                 return Err(RepositoryError::StaleHead);
             }
             fs::rename(&candidate_index, &index)
@@ -879,12 +889,25 @@ impl Repository {
             .iter()
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
+        self.ensure_atomic_index_install_supported()?;
+        let index = self.git_path("index")?;
+        let base_index = self.capture_index_for_expected(expected_index, &index)?;
+        // Own Git's writer lock before exposing the new ref. This closes the
+        // post-ref/pre-index race where an ordinary Git writer could publish
+        // the captured, stale index.
+        let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
         self.write_publication_journal(journal)?;
         self.advance_current_ref(journal.old_head(), candidate)?;
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal(journal)?;
-        let reconciled = self.reconcile_published_index(expected_index, candidate, &paths)?;
+        let reconciled = self.reconcile_published_index_locked(
+            expected_index,
+            candidate,
+            &paths,
+            &base_index,
+            git_lock,
+        )?;
 
         journal.advance(PublicationJournalStage::IndexReconciled)?;
         self.write_publication_journal(journal)?;
@@ -1044,10 +1067,31 @@ impl Repository {
     /// Observes the ordinary Git index without modifying it.
     pub fn index_generation(&self) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_no_git_index_lock()?;
+        self.index_generation_while_locked()
+    }
+
+    fn index_generation_while_locked(&self) -> Result<IndexGeneration, RepositoryError> {
         Ok(IndexGeneration {
             head: self.head()?,
             tree: self.git_optional_tree(["write-tree"])?,
         })
+    }
+
+    fn capture_index_for_expected(
+        &self,
+        expected: &IndexGeneration,
+        index: &Path,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let base_index = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let actual = self.index_generation()?;
+        let after_capture = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if base_index != after_capture || actual.tree() != expected.tree() {
+            return Err(RepositoryError::StaleIndex {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        Ok(base_index)
     }
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.
