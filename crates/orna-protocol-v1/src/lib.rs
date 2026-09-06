@@ -1568,6 +1568,31 @@ mod tests {
         );
     }
     #[test]
+    fn request_fingerprint_covers_present_optional_registry_fields() {
+        let session_id = id(9);
+        let watch = messages().remove(5);
+        let mut absent_watch = watch.clone();
+        let Message::Watch { refresh_floor, .. } = &mut absent_watch.message else {
+            unreachable!();
+        };
+        *refresh_floor = None;
+        assert_ne!(
+            canonical_request_fingerprint(session_id, &watch, Limits::default()),
+            canonical_request_fingerprint(session_id, &absent_watch, Limits::default()),
+        );
+
+        let diagnostic = messages().remove(11);
+        let mut absent_diagnostic = diagnostic.clone();
+        let Message::Diagnostic { recoverable, .. } = &mut absent_diagnostic.message else {
+            unreachable!();
+        };
+        *recoverable = None;
+        assert_ne!(
+            canonical_request_fingerprint(session_id, &diagnostic, Limits::default()),
+            canonical_request_fingerprint(session_id, &absent_diagnostic, Limits::default()),
+        );
+    }
+    #[test]
     fn rejects_malformed_envelopes_and_extensions() {
         let bytes = wire(
             1,
