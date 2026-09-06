@@ -572,10 +572,11 @@ fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
             "orna: publish runtime data",
         )
         .unwrap();
-    let mut journal = orna_repository_v1::PublicationJournal::new_with_index_tree(
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
         head.clone(),
         candidate.commit().clone(),
         index_before.tree().unwrap().clone(),
+        [1; 16],
         vec![orna_repository_v1::PublicationJournalEntry::new(
             managed.clone(),
             None,
@@ -603,6 +604,7 @@ fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
         fs::read_to_string(root.path().join("main.orna")).unwrap(),
         "unstaged human edit\n"
     );
+    repo.mark_runtime_complete([1; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
@@ -623,10 +625,11 @@ fn recovery_resumes_after_ref_and_index_boundaries() {
             "orna: publish runtime data",
         )
         .unwrap();
-    let journal = orna_repository_v1::PublicationJournal::new_with_index_tree(
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
         head,
         candidate.commit().clone(),
         index_before.tree().unwrap().clone(),
+        [2; 16],
         vec![orna_repository_v1::PublicationJournalEntry::new(
             managed.clone(),
             None,
@@ -641,12 +644,17 @@ fn recovery_resumes_after_ref_and_index_boundaries() {
     repo.reconcile_published_index(&index_before, &candidate, std::slice::from_ref(&managed))
         .unwrap();
 
-    repo.recover_publication().unwrap().unwrap();
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
     assert_eq!(repo.head().unwrap().unwrap(), *candidate.commit());
     assert_eq!(
         fs::read(root.path().join(managed.as_path())).unwrap(),
         b"candidate row\n"
     );
+    let mut journal = repo.read_publication_journal().unwrap().unwrap();
+    repo.mark_runtime_complete([2; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
@@ -667,10 +675,11 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
             "orna: publish runtime data",
         )
         .unwrap();
-    let journal = orna_repository_v1::PublicationJournal::new_with_index_tree(
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
         head.clone(),
         candidate.commit().clone(),
         index_before.tree().unwrap().clone(),
+        [3; 16],
         vec![orna_repository_v1::PublicationJournalEntry::new(
             managed.clone(),
             None,
@@ -697,6 +706,11 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     );
 
     fs::write(root.path().join(managed.as_path()), b"candidate row\n").unwrap();
-    repo.recover_publication().unwrap().unwrap();
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    let mut journal = repo.read_publication_journal().unwrap().unwrap();
+    repo.mark_runtime_complete([3; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }

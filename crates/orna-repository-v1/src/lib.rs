@@ -103,6 +103,7 @@ pub enum PublicationJournalStage {
     RefAdvanced,
     IndexReconciled,
     WorktreeReconciled,
+    RuntimeCompleted,
     Complete,
 }
 
@@ -113,7 +114,8 @@ impl PublicationJournalStage {
             Self::RefAdvanced => 2,
             Self::IndexReconciled => 3,
             Self::WorktreeReconciled => 4,
-            Self::Complete => 5,
+            Self::RuntimeCompleted => 5,
+            Self::Complete => 6,
         }
     }
 
@@ -123,7 +125,8 @@ impl PublicationJournalStage {
             2 => Ok(Self::RefAdvanced),
             3 => Ok(Self::IndexReconciled),
             4 => Ok(Self::WorktreeReconciled),
-            5 => Ok(Self::Complete),
+            5 => Ok(Self::RuntimeCompleted),
+            6 => Ok(Self::Complete),
             _ => Err(RepositoryError::InvalidPublicationJournal),
         }
     }
@@ -165,6 +168,7 @@ pub struct PublicationJournal {
     old_head: GitCommitRef,
     new_head: GitCommitRef,
     base_index_tree: Option<IndexTreeRef>,
+    runtime_intent_id: Option<[u8; 16]>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
 }
@@ -187,6 +191,22 @@ impl PublicationJournal {
         Self::new_with_base_index_tree(old_head, new_head, Some(base_index_tree), entries)
     }
 
+    pub fn new_with_runtime_intent(
+        old_head: GitCommitRef,
+        new_head: GitCommitRef,
+        base_index_tree: IndexTreeRef,
+        runtime_intent_id: [u8; 16],
+        entries: Vec<PublicationJournalEntry>,
+    ) -> Result<Self, RepositoryError> {
+        let mut journal =
+            Self::new_with_base_index_tree(old_head, new_head, Some(base_index_tree), entries)?;
+        if runtime_intent_id == [0; 16] {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        journal.runtime_intent_id = Some(runtime_intent_id);
+        Ok(journal)
+    }
+
     fn new_with_base_index_tree(
         old_head: GitCommitRef,
         new_head: GitCommitRef,
@@ -206,6 +226,7 @@ impl PublicationJournal {
             old_head,
             new_head,
             base_index_tree,
+            runtime_intent_id: None,
             entries,
             stage: PublicationJournalStage::Prepared,
         })
@@ -227,6 +248,10 @@ impl PublicationJournal {
         &self.entries
     }
 
+    pub const fn runtime_intent_id(&self) -> Option<[u8; 16]> {
+        self.runtime_intent_id
+    }
+
     pub const fn stage(&self) -> PublicationJournalStage {
         self.stage
     }
@@ -242,13 +267,20 @@ impl PublicationJournal {
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(JOURNAL_MAGIC);
-        bytes.push(1);
+        bytes.push(2);
         put_string(&mut bytes, self.old_head.as_str())?;
         put_string(&mut bytes, self.new_head.as_str())?;
         put_optional_string(
             &mut bytes,
             self.base_index_tree.as_ref().map(IndexTreeRef::as_str),
         )?;
+        match self.runtime_intent_id {
+            Some(intent_id) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&intent_id);
+            }
+            None => bytes.push(0),
+        }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
         for entry in &self.entries {
@@ -272,7 +304,7 @@ impl PublicationJournal {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let mut cursor = JOURNAL_MAGIC.len();
-        if take_byte(bytes, &mut cursor)? != 1 {
+        if take_byte(bytes, &mut cursor)? != 2 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -282,6 +314,11 @@ impl PublicationJournal {
         let base_index_tree = take_optional_string(bytes, &mut cursor)?
             .map(|value| IndexTreeRef::from_verified_tree(value, object_id_length))
             .transpose()?;
+        let runtime_intent_id = match take_byte(bytes, &mut cursor)? {
+            0 => None,
+            1 => Some(take_fixed_array::<16>(bytes, &mut cursor)?),
+            _ => return Err(RepositoryError::InvalidPublicationJournal),
+        };
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
         let count = take_u32(bytes, &mut cursor)? as usize;
         if count == 0 {
@@ -305,6 +342,7 @@ impl PublicationJournal {
             old_head,
             new_head,
             base_index_tree,
+            runtime_intent_id,
             entries,
             stage,
         })
@@ -829,6 +867,7 @@ impl Repository {
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.stage() != PublicationJournalStage::Prepared
+            || journal.runtime_intent_id().is_none()
             || expected_index.head() != Some(journal.old_head())
             || journal.new_head() != candidate.commit()
             || journal.base_index_tree() != expected_index.tree()
@@ -862,10 +901,27 @@ impl Repository {
 
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
         self.write_publication_journal(journal)?;
+        Ok(reconciled)
+    }
+
+    /// Records that the separately owned runtime transaction consumed the
+    /// exact frozen intent named by the journal. The caller must invoke this
+    /// only after runtime completion has committed successfully.
+    pub fn mark_runtime_complete(
+        &self,
+        runtime_intent_id: [u8; 16],
+        journal: &mut PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || journal.runtime_intent_id() != Some(runtime_intent_id)
+        {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        journal.advance(PublicationJournalStage::RuntimeCompleted)?;
+        self.write_publication_journal(journal)?;
         journal.advance(PublicationJournalStage::Complete)?;
         self.write_publication_journal(journal)?;
-        self.clear_publication_journal()?;
-        Ok(reconciled)
+        self.clear_publication_journal()
     }
 
     /// Resumes a persisted publication after a process interruption. The
@@ -905,7 +961,7 @@ impl Repository {
                 return Err(RepositoryError::StaleHead);
             }
             let current = self.index_generation()?;
-            let reconciled = if current.tree() == expected_index.tree() {
+            let _reconciled = if current.tree() == expected_index.tree() {
                 let paths = journal
                     .entries()
                     .iter()
@@ -923,10 +979,7 @@ impl Repository {
             journal.advance(PublicationJournalStage::IndexReconciled)?;
             self.write_publication_journal(&journal)?;
             self.recover_publication_worktree(&mut journal)?;
-            journal.advance(PublicationJournalStage::Complete)?;
-            self.write_publication_journal(&journal)?;
-            self.clear_publication_journal()?;
-            return Ok(Some(reconciled));
+            return Err(RepositoryError::RuntimeCompletionRequired);
         }
 
         if journal.stage() == PublicationJournalStage::IndexReconciled {
@@ -936,6 +989,9 @@ impl Repository {
             self.recover_publication_worktree(&mut journal)?;
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        if journal.stage() == PublicationJournalStage::RuntimeCompleted {
             journal.advance(PublicationJournalStage::Complete)?;
             self.write_publication_journal(&journal)?;
         }
@@ -1818,6 +1874,22 @@ fn take_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, RepositoryError> {
     Ok(value)
 }
 
+fn take_fixed_array<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<[u8; N], RepositoryError> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    value
+        .try_into()
+        .map_err(|_| RepositoryError::InvalidPublicationJournal)
+}
+
 fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
     let end = cursor
         .checked_add(4)
@@ -1944,6 +2016,7 @@ pub enum RepositoryError {
     RepositoryBusy,
     GitIndexLockPresent,
     StaleHead,
+    RuntimeCompletionRequired,
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
@@ -1984,6 +2057,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("Git index lock is present; resolve it with Git before retrying")
             }
             Self::StaleHead => f.write_str("Git HEAD changed during repository operation"),
+            Self::RuntimeCompletionRequired => {
+                f.write_str("runtime publication completion is required")
+            }
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
