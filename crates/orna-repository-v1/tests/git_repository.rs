@@ -460,3 +460,44 @@ fn private_candidate_advances_current_branch_with_compare_and_set() {
         Err(orna_repository_v1::RepositoryError::StaleHead)
     ));
 }
+
+#[test]
+fn published_candidate_reconciles_only_managed_index_entries() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "staged human edit\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged human edit\n").unwrap();
+
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    let reconciled = repo
+        .reconcile_published_index(&index_before, &candidate, &[managed])
+        .unwrap();
+    assert_eq!(reconciled.head(), Some(candidate.commit()));
+    assert_eq!(
+        git(root.path(), &["show", ":generated/row.orna"]),
+        "candidate row"
+    );
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged human edit"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged human edit\n"
+    );
+}
