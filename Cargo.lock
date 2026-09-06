@@ -1544,6 +1544,8 @@ dependencies = [
  "num-bigint",
  "orna-evaluator-v1",
  "orna-foundation-v1",
+ "orna-repository-v1",
+ "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
  "orna-table-v1",
@@ -1551,6 +1553,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
