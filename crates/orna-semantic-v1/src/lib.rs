@@ -5305,6 +5305,54 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 may_fail: true,
             },
         },
+        ["sys", "admin", "reset_checkpoint"] => Inferred {
+            ty: named_function(
+                vec![
+                    ("checkpoint", Type::Named("sys.CheckpointRef".into())),
+                    (
+                        "expected_version",
+                        Type::Named("sys.CheckpointVersion".into()),
+                    ),
+                    (
+                        "expected_position",
+                        Type::Named("sys.CheckpointPosition".into()),
+                    ),
+                    ("to", Type::Named("sys.CheckpointPosition".into())),
+                    ("reason", Type::Text),
+                ],
+                Type::Named("sys.Checkpoint".into()),
+            ),
+            effects: EffectSummary {
+                effects: BTreeSet::from(["admin".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "admin", "retry_failure"] => Inferred {
+            ty: {
+                let mut callable = named_function(
+                    vec![
+                        ("failure", Type::Named("sys.FailureRef".into())),
+                        ("expected_version", Type::Named("sys.FailureVersion".into())),
+                        ("expected_status", Type::Named("sys.FailureStatus".into())),
+                    ],
+                    Type::Applied {
+                        base: "sys.InvocationHandle".into(),
+                        arguments: vec![Type::Named("sys.Value".into())],
+                    },
+                );
+                if let Type::Function {
+                    default_parameters, ..
+                } = &mut callable
+                {
+                    default_parameters.insert(2);
+                }
+                callable
+            },
+            effects: EffectSummary {
+                effects: BTreeSet::from(["admin".into()]),
+                may_fail: true,
+            },
+        },
         ["sys", "admin", "replay_failure"] => Inferred {
             ty: {
                 let mut callable = named_function(
@@ -5326,6 +5374,21 @@ fn infer_system_path(path: &[&str]) -> Option<Inferred> {
                 }
                 callable
             },
+            effects: EffectSummary {
+                effects: BTreeSet::from(["admin".into()]),
+                may_fail: true,
+            },
+        },
+        ["sys", "admin", "resolve_failure"] => Inferred {
+            ty: named_function(
+                vec![
+                    ("failure", Type::Named("sys.FailureRef".into())),
+                    ("expected_version", Type::Named("sys.FailureVersion".into())),
+                    ("expected_status", Type::Named("sys.FailureStatus".into())),
+                    ("reason", Type::Text),
+                ],
+                Type::Named("sys.Failure".into()),
+            ),
             effects: EffectSummary {
                 effects: BTreeSet::from(["admin".into()]),
                 may_fail: true,
@@ -5382,6 +5445,15 @@ fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
         (Type::Named(system_type), "position") if system_type == "sys.Failure" => Some(Type::Error),
         (Type::Named(system_type), "version") if system_type == "sys.Failure" => {
             Some(Type::Named("sys.FailureVersion".into()))
+        }
+        (Type::Named(system_type), "reference") if system_type == "sys.Checkpoint" => {
+            Some(Type::Named("sys.CheckpointRef".into()))
+        }
+        (Type::Named(system_type), "position") if system_type == "sys.Checkpoint" => {
+            Some(Type::Named("sys.CheckpointPosition".into()))
+        }
+        (Type::Named(system_type), "version") if system_type == "sys.Checkpoint" => {
+            Some(Type::Named("sys.CheckpointVersion".into()))
         }
         (Type::Named(system_type), "started") if system_type == "sys.Run" => Some(Type::Instant),
         (Type::Named(system_type), "pending_rows") if system_type == "sys.Storage" => {
