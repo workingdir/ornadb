@@ -93,10 +93,13 @@ impl ReplSession {
         self.submit_unchecked(parsed)
     }
 
-    /// Executes an already parsed input which a caller has admitted through a
-    /// semantic context.  This deliberately receives the original AST: type
-    /// annotations remain attached to declarations and source is not
-    /// fabricated or reparsed at the runtime boundary.
+    /// Executes an already parsed input at a trusted runtime boundary.
+    ///
+    /// This does not perform type, import, or effect admission. Callers must
+    /// place it behind a trusted checker such as `AdmittedReplSession`; raw
+    /// evaluator use is not the typed REPL API. This deliberately receives the
+    /// original AST: annotations remain attached and source is not fabricated
+    /// or reparsed at the runtime boundary.
     pub fn submit_admitted(
         &mut self,
         input: &ReplInput,
