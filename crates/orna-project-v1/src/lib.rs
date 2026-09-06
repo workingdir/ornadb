@@ -13,7 +13,7 @@ use std::{
 };
 
 use orna_repository_v1::{Repository, RepositoryError};
-use orna_semantic_v1::ModuleInput;
+use orna_semantic_v1::{ModuleInput, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, parse_module};
 use unicode_normalization::UnicodeNormalization;
 
@@ -61,6 +61,7 @@ impl ModuleIdentity {
 pub struct LoadedProject {
     modules: Vec<ModuleInput>,
     identities: Vec<ModuleIdentity>,
+    standard_profile: Option<StandardDependencyProfile>,
 }
 
 impl LoadedProject {
@@ -74,6 +75,12 @@ impl LoadedProject {
 
     pub fn into_modules(self) -> Vec<ModuleInput> {
         self.modules
+    }
+
+    /// Returns the explicitly supplied immutable standard dependency profile,
+    /// if this project was loaded with one.
+    pub fn standard_profile(&self) -> Option<&StandardDependencyProfile> {
+        self.standard_profile.as_ref()
     }
 }
 
@@ -89,6 +96,18 @@ impl ProjectLoader {
     }
 
     pub fn load(&self, repository: &Repository) -> Result<LoadedProject, ProjectLoadError> {
+        self.load_with_standard_profile(repository, None)
+    }
+
+    /// Loads a project while carrying an explicitly selected standard
+    /// dependency profile. The profile is metadata only at this boundary:
+    /// standard modules are never discovered from the worktree and are not
+    /// silently replaced with the current host library.
+    pub fn load_with_standard_profile(
+        &self,
+        repository: &Repository,
+        standard_profile: Option<StandardDependencyProfile>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
         let root = canonical_worktree(repository)?;
         validate_repository_paths(&root, self.limits)?;
         let mut pending = VecDeque::from([String::from("main.orna")]);
@@ -148,6 +167,7 @@ impl ProjectLoader {
         Ok(LoadedProject {
             modules,
             identities,
+            standard_profile,
         })
     }
 }
