@@ -867,16 +867,35 @@ impl RuntimeSupervisor {
                 .unwrap_or_else(Instant::now)
         });
         loop {
-            let state = {
+            let terminal = {
+                let _control = self
+                    .control
+                    .lock()
+                    .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?;
                 let runtime = self
                     .runtime
                     .lock()
                     .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?;
-                runtime
+                let state = runtime
                     .invocation_state(handle)
-                    .map_err(AwaitError::Admission)?
+                    .map_err(AwaitError::Admission)?;
+                drop(runtime);
+                match state {
+                    InvocationState::Active => None,
+                    InvocationState::Terminal(result) => {
+                        let worker = self
+                            .workers
+                            .lock()
+                            .map_err(|_| AwaitError::Admission(AdmissionError::RuntimeUnavailable))?
+                            .remove(handle.invocation());
+                        if let Some(worker) = worker {
+                            let _ = worker.join();
+                        }
+                        Some(result)
+                    }
+                }
             };
-            if let InvocationState::Terminal(result) = state {
+            if let Some(result) = terminal {
                 return Ok(result);
             }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1544,6 +1563,31 @@ mod tests {
         assert_eq!(replay.invocation(), handle.invocation());
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn supervised_await_reaps_the_completed_worker() {
+        let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.mode = InvocationMode::Start;
+        request.transaction = TransactionMode::Separate;
+        let handle = supervisor
+            .start(
+                request,
+                Executor {
+                    calls: 0,
+                    result: InvocationResult::Success(value("Str", "answer")),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            supervisor.await_invocation(&handle, Some(Duration::from_secs(1))),
+            Ok(RetainedInvocationResult::Success(ref retained))
+                if retained.canonical() == Some(b"answer".as_slice())
+        ));
+        assert!(supervisor.workers.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn supervised_start_retains_explicit_cancellation() {
         let supervisor = RuntimeSupervisor::new(RuntimeId::new("r"));
