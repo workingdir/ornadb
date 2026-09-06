@@ -2455,6 +2455,17 @@ impl LiveTransport {
         self.retired_attachments.drain(..).collect()
     }
 
+    /// Idempotently closes one attachment through the transport-owned host
+    /// state. Retired workers may call this after replacement; the inner host
+    /// reports [`Error::Closed`] without affecting the replacement.
+    pub async fn close_attachment(
+        &mut self,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> Result<FrameOutcome> {
+        self.host.close_attachment(attachment, now).await
+    }
+
     /// Parses exactly the three live-session HTTP endpoint shapes.
     #[allow(clippy::too_many_lines)]
     pub async fn handle(
