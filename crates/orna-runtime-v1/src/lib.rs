@@ -3988,6 +3988,20 @@ async fn apply_stream_intent_tx(
                         .await
                         .map_err(|_| RuntimeError::StorageUnavailable)?;
                     if claimed == 1 {
+                        connection
+                            .execute(
+                                "UPDATE stream_lease
+                                 SET successor_position = ?3
+                                 WHERE key_id = ?1 AND fence = ?2",
+                                params![
+                                    stream_key_id(&key),
+                                    i64::try_from(stored.fence)
+                                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                                    delivery.successor.token.as_str().to_owned(),
+                                ],
+                            )
+                            .await
+                            .map_err(|_| RuntimeError::StorageUnavailable)?;
                         return Ok(CommitResult::Acquired {
                             lease: DeliveryLease {
                                 delivery,
@@ -6196,6 +6210,96 @@ mod tests {
             .expect("durable failure");
         assert_eq!(failure.status, FailureStatus::Succeeded);
         assert_eq!(failure.attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn retry_admission_accepts_a_provider_successor_revision() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let original = stream_delivery("retry-revision", "retry-original-next");
+        let revised = stream_delivery("retry-revision", "retry-revised-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let original_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: original.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                original_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let retry = match stream
+            .apply_async(CommitIntent::Retry {
+                failure: failed.identity.clone(),
+                expected_version: failed.version,
+                expected: expected.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("unexpected stream retry result: {other:?}"),
+        };
+        let revised_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: revised,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected retry admission result: {other:?}"),
+        };
+        let advanced = match stream
+            .apply_async(CommitIntent::Complete {
+                lease: revised_lease,
+                expected,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected retry completion result: {other:?}"),
+        };
+        assert_eq!(
+            advanced.committed,
+            Some(Position {
+                token: Component::new("retry-revised-next").unwrap(),
+            })
+        );
+        let succeeded = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(succeeded.identity, failed.identity);
+        assert_eq!(succeeded.attempts, retry.attempts);
+        assert_eq!(succeeded.status, FailureStatus::Succeeded);
     }
 
     #[tokio::test]
