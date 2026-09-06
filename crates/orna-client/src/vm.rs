@@ -131,7 +131,9 @@ pub fn execute_admitted_pure_client_function(
     }
     if !matches!(
         admission.plan(),
-        ClientVmDecodedPlan::Boolean(_) | ClientVmDecodedPlan::Expression(_)
+        ClientVmDecodedPlan::Boolean(_)
+            | ClientVmDecodedPlan::Expression(_)
+            | ClientVmDecodedPlan::ControlFlow(_)
     ) {
         return Err(ClientVmExecutionError::NonPurePlan);
     }
