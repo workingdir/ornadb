@@ -28,7 +28,7 @@ use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
     CheckpointKey, Component, ConsumerIdentity, DiagnosticClass, DiagnosticCode, SafeDiagnostic,
 };
-use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
+use orna_syntax_v1::{Declaration, Expr, Pattern, Statement, parse_expression, parse_module};
 use orna_sys_v1::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationExecutor,
     InvocationHandle, InvocationResult, InvocationState, RuntimeSupervisor, TypedValue,
@@ -927,7 +927,7 @@ impl TransactionalEvaluator {
                 Ok(value) => value,
                 Err(outcome) => return Some(*outcome),
             };
-        let key_fields = BTreeMap::from([(String::from("Contact"), String::from("id"))]);
+        let key_fields = BTreeMap::from([(String::from("Contact"), vec![String::from("id")])]);
         let outcome = match evaluator.execute_admitted(
             &functions,
             &key_fields,
@@ -1012,7 +1012,7 @@ impl TransactionalEvaluator {
     fn execute_admitted(
         &mut self,
         functions: &Functions,
-        key_fields: &BTreeMap<String, String>,
+        key_fields: &TableKeys,
         table_assertions: &TableAssertions,
         module_assertions: &[Expr],
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
@@ -1020,17 +1020,24 @@ impl TransactionalEvaluator {
         let limits = self.limits;
         let mut mutations = Vec::new();
         let result = self.database.activate(|activation| {
+            let functions = lower_relation_bindings(functions, key_fields);
             let mut effects = TableEffectHandler {
                 activation,
                 key_fields,
                 mutations: &mut mutations,
                 next_mutation: 0,
             };
-            invoke_named_with_effects(&entry, functions, &Environment::new(), limits, &mut effects)
-                .and_then(|_| {
-                    validate_table_assertions(activation, table_assertions, functions, limits)?;
-                    validate_module_assertions(activation, module_assertions, functions, limits)
-                })
+            invoke_named_with_effects(
+                &entry,
+                &functions,
+                &Environment::new(),
+                limits,
+                &mut effects,
+            )
+            .and_then(|_| {
+                validate_table_assertions(activation, table_assertions, &functions, limits)?;
+                validate_module_assertions(activation, module_assertions, &functions, limits)
+            })
         });
         match result {
             Ok(()) => Ok(mutations),
@@ -1098,6 +1105,90 @@ impl DurableTransactionalEvaluator {
         let snapshot = state.begin_table_activation(&tables).await?;
         let context = snapshot.context();
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        for (table, rows) in snapshot.table_rows() {
+            for (key, row) in rows {
+                let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                evaluator.seed_committed(table.clone(), key.clone(), row)?;
+            }
+        }
+        let mutations = match evaluator.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
+            Ok(mutations) => mutations,
+            Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
+        };
+        if mutations.is_empty() {
+            return Ok(StageOutcome::Passed);
+        }
+        let next_digest =
+            durable_activation_digest(context.capture().generation_digest(), &mutations);
+        state
+            .commit_table_activation(lease, context, &mutations, next_digest, &NoFault)
+            .await?;
+        Ok(StageOutcome::Passed)
+    }
+
+    /// Admits distinct project modules and executes one namespace-qualified
+    /// root function through the durable activation lifecycle.  Module source
+    /// is parsed and retained independently; this boundary never constructs a
+    /// combined source string.
+    pub async fn execute_project(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        project: &ProjectUnit,
+        root_entry: &str,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        if !root_entry.contains('.') {
+            return Ok(StageOutcome::Skipped {
+                reason: "project transaction roots must be namespace-qualified".into(),
+            });
+        }
+        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+            Ok(value) => value,
+            Err(outcome) => return Ok(*outcome),
+        };
+        if admitted
+            .0
+            .get(root_entry)
+            .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
+        {
+            return Ok(StageOutcome::Skipped {
+                reason: "project transaction admission does not run stream roots; use the explicit finite-list stream seam".into(),
+            });
+        }
+        self.execute_admitted_project(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            root_entry,
+            admitted,
+        )
+        .await
+    }
+
+    async fn execute_admitted_project(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        entry: &str,
+        admitted: AdmittedTransaction,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let (functions, key_fields, table_assertions, module_assertions) = admitted;
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let lease = state.acquire_lease(owner_id).await?;
+        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let snapshot = state.begin_table_activation(&tables).await?;
+        let context = snapshot.context();
+        let mut evaluator = TransactionalEvaluator::new(entry, self.limits);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -1266,7 +1357,7 @@ impl StreamHandler for ListTableHandler {
                 Some(row) => row,
                 None => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
             };
-        let key = match table_key(&row, &self.bridge.key_field) {
+        let key = match table_key(&row, std::slice::from_ref(&self.bridge.key_field)) {
             Ok(key) => key,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
         };
@@ -1345,7 +1436,12 @@ fn admit_list_stream_source(
         .ok_or_else(|| Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires Stream.from_list piped to one for_each insert body".into(),
         }))?;
-    let (table_name, key_field) = key_fields.into_iter().next().expect("one table checked");
+    let (table_name, key_fields) = key_fields.into_iter().next().expect("one table checked");
+    let [key_field] = key_fields.as_slice() else {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "literal list stream bridge requires a single-field table key".into(),
+        }));
+    };
     if table != table_name {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream insert must target the declared table".into(),
@@ -1371,7 +1467,7 @@ fn admit_list_stream_source(
         source_id: unit.source_id.clone(),
         entry: entry.into(),
         table: table_name,
-        key_field,
+        key_field: key_field.clone(),
         parameter,
         insert_row: insert_row.clone(),
         payloads,
@@ -1627,7 +1723,7 @@ impl RuntimeEvaluator for TransactionalEvaluator {
 
 struct TableEffectHandler<'activation, 'runtime> {
     activation: &'activation mut TransactionActivation<'runtime>,
-    key_fields: &'activation BTreeMap<String, String>,
+    key_fields: &'activation TableKeys,
     mutations: &'activation mut Vec<TableMutation>,
     next_mutation: u64,
 }
@@ -1666,8 +1762,12 @@ impl TableEffectHandler<'_, '_> {
         let Expr::Name { text: table, .. } = base.as_ref() else {
             return Ok(None);
         };
-        let Some(key_field) = self.key_fields.get(table) else {
-            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        // Qualified module calls (for example `inventory.add()`) arrive at
+        // the effect boundary before the retained evaluator resolves them.
+        // Only declared table names are effects; every other qualified call
+        // remains available to the admitted function namespace.
+        let Some(key_fields) = self.key_fields.get(table) else {
+            return Ok(None);
         };
         match name.as_str() {
             "count" => {
@@ -1681,11 +1781,23 @@ impl TableEffectHandler<'_, '_> {
                     .count();
                 Ok(Some(Value::int(BigInt::from(count))))
             }
+            "lookup" => {
+                if arguments.len() != key_fields.len() {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                }
+                let key = encoded_table_key(arguments)?;
+                self.activation
+                    .read(table, &key)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))
+            }
             "insert" => {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = table_key(row, key_field)?;
+                let key = table_key(row, key_fields)?;
                 self.activation
                     .insert(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -1696,14 +1808,14 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
-                let key = table_key(row, key_field)?;
+                let key = table_key(row, key_fields)?;
                 if let Some(existing) = self
                     .activation
                     .read(table, &key)
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                 {
-                    let row = merge_upsert_row(&existing, row, key_field)?;
+                    let row = merge_upsert_row(&existing, row, key_fields)?;
                     let key = key.clone();
                     self.activation
                         .update(table.clone(), key.clone(), row.clone())
@@ -1728,7 +1840,7 @@ impl TableEffectHandler<'_, '_> {
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
-                let row = merge_row(&existing, patch, key_field)?;
+                let row = merge_row(&existing, patch, key_fields)?;
                 let key = encoded_key(key)?;
                 self.activation
                     .update(table.clone(), key.clone(), row.clone())
@@ -1759,6 +1871,9 @@ impl TableEffectHandler<'_, '_> {
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
+                let [key_field] = key_fields.as_slice() else {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+                };
                 let row = replace_record_field(&existing, key_field, new_key.clone())?;
                 self.activation
                     .delete(table.clone(), old_key.clone())
@@ -1811,12 +1926,8 @@ impl TableEffectHandler<'_, '_> {
 
 type TableAssertions = BTreeMap<String, Vec<Expr>>;
 type ModuleAssertions = Vec<Expr>;
-type AdmittedTransaction = (
-    Functions,
-    BTreeMap<String, String>,
-    TableAssertions,
-    ModuleAssertions,
-);
+type TableKeys = BTreeMap<String, Vec<String>>;
+type AdmittedTransaction = (Functions, TableKeys, TableAssertions, ModuleAssertions);
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
 
 fn admit_transaction_source(
@@ -1848,7 +1959,7 @@ fn admit_transaction_source(
         )));
     }
     let (functions, key_fields, table_assertions, module_assertions) =
-        admitted_transaction_module(&parsed.value.items)
+        admitted_transaction_module(&parsed.value.items, None)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -1859,6 +1970,104 @@ fn admit_transaction_source(
         }));
     }
     Ok((functions, key_fields, table_assertions, module_assertions))
+}
+
+/// Admits a project as a graph of independently parsed modules.  The retained
+/// evaluator receives qualified function identities (for example
+/// `main.seed` and `inventory.add`) so its native qualified-call resolver
+/// preserves module boundaries rather than relying on source concatenation.
+fn admit_transaction_project(
+    project: &ProjectUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
+    let analysis = analyze_with_catalogue(
+        &project
+            .modules
+            .iter()
+            .map(|unit| {
+                let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+                let path = unit
+                    .source_id
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&unit.source_id)
+                    .to_owned();
+                ModuleInput::new(path, unit.source.clone())
+            })
+            .collect::<Vec<_>>(),
+        &Catalogue::authoritative_fixture(),
+    );
+    if let Some(diagnostic) = analysis.diagnostics.first() {
+        return Err(Box::new(StageOutcome::Failed(
+            diagnostic.clone().redacted(),
+        )));
+    }
+    let mut functions = Functions::new();
+    let mut key_fields = BTreeMap::new();
+    let mut table_assertions = TableAssertions::new();
+    let mut module_assertions = ModuleAssertions::new();
+    for unit in &project.modules {
+        if let Err(error) = limits.check_source(&unit.source) {
+            return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+        }
+        let mut syntax = SyntaxAdapter;
+        if let StageOutcome::Failed(diagnostic) = syntax.parse(unit) {
+            return Err(Box::new(StageOutcome::Failed(diagnostic)));
+        }
+        let parsed = parse_module(&unit.source);
+        if let Err(error) = limits.check_items(parsed.value.items.len()) {
+            return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+        }
+        let namespace = project_transaction_namespace(project, unit)
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        let (module_functions, module_keys, module_assertions_by_table, module_assertions_only) =
+            admitted_transaction_module(&parsed.value.items, Some(&namespace))
+                .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        if let Err(error) = limits.check_items(module_functions.len()) {
+            return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
+        }
+        if module_functions
+            .keys()
+            .any(|name| functions.contains_key(name))
+        {
+            return Err(Box::new(StageOutcome::Skipped {
+                reason: "project transaction modules declare a duplicate qualified function".into(),
+            }));
+        }
+        if module_keys.keys().any(|name| key_fields.contains_key(name)) {
+            return Err(Box::new(StageOutcome::Skipped {
+                reason: "project transaction modules declare a duplicate table name".into(),
+            }));
+        }
+        functions.extend(module_functions);
+        key_fields.extend(module_keys);
+        table_assertions.extend(module_assertions_by_table);
+        module_assertions.extend(module_assertions_only);
+    }
+    if !functions.contains_key(entry) {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "configured qualified project transaction entry function is not present".into(),
+        }));
+    }
+    Ok((functions, key_fields, table_assertions, module_assertions))
+}
+
+fn project_transaction_namespace(
+    project: &ProjectUnit,
+    unit: &SourceUnit,
+) -> Result<String, String> {
+    let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+    let path = unit
+        .source_id
+        .strip_prefix(&prefix)
+        .unwrap_or(&unit.source_id);
+    let stem = path
+        .strip_suffix(".orna")
+        .ok_or_else(|| "project transaction modules must use .orna logical names".to_owned())?;
+    if stem.is_empty() || stem.split('/').any(str::is_empty) {
+        return Err("project transaction modules need a non-empty logical namespace".into());
+    }
+    Ok(stem.replace('/', "."))
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -1881,6 +2090,7 @@ fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) ->
 
 fn admitted_transaction_module(
     items: &[orna_syntax_v1::Item],
+    namespace: Option<&str>,
 ) -> Result<AdmittedTransaction, String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
@@ -1889,8 +2099,12 @@ fn admitted_transaction_module(
     for item in items {
         match &item.declaration {
             Declaration::Function { signature, body } => {
+                let name = namespace.map_or_else(
+                    || signature.name.clone(),
+                    |namespace| format!("{namespace}.{}", signature.name),
+                );
                 functions.insert(
-                    signature.name.clone(),
+                    name,
                     RetainedFunction {
                         parameters: signature.parameters.clone(),
                         body: body.clone(),
@@ -1903,13 +2117,17 @@ fn admitted_transaction_module(
                 keys,
                 members,
             } => {
-                let [key] = keys.as_slice() else {
-                    return Err("transactional source seam requires one explicit table key".into());
-                };
-                let Pattern::Name(field, _) = &key.pattern else {
-                    return Err("transactional source seam requires a named table key".into());
-                };
-                key_fields.insert(name.clone(), field.clone());
+                let fields = keys
+                    .iter()
+                    .map(|key| match &key.pattern {
+                        Pattern::Name(field, _) => Ok(field.clone()),
+                        _ => Err("transactional source seam requires named table keys".into()),
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                if fields.is_empty() {
+                    return Err("transactional source seam requires an explicit table key".into());
+                }
+                key_fields.insert(name.clone(), fields);
                 let expressions = members
                     .iter()
                     .filter_map(|member| match member {
@@ -1922,13 +2140,171 @@ fn admitted_transaction_module(
                 }
             }
             Declaration::Assertion { value } => module_assertions.push(value.clone()),
-            Declaration::Use { .. } => {
-                return Err("transactional source seam does not load module imports yet".into());
+            // Import declarations were resolved against the complete project
+            // graph before this per-module retention pass. Qualified calls are
+            // resolved by the evaluator against the retained function map.
+            Declaration::Use { .. } => {}
+            // Types and related declarations affect semantic admission but
+            // have no activation-time effect in this bounded table runtime.
+            // Retaining them as inert preserves project module boundaries.
+            Declaration::Protocol { .. }
+            | Declaration::Enum { .. }
+            | Declaration::Dimension { .. }
+            | Declaration::Unit { .. }
+            | Declaration::Type { .. } => {}
+            Declaration::Let { .. } => {
+                return Err(
+                    "transactional source seam does not execute module-level bindings".into(),
+                );
             }
-            _ => return Err("transactional source seam admits only tables and functions".into()),
         }
     }
     Ok((functions, key_fields, assertions, module_assertions))
+}
+
+/// Materializes the narrow relation-binding form used by durable transaction
+/// functions: `let row = Table | filter(predicate) | one();`.  Rows come from
+/// the active candidate relation and predicates are evaluated through the
+/// admitted pure-function map; no fixture data is embedded in this seam.
+fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
+    let mut materialized = functions.clone();
+    for function in materialized.values_mut() {
+        let Expr::Block { statements, .. } = &mut function.body else {
+            continue;
+        };
+        for statement in statements {
+            let Statement::Let { value, .. } = statement else {
+                continue;
+            };
+            if let Some(lookup) = relation_lookup(value, table_keys) {
+                *value = lookup;
+            }
+        }
+    }
+    materialized
+}
+
+fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs.as_ref()
+    else {
+        return None;
+    };
+    if op != "|"
+        || !arguments.is_empty()
+        || !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "one")
+    {
+        return None;
+    }
+    let Expr::Binary {
+        lhs: table,
+        op: filter_op,
+        rhs: filter,
+        ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = table.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Call {
+        callee, arguments, ..
+    } = filter.as_ref()
+    else {
+        return None;
+    };
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Name {
+        text: filter_name, ..
+    } = callee.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    if filter_op != "|" || filter_name != "filter" {
+        return None;
+    }
+    let mut arguments = Vec::new();
+    let mut fields = Vec::new();
+    relation_key_arguments(body, binding, &mut fields)?;
+    let declared_keys = table_keys.get(table)?;
+    if fields.len() != declared_keys.len()
+        || fields
+            .iter()
+            .zip(declared_keys)
+            .any(|((field, _), declared)| field != declared)
+    {
+        return None;
+    }
+    arguments.extend(fields.into_iter().map(|(_, value)| value));
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::Name {
+                text: table.clone(),
+                span: table_span.clone(),
+            }),
+            name: "lookup".into(),
+            span: expression.span(),
+        }),
+        arguments: arguments
+            .into_iter()
+            .map(|value| orna_syntax_v1::Argument {
+                name: None,
+                span: value.span(),
+                value,
+            })
+            .collect(),
+        span: expression.span(),
+    })
+}
+
+fn relation_key_arguments(
+    expression: &Expr,
+    binding: &str,
+    output: &mut Vec<(String, Expr)>,
+) -> Option<()> {
+    if let Expr::Binary { lhs, op, rhs, .. } = expression
+        && op == "&&"
+    {
+        relation_key_arguments(lhs, binding, output)?;
+        return relation_key_arguments(rhs, binding, output);
+    }
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    let Expr::Field { base, name, .. } = lhs.as_ref() else {
+        return None;
+    };
+    if op != "==" || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+        return None;
+    }
+    if output.iter().any(|(field, _)| field == name) {
+        return None;
+    }
+    output.push((name.clone(), rhs.as_ref().clone()));
+    Some(())
 }
 
 /// Checks every candidate row before the root activation can publish. This
@@ -2147,13 +2523,32 @@ fn encoded_key(key: &Value) -> Result<Vec<u8>, EvaluationError> {
         .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))
 }
 
-fn table_key(row: &Value, field: &str) -> Result<Vec<u8>, EvaluationError> {
-    record_field(row, field)
-        .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
-        .and_then(|key| encoded_key(&key))
+fn encoded_table_key(values: &[Value]) -> Result<Vec<u8>, EvaluationError> {
+    match values {
+        [key] => encoded_key(key),
+        _ => Value::new(OvbRaw::Array(
+            values.iter().map(|value| value.raw().clone()).collect(),
+        ))
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))
+        .and_then(|key| encoded_key(&key)),
+    }
 }
 
-fn merge_row(existing: &Value, patch: &Value, key_field: &str) -> Result<Value, EvaluationError> {
+fn table_key(row: &Value, fields: &[String]) -> Result<Vec<u8>, EvaluationError> {
+    let values = fields
+        .iter()
+        .map(|field| {
+            record_field(row, field).ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encoded_table_key(&values)
+}
+
+fn merge_row(
+    existing: &Value,
+    patch: &Value,
+    key_fields: &[String],
+) -> Result<Value, EvaluationError> {
     let OvbRaw::Map(existing_fields) = existing.raw() else {
         return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
     };
@@ -2165,7 +2560,7 @@ fn merge_row(existing: &Value, patch: &Value, key_field: &str) -> Result<Value, 
         let OvbRaw::Text(name) = patch_key else {
             return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
         };
-        if name == key_field {
+        if key_fields.iter().any(|field| name == field) {
             return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
         }
         let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == patch_key) else {
@@ -2179,19 +2574,19 @@ fn merge_row(existing: &Value, patch: &Value, key_field: &str) -> Result<Value, 
 fn merge_upsert_row(
     existing: &Value,
     patch: &Value,
-    key_field: &str,
+    key_fields: &[String],
 ) -> Result<Value, EvaluationError> {
     let OvbRaw::Map(fields) = patch.raw() else {
         return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
     };
     let fields = fields
         .iter()
-        .filter(|(key, _)| !matches!(key, OvbRaw::Text(name) if name == key_field))
+        .filter(|(key, _)| !matches!(key, OvbRaw::Text(name) if key_fields.iter().any(|field| name == field)))
         .cloned()
         .collect();
     let patch =
         Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
-    merge_row(existing, &patch, key_field)
+    merge_row(existing, &patch, key_fields)
 }
 
 fn replace_record_field(
@@ -2727,6 +3122,7 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
+    use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
     use orna_foundation_v1::Value;
     use orna_repository_v1::Repository;
@@ -2752,6 +3148,59 @@ mod durable_tests {
             parse_as: "module_unit".into(),
             source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
         }
+    }
+
+    fn project(modules: Vec<(&str, &str)>) -> ProjectUnit {
+        ProjectUnit {
+            fixture_id: "durable-project-txn".into(),
+            project_id: "durable-project-txn".into(),
+            environment_id: None,
+            modules: modules
+                .into_iter()
+                .map(|(source_id, source)| SourceUnit {
+                    fixture_id: "durable-project-txn".into(),
+                    source_id: format!("durable-project-txn/{source_id}"),
+                    parse_as: "module_unit".into(),
+                    source: source.into(),
+                })
+                .collect(),
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        }
+    }
+
+    fn authoritative_project() -> ProjectUnit {
+        project(vec![
+            (
+                "library.orna",
+                include_str!("../../../../reference/Orna-1.0.0/examples/reference/library.orna"),
+            ),
+            (
+                "main.orna",
+                include_str!("../../../../reference/Orna-1.0.0/examples/reference/main.orna"),
+            ),
+            (
+                "sensors.orna",
+                include_str!("../../../../reference/Orna-1.0.0/examples/reference/sensors.orna"),
+            ),
+            (
+                "values.orna",
+                include_str!("../../../../reference/Orna-1.0.0/examples/reference/values.orna"),
+            ),
+            (
+                "warehouse.orna",
+                include_str!("../../../../reference/Orna-1.0.0/examples/reference/warehouse.orna"),
+            ),
+        ])
     }
 
     #[tokio::test]
@@ -2834,6 +3283,160 @@ mod durable_tests {
                     && value
                         == &orna_foundation_v1::OvbRaw::Text("changed".into()))
         ));
+    }
+
+    #[tokio::test]
+    async fn project_activation_keeps_modules_qualified_and_rolls_back_failed_roots() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [41; 16],
+            repository_id: [42; 16],
+        };
+        let project = project(vec![
+            (
+                "inventory.orna",
+                "pub table Note(id: Int) { text: Str, assert every(n => n.text != \"bad\"); } pub fn add() { Note.insert({ id: 7, text: \"from-import\" }); } pub fn bad() { Note.insert({ id: 8, text: \"bad\" }); }",
+            ),
+            (
+                "main.orna",
+                "use inventory; fn seed() { inventory.add(); } fn exercise() { inventory.bad(); }",
+            ),
+        ]);
+        let evaluator = DurableTransactionalEvaluator::default();
+
+        match evaluator
+            .execute_project(
+                &repository,
+                identity,
+                [43; 16],
+                [44; 32],
+                &project,
+                "main.seed",
+            )
+            .await
+        {
+            Ok(StageOutcome::Passed) => {}
+            Ok(StageOutcome::Failed(diagnostic)) => panic!("seed failed: {}", diagnostic.code()),
+            Ok(StageOutcome::Skipped { reason }) => panic!("seed skipped: {reason}"),
+            Err(error) => panic!("seed runtime error: {error}"),
+        }
+        assert!(matches!(
+            evaluator
+                .execute_project(
+                    &repository,
+                    identity,
+                    [43; 16],
+                    [44; 32],
+                    &project,
+                    "main.exercise",
+                )
+                .await,
+            Ok(StageOutcome::Failed(_))
+        ));
+        let state = RuntimeState::open(&repository, identity, [44; 32])
+            .await
+            .expect("reopened runtime");
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(7.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(8.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_five_module_project_executes_seed_and_exercise() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [51; 16],
+            repository_id: [52; 16],
+        };
+        let evaluator = DurableTransactionalEvaluator::default();
+        let project = authoritative_project();
+
+        for entry in ["main.seed", "main.exercise"] {
+            match evaluator
+                .execute_project(&repository, identity, [53; 16], [54; 32], &project, entry)
+                .await
+            {
+                Ok(StageOutcome::Passed) => {}
+                Ok(StageOutcome::Failed(diagnostic)) => {
+                    panic!("{entry} failed: {}", diagnostic.code())
+                }
+                Ok(StageOutcome::Skipped { reason }) => panic!("{entry} skipped: {reason}"),
+                Err(error) => panic!("{entry} runtime error: {error}"),
+            }
+        }
+        let state = RuntimeState::open(&repository, identity, [54; 32])
+            .await
+            .expect("reopened runtime");
+        let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
+            orna_foundation_v1::OvbRaw::Text("north".into()),
+            orna_foundation_v1::OvbRaw::Text("pencil".into()),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        assert!(
+            state
+                .committed_table_row("Stock", &north)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn relation_lowering_requires_exact_declared_key_order() {
+        let keys = std::collections::BTreeMap::from([(
+            String::from("Stock"),
+            vec![String::from("location"), String::from("sku")],
+        )]);
+        let ordered = orna_syntax_v1::parse_expression(
+            r#"Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one()"#,
+        );
+        assert!(ordered.is_ok());
+        assert!(super::relation_lookup(&ordered.value, &keys).is_some());
+
+        let reordered = orna_syntax_v1::parse_expression(
+            r#"Stock | filter(stock => stock.sku == "pencil" && stock.location == "north") | one()"#,
+        );
+        assert!(reordered.is_ok());
+        assert!(super::relation_lookup(&reordered.value, &keys).is_none());
+
+        let non_key = orna_syntax_v1::parse_expression(
+            r#"Stock | filter(stock => stock.location == "north" && stock.quantity == 12) | one()"#,
+        );
+        assert!(non_key.is_ok());
+        assert!(super::relation_lookup(&non_key.value, &keys).is_none());
+
+        let duplicate_key = orna_syntax_v1::parse_expression(
+            r#"Stock | filter(stock => stock.location == "north" && stock.location == "south") | one()"#,
+        );
+        assert!(duplicate_key.is_ok());
+        assert!(super::relation_lookup(&duplicate_key.value, &keys).is_none());
     }
 }
 
