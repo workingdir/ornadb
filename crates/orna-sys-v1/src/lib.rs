@@ -200,18 +200,18 @@ pub struct AdmissionRequest<T> {
     pub context: InvocationContext,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct InvocationIdentity(String);
-impl InvocationIdentity {
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl fmt::Debug for InvocationIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InvocationIdentity(<withheld>)")
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionBoundary {
     pub invocation: InvocationId,
-    pub identity: InvocationIdentity,
+    identity: InvocationIdentity,
     pub function: FunctionIdentity,
     pub arguments: ArgumentMap,
     pub mode: InvocationMode,
@@ -1264,6 +1264,37 @@ mod tests {
             _ => unreachable!(),
         };
         assert_ne!(identity(first), identity(second));
+    }
+    #[test]
+    fn protected_argument_identities_remain_private_but_enforce_idempotency() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut first = request(
+            None,
+            args(vec![Argument {
+                name: "a".into(),
+                value: TypedValue::protected(ty("Int"), "1234"),
+            }]),
+        );
+        first.idempotency_key = Some("key".into());
+
+        let boundary = match runtime.admit(first.clone()).unwrap() {
+            Admission::New { boundary, .. } => boundary,
+            _ => unreachable!(),
+        };
+        let rendered = format!("{boundary:?}");
+        assert!(rendered.contains("InvocationIdentity(<withheld>)"));
+        assert!(!rendered.contains("1234"));
+        assert!(!rendered.contains(boundary.identity.0.as_str()));
+
+        let mut different_secret = first;
+        different_secret.arguments = args(vec![Argument {
+            name: "a".into(),
+            value: TypedValue::protected(ty("Int"), "5678"),
+        }]);
+        assert!(matches!(
+            runtime.admit(different_secret),
+            Err(AdmissionError::IdempotencyMismatch)
+        ));
     }
     #[test]
     fn rejects_before_effect_boundary() {
