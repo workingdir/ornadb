@@ -928,7 +928,32 @@ impl<S: orna_foundation_v1::RuntimeIdentityStore> orna_foundation_v1::Repository
     fn committed_snapshot(
         &self,
     ) -> Result<Option<orna_foundation_v1::CanonicalSnapshot>, Self::Error> {
-        Ok(None)
+        let Some(head) = self
+            .repository
+            .head()
+            .map_err(OrnaRepositoryAdapterError::Repository)?
+        else {
+            return Ok(None);
+        };
+        let oid =
+            decode_object_id(head.as_str()).map_err(OrnaRepositoryAdapterError::Repository)?;
+        let algorithm = match oid.len() {
+            20 => orna_foundation_v1::GitHash::Sha1,
+            32 => orna_foundation_v1::GitHash::Sha256,
+            _ => {
+                return Err(OrnaRepositoryAdapterError::Repository(
+                    RepositoryError::InvalidObjectId,
+                ));
+            }
+        };
+        Ok(Some(orna_foundation_v1::CanonicalSnapshot::Commit {
+            database: self
+                .runtime
+                .database_id()
+                .map_err(OrnaRepositoryAdapterError::Runtime)?,
+            algorithm,
+            oid,
+        }))
     }
     fn capture_cwd(
         &self,
@@ -961,4 +986,21 @@ impl<S: orna_foundation_v1::RuntimeIdentityStore> orna_foundation_v1::Repository
             .compare_and_set_cwd(expected, next)
             .map_err(OrnaRepositoryAdapterError::Runtime)
     }
+}
+
+fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RepositoryError::InvalidObjectId);
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(RepositoryError::InvalidObjectId)?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(RepositoryError::InvalidObjectId)?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+    Ok(bytes)
 }
