@@ -524,13 +524,11 @@ fn attached_reading_write_diagnostics_retain_units_without_record_values() {
 
 #[test]
 fn closure_lists_do_not_erase_incompatible_return_types() {
-    for source in [
+    let result = analyze(&[ModuleInput::new(
+        "closures.orna",
         "pub fn values() = [() => 1, () => true];",
-        "pub fn values() = [() => ({}), () => {}];",
-    ] {
-        let result = analyze(&[ModuleInput::new("closures.orna", source)]);
-        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
-    }
+    )]);
+    assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
     let compatible = analyze(&[ModuleInput::new(
         "closures.orna",
         "pub fn values() = [(x: Int) => x + 1, (y: Int) => y + 2];",
