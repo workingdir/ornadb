@@ -68,6 +68,8 @@ impl RuntimeEvaluator for CompositeEvaluator {
             self.transactional.run_scenario(scenario)
         } else if live_keyed_update_contract(scenario) {
             run_live_keyed_update_scenario(scenario)
+        } else if live_unkeyed_update_contract(scenario) {
+            run_live_unkeyed_update_scenario(scenario)
         } else if live_resync_contract(scenario) {
             run_live_resync_scenario(scenario)
         } else if sys_rt_rename_contract(scenario) {
@@ -196,6 +198,84 @@ fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnosti
         || replay[0].page.get("contact/bob/email") != Some(&"bob@example.test".into())
     {
         return scenario_failure("keyed update changed an unrelated row or missed Alice");
+    }
+    StageOutcome::Passed
+}
+
+fn live_unkeyed_update_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LIVE-002"
+        && scenario.title == "Unkeyed value still updates"
+        && scenario.given == ["page contains opaque/unkeyed custom value"]
+        && scenario.when == ["value changes"]
+        && scenario.then == ["nearest stable subtree is replaced"]
+        && scenario.requirements == ["ORNA-LIVE-002"]
+}
+
+fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
+    if !live_unkeyed_update_contract(scenario) {
+        return StageOutcome::Skipped {
+            reason: "scenario has no implemented execution contract in the serving runtime".into(),
+        };
+    }
+    let mut serving = match Serving::new(ServingLimits::default()) {
+        Ok(serving) => serving,
+        Err(_) => return scenario_failure("serving limits rejected the unkeyed live scenario"),
+    };
+    let subscribe = Envelope {
+        request: Some([21; 16]),
+        watch: None,
+        message: Message::Subscribe {
+            resource: [22; 16],
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".into(),
+                supported_kinds: vec!["text".into()],
+            },
+        },
+        extensions: BTreeMap::new(),
+    };
+    if serving
+        .admit(
+            [23; 16],
+            Credential::new([24; 32]),
+            Origin([25; 16]),
+            &subscribe,
+        )
+        .is_err()
+    {
+        return scenario_failure("serving rejected the unkeyed live session admission");
+    }
+    for (revision, value) in [(1, "opaque-v1"), (2, "opaque-v2")] {
+        if serving
+            .apply_patch(
+                [23; 16],
+                revision - 1,
+                revision,
+                &[Patch::Set {
+                    key: "page/custom/value".into(),
+                    value: value.into(),
+                }],
+                RetainedPin {
+                    revision,
+                    fingerprint: [revision as u8; 32],
+                },
+            )
+            .is_err()
+        {
+            return scenario_failure("serving rejected the unkeyed subtree replacement");
+        }
+    }
+    let replay = match serving.resync([23; 16], 1) {
+        Ok(replay) => replay,
+        Err(_) => return scenario_failure("serving could not replay the unkeyed update"),
+    };
+    if replay.len() != 1
+        || replay[0].revision != 2
+        || replay[0].page.get("page/custom/value") != Some(&"opaque-v2".into())
+    {
+        return scenario_failure("unkeyed value did not replace the stable subtree");
     }
     StageOutcome::Passed
 }
@@ -334,7 +414,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, keyed-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, keyed/unkeyed-live/resync and sys runtime-root contracts, and the two bounded transactional scenarios execute; module, effectful, and remaining scenario stages remain explicit skips".into(),
                 ),
             ]
             .into_iter()
@@ -346,6 +426,7 @@ fn main() {
                 "TXN-001",
                 "TXN-002",
                 "LIVE-001",
+                "LIVE-002",
                 "LIVE-003",
                 "SYS-RT-RENAME-100",
             ]
@@ -364,8 +445,25 @@ fn main() {
 mod tests {
     use super::{
         Scenario, StageOutcome, run_live_keyed_update_scenario, run_live_resync_scenario,
-        run_sys_rt_rename_scenario,
+        run_live_unkeyed_update_scenario, run_sys_rt_rename_scenario,
     };
+
+    #[test]
+    fn unkeyed_live_update_replaces_the_stable_subtree() {
+        let scenario = Scenario {
+            id: "LIVE-002".into(),
+            title: "Unkeyed value still updates".into(),
+            given: vec!["page contains opaque/unkeyed custom value".into()],
+            when: vec!["value changes".into()],
+            then: vec!["nearest stable subtree is replaced".into()],
+            requirements: vec!["ORNA-LIVE-002".into()],
+            evidence_level: "implementation scenario, not executed by an Orna engine".into(),
+        };
+        assert!(matches!(
+            run_live_unkeyed_update_scenario(&scenario),
+            StageOutcome::Passed
+        ));
+    }
 
     #[test]
     fn keyed_live_update_preserves_unrelated_rows() {
