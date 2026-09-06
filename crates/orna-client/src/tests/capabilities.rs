@@ -1504,6 +1504,44 @@ fn retained_v11_math_functions_execute_through_the_normal_client_path() {
         .id();
     let result = evaluate_client_function(&active, function).expect("dogfood function evaluates");
     assert_eq!(result.value(), &RuntimeValue::Integer(5));
+
+    let authorisation = authorise(active.pair(), function);
+    let limits =
+        super::super::vm::ClientVmArtifactLimits::new(1024, 64, 1024).expect("valid VM limits");
+    let runtime_offer = super::super::vm::RuntimeOfferWitness::from_parts(
+        1,
+        0,
+        "orna-runtime-test",
+        "0.1.0",
+        "test-build",
+        "linux-x86_64",
+        3,
+        1,
+        &[],
+        &[],
+    )
+    .expect("valid runtime offer");
+    let registry = super::super::vm::ClientVmInvocationRegistry::new();
+    let mut host = super::super::vm::ClientVmHostContext::new(&registry, runtime_offer, limits)
+        .expect("valid VM host");
+    let admission = super::super::vm::admit_client_function(
+        &active,
+        &authorisation,
+        &mut host,
+        limits,
+        &[],
+        &[],
+    )
+    .expect("canonical V11 math caller should be admitted");
+    let admitted = super::super::vm::execute_admitted_pure_client_function(
+        &active,
+        &authorisation,
+        &host,
+        &admission,
+        &[],
+    )
+    .expect("admitted V11 math caller should execute");
+    assert_eq!(admitted.value(), &RuntimeValue::Integer(5));
 }
 
 #[test]
