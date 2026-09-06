@@ -2962,11 +2962,12 @@ impl WebSocketState {
                     }
                 }
                 8 => {
+                    validate_close_payload(&payload)?;
                     self.closed = true;
+                    self.fragment = None;
+                    self.pending.clear();
                     events.push(SocketEvent::Close);
-                    if !self.pending.is_empty() {
-                        return Err(Error::Closed);
-                    }
+                    break;
                 }
                 9 => events.push(SocketEvent::Ping(payload)),
                 10 => events.push(SocketEvent::Pong),
@@ -2984,6 +2985,22 @@ enum SocketEvent {
     Close,
 }
 type ParsedFrame = (usize, bool, u8, Vec<u8>);
+
+fn validate_close_payload(payload: &[u8]) -> Result<()> {
+    if payload.is_empty() {
+        return Ok(());
+    }
+    if payload.len() == 1 {
+        return Err(Error::InvalidFrame);
+    }
+    let code = u16::from_be_bytes([payload[0], payload[1]]);
+    if !(matches!(code, 1000..=1003 | 1007..=1014) || matches!(code, 3000..=4999)) {
+        return Err(Error::InvalidFrame);
+    }
+    core::str::from_utf8(&payload[2..])
+        .map(|_| ())
+        .map_err(|_| Error::InvalidFrame)
+}
 
 fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
     if bytes.len() < 2 {
