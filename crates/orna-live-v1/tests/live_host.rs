@@ -1611,6 +1611,62 @@ fn http_resume_retires_the_active_attachment_without_closing_the_session() {
 }
 
 #[test]
+fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let cookie = token(&created);
+    let upgrade = |attachment| {
+        let mut request = wire("GET", "/orna/live/01010101-0101-0101-0101-010101010101", "");
+        request.headers.extend([
+            ("connection".into(), "Upgrade".into()),
+            ("upgrade".into(), "websocket".into()),
+            ("sec-websocket-version".into(), "13".into()),
+            (
+                "sec-websocket-key".into(),
+                "dGhlIHNhbXBsZSBub25jZQ==".into(),
+            ),
+            ("sec-websocket-protocol".into(), SUBPROTOCOL.into()),
+            ("cookie".into(), format!("orna_session={cookie}")),
+        ]);
+        (request, attachment)
+    };
+    assert_eq!(
+        block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 1)).status,
+        101
+    );
+    assert_eq!(
+        block_on(transport.upgrade(upgrade([6; 16]).0, [6; 16], 2)).status,
+        101
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 3)),
+        Err(Error::Closed)
+    );
+    assert_eq!(
+        block_on(transport.close_attachment([6; 16], 3)),
+        Ok(FrameOutcome::Closed)
+    );
+}
+
+#[test]
 fn http_contract_has_stable_status_headers_and_redacted_errors() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
