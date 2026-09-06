@@ -515,6 +515,20 @@ impl CheckoutPlanToken {
     }
 }
 
+/// An opaque admission capability for one exact force-discard checkout.
+///
+/// The capability can only be produced after the locked preflight, force
+/// witness, logical validation, and canonical discard set all agree. Its
+/// private contents prevent callers from replacing any of those bindings
+/// before a future journaled executor consumes the capability.
+#[must_use]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedCheckoutDiscard {
+    preflight: CheckoutPreflight,
+    force_token: CheckoutPlanToken,
+    discard_paths: Vec<ManagedPath>,
+}
+
 /// The failure boundary for a checkout that validates its logical candidate
 /// while the repository mutation lock is held.
 #[derive(Debug)]
@@ -1666,7 +1680,7 @@ impl Repository {
         force: bool,
         token: Option<&CheckoutPlanToken>,
         discard_paths: &[ManagedPath],
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<ValidatedCheckoutDiscard, RepositoryError> {
         self.validate_checkout_discard_set_with_validation(
             plan,
             force,
@@ -1694,7 +1708,7 @@ impl Repository {
         token: Option<&CheckoutPlanToken>,
         discard_paths: &[ManagedPath],
         validate: F,
-    ) -> Result<(), CheckoutExecutionError<E>>
+    ) -> Result<ValidatedCheckoutDiscard, CheckoutExecutionError<E>>
     where
         F: FnOnce(&Repository, &CheckoutPreflight) -> Result<(), E>,
     {
@@ -1707,7 +1721,11 @@ impl Repository {
         plan.authorize_force(force, token)
             .map_err(CheckoutExecutionError::Repository)?;
         if discard_paths == plan.git.discardable_paths() {
-            Ok(())
+            Ok(ValidatedCheckoutDiscard {
+                preflight: plan.clone(),
+                force_token: *token.expect("authorized force checkout has a token"),
+                discard_paths: discard_paths.to_vec(),
+            })
         } else {
             Err(CheckoutExecutionError::Repository(
                 RepositoryError::CheckoutDiscardSetMismatch,

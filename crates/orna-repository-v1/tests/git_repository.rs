@@ -655,7 +655,8 @@ fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
     let token = plan.force_token();
     let before = repo.cwd_generation(RuntimeGeneration::new(28)).unwrap();
 
-    repo.validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+    let _validated = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
         .unwrap();
     assert_eq!(
         repo.cwd_generation(RuntimeGeneration::new(28)).unwrap(),
