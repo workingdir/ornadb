@@ -18,7 +18,9 @@ use orna_core::{
     system::{SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID},
     value::{EnumValue, ResultColumn, ResultRow, ResultRows, RuntimeFloat},
 };
-use orna_standard::{STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID};
+use orna_standard::{
+    STD_CLI_REPL_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
+};
 use std::time::UNIX_EPOCH;
 
 const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
@@ -937,6 +939,33 @@ fn sealed_standard_dispatch_rejects_unsupported_artifact_before_execution() {
             })
         ));
     }
+}
+
+#[test]
+fn sealed_standard_dispatch_selects_the_canonical_cli_client_plan() {
+    let standard = orna_standard::verify_standard_library_v11_snapshot(
+        orna_standard::retained_standard_library_v11_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let artifact = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == STD_CLI_REPL_FUNCTION_ID)
+        .expect("canonical CLI executable")
+        .revision()
+        .artifact()
+        .clone();
+    let revision = sealed_standard_revision_with_artifact(STD_CLI_REPL_FUNCTION_ID, artifact);
+    let active = sealed_test_active_revision(RevisionPair::new(
+        SourceRevisionId::from_bytes([0xd7; 16]),
+        CatalogueRevisionId::from_bytes([0xd8; 16]),
+    ));
+
+    assert_eq!(
+        select_checked_standard_artifact_executor(&active, &revision)
+            .expect("the canonical CLI artifact must be admitted"),
+        CheckedStandardArtifactExecutor::ClientExpression
+    );
 }
 
 #[test]
