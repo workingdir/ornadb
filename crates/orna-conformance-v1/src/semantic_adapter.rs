@@ -18,7 +18,7 @@ use orna_evaluator_v1::{
     invoke_named_with_effects,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
-use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -464,6 +464,37 @@ impl BoundedEvaluator {
         }
     }
 
+    /// Loads pure standard-library source only after every module is verified
+    /// against the caller's pinned dependency profile. The staged evaluator is
+    /// published only when the complete bundle is admitted; effects, tables,
+    /// and streams remain outside this bounded source-execution seam.
+    pub fn load_standard_sources(
+        &mut self,
+        profile: &StandardDependencyProfile,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> StageOutcome<Diagnostic> {
+        let mut sources = sources.into_iter().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        if Catalogue::from_standard_sources(profile, sources.clone()).is_err() {
+            return StageOutcome::Failed(standard_profile_diagnostic());
+        }
+        let mut staged = self.clone();
+        for (logical_path, source) in sources {
+            let unit = SourceUnit {
+                fixture_id: format!("standard:{logical_path}"),
+                source_id: logical_path,
+                parse_as: "module_unit".into(),
+                source,
+            };
+            match staged.evaluate_module(&unit) {
+                StageOutcome::Passed => {}
+                outcome => return outcome,
+            }
+        }
+        *self = staged;
+        StageOutcome::Passed
+    }
+
     fn evaluate_unit(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         match unit.parse_as.as_str() {
             "row_unit" | "expression_unit" | "repl_unit" => {
@@ -567,6 +598,16 @@ impl BoundedEvaluator {
             reason: "project execution requires an offline empty-state project whose modules contain only function declarations; tables, effects, and streams require the integrated runtime".into(),
         }
     }
+}
+
+fn standard_profile_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-STANDARD-PROFILE").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("pinned standard dependency source was rejected").expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
 }
 
 impl RuntimeEvaluator for BoundedEvaluator {
