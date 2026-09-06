@@ -2468,7 +2468,8 @@ impl LiveTransport {
         })
     }
 
-    /// Takes attachment identities retired by successful HTTP session resume.
+    /// Takes attachment identities retired by successful HTTP session resume
+    /// or deletion.
     /// The executable host uses these identities to cancel and join the old
     /// socket task without changing session-owned work.
     pub fn take_retired_attachments(&mut self) -> Vec<[u8; 16]> {
@@ -2619,8 +2620,16 @@ impl LiveTransport {
                 if !authorised {
                     return wire_error(410, "live.expired");
                 }
+                let retired = self
+                    .host
+                    .attachments
+                    .iter()
+                    .find_map(|(attachment, session)| (*session == id).then_some(*attachment));
                 match self.host.delete(DeleteRequest { id }, deletion).await {
                     Ok(()) => {
+                        if let Some(attachment) = retired {
+                            self.retired_attachments.push_back(attachment);
+                        }
                         self.sessions.remove(&id);
                         WireResponse {
                             status: 204,
