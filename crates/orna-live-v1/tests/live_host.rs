@@ -24,8 +24,11 @@ use orna_serving_v1::{Limits as ServingLimits, Serving};
 use std::{
     collections::BTreeMap,
     fs,
+    io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -553,6 +556,48 @@ fn async_http_connection_loop_writes_routed_responses_until_eof() {
     .unwrap();
     assert!(writer.into_inner().starts_with(b"HTTP/1.1 201 Created\r\n"));
     assert_eq!(connection.buffered_bytes(), 0);
+}
+
+#[test]
+fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut connection = HttpConnection::new(TransportLimits::default());
+        let mut authority = Authority;
+        let mut issuer = Issuer(7, None);
+        let mut deletion = Delete(true);
+        transport.serve_accepted_http_socket(
+            stream,
+            &mut connection,
+            &mut || 0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )
+    });
+
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut client = TcpStream::connect(address).unwrap();
+    client.write_all(request.as_bytes()).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap().unwrap();
+
+    assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
+    assert!(response.windows(4).any(|window| window == b"\r\n\r\n"));
 }
 
 #[test]
