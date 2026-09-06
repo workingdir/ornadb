@@ -230,6 +230,12 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         Self::new(self.source.chain(other.source))
     }
 
+    /// Pairs values with another relation in input order until either relation
+    /// is exhausted.
+    pub fn zip<Other: 'a>(self, other: Relation<'a, Other>) -> Relation<'a, (Item, Other)> {
+        Relation::new(self.source.zip(other.source))
+    }
+
     /// Returns adjacent overlapping pairs in input order.
     pub fn pairs(self) -> Relation<'a, (Item, Item)>
     where
@@ -1804,6 +1810,20 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn relation_zip_preserves_input_order_and_stops_at_the_shorter_relation() {
+        let pairs = super::Relation::new([1, 2, 3].into_iter())
+            .zip(super::Relation::new(['a', 'b'].into_iter()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(pairs, vec![(1, 'a'), (2, 'b')]);
+
+        let empty = super::Relation::new(std::iter::empty::<u8>())
+            .zip(super::Relation::new(["unused"].into_iter()))
+            .collect::<Vec<_>>();
+        assert!(empty.is_empty());
     }
 
     #[test]
