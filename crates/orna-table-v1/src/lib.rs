@@ -125,6 +125,18 @@ enum ActivationState {
     RolledBack,
 }
 
+/// A private copy of one activation overlay used for statement recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Savepoint<Key, Row> {
+    overlay: BTreeMap<Key, Option<Row>>,
+}
+
+/// A private copy of all relation overlays used for database statement recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseSavepoint<Table, Key, Row> {
+    overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+}
+
 type CommittedRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Row)> + 'a>;
 type OverlayRows<'a, Key, Row> = Box<dyn Iterator<Item = (&'a Key, &'a Option<Row>)> + 'a>;
 
@@ -510,6 +522,21 @@ where
         )))
     }
 
+    /// Captures the current private overlay for statement-level recovery.
+    pub fn savepoint(&self) -> Result<Savepoint<Key, Row>, TableError> {
+        self.require_open()?;
+        Ok(Savepoint {
+            overlay: self.overlay.clone(),
+        })
+    }
+
+    /// Restores a previously captured overlay without affecting committed rows.
+    pub fn rollback_to(&mut self, savepoint: Savepoint<Key, Row>) -> Result<(), TableError> {
+        self.require_open()?;
+        self.overlay = savepoint.overlay;
+        Ok(())
+    }
+
     /// Publishes every staged change together. Nested scopes cannot call this.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -610,6 +637,16 @@ where
 
     pub fn candidate_relation(&self) -> Result<Relation<'_, (Key, Row)>, TableError> {
         self.activation.candidate_relation()
+    }
+
+    /// Captures the parent's private overlay for statement-level recovery.
+    pub fn savepoint(&self) -> Result<Savepoint<Key, Row>, TableError> {
+        self.activation.savepoint()
+    }
+
+    /// Restores a previously captured parent overlay.
+    pub fn rollback_to(&mut self, savepoint: Savepoint<Key, Row>) -> Result<(), TableError> {
+        self.activation.rollback_to(savepoint)
     }
 
     /// Nested calls have no publication capability.
@@ -866,6 +903,24 @@ where
         Ok(Relation::new(CandidateScan::new(committed, overlay)))
     }
 
+    /// Captures every private relation overlay for statement-level recovery.
+    pub fn savepoint(&self) -> Result<DatabaseSavepoint<Table, Key, Row>, TableError> {
+        self.require_open()?;
+        Ok(DatabaseSavepoint {
+            overlay: self.overlay.clone(),
+        })
+    }
+
+    /// Restores a previously captured overlay without affecting committed rows.
+    pub fn rollback_to(
+        &mut self,
+        savepoint: DatabaseSavepoint<Table, Key, Row>,
+    ) -> Result<(), TableError> {
+        self.require_open()?;
+        self.overlay = savepoint.overlay;
+        Ok(())
+    }
+
     /// Publishes the overlays of every changed relation together.
     pub fn commit(&mut self) -> Result<(), TableError> {
         match self.state {
@@ -979,6 +1034,19 @@ where
         self.activation.candidate_relation(table)
     }
 
+    /// Captures the parent's private relation overlays for statement-level recovery.
+    pub fn savepoint(&self) -> Result<DatabaseSavepoint<Table, Key, Row>, TableError> {
+        self.activation.savepoint()
+    }
+
+    /// Restores previously captured parent relation overlays.
+    pub fn rollback_to(
+        &mut self,
+        savepoint: DatabaseSavepoint<Table, Key, Row>,
+    ) -> Result<(), TableError> {
+        self.activation.rollback_to(savepoint)
+    }
+
     /// Nested calls cannot independently publish the root's overlays.
     pub fn commit(&mut self) -> Result<(), TableError> {
         Err(TableError::ChildCannotCommit)
@@ -1079,6 +1147,65 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(table.committed(&1), None);
+    }
+
+    #[test]
+    fn statement_savepoint_restores_later_single_table_mutations() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        table
+            .activate(|activation| {
+                activation.insert(1, "one")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        let mut activation = table.begin();
+        activation.update(1, "earlier").unwrap();
+        let savepoint = activation.savepoint().unwrap();
+        activation.insert(2, "later").unwrap();
+        activation.delete(1).unwrap();
+        activation.rollback_to(savepoint).unwrap();
+
+        assert_eq!(activation.read(&1).unwrap(), Some(&"earlier"));
+        assert_eq!(activation.read(&2).unwrap(), None);
+        activation.commit().unwrap();
+
+        assert_eq!(table.committed(&1), Some(&"earlier"));
+        assert_eq!(table.committed(&2), None);
+    }
+
+    #[test]
+    fn nested_statement_savepoint_restores_parent_overlay() {
+        let mut table = TableRuntime::<u64, &'static str>::default();
+        let mut activation = table.begin();
+        let mut child = activation.child().unwrap();
+        child.insert(1, "earlier").unwrap();
+        let savepoint = child.savepoint().unwrap();
+        child.insert(2, "later").unwrap();
+        child.rollback_to(savepoint).unwrap();
+
+        assert_eq!(child.read(&1).unwrap(), Some(&"earlier"));
+        assert_eq!(child.read(&2).unwrap(), None);
+    }
+
+    #[test]
+    fn database_statement_savepoint_restores_later_cross_relation_mutations() {
+        let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
+        let mut activation = database.begin();
+        activation.insert("orders", 1, "earlier").unwrap();
+        let savepoint = activation.savepoint().unwrap();
+        activation.insert("audits", 1, "later").unwrap();
+        activation.insert("orders", 2, "later").unwrap();
+        activation.rollback_to(savepoint).unwrap();
+
+        assert_eq!(activation.read(&"orders", &1).unwrap(), Some(&"earlier"));
+        assert_eq!(activation.read(&"orders", &2).unwrap(), None);
+        assert_eq!(activation.read(&"audits", &1).unwrap(), None);
+        activation.commit().unwrap();
+
+        assert_eq!(database.committed(&"orders", &1), Some(&"earlier"));
+        assert_eq!(database.committed(&"orders", &2), None);
+        assert_eq!(database.committed(&"audits", &1), None);
     }
 
     #[test]
