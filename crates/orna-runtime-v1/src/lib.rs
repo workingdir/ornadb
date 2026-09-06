@@ -5,6 +5,7 @@
 //! This crate does not publish, project, compact, or contact a remote.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     future::{Future, Ready, ready},
     path::Path,
@@ -475,6 +476,29 @@ pub struct RuntimeState {
 pub struct RuntimeActivationContext {
     capture: CwdCapture,
     activation_time: SystemTime,
+}
+
+/// The immutable admission view for a table-backed activation.
+///
+/// The context and every requested relation are read from one database
+/// transaction, so evaluation cannot combine a generation from one durable
+/// state with rows from another.
+pub type RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTableActivationSnapshot {
+    context: RuntimeActivationContext,
+    table_rows: RuntimeTableRows,
+}
+
+impl RuntimeTableActivationSnapshot {
+    pub fn context(&self) -> &RuntimeActivationContext {
+        &self.context
+    }
+
+    pub fn table_rows(&self) -> &RuntimeTableRows {
+        &self.table_rows
+    }
 }
 
 impl RuntimeActivationContext {
@@ -1008,6 +1032,60 @@ impl RuntimeState {
         Ok(RuntimeActivationContext {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
+        })
+    }
+
+    /// Captures one activation context and its declared committed relations
+    /// from the same durable read transaction.
+    pub async fn begin_table_activation(
+        &self,
+        tables: &[&str],
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        for table in tables {
+            validate_table_name(table)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let context = RuntimeActivationContext {
+            capture: capture_tx(&transaction).await?,
+            activation_time: SystemTime::now(),
+        };
+        let mut table_rows = BTreeMap::new();
+        for table in tables {
+            if table_rows.contains_key(*table) {
+                continue;
+            }
+            let mut rows = transaction
+                .query(
+                    "SELECT row_key, row_value FROM table_row
+                     WHERE table_id = ?1 ORDER BY row_key",
+                    params![*table],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let mut values = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            {
+                values.push((
+                    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ));
+            }
+            table_rows.insert((*table).to_owned(), values);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RuntimeTableActivationSnapshot {
+            context,
+            table_rows,
         })
     }
 
@@ -4889,6 +4967,36 @@ mod tests {
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn table_activation_snapshot_pins_context_and_declared_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 2, Some(8)), table_mutation(6, 1, Some(9))],
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state
+            .begin_table_activation(&["books", "unused", "books"])
+            .await
+            .unwrap();
+        assert_eq!(snapshot.context().capture().generation(), &BigInt::from(1));
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![8])])
+        );
+        assert_eq!(snapshot.table_rows().get("unused"), Some(&Vec::new()));
+        assert_eq!(snapshot.table_rows().len(), 2);
     }
 
     #[tokio::test]
