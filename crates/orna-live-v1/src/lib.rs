@@ -1,9 +1,12 @@
 //! A small transport-facing adapter for canonical `orna.present.v1` sessions.
 //!
 //! Hosts provide request routing, credential issuance, and durable deletion;
-//! this crate owns no socket or HTTP implementation. All public failures are
-//! stable redacted codes and inbound protocol bytes are decoded canonically.
+//! this crate owns bounded HTTP framing and an injectable byte-stream loop but
+//! leaves bind, TLS, clock, and WebSocket ownership at the executable edge.
+//! All public failures are stable redacted codes and inbound protocol bytes
+//! are decoded canonically.
 
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
@@ -1862,6 +1865,25 @@ impl core::fmt::Display for HttpConnectionError {
 
 impl std::error::Error for HttpConnectionError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpIoError {
+    Read,
+    Write,
+    Transport(HttpConnectionError),
+}
+
+impl core::fmt::Display for HttpIoError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read => formatter.write_str("HTTP connection read failed"),
+            Self::Write => formatter.write_str("HTTP connection write failed"),
+            Self::Transport(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for HttpIoError {}
+
 impl HttpConnection {
     #[must_use]
     pub fn new(limits: TransportLimits) -> Self {
@@ -2251,6 +2273,54 @@ impl LiveTransport {
             );
         }
         Ok(responses)
+    }
+
+    /// Serves the HTTP session lifecycle over an injected byte stream until
+    /// EOF. Binding, TLS, clock ownership, and WebSocket handoff stay with the
+    /// executable host; this loop only reads, routes, and writes bounded HTTP.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted read, write, parser, or response-encoding error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve_http_connection<R, W>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        connection: &mut HttpConnection,
+        now: u64,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let mut chunk = [0; 8192];
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .await
+                .map_err(|_| HttpIoError::Read)?;
+            if read == 0 {
+                return Ok(());
+            }
+            let responses = self
+                .handle_http_read(connection, &chunk[..read], now, authority, issuer, deletion)
+                .await
+                .map_err(HttpIoError::Transport)?;
+            let wrote_response = !responses.is_empty();
+            for response in responses {
+                writer
+                    .write_all(&response)
+                    .await
+                    .map_err(|_| HttpIoError::Write)?;
+            }
+            if wrote_response {
+                writer.flush().await.map_err(|_| HttpIoError::Write)?;
+            }
+        }
     }
 
     /// Validates the RFC 6455 handshake and attaches the cookie-authenticated
