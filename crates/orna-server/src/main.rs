@@ -2498,7 +2498,10 @@ mod tests {
             (vec!["orna", "-h"], Command::Help(HelpTopic::TopLevel)),
             (vec!["orna", "-V"], Command::Version),
             (vec!["orna", "repl", "-h"], Command::Help(HelpTopic::Repl)),
-            (vec!["orna", "server", "-h"], Command::Help(HelpTopic::Server)),
+            (
+                vec!["orna", "server", "-h"],
+                Command::Help(HelpTopic::Server),
+            ),
             (
                 vec!["orna", "server", "run", "-h"],
                 Command::Help(HelpTopic::ServerRun),
@@ -2507,13 +2510,22 @@ mod tests {
                 vec!["orna", "server", "backend-shell", "-h"],
                 Command::Help(HelpTopic::ServerBackendShell),
             ),
-            (vec!["orna", "runtime", "-h"], Command::Help(HelpTopic::Runtime)),
+            (
+                vec!["orna", "runtime", "-h"],
+                Command::Help(HelpTopic::Runtime),
+            ),
             (
                 vec!["orna", "runtime", "describe", "-h"],
                 Command::Help(HelpTopic::Runtime),
             ),
-            (vec!["orna", "source", "-h"], Command::Help(HelpTopic::Source)),
-            (vec!["orna", "invoke", "-h"], Command::Help(HelpTopic::Invoke)),
+            (
+                vec!["orna", "source", "-h"],
+                Command::Help(HelpTopic::Source),
+            ),
+            (
+                vec!["orna", "invoke", "-h"],
+                Command::Help(HelpTopic::Invoke),
+            ),
             (vec!["orna", "state", "-h"], Command::Help(HelpTopic::State)),
             (
                 vec!["orna", "inspect", "-h"],
