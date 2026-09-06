@@ -19,9 +19,15 @@ use orna_evaluator_v1::{
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation};
+use orna_runtime_v1::{
+    ListStreamSource, NoFault, RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler,
+    StreamHandlerResult, StreamItem, StreamRunOutcome, StreamTableMutationBatch, TableMutation,
+};
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
+use orna_stream_v1::{
+    CheckpointKey, Component, ConsumerIdentity, DiagnosticClass, DiagnosticCode, SafeDiagnostic,
+};
 use orna_syntax_v1::{Declaration, Expr, Pattern, parse_expression, parse_module};
 use orna_table_v1::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use sha2::{Digest, Sha256};
@@ -970,6 +976,407 @@ impl Default for DurableTransactionalEvaluator {
     }
 }
 
+impl DurableTransactionalEvaluator {
+    /// Runs the deliberately narrow declarative finite-list bridge through the
+    /// durable stream runner. It admits one literal `Stream.from_list`, one
+    /// explicitly keyed table, and one `for_each` insert body; it does not
+    /// interpret arbitrary stream expressions or administrative APIs.
+    pub async fn execute_list_stream_source(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        unit: &SourceUnit,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let mut bridge = match admit_list_stream_source(unit, self.limits, &self.entry) {
+            Ok(bridge) => bridge,
+            Err(outcome) => return Ok(*outcome),
+        };
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let writer = state.acquire_lease(owner_id).await?;
+        let key = bridge.checkpoint_key()?;
+        let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
+        let mut handler = ListTableHandler::new(bridge);
+        match state
+            .run_stream(
+                writer,
+                &key,
+                &mut source,
+                &mut handler,
+                &orna_runtime_v1::NeverCancelled,
+            )
+            .await
+        {
+            Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
+            Ok(_) => Ok(StageOutcome::Skipped {
+                reason: "literal list stream did not exhaust".into(),
+            }),
+            Err(error) => Ok(StageOutcome::Failed(stream_error_diagnostic(error))),
+        }
+    }
+}
+
+struct ListStreamBridge {
+    source_identity: String,
+    source_id: String,
+    entry: String,
+    table: String,
+    key_field: String,
+    parameter: String,
+    insert_row: Expr,
+    payloads: Vec<Vec<u8>>,
+}
+
+impl ListStreamBridge {
+    fn checkpoint_key(&self) -> Result<CheckpointKey, RuntimeError> {
+        fn component(value: &str) -> Result<Component, RuntimeError> {
+            Component::new(value).map_err(|_| RuntimeError::RecoveryInvalid)
+        }
+        Ok(CheckpointKey {
+            consumer: ConsumerIdentity {
+                principal: component("conformance")?,
+                root: component(&self.source_id)?,
+                function: component(&self.entry)?,
+                binding: component("from_list")?,
+            },
+            source_format: component("orna-stream-v1")?,
+            source: component(&self.source_identity)?,
+            partition_format: component("literal-list")?,
+            partition: component("default")?,
+            position_format: component("ordinal")?,
+        })
+    }
+}
+
+struct ListTableHandler {
+    bridge: ListStreamBridge,
+    next_mutation: u64,
+    digest: [u8; 32],
+}
+
+impl ListTableHandler {
+    fn new(bridge: ListStreamBridge) -> Self {
+        Self {
+            bridge,
+            next_mutation: 0,
+            digest: [9; 32],
+        }
+    }
+}
+
+impl StreamHandler for ListTableHandler {
+    fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+        let value = match Value::decode(&item.payload) {
+            Ok(value) => value,
+            Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+        };
+        let row =
+            match substitute_list_item(&self.bridge.insert_row, &self.bridge.parameter, &value) {
+                Some(row) => row,
+                None => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+            };
+        let key = match table_key(&row, &self.bridge.key_field) {
+            Ok(key) => key,
+            Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"ORNA-LIST-STREAM-MUTATION\0");
+        hasher.update(item.delivery.canonical().as_bytes());
+        hasher.update(self.next_mutation.to_be_bytes());
+        let id = hasher.finalize()[..16]
+            .try_into()
+            .expect("fixed digest length");
+        let encoded = match row.encode() {
+            Ok(encoded) => encoded,
+            Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+        };
+        let mutation = match TableMutation::new(id, &self.bridge.table, key, Some(encoded)) {
+            Ok(mutation) => mutation,
+            Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+        };
+        self.next_mutation = self.next_mutation.saturating_add(1);
+        let mut digest = Sha256::new();
+        digest.update(b"ORNA-LIST-STREAM-COMMIT\0");
+        digest.update(self.digest);
+        digest.update(mutation.id());
+        self.digest = digest.finalize().into();
+        StreamHandlerResult::CommitTable(StreamTableMutationBatch {
+            mutations: vec![mutation],
+            next_digest: self.digest,
+        })
+    }
+}
+
+fn stream_handler_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::DecodeRejected,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new(format!("literal list stream failed: {error}"))
+            .expect("bounded stream error"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
+fn admit_list_stream_source(
+    unit: &SourceUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+) -> Result<ListStreamBridge, AdmissionFailure> {
+    let (_, key_fields) = admit_transaction_source(unit, limits, entry)?;
+    if key_fields.len() != 1 {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "literal list stream bridge requires one explicit-key table".into(),
+        }));
+    }
+    let parsed = parse_module(&unit.source);
+    let body = parsed
+        .value
+        .items
+        .iter()
+        .find_map(|item| match &item.declaration {
+            Declaration::Function { signature, body } if signature.name == entry => Some(body),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            Box::new(StageOutcome::Skipped {
+                reason: "configured list stream entry function is not present".into(),
+            })
+        })?;
+    let (values, source_identity, parameter, table, insert_row) = literal_stream_pipeline(body)
+        .ok_or_else(|| Box::new(StageOutcome::Skipped {
+            reason: "literal list stream bridge requires Stream.from_list piped to one for_each insert body".into(),
+        }))?;
+    let (table_name, key_field) = key_fields.into_iter().next().expect("one table checked");
+    if table != table_name {
+        return Err(Box::new(StageOutcome::Skipped {
+            reason: "literal list stream insert must target the declared table".into(),
+        }));
+    }
+    let payloads = values
+        .iter()
+        .map(literal_value)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|values| {
+            values
+                .into_iter()
+                .map(|value| value.encode().ok())
+                .collect()
+        })
+        .ok_or_else(|| {
+            Box::new(StageOutcome::Skipped {
+                reason: "literal list stream values must be canonical literals".into(),
+            })
+        })?;
+    Ok(ListStreamBridge {
+        source_identity,
+        source_id: unit.source_id.clone(),
+        entry: entry.into(),
+        table: table_name,
+        key_field,
+        parameter,
+        insert_row: insert_row.clone(),
+        payloads,
+    })
+}
+
+fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, String, &Expr)> {
+    let Expr::Block {
+        statements,
+        tail: None,
+        ..
+    } = body
+    else {
+        return None;
+    };
+    let [orna_syntax_v1::Statement::Expression { value, .. }] = statements.as_slice() else {
+        return None;
+    };
+    let Expr::Binary { lhs, op, rhs, .. } = value else {
+        return None;
+    };
+    if op != "|" {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    if qualified_expr_path(callee).as_deref() != Some(["Stream", "from_list"].as_slice()) {
+        return None;
+    }
+    let [values, identity] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::List { elements, .. } = &values.value else {
+        return None;
+    };
+    let (
+        Some(name),
+        Expr::Literal {
+            text: source_identity,
+            kind: orna_syntax_v1::LiteralKind::String,
+            ..
+        },
+    ) = (&identity.name, &identity.value)
+    else {
+        return None;
+    };
+    let source_identity = literal_string(source_identity)?;
+    if name != "source_identity" || Component::new(source_identity.clone()).is_err() {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = rhs.as_ref()
+    else {
+        return None;
+    };
+    if qualified_expr_path(callee).as_deref() != Some(["for_each"].as_slice()) {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(parameter, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Block {
+        statements,
+        tail: None,
+        ..
+    } = body.as_ref()
+    else {
+        return None;
+    };
+    let [orna_syntax_v1::Statement::Expression { value: insert, .. }] = statements.as_slice()
+    else {
+        return None;
+    };
+    let Expr::Call {
+        callee, arguments, ..
+    } = insert
+    else {
+        return None;
+    };
+    let Expr::Field { base, name, .. } = callee.as_ref() else {
+        return None;
+    };
+    if name != "insert" {
+        return None;
+    }
+    let Expr::Name { text: table, .. } = base.as_ref() else {
+        return None;
+    };
+    let [row] = arguments.as_slice() else {
+        return None;
+    };
+    Some((
+        elements,
+        source_identity,
+        parameter.clone(),
+        table.clone(),
+        &row.value,
+    ))
+}
+
+fn qualified_expr_path(expr: &Expr) -> Option<Vec<&str>> {
+    match expr {
+        Expr::Name { text, .. } => Some(vec![text]),
+        Expr::Field { base, name, .. } => {
+            let mut path = qualified_expr_path(base)?;
+            path.push(name);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn literal_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Literal { text, kind, .. } => match kind {
+            orna_syntax_v1::LiteralKind::Integer => text.parse::<BigInt>().ok().map(Value::int),
+            orna_syntax_v1::LiteralKind::String => {
+                literal_string(text).and_then(|text| Value::new(OvbRaw::Text(text)).ok())
+            }
+            orna_syntax_v1::LiteralKind::Boolean => Value::new(OvbRaw::Bool(text == "true")).ok(),
+            orna_syntax_v1::LiteralKind::Null => Value::new(OvbRaw::Null).ok(),
+            _ => None,
+        },
+        Expr::List { elements, .. } => elements
+            .iter()
+            .map(literal_value)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|values| {
+                Value::new(OvbRaw::Array(
+                    values
+                        .into_iter()
+                        .map(|value| value.raw().clone())
+                        .collect(),
+                ))
+                .ok()
+            }),
+        Expr::Record { fields, .. } => fields
+            .iter()
+            .map(|field| {
+                Some((
+                    OvbRaw::Text(field.name.clone()),
+                    literal_value(&field.value)?.raw().clone(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+            .and_then(|fields| Value::new(OvbRaw::Map(fields)).ok()),
+        _ => None,
+    }
+}
+
+fn literal_string(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    (!body.contains('\\')).then(|| body.into())
+}
+
+fn substitute_list_item(expr: &Expr, parameter: &str, item: &Value) -> Option<Value> {
+    match expr {
+        Expr::Name { text, .. } if text == parameter => Some(item.clone()),
+        Expr::Field { base, name, .. } => match base.as_ref() {
+            Expr::Name { text, .. } if text == parameter => record_field(item, name),
+            _ => None,
+        },
+        Expr::Record { fields, .. } => fields
+            .iter()
+            .map(|field| {
+                Some((
+                    OvbRaw::Text(field.name.clone()),
+                    substitute_list_item(&field.value, parameter, item)?
+                        .raw()
+                        .clone(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+            .and_then(|fields| Value::new(OvbRaw::Map(fields)).ok()),
+        _ => literal_value(expr),
+    }
+}
+
 impl Default for TransactionalEvaluator {
     fn default() -> Self {
         Self::new("main", EvaluatorLimits::default())
@@ -1739,5 +2146,177 @@ mod durable_tests {
                     && value
                         == &orna_foundation_v1::OvbRaw::Text("changed".into()))
         ));
+    }
+}
+
+#[cfg(test)]
+mod list_stream_tests {
+    use super::{
+        DurableTransactionalEvaluator, SourceUnit, StageOutcome, stream_handler_diagnostic,
+    };
+    use orna_evaluator_v1::Limits;
+    use orna_foundation_v1::Value;
+    use orna_repository_v1::Repository;
+    use orna_runtime_v1::{
+        ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult,
+        StreamItem,
+    };
+    use orna_stream_v1::{AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity};
+    use std::{path::Path, process::Command};
+    use tempfile::TempDir;
+
+    fn git(path: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .expect("git command")
+                .success()
+        );
+    }
+
+    fn repository() -> (TempDir, Repository) {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init", "-q"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        (temp, repository)
+    }
+
+    fn identity() -> RuntimeIdentity {
+        RuntimeIdentity {
+            database_id: [21; 16],
+            repository_id: [22; 16],
+        }
+    }
+
+    fn source() -> SourceUnit {
+        SourceUnit {
+            fixture_id: "list-stream".into(),
+            source_id: "sensors.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Reading(id: Int) { value: Int, } fn main() { Stream.from_list([1, 2], source_identity: \"fixture:readings\") | for_each(value => { Reading.insert({ id: value, value: value }); }); }".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn literal_list_stream_reopens_without_duplicate_delivery() {
+        let (_temp, repository) = repository();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(&repository, identity(), [23; 16], [24; 32], &source())
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened runtime");
+        let first_generation = state
+            .capture()
+            .await
+            .expect("first capture")
+            .generation()
+            .clone();
+        for value in [1, 2] {
+            let key = Value::int(value.into()).encode().expect("encoded key");
+            assert!(
+                state
+                    .committed_table_row("Reading", &key)
+                    .await
+                    .expect("durable row read")
+                    .is_some()
+            );
+        }
+        drop(state);
+
+        assert!(matches!(
+            evaluator
+                .execute_list_stream_source(&repository, identity(), [23; 16], [24; 32], &source())
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("second reopened runtime");
+        assert_eq!(
+            state
+                .capture()
+                .await
+                .expect("second capture")
+                .generation()
+                .clone(),
+            first_generation,
+            "an exhausted reopened source must not publish duplicate table commits"
+        );
+    }
+
+    struct FailingHandler;
+
+    impl StreamHandler for FailingHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            StreamHandlerResult::Fail(stream_handler_diagnostic())
+        }
+    }
+
+    fn key() -> CheckpointKey {
+        let component = |value| Component::new(value).expect("static component");
+        CheckpointKey {
+            consumer: ConsumerIdentity {
+                principal: component("conformance"),
+                root: component("handler-failure"),
+                function: component("main"),
+                binding: component("from_list"),
+            },
+            source_format: component("orna-stream-v1"),
+            source: component("fixture:failure"),
+            partition_format: component("literal-list"),
+            partition: component("default"),
+            position_format: component("ordinal"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_failure_does_not_advance_literal_list_checkpoint() {
+        let (_temp, repository) = repository();
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("runtime");
+        let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
+        let key = key();
+        let payload = Value::int(1.into()).encode().expect("canonical payload");
+        let mut source = ListStreamSource::new(key.clone(), vec![payload]);
+        let mut handler = FailingHandler;
+
+        let outcome = state
+            .run_stream(
+                writer,
+                &key,
+                &mut source,
+                &mut handler,
+                &orna_runtime_v1::NeverCancelled,
+            )
+            .await
+            .expect("handler failure is a stream outcome");
+        assert!(matches!(
+            outcome,
+            orna_runtime_v1::StreamRunOutcome::Failed { delivered: 0, .. }
+        ));
+        assert!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&key)
+                .await
+                .expect("checkpoint")
+                .committed
+                .is_none(),
+            "a failed handler must leave the first literal list item uncommitted"
+        );
     }
 }
