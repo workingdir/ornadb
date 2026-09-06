@@ -404,6 +404,7 @@ impl<T> InvocationResult<T> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Runtime {
     id: RuntimeId,
+    generation: u64,
     next_invocation: u64,
     invocations: BTreeMap<InvocationId, StoredInvocation>,
     idempotency: BTreeMap<String, IdempotencyEntry>,
@@ -412,6 +413,7 @@ impl Runtime {
     pub fn new(id: RuntimeId) -> Self {
         Self {
             id,
+            generation: 1,
             next_invocation: 0,
             invocations: BTreeMap::new(),
             idempotency: BTreeMap::new(),
@@ -419,6 +421,20 @@ impl Runtime {
     }
     pub fn id(&self) -> &RuntimeId {
         &self.id
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Starts a new owner generation and invalidates every handle from the
+    /// previous generation. Live invocation state is deliberately not
+    /// reparented across an owner restart.
+    pub fn restart(&mut self) -> RuntimeId {
+        self.generation = self.generation.saturating_add(1);
+        self.id = RuntimeId::new(format!("{}@{}", self.id.as_str(), self.generation));
+        self.next_invocation = 0;
+        self.invocations.clear();
+        self.idempotency.clear();
+        self.id.clone()
     }
     pub fn admit<T>(
         &mut self,
@@ -690,6 +706,13 @@ impl RuntimeSupervisor {
         Self {
             runtime: Arc::new(Mutex::new(Runtime::new(id))),
         }
+    }
+
+    pub fn restart(&self) -> Result<RuntimeId, AdmissionError> {
+        self.runtime
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)
+            .map(|mut runtime| runtime.restart())
     }
 
     /// Admits a separate invocation and schedules exactly one worker for a new
@@ -1459,6 +1482,36 @@ mod tests {
             Err(AdmissionError::ExpiredHandle)
         );
     }
+
+    #[test]
+    fn restart_changes_runtime_generation_and_invalidates_prior_handles() {
+        let mut runtime = Runtime::new(RuntimeId::new("owner"));
+        let mut request = request(Some(value("Int", "1")), ArgumentMap::default());
+        request.idempotency_key = Some("key".into());
+        let old_id = runtime.id().clone();
+        let old_generation = runtime.generation();
+        let old_handle = match runtime.admit(request.clone()).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => unreachable!(),
+        };
+
+        let new_id = runtime.restart();
+
+        assert_ne!(new_id, old_id);
+        assert_eq!(runtime.id(), &new_id);
+        assert_eq!(runtime.generation(), old_generation + 1);
+        assert_eq!(
+            runtime.check_handle(&old_handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        let new_handle = match runtime.admit(request).unwrap() {
+            Admission::New { handle, .. } => handle,
+            _ => panic!("a restarted owner must not replay prior idempotency state"),
+        };
+        assert_ne!(new_handle.runtime(), old_handle.runtime());
+        assert_eq!(new_handle.invocation(), old_handle.invocation());
+    }
+
     #[test]
     fn expiration_releases_idempotency_key_with_its_invocation() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
