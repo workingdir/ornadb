@@ -456,7 +456,9 @@ impl CheckoutTarget {
 
 /// Read-only checkout preconditions. It is intentionally not an executable
 /// checkout plan yet: force consent, logical validation, and durable recovery
-/// remain separate boundaries owned by the higher repository layers.
+/// remain separate boundaries owned by the higher repository layers. Capturing
+/// it may initialize private coordination metadata, but never changes visible
+/// Git state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckoutPreflight {
     target: CheckoutTarget,
@@ -1215,6 +1217,29 @@ impl Repository {
             target,
             cwd,
         })
+    }
+
+    /// Revalidates a previously captured checkout preflight while holding the
+    /// same coordination lock future mutation will require. No ref, index,
+    /// worktree, or runtime state is written.
+    pub fn verify_checkout_preflight(
+        &self,
+        plan: &CheckoutPreflight,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let current_cwd = self.cwd_generation_locked(plan.cwd.runtime)?;
+        if current_cwd != plan.cwd {
+            return Err(RepositoryError::CheckoutPlanStale);
+        }
+        let selector = plan
+            .target
+            .branch_name()
+            .map_or_else(|| plan.target.commit().as_str().to_owned(), str::to_owned);
+        let current_target = self.resolve_checkout_target(&selector)?;
+        if current_target != plan.target {
+            return Err(RepositoryError::CheckoutPlanStale);
+        }
+        Ok(())
     }
 
     /// Explicitly resolves a Git selector to an immutable commit. This is the
@@ -2171,6 +2196,7 @@ pub enum RepositoryError {
     RepositoryBusy,
     GitIndexLockPresent,
     StaleHead,
+    CheckoutPlanStale,
     RuntimeCompletionRequired,
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
@@ -2212,6 +2238,7 @@ impl fmt::Display for RepositoryError {
                 f.write_str("Git index lock is present; resolve it with Git before retrying")
             }
             Self::StaleHead => f.write_str("Git HEAD changed during repository operation"),
+            Self::CheckoutPlanStale => f.write_str("checkout preflight is stale"),
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
             }
