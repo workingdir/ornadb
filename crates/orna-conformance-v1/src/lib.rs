@@ -647,6 +647,9 @@ pub struct Evidence {
     pub class: EvidenceClass,
     pub status: EvidenceStatus,
     pub detail: String,
+    /// Structured assertion used by traceability; callers must not infer it
+    /// by parsing the human-readable detail.
+    pub expectation_satisfied: bool,
     /// JSON serialization of the adapter's native diagnostic, including any
     /// shared SourceSpan, labels and structured payload it exposes.
     pub diagnostic: Option<Value>,
@@ -702,6 +705,32 @@ pub struct CoverageReport {
     pub unmapped_stage_evidence: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FixtureStageBinding {
+    pub requirement_id: String,
+    pub fixture_id: String,
+    pub fixture_path: String,
+    pub stage: Stage,
+    pub implementation_ref: String,
+    pub test_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineWitness {
+    pub requirement_id: String,
+    pub fixture_id: String,
+    pub fixture_path: String,
+    pub stage: Stage,
+    pub implementation_ref: String,
+    pub test_ref: String,
+    pub observed_status: EvidenceStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineWitnesses {
+    pub witnesses: Vec<EngineWitness>,
+}
+
 pub struct Harness {
     corpus: Corpus,
     claim: ImplementationClaim,
@@ -727,7 +756,7 @@ impl Harness {
         self
     }
     pub fn run<A: ConformanceAdapter>(&self, adapter: &mut A) -> RunReport {
-        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
+        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
         for fixture in &self.corpus.manifest.fixtures {
             let result = self.run_fixture(fixture, adapter);
             for stage in &result.stages {
@@ -775,6 +804,94 @@ impl Harness {
             .filter(|e| matches!(e.requirement_mapping, RequirementMapping::Unmapped { .. }))
             .count();
         report
+    }
+
+    /// Convert explicit reviewed bindings into execution witnesses only when
+    /// the current report contains the exact fixture/path/stage and that
+    /// stage passed its declared expectation. Static, model and skipped rows
+    /// can never become engine evidence through this boundary.
+    pub fn engine_witnesses(
+        &self,
+        report: &RunReport,
+        bindings: &[FixtureStageBinding],
+    ) -> Result<EngineWitnesses, String> {
+        let requirements = self
+            .corpus
+            .requirements
+            .iter()
+            .map(|requirement| requirement.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut witnesses = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            if !requirements.contains(binding.requirement_id.as_str()) {
+                return Err(format!(
+                    "unknown requirement binding: {}",
+                    binding.requirement_id
+                ));
+            }
+            let fixture = self
+                .corpus
+                .manifest
+                .fixtures
+                .iter()
+                .find(|fixture| fixture.id == binding.fixture_id)
+                .ok_or_else(|| format!("unknown fixture binding: {}", binding.fixture_id))?;
+            if fixture.path != binding.fixture_path {
+                return Err(format!(
+                    "fixture binding path mismatch: {}",
+                    binding.fixture_id
+                ));
+            }
+            let key = (
+                binding.requirement_id.as_str(),
+                binding.fixture_id.as_str(),
+                format!("{:?}", binding.stage),
+            );
+            if !seen.insert(key) {
+                return Err(format!(
+                    "duplicate fixture stage binding: {}",
+                    binding.fixture_id
+                ));
+            }
+            let result = report
+                .fixtures
+                .iter()
+                .find(|result| result.fixture == binding.fixture_id)
+                .ok_or_else(|| format!("fixture is absent from report: {}", binding.fixture_id))?;
+            let evidence = result
+                .stages
+                .iter()
+                .find(|evidence| evidence.stage.as_ref() == Some(&binding.stage))
+                .ok_or_else(|| {
+                    format!(
+                        "fixture stage is absent from report: {}",
+                        binding.fixture_id
+                    )
+                })?;
+            if !evidence.expectation_satisfied
+                || !matches!(
+                    evidence.class,
+                    EvidenceClass::Semantic | EvidenceClass::Runtime
+                )
+                || evidence.status == EvidenceStatus::Skipped
+            {
+                return Err(format!(
+                    "fixture stage is not executed evidence: {}",
+                    binding.fixture_id
+                ));
+            }
+            witnesses.push(EngineWitness {
+                requirement_id: binding.requirement_id.clone(),
+                fixture_id: binding.fixture_id.clone(),
+                fixture_path: binding.fixture_path.clone(),
+                stage: binding.stage.clone(),
+                implementation_ref: binding.implementation_ref.clone(),
+                test_ref: binding.test_ref.clone(),
+                observed_status: evidence.status.clone(),
+            });
+        }
+        Ok(EngineWitnesses { witnesses })
     }
     fn run_fixture<A: ConformanceAdapter>(
         &self,
@@ -878,6 +995,7 @@ impl Harness {
                         "expectation NOT satisfied"
                     }
                 ),
+                expectation_satisfied: correct,
                 diagnostic: failed_diagnostic(&outcome),
                 requirements: requirements.clone(),
                 requirement_mapping: requirement_mapping.clone(),
