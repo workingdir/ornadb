@@ -336,10 +336,11 @@ fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner
             "LIVE-001",
             "LIVE-002",
             "LIVE-003",
+            "LIVE-004",
             "SYS-RT-RENAME-100",
         ]
     );
-    for scenario_id in ["LIVE-004", "STREAM-001", "STREAM-002"] {
+    for scenario_id in ["STREAM-001", "STREAM-002"] {
         let result = report["scenarios"]
             .as_array()
             .expect("scenario results are an array")
