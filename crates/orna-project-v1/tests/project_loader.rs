@@ -79,6 +79,38 @@ fn carries_only_an_explicit_standard_dependency_profile() {
 }
 
 #[test]
+fn derives_standard_catalogue_only_from_the_pinned_profile_source_bundle() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        "use std.math.{increment}; pub fn run(value: Int): Int = increment(value);",
+    )]);
+    let source = "pub fn increment(value: Int): Int = value + 1;";
+    let profile = StandardDependencyProfile::from_sources(
+        "std-snapshot-1",
+        [("std/math.orna".into(), source.into())],
+    )
+    .unwrap();
+    let project = ProjectLoader::default()
+        .load_with_standard_profile(&repository, Some(profile))
+        .unwrap();
+
+    let catalogue = project
+        .standard_catalogue([("std/math.orna".into(), source.into())])
+        .unwrap()
+        .unwrap();
+    let analysis = analyze_with_catalogue(project.modules(), &catalogue);
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    assert_eq!(
+        ProjectLoader::default()
+            .load(&repository)
+            .unwrap()
+            .standard_catalogue([])
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../reference/Orna-1.0.0/examples/reference");
