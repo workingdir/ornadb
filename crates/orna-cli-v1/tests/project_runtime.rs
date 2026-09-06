@@ -1,4 +1,7 @@
-use std::process::{Command, Output};
+use std::{
+    fmt::Write,
+    process::{Command, Output},
+};
 
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
@@ -128,10 +131,13 @@ fn checkpoint_component(value: impl Into<String>) -> Component {
 }
 
 fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
-    let database = database_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let database = database_id.iter().fold(
+        String::with_capacity(database_id.len() * 2),
+        |mut database, byte| {
+            write!(&mut database, "{byte:02x}").expect("write database identity");
+            database
+        },
+    );
     CheckpointKey {
         consumer: ConsumerIdentity {
             principal: checkpoint_component(format!("database:{database}")),
