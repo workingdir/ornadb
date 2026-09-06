@@ -7,7 +7,7 @@
 //! are decoded canonically.
 
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_protocol_v1::{
@@ -1842,6 +1842,7 @@ impl ParsedHttpRequest {
 pub struct HttpConnection {
     limits: TransportLimits,
     buffered: Vec<u8>,
+    pending: VecDeque<ParsedHttpRequest>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1890,6 +1891,7 @@ impl HttpConnection {
         Self {
             limits,
             buffered: Vec::new(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -1936,6 +1938,15 @@ impl HttpConnection {
     #[must_use]
     pub const fn buffered_bytes(&self) -> usize {
         self.buffered.len()
+    }
+
+    fn push_one(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::result::Result<Option<ParsedHttpRequest>, HttpParseError> {
+        let parsed = self.push(bytes)?;
+        self.pending.extend(parsed);
+        Ok(self.pending.pop_front())
     }
 }
 
@@ -2297,6 +2308,37 @@ impl LiveTransport {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
     {
+        let mut clock = || now;
+        self.serve_http_connection_with_clock(
+            reader, writer, connection, &mut clock, authority, issuer, deletion,
+        )
+        .await
+    }
+
+    /// Serves an injected HTTP byte stream while taking a fresh timestamp for
+    /// every routed request. Complete requests are admitted and written one at
+    /// a time, so a failed write cannot cause later pipelined requests to run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted read, write, parser, or response-encoding error, or
+    /// an incomplete-request error when EOF arrives with retained bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve_http_connection_with_clock<R, W, C>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        connection: &mut HttpConnection,
+        clock: &mut C,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+        C: FnMut() -> u64,
+    {
         let mut chunk = [0; 8192];
         loop {
             let read = reader
@@ -2304,21 +2346,34 @@ impl LiveTransport {
                 .await
                 .map_err(|_| HttpIoError::Read)?;
             if read == 0 {
-                return Ok(());
+                return if connection.buffered_bytes() == 0 {
+                    Ok(())
+                } else {
+                    Err(HttpIoError::Transport(HttpConnectionError::Parse(
+                        HttpParseError::Incomplete,
+                    )))
+                };
             }
-            let responses = self
-                .handle_http_read(connection, &chunk[..read], now, authority, issuer, deletion)
-                .await
+            let mut next_request = connection
+                .push_one(&chunk[..read])
+                .map_err(HttpConnectionError::Parse)
                 .map_err(HttpIoError::Transport)?;
-            let wrote_response = !responses.is_empty();
-            for response in responses {
+            while let Some(request) = next_request {
+                let response = self
+                    .handle(request.into_request(), clock(), authority, issuer, deletion)
+                    .await
+                    .encode_http(self.limits)
+                    .map_err(HttpConnectionError::Encode)
+                    .map_err(HttpIoError::Transport)?;
                 writer
                     .write_all(&response)
                     .await
                     .map_err(|_| HttpIoError::Write)?;
-            }
-            if wrote_response {
                 writer.flush().await.map_err(|_| HttpIoError::Write)?;
+                next_request = connection
+                    .push_one(&[])
+                    .map_err(HttpConnectionError::Parse)
+                    .map_err(HttpIoError::Transport)?;
             }
         }
     }
