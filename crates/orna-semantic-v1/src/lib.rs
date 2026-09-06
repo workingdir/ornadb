@@ -424,6 +424,22 @@ impl Catalogue {
         Ok(catalogue)
     }
 
+    /// Replaces the matching source-backed standard modules in an existing
+    /// core catalogue after the source bundle has passed profile verification.
+    /// Core declarations remain available for system and language surfaces;
+    /// source-backed modules provide the executable standard declarations.
+    pub fn with_standard_sources(
+        mut self,
+        profile: &StandardDependencyProfile,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, StandardCatalogueError> {
+        let standard = Self::from_standard_sources(profile, sources)?;
+        for (namespace, header) in standard.modules {
+            self.modules.insert(namespace, header);
+        }
+        Ok(self)
+    }
+
     /// The stable core surface represented by the authoritative `stdlib/std`
     /// corpus.  It is intentionally a small declaration catalogue rather than
     /// executable standard-library source.
@@ -6349,6 +6365,36 @@ mod tests {
         assert_eq!(
             Catalogue::from_standard_sources(&profile, []),
             Err(StandardCatalogueError::MissingModule)
+        );
+    }
+
+    #[test]
+    fn verified_standard_sources_replace_matching_core_modules() {
+        let source = "pub fn increment(value: Int): Int = value + 1;";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-1",
+            [("std/math.orna".into(), source.into())],
+        )
+        .unwrap();
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&profile, [("std/math.orna".into(), source.into())])
+            .unwrap();
+        let analysis = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "client.orna",
+                "use std.math.{increment}; fn next(value: Int): Int = increment(value);",
+            )],
+            &catalogue,
+        );
+        assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+        assert_eq!(
+            Catalogue::authoritative_core().with_standard_sources(
+                &profile,
+                [("std/math.orna".into(), "pub fn broken( = 1;".into())],
+            ),
+            Err(StandardCatalogueError::Profile(
+                StandardProfileError::DigestMismatch
+            ))
         );
     }
 
