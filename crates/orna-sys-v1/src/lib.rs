@@ -910,6 +910,10 @@ impl RuntimeSupervisor {
         handle: &InvocationHandle<T>,
         reason: Option<Diagnostic>,
     ) -> Result<bool, AdmissionError> {
+        let _control = self
+            .control
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
         self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
@@ -920,6 +924,10 @@ impl RuntimeSupervisor {
         &self,
         handle: &InvocationHandle<T>,
     ) -> Result<InvocationState, AdmissionError> {
+        let _control = self
+            .control
+            .lock()
+            .map_err(|_| AdmissionError::RuntimeUnavailable)?;
         self.runtime
             .lock()
             .map_err(|_| AdmissionError::RuntimeUnavailable)?
@@ -1747,6 +1755,10 @@ mod tests {
         assert_ne!(handle.runtime(), &new_id);
         assert_eq!(
             supervisor.state(&handle),
+            Err(AdmissionError::ForeignRuntime)
+        );
+        assert_eq!(
+            supervisor.cancel(&handle, Some(diagnostic("late cancellation"))),
             Err(AdmissionError::ForeignRuntime)
         );
     }
