@@ -1441,6 +1441,44 @@ impl Repository {
         Ok(())
     }
 
+    /// Executes the Git carry-forward phase for a divergent checkout whose
+    /// locked preflight found no conflicting local paths.
+    ///
+    /// This is intentionally narrower than a complete Orna checkout: callers
+    /// must validate the target's logical state and coordinate runtime
+    /// activation before invoking this repository phase.  It never accepts a
+    /// force witness or discard set; a conflict fails before Git is asked to
+    /// change the CWD.
+    pub fn execute_nonconflicting_git_checkout(
+        &self,
+        plan: &CheckoutPreflight,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(plan)?;
+        if plan.expected_head.as_ref() == Some(plan.target.commit())
+            || !plan.git.conflicting_paths().is_empty()
+        {
+            return Err(RepositoryError::CheckoutExecutionUnsafe);
+        }
+
+        let mut command = self.command();
+        match plan.target() {
+            CheckoutTarget::Branch { name, .. } => {
+                command.args(["switch", "--"]).arg(name);
+            }
+            CheckoutTarget::Detached { commit } => {
+                command
+                    .args(["switch", "--detach", "--"])
+                    .arg(commit.as_str());
+            }
+        }
+        self.run(command)?;
+        if self.head()?.as_ref() != Some(plan.target.commit()) {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(())
+    }
+
     fn checkout_git_subplan(
         &self,
         current_head: Option<&GitCommitRef>,
