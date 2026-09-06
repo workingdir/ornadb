@@ -15,7 +15,7 @@ use orna_conformance_v1::{
 const REPL_TARGET: &str = "std.cli.repl";
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 const STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
-const STD_MATH_SOURCE: &str = "pub fn increment(value: Int): Int = value + 1;";
+const STD_MATH_SOURCE: &str = include_str!("stdlib/std/math.orna");
 
 fn standard_sources() -> [(String, String); 1] {
     [(STD_MATH_LOGICAL_PATH.into(), STD_MATH_SOURCE.into())]
