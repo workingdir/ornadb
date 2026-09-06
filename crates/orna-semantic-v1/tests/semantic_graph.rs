@@ -2054,6 +2054,41 @@ fn affine_collection_aggregates_preserve_absolute_values_and_reject_sum() {
 }
 
 #[test]
+fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
+    let exact = analyze(&[ModuleInput::new(
+        "readings.orna",
+        r#"
+            pub table Reading(id: Int) { decimal: Decimal, money: Money<GBP>, }
+            pub fn decimal_total(): Decimal = Reading | map(reading => reading.decimal) | sum;
+            pub fn money_total(): Money<GBP> = Reading | map(reading => reading.money) | sum;
+        "#,
+    )]);
+    assert!(exact.is_ok(), "{:?}", exact.diagnostics);
+
+    let absolute = analyze(&[ModuleInput::new(
+        "temperatures.orna",
+        "pub table Temperature(id: Int) { value: Float<C>, } pub fn total() = Temperature | map(row => row.value) | sum;",
+    )]);
+    assert!(
+        absolute
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "cannot sum absolute affine quantities")
+    );
+
+    let non_numeric = analyze(&[ModuleInput::new(
+        "labels.orna",
+        "pub table Label(id: Int) { value: Str, } pub fn total() = Label | map(row => row.value) | sum;",
+    )]);
+    assert!(
+        non_numeric
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message() == "sum requires a numeric element type")
+    );
+}
+
+#[test]
 fn inferred_function_summaries_propagate_through_project_calls_independent_of_input_order() {
     let result = analyze(&[
         ModuleInput::new(
