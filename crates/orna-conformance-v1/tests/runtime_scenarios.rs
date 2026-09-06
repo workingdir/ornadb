@@ -312,7 +312,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_skips_scenarios_without_orna_engine_witnesses() {
+fn published_report_only_promotes_exact_durable_transaction_contracts() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -325,20 +325,28 @@ fn published_report_skips_scenarios_without_orna_engine_witnesses() {
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert!(declared.is_empty());
+    assert_eq!(declared, ["TXN-001", "TXN-002"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
     assert_eq!(scenarios.len(), 144);
     for result in scenarios {
-        assert_eq!(
-            result["status"], "skipped",
-            "{} must remain skipped",
-            result["scenario"]
-        );
-        assert_eq!(
-            result["detail"],
-            "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
-        );
+        if matches!(result["scenario"].as_str(), Some("TXN-001" | "TXN-002")) {
+            assert_eq!(result["status"], "passed", "transaction must execute");
+            assert_eq!(
+                result["detail"],
+                "scenario execution satisfied its adapter contract"
+            );
+        } else {
+            assert_eq!(
+                result["status"], "skipped",
+                "{} must remain skipped",
+                result["scenario"]
+            );
+            assert_eq!(
+                result["detail"],
+                "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
+            );
+        }
     }
 }
