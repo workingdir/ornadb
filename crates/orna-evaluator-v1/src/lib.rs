@@ -22,7 +22,7 @@ use orna_value_v1::Raw;
 
 mod repl;
 
-pub use repl::ReplSession;
+pub use repl::{ReplSession, parse_admitted_repl};
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
 const DEFAULT_STEPS: u64 = 10_000;
@@ -1359,9 +1359,6 @@ impl Context<'_, '_> {
                     .filter(|name| captured.0.contains_key(*name))
                     .cloned(),
             );
-            if session_owned && let Some(last_success) = scope.0.get("$_").cloned() {
-                captured.0.insert("$_".into(), last_success);
-            }
             self.depth(depth + 1)?;
             self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
