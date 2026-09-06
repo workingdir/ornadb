@@ -728,6 +728,7 @@ pub struct EngineWitness {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineWitnesses {
+    pub publication_digests: BTreeMap<String, String>,
     pub witnesses: Vec<EngineWitness>,
 }
 
@@ -891,7 +892,10 @@ impl Harness {
                 observed_status: evidence.status.clone(),
             });
         }
-        Ok(EngineWitnesses { witnesses })
+        Ok(EngineWitnesses {
+            publication_digests: report.publication_digests.clone(),
+            witnesses,
+        })
     }
     fn run_fixture<A: ConformanceAdapter>(
         &self,
