@@ -136,6 +136,8 @@ struct Fixture {
     id: String,
     kind: String,
     path: String,
+    #[serde(default)]
+    expect: BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
 struct InvalidMetadata {
@@ -296,7 +298,7 @@ fn apply_engine_witnesses(
     witnesses: &EngineWitnesses,
     manifest: &Manifest,
 ) -> Result<()> {
-    if report.publication_digests != witnesses.publication_digests {
+    if report.publication_digests != *witnesses.publication_digests() {
         return Err(err(
             "engine witness publication digests do not match report",
         ));
@@ -304,7 +306,7 @@ fn apply_engine_witnesses(
     let fixtures = manifest
         .fixtures
         .iter()
-        .map(|fixture| (fixture.id.as_str(), fixture.path.as_str()))
+        .map(|fixture| (fixture.id.as_str(), fixture))
         .collect::<BTreeMap<_, _>>();
     let mut requirements = report
         .requirements
@@ -312,51 +314,58 @@ fn apply_engine_witnesses(
         .map(|requirement| (requirement.requirement_id.clone(), requirement))
         .collect::<BTreeMap<_, _>>();
     let mut seen = BTreeSet::new();
-    for witness in &witnesses.witnesses {
-        let expected_path = fixtures.get(witness.fixture_id.as_str()).ok_or_else(|| {
+    for witness in witnesses.witnesses() {
+        let fixture = fixtures.get(witness.fixture_id()).ok_or_else(|| {
             err(format!(
                 "engine witness names unknown fixture: {}",
-                witness.fixture_id
+                witness.fixture_id()
             ))
         })?;
-        if *expected_path != witness.fixture_path {
+        if fixture.path != witness.fixture_path() {
             return Err(err(format!(
                 "engine witness fixture path mismatch: {}",
-                witness.fixture_id
+                witness.fixture_id()
             )));
         }
-        if witness.implementation_ref.is_empty() || witness.test_ref.is_empty() {
+        let stage = stage_name(witness.stage());
+        if fixture
+            .expect
+            .get(stage)
+            .is_none_or(|expected| expected == "not-run")
+        {
+            return Err(err(format!(
+                "engine witness stage is outside fixture expectation: {}:{}",
+                witness.fixture_id(),
+                stage
+            )));
+        }
+        if witness.implementation_ref().is_empty() || witness.test_ref().is_empty() {
             return Err(err("engine witness lacks implementation or test reference"));
         }
         if matches!(
-            witness.observed_status,
+            witness.observed_status(),
             orna_conformance_v1::EvidenceStatus::Skipped
                 | orna_conformance_v1::EvidenceStatus::Specified
         ) {
             return Err(err("engine witness has non-executed status"));
         }
-        let stage = stage_name(&witness.stage);
-        let key = (
-            witness.requirement_id.as_str(),
-            witness.fixture_id.as_str(),
-            stage,
-        );
+        let key = (witness.requirement_id(), witness.fixture_id(), stage);
         if !seen.insert(key) {
             return Err(err("duplicate engine witness binding"));
         }
         let requirement = requirements
-            .get_mut(&witness.requirement_id)
+            .get_mut(witness.requirement_id())
             .ok_or_else(|| {
                 err(format!(
                     "engine witness names unknown requirement: {}",
-                    witness.requirement_id
+                    witness.requirement_id()
                 ))
             })?;
         requirement.boundaries.push(Boundary {
             kind: "engine-witness".into(),
-            logical_id: format!("{}:{stage}", witness.fixture_id),
-            implementation_ref: Some(witness.implementation_ref.clone()),
-            test_ref: Some(witness.test_ref.clone()),
+            logical_id: format!("{}:{stage}", witness.fixture_id()),
+            implementation_ref: Some(witness.implementation_ref().into()),
+            test_ref: Some(witness.test_ref().into()),
             status: Status::Executed,
         });
         requirement.status = aggregate(
@@ -918,18 +927,16 @@ mod tests {
             orna_conformance_v1::BoundedEvaluator::default(),
         );
         let conformance_report = harness.run(&mut adapter);
+        let binding = orna_conformance_v1::FixtureStageBinding {
+            requirement_id: "ORNA-SOURCE-001".into(),
+            fixture_id: "valid/minimal-root.orna".into(),
+            fixture_path: "examples/valid/minimal-root.orna".into(),
+            stage: Stage::Parse,
+            implementation_ref: "orna.syntax.module-entrypoint".into(),
+            test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+        };
         let witnesses = harness
-            .engine_witnesses(
-                &conformance_report,
-                &[orna_conformance_v1::FixtureStageBinding {
-                    requirement_id: "ORNA-SOURCE-001".into(),
-                    fixture_id: "valid/minimal-root.orna".into(),
-                    fixture_path: "examples/valid/minimal-root.orna".into(),
-                    stage: Stage::Parse,
-                    implementation_ref: "orna.syntax.module-entrypoint".into(),
-                    test_ref: "conformance.reference_corpus.engine_witnesses".into(),
-                }],
-            )
+            .engine_witnesses(&conformance_report, std::slice::from_ref(&binding))
             .expect("conformance report produces a witness");
         let report = generate_with_engine_witnesses(&root, &witnesses)
             .expect("digest-bound witness is accepted");
@@ -945,10 +952,13 @@ mod tests {
                 && boundary.implementation_ref.as_deref() == Some("orna.syntax.module-entrypoint")
         }));
 
-        let mut mismatched = witnesses;
-        mismatched
+        let mut mismatched_report = conformance_report;
+        mismatched_report
             .publication_digests
             .insert("release.json".into(), "0".repeat(64));
+        let mismatched = harness
+            .engine_witnesses(&mismatched_report, std::slice::from_ref(&binding))
+            .expect("witness can carry the observed report digest inventory");
         assert!(generate_with_engine_witnesses(&root, &mismatched).is_err());
     }
     #[test]
