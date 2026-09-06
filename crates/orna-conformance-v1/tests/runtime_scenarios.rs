@@ -312,7 +312,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_declares_only_the_repl_preview_executed_through_the_runtime_boundary() {
+fn published_report_declares_only_frozen_repl_previews_and_transaction_scenarios() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -325,13 +325,16 @@ fn published_report_declares_only_the_repl_preview_executed_through_the_runtime_
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["REPL-001"]);
+    assert_eq!(declared, ["REPL-001", "REPL-002", "TXN-001", "TXN-002"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
     assert_eq!(scenarios.len(), 144);
     for result in scenarios {
-        if result["scenario"] == "REPL-001" {
+        let scenario = result["scenario"]
+            .as_str()
+            .expect("scenario result has an ID");
+        if ["REPL-001", "REPL-002", "TXN-001", "TXN-002"].contains(&scenario) {
             assert_eq!(result["status"], "passed");
             continue;
         }
