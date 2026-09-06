@@ -307,7 +307,7 @@ enum DurableAdmission {
 // The state boundary is synchronous today, but the async methods keep the
 // adapter signature ready for hosts whose credential and deletion adapters
 // perform I/O. The explicit lint allowance records that deliberate seam.
-#[allow(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 impl LiveHost {
     /// Creates a bounded live host around the supplied security and serving
     /// state machines.
@@ -613,6 +613,11 @@ impl LiveHost {
     /// worker. A worker may race retirement with its own EOF or frame error;
     /// an already-retired attachment is therefore reported as [`Error::Closed`]
     /// and has no effect on a replacement attachment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] when the attachment has already been
+    /// retired or otherwise left the host.
     pub async fn close_attachment(
         &mut self,
         attachment: [u8; 16],
@@ -2351,7 +2356,22 @@ struct UpgradeAdmission {
     id: [u8; 16],
     origin: Origin,
     credential: SessionCredential,
+    attachment: [u8; 16],
+    now: u64,
     response: WireResponse,
+}
+
+/// A validated WebSocket handshake waiting for the host to deliver its 101
+/// response. The attachment is committed only after that delivery succeeds.
+pub struct WebSocketUpgrade {
+    admission: UpgradeAdmission,
+}
+
+impl WebSocketUpgrade {
+    #[must_use]
+    pub const fn response(&self) -> &WireResponse {
+        &self.admission.response
+    }
 }
 
 /// A bounded HTTP/RFC-6455 parser and adapter. It deliberately has no listener,
@@ -2458,6 +2478,11 @@ impl LiveTransport {
     /// Idempotently closes one attachment through the transport-owned host
     /// state. Retired workers may call this after replacement; the inner host
     /// reports [`Error::Closed`] without affecting the replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] when the attachment has already been
+    /// retired or otherwise left the host.
     pub async fn close_attachment(
         &mut self,
         attachment: [u8; 16],
@@ -2981,7 +3006,7 @@ impl LiveTransport {
         if response.status != 101 {
             return Ok(());
         }
-        self.commit_upgrade(admission, attachment, now)
+        self.commit_upgrade(admission)
             .await
             .map_err(HttpConnectionError::Protocol)
             .map_err(HttpIoError::Transport)?;
@@ -3083,10 +3108,42 @@ impl LiveTransport {
             Ok(admission) => admission,
             Err(response) => return response,
         };
-        match self.commit_upgrade(admission, attachment, now).await {
+        match self.commit_upgrade(admission).await {
             Ok(response) => response,
             Err(error) => host_error(error),
         }
+    }
+
+    /// Validates a WebSocket handshake without changing session state.
+    ///
+    /// The returned value must be committed after the host has successfully
+    /// delivered its 101 response. This keeps failed socket writes from
+    /// creating an attachment that has no live owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns the redacted handshake response when validation fails.
+    pub fn prepare_websocket_upgrade(
+        &self,
+        request: &WireRequest,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> std::result::Result<WebSocketUpgrade, WireResponse> {
+        self.prepare_upgrade(request, attachment, now)
+            .map(|admission| WebSocketUpgrade { admission })
+    }
+
+    /// Commits a previously validated handshake after its 101 response was
+    /// delivered to the peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol error when the session cannot be attached.
+    pub async fn commit_websocket_upgrade(
+        &mut self,
+        upgrade: WebSocketUpgrade,
+    ) -> Result<WireResponse> {
+        self.commit_upgrade(upgrade.admission).await
     }
 
     fn prepare_upgrade(
@@ -3151,6 +3208,8 @@ impl LiveTransport {
             id,
             origin,
             credential,
+            attachment,
+            now,
             response: WireResponse {
                 status: 101,
                 headers: vec![
@@ -3169,20 +3228,15 @@ impl LiveTransport {
         })
     }
 
-    async fn commit_upgrade(
-        &mut self,
-        admission: UpgradeAdmission,
-        attachment: [u8; 16],
-        now: u64,
-    ) -> Result<WireResponse> {
+    async fn commit_upgrade(&mut self, admission: UpgradeAdmission) -> Result<WireResponse> {
         let outcome = self
             .host
             .resume(ResumeRequest {
                 id: admission.id,
                 origin: &admission.origin,
                 credential: &admission.credential,
-                attachment,
-                now,
+                attachment: admission.attachment,
+                now: admission.now,
             })
             .await?;
         if let AttachOutcome::Replaced(previous) = outcome {
