@@ -1,6 +1,6 @@
 use futures::{
     executor::block_on,
-    io::{AsyncWrite, Cursor},
+    io::{AsyncRead, AsyncWrite, Cursor},
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
@@ -31,6 +31,68 @@ use std::{
 
 struct FailFirstWriter {
     writes: usize,
+}
+
+struct PendingReader;
+
+impl AsyncRead for PendingReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Pending
+    }
+}
+
+struct PendingWriter;
+
+impl AsyncWrite for PendingWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        _: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        context.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        context.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+struct CancelAfterPolls {
+    polls: usize,
+    ready_after: usize,
+}
+
+impl std::future::Future for CancelAfterPolls {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.polls += 1;
+        if self.polls >= self.ready_after {
+            std::task::Poll::Ready(())
+        } else {
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
 }
 
 impl AsyncWrite for FailFirstWriter {
@@ -556,6 +618,79 @@ fn async_http_connection_loop_samples_clock_for_each_request() {
     ))
     .unwrap();
     assert_eq!(authority.times, [17, 23]);
+}
+
+#[test]
+fn async_http_connection_loop_cancels_a_pending_read() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let mut reader = PendingReader;
+    let mut writer = Cursor::new(Vec::new());
+    let mut authority = Authority;
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    let mut clock = || 0;
+    let mut cancellation = CancelAfterPolls {
+        polls: 0,
+        ready_after: 2,
+    };
+    assert_eq!(
+        block_on(transport.serve_http_connection_with_cancellation(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            &mut clock,
+            &mut cancellation,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )),
+        Err(HttpIoError::Cancelled)
+    );
+    assert!(writer.into_inner().is_empty());
+}
+
+#[test]
+fn async_http_connection_loop_cancels_a_pending_write() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut reader = Cursor::new(request.into_bytes());
+    let mut writer = PendingWriter;
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    let mut clock = || 0;
+    let mut cancellation = CancelAfterPolls {
+        polls: 0,
+        ready_after: 3,
+    };
+    assert_eq!(
+        block_on(transport.serve_http_connection_with_cancellation(
+            &mut reader,
+            &mut writer,
+            &mut connection,
+            &mut clock,
+            &mut cancellation,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )),
+        Err(HttpIoError::Cancelled)
+    );
+    assert_eq!(authority.calls, 1);
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
