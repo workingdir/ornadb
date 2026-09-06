@@ -584,6 +584,7 @@ impl BoundedEvaluator {
                         },
                     );
                 }
+                Declaration::Use { .. } => {}
                 _ => return Self::unsupported_module(),
             }
         }
@@ -597,9 +598,12 @@ impl BoundedEvaluator {
     }
 
     fn supports_pure_declarations(items: &[orna_syntax_v1::Item]) -> bool {
-        items
-            .iter()
-            .all(|item| matches!(&item.declaration, Declaration::Function { .. }))
+        items.iter().all(|item| {
+            matches!(
+                &item.declaration,
+                Declaration::Function { .. } | Declaration::Use { .. }
+            )
+        })
     }
 
     fn supports_pure_project(project: &ProjectUnit) -> bool {
@@ -1535,7 +1539,8 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 
 #[cfg(test)]
 mod bounded_tests {
-    use super::{BoundedEvaluator, SourceUnit, StageOutcome};
+    use super::{BoundedEvaluator, RuntimeEvaluator, SourceUnit, StageOutcome};
+    use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::{Environment, Limits, evaluate_expression_with_functions};
     use orna_foundation_v1::Value;
 
@@ -1580,6 +1585,47 @@ mod bounded_tests {
         )
         .expect("qualified module call");
         assert_eq!(result, Value::int(42.into()));
+    }
+
+    #[test]
+    fn pure_project_evaluation_accepts_ordinary_import_declarations() {
+        let mut evaluator = BoundedEvaluator::new(Limits::default());
+        let project = ProjectUnit {
+            fixture_id: "project".into(),
+            project_id: "project".into(),
+            environment_id: None,
+            modules: vec![
+                SourceUnit {
+                    fixture_id: "project".into(),
+                    source_id: "main.orna".into(),
+                    parse_as: "module_unit".into(),
+                    source: "use library; pub fn answer(): Int = library.value();".into(),
+                },
+                SourceUnit {
+                    fixture_id: "project".into(),
+                    source_id: "library.orna".into(),
+                    parse_as: "module_unit".into(),
+                    source: "pub fn value(): Int = 42;".into(),
+                },
+            ],
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        };
+
+        assert!(matches!(
+            evaluator.evaluate_project(&project),
+            StageOutcome::Passed
+        ));
+        assert!(matches!(evaluator.invoke("answer"), StageOutcome::Passed));
     }
 }
 
