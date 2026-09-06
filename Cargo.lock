@@ -1554,6 +1554,7 @@ dependencies = [
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
+ "orna-serving-v1",
  "orna-storage-v1",
  "orna-stream-v1",
  "orna-syntax-v1",
