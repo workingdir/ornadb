@@ -2558,6 +2558,19 @@ fn infer(
         Expr::Call {
             callee, arguments, ..
         } => {
+            if qualified_path(callee)
+                .as_deref()
+                .is_some_and(|path| path == ["work", "Contact", "insert"])
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "cross-database writes are not atomic/supported",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                };
+            }
             if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "parallel")
                 && let [argument] = arguments.as_slice()
                 && let Expr::List { elements, .. } = &argument.value
@@ -6322,7 +6335,11 @@ mod tests {
             "m.orna",
             "pub fn makers() = [() => ({}), () => {},];",
         )]);
-        assert!(!has(&a, DIAG_TYPE), "empty lambda records: {:?}", a.diagnostics);
+        assert!(
+            !has(&a, DIAG_TYPE),
+            "empty lambda records: {:?}",
+            a.diagnostics
+        );
         let module = a.modules.values().next().expect("module is present");
         let symbol = module.symbols.get("makers").expect("makers is collected");
         assert_eq!(
@@ -6339,6 +6356,21 @@ mod tests {
                 }))),
             }
         );
+    }
+
+    #[test]
+    fn duplicate_durable_consumers_are_rejected_before_execution() {
+        let a = analyze_with_catalogue(
+            &[ModuleInput::new(
+                "m.orna",
+                "pub fn main() = parallel([mail.google.sync, mail.google.sync]);",
+            )],
+            &Catalogue::authoritative_fixture(),
+        );
+        assert!(a.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message()
+                == "same durable source consumed twice without distinct consumer identity"
+        }));
     }
     #[test]
     fn assertion_plan_rejects_compile_time_boolean() {
