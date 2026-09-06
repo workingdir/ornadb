@@ -170,6 +170,34 @@ implementation/source-apply selection paths include V10 and V11. Consequently:
   source/catalogue identities and report an unavailable compatibility result
   rather than claiming conformance.
 
+### Source-level pinned pure-module boundary
+
+The current v1 command-line source boundary has one smaller, executable
+standard-module profile: `orna.std/v1-pure-math`. It contains the bundled
+`std.math` module, whose public functions are `increment`, `decrement`, and
+`is_zero`. This is a pinned source bundle, not discovery of an installed or
+host-provided standard library.
+
+When a project imports a standard module, `orna-cli-v1 check` first requires
+the imported logical module to be named by the selected profile. It then
+verifies the exact source bytes of every profile module, requires the complete
+declared bundle, parses the verified sources, and derives the semantic
+catalogue from their declarations. A changed, missing, duplicate, malformed,
+or unlisted standard module is rejected before that catalogue is admitted.
+
+`orna-cli-v1 run seed` uses the same selected source bundle. After semantic
+checking, its bounded evaluator loads the verified pure module and explicitly
+invokes the requested retained function; loading alone does not execute a
+function body. This establishes executable evidence for that source-level
+pure-function subset, including calls to the bundled `std.math` functions.
+
+It does not establish a complete standard library or general runtime. Standard
+modules beyond the selected bundle, tables, effects, streams, credentials,
+network access, and non-empty initial state remain outside this boundary and
+require the integrated runtime. The broader standard-library revisions and
+upgrade preparation described above are separate compatibility work; they do
+not enlarge this v1 pure-module profile or constitute a 1.0 release claim.
+
 ## Private protocol and runtime compatibility
 
 The local server socket uses the private Orna handshake (versions 1 through 5)
