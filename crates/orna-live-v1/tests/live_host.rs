@@ -1,10 +1,10 @@
 use futures::executor::block_on;
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
-    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, Limits, LiveApplication,
-    LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
-    SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
-    WebSocketState, WireRequest,
+    CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpParseError, Limits,
+    LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport,
+    ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
+    WebSocketOutput, WebSocketState, WireRequest, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -177,6 +177,64 @@ fn request_fingerprint(bytes: &[u8], session: [u8; 16]) -> [u8; 32] {
 
 fn remove_test_repository(root: &Path) {
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn http_decoder_handles_partial_body_and_pipelined_bytes() {
+    let limits = TransportLimits::default();
+    let request = b"POST /orna/session HTTP/1.1\r\nHost: example\r\nContent-Length: 4\r\n\r\nbodyGET /orna/session HTTP/1.1\r\n\r\n";
+    assert_eq!(parse_http_request(&request[..68], limits).unwrap(), None);
+    let parsed = parse_http_request(request, limits).unwrap().unwrap();
+    assert_eq!(parsed.request.method, "POST");
+    assert_eq!(parsed.request.path, "/orna/session");
+    assert_eq!(parsed.request.body, b"body");
+    assert_eq!(
+        &request[parsed.consumed..],
+        b"GET /orna/session HTTP/1.1\r\n\r\n"
+    );
+}
+
+#[test]
+fn http_decoder_rejects_ambiguous_or_unsupported_framing() {
+    let limits = TransportLimits::default();
+    for raw in [
+        b"POST /orna/session HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx"
+            .as_slice(),
+        b"POST /orna/session HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+        b"GET /orna/session HTTP/1.0\r\n\r\n".as_slice(),
+    ] {
+        assert_eq!(
+            parse_http_request(raw, limits),
+            Err(HttpParseError::Malformed)
+        );
+    }
+}
+
+#[test]
+fn http_decoder_applies_header_and_request_limits_before_body_materialisation() {
+    let limits = TransportLimits {
+        max_header_bytes: 32,
+        ..TransportLimits::default()
+    };
+    assert_eq!(
+        parse_http_request(
+            b"GET /orna/session HTTP/1.1\r\nHost: example\r\n\r\n",
+            limits
+        ),
+        Err(HttpParseError::Limit)
+    );
+
+    let limits = TransportLimits {
+        max_request_bytes: 64,
+        ..TransportLimits::default()
+    };
+    assert_eq!(
+        parse_http_request(
+            b"POST /orna/session HTTP/1.1\r\nContent-Length: 100\r\n\r\n",
+            limits
+        ),
+        Err(HttpParseError::Limit)
+    );
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
