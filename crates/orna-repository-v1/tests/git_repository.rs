@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use fs2::FileExt;
-use orna_repository_v1::{ManagedPath, Repository, RuntimeGeneration};
+use orna_repository_v1::{CheckoutTarget, ManagedPath, Repository, RuntimeGeneration};
 use tempfile::TempDir;
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -202,6 +202,83 @@ fn snapshot_resolution_accepts_commits_and_rejects_non_commits_and_malformed_ids
     ));
     git(root.path(), &["switch", "--detach", &dangling]);
     assert_eq!(repo.resolve_snapshot("HEAD").unwrap().as_str(), dangling);
+}
+
+#[test]
+fn checkout_preflight_classifies_a_local_branch_without_mutating_cwd() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    let before = repo.cwd_generation(RuntimeGeneration::new(17)).unwrap();
+
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(17))
+        .unwrap();
+
+    assert_eq!(plan.cwd(), &before);
+    assert_eq!(plan.expected_head(), before.head());
+    assert_eq!(plan.target().branch_name(), Some("experiment"));
+    assert_eq!(plan.target().commit(), before.head().unwrap());
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(17)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged source\n"
+    );
+}
+
+#[test]
+fn checkout_preflight_classifies_a_commit_as_detached_and_rejects_ambiguity() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let before = repo.cwd_generation(RuntimeGeneration::new(18)).unwrap();
+
+    let plan = repo
+        .plan_checkout(&head, RuntimeGeneration::new(18))
+        .unwrap();
+    assert!(matches!(plan.target(), CheckoutTarget::Detached { .. }));
+    assert_eq!(plan.target().commit().as_str(), head);
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(18)).unwrap(),
+        before
+    );
+
+    git(root.path(), &["tag", "main"]);
+    let before_ambiguous = repo.cwd_generation(RuntimeGeneration::new(18)).unwrap();
+    assert!(matches!(
+        repo.plan_checkout("main", RuntimeGeneration::new(18)),
+        Err(orna_repository_v1::RepositoryError::InvalidSelector)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(18)).unwrap(),
+        before_ambiguous
+    );
+}
+
+#[test]
+fn checkout_preflight_invalid_selector_is_strictly_non_mutating() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = repo.cwd_generation(RuntimeGeneration::new(19)).unwrap();
+    assert!(matches!(
+        repo.plan_checkout("-force", RuntimeGeneration::new(19)),
+        Err(orna_repository_v1::RepositoryError::InvalidSelector)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(19)).unwrap(),
+        before
+    );
 }
 
 #[test]
