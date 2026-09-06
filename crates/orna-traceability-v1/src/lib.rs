@@ -1,6 +1,7 @@
 //! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
+use orna_conformance_v1::{EngineWitnesses, Stage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -58,6 +59,8 @@ pub struct RequirementTrace {
 pub struct Boundary {
     pub kind: String,
     pub logical_id: String,
+    pub implementation_ref: Option<String>,
+    pub test_ref: Option<String>,
     pub status: Status,
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -169,7 +172,20 @@ struct Model {
 }
 
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
-    let root = root.as_ref();
+    generate_inner(root.as_ref(), None)
+}
+
+/// Generate the frozen report with an execution register produced by the
+/// conformance harness. The register is accepted only when it carries the
+/// exact publication digest inventory loaded from the same reference root.
+pub fn generate_with_engine_witnesses(
+    root: impl AsRef<Path>,
+    witnesses: &EngineWitnesses,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), Some(witnesses))
+}
+
+fn generate_inner(root: &Path, engine_witnesses: Option<&EngineWitnesses>) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
     if release.version != VERSION
         || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
@@ -206,6 +222,8 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
                 .map(|test| Boundary {
                     kind: test.kind.clone(),
                     logical_id: logical_test_id(test, &requirement.id),
+                    implementation_ref: None,
+                    test_ref: None,
                     status: test_status(test, &entry.implementation_result),
                 })
                 .collect::<Vec<_>>();
@@ -217,7 +235,7 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
             }
         })
         .collect();
-    Ok(Report {
+    let mut report = Report {
         format: "orna.traceability.v1".into(),
         specification_version: VERSION.into(),
         normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
@@ -253,7 +271,100 @@ pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
                 }
             })
             .collect(),
-    })
+    };
+    if let Some(witnesses) = engine_witnesses {
+        apply_engine_witnesses(&mut report, witnesses, &manifest)?;
+    }
+    Ok(report)
+}
+
+fn apply_engine_witnesses(
+    report: &mut Report,
+    witnesses: &EngineWitnesses,
+    manifest: &Manifest,
+) -> Result<()> {
+    if report.publication_digests != witnesses.publication_digests {
+        return Err(err(
+            "engine witness publication digests do not match report",
+        ));
+    }
+    let fixtures = manifest
+        .fixtures
+        .iter()
+        .map(|fixture| (fixture.id.as_str(), fixture.path.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for witness in &witnesses.witnesses {
+        let expected_path = fixtures.get(witness.fixture_id.as_str()).ok_or_else(|| {
+            err(format!(
+                "engine witness names unknown fixture: {}",
+                witness.fixture_id
+            ))
+        })?;
+        if *expected_path != witness.fixture_path {
+            return Err(err(format!(
+                "engine witness fixture path mismatch: {}",
+                witness.fixture_id
+            )));
+        }
+        if witness.implementation_ref.is_empty() || witness.test_ref.is_empty() {
+            return Err(err("engine witness lacks implementation or test reference"));
+        }
+        if matches!(
+            witness.observed_status,
+            orna_conformance_v1::EvidenceStatus::Skipped
+                | orna_conformance_v1::EvidenceStatus::Specified
+        ) {
+            return Err(err("engine witness has non-executed status"));
+        }
+        let stage = stage_name(&witness.stage);
+        let key = (
+            witness.requirement_id.as_str(),
+            witness.fixture_id.as_str(),
+            stage,
+        );
+        if !seen.insert(key) {
+            return Err(err("duplicate engine witness binding"));
+        }
+        let requirement = requirements
+            .get_mut(&witness.requirement_id)
+            .ok_or_else(|| {
+                err(format!(
+                    "engine witness names unknown requirement: {}",
+                    witness.requirement_id
+                ))
+            })?;
+        requirement.boundaries.push(Boundary {
+            kind: "engine-witness".into(),
+            logical_id: format!("{}:{stage}", witness.fixture_id),
+            implementation_ref: Some(witness.implementation_ref.clone()),
+            test_ref: Some(witness.test_ref.clone()),
+            status: Status::Executed,
+        });
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(())
+}
+
+fn stage_name(stage: &Stage) -> &'static str {
+    match stage {
+        Stage::Parse => "parse",
+        Stage::Resolve => "resolve",
+        Stage::Typecheck => "typecheck",
+        Stage::Evaluate => "evaluate",
+        Stage::RowValidation => "row-validation",
+    }
 }
 
 fn validate(
@@ -783,6 +894,42 @@ mod tests {
                     .all(|boundary| boundary.status != Status::Executed)
             );
         }
+    }
+    #[test]
+    fn digest_bound_engine_witnesses_add_only_explicit_executed_boundaries() {
+        let root = corpus();
+        let base = generate(&root).expect("valid corpus");
+        let witnesses = EngineWitnesses {
+            publication_digests: base.publication_digests.clone(),
+            witnesses: vec![orna_conformance_v1::EngineWitness {
+                requirement_id: "ORNA-SOURCE-001".into(),
+                fixture_id: "valid/minimal-root.orna".into(),
+                fixture_path: "examples/valid/minimal-root.orna".into(),
+                stage: Stage::Parse,
+                implementation_ref: "orna.syntax.module-entrypoint".into(),
+                test_ref: "conformance.reference_corpus.engine_witnesses".into(),
+                observed_status: orna_conformance_v1::EvidenceStatus::Passed,
+            }],
+        };
+        let report = generate_with_engine_witnesses(&root, &witnesses)
+            .expect("digest-bound witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-SOURCE-001")
+            .expect("witnessed requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "engine-witness"
+                && boundary.status == Status::Executed
+                && boundary.implementation_ref.as_deref() == Some("orna.syntax.module-entrypoint")
+        }));
+
+        let mut mismatched = witnesses;
+        mismatched
+            .publication_digests
+            .insert("release.json".into(), "0".repeat(64));
+        assert!(generate_with_engine_witnesses(&root, &mismatched).is_err());
     }
     #[test]
     fn reproducible() {
