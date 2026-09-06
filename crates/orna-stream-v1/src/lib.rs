@@ -628,6 +628,14 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                     .failures
                     .get(&FailureIdentity(delivery.clone()))
                     .map(|failure| failure.status);
+                let authorised_blocking_delivery = matches!(
+                    (purpose, failure_status),
+                    (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
+                        | (LeasePurpose::Skip, Some(FailureStatus::Failed))
+                );
+                if self.has_blocking_failure(&key) && !authorised_blocking_delivery {
+                    return CommitResult::Rejected(RejectReason::BlockingFailure);
+                }
                 if let Some(existing) = self.leases.get(&key).cloned() {
                     if purpose == LeasePurpose::Deliver
                         && failure_status == Some(FailureStatus::Retrying)
@@ -1443,6 +1451,23 @@ mod tests {
     }
 
     #[test]
+    fn failed_delivery_blocks_later_ordered_delivery_until_administration() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let failed_delivery = delivery("receipt:failed", "resume:after-failed");
+        acquire_and_fail(&mut backend, failed_delivery.clone());
+        let later_delivery = delivery("receipt:later", "resume:after-later");
+
+        assert_eq!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: later_delivery,
+                expected: expected(&backend, &failed_delivery),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Rejected(RejectReason::BlockingFailure)
+        );
+    }
+
+    #[test]
     fn pause_blocks_fresh_delivery_and_reset_is_opaque_and_compare_and_set() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -1550,25 +1575,30 @@ mod tests {
     #[test]
     fn retry_rejects_a_stale_blocking_checkpoint() {
         let mut backend = InMemoryCheckpointBackend::default();
-        let failed_delivery = delivery("receipt:failed", "resume:after-failed");
-        let failure = acquire_and_fail(&mut backend, failed_delivery.clone());
-        let failed_expected = expected(&backend, &failed_delivery);
-
-        let later_delivery = delivery("receipt:later", "resume:after-later");
-        let lease = acquire(&mut backend, later_delivery.clone());
+        let first_delivery = delivery("receipt:first", "resume:after-first");
+        let first_expected = expected(&backend, &first_delivery);
+        let first_lease = acquire(&mut backend, first_delivery.clone());
         assert!(matches!(
             backend.apply(CommitIntent::Complete {
-                lease,
-                expected: expected(&backend, &later_delivery),
+                lease: first_lease,
+                expected: first_expected,
             }),
             CommitResult::CheckpointAdvanced { .. }
         ));
+
+        let failed_delivery = delivery("receipt:failed", "resume:after-failed");
+        let failure = acquire_and_fail(&mut backend, failed_delivery.clone());
+        let current = expected(&backend, &failed_delivery);
+        let stale = CheckpointPrecondition {
+            version: current.version - 1,
+            committed: Some(position("stale-position")),
+        };
 
         assert_eq!(
             backend.apply(CommitIntent::Retry {
                 failure: failure.identity.clone(),
                 expected_version: failure.version,
-                expected: failed_expected,
+                expected: stale,
             }),
             CommitResult::Rejected(RejectReason::StaleCheckpoint)
         );
