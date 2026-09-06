@@ -71,6 +71,20 @@ fn json_field(response: &str, field: &str) -> String {
         .unwrap()
 }
 
+fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
+    assert!(body.len() < 126);
+    let key = [1, 2, 3, 4];
+    let length = u8::try_from(body.len()).unwrap();
+    let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode, 0x80 | length];
+    frame.extend(key);
+    frame.extend(
+        body.iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ key[index % key.len()]),
+    );
+    frame
+}
+
 #[test]
 fn loopback_host_creates_a_session_from_a_real_repository() {
     let temporary = TemporaryRepository::new();
@@ -232,6 +246,71 @@ fn loopback_host_reuses_session_state_across_connections_until_cancelled() {
         let mut second_response = Vec::new();
         second.read_to_end(&mut second_response).unwrap();
         assert!(second_response.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_serves_websocket_and_resumes_the_session_after_close() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        assert!(created.starts_with("HTTP/1.1 201 Created\r\n"));
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket = TcpStream::connect(address).unwrap();
+        let handshake = format!(
+            "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token}\r\n\r\n",
+            address.port()
+        );
+        let mut upgrade = handshake.into_bytes();
+        upgrade.extend(masked(true, 9, b"hi"));
+        upgrade.extend(masked(true, 8, b""));
+        websocket.write_all(&upgrade).unwrap();
+        websocket.shutdown(Shutdown::Write).unwrap();
+        let mut websocket_response = Vec::new();
+        websocket.read_to_end(&mut websocket_response).unwrap();
+        let header_end = websocket_response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        assert!(websocket_response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+        assert_eq!(&websocket_response[header_end + 4..], b"\x8a\x02hi\x88\x00");
+
+        let body = format!(r#"{{"resume_token":"{token}","protocol":"orna.present.v1"}}"#);
+        let mut resume = TcpStream::connect(address).unwrap();
+        let resume_request = format!(
+            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            address.port(),
+            body.len()
+        );
+        resume.write_all(resume_request.as_bytes()).unwrap();
+        let resumed = read_response(&mut resume);
+        assert!(resumed.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(json_field(&resumed, "session"), session);
+        resume.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        resume.read_to_end(&mut ignored).unwrap();
         sender.send(()).unwrap();
     });
 

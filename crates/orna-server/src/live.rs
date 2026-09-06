@@ -2,14 +2,15 @@
 //!
 //! This is the first executable-owned live boundary. Its basic entry point
 //! accepts one local HTTP connection; the cancellable entry point retains
-//! transport/session state across sequential connections. TLS, remote
-//! exposure, WebSocket handoff, durable live-session rows, and application
-//! dispatch are deliberately outside this slice.
+//! transport/session state across sequential connections and hands the live
+//! WebSocket path to the bounded transport driver. TLS, remote exposure,
+//! durable live-session rows, and application dispatch are deliberately
+//! outside this slice.
 
-use futures::{Future, executor::block_on};
+use futures::{Future, executor::block_on, io::AsyncReadExt};
 use orna_live_v1::{
-    HttpConnection, HttpIoError, Limits, LiveHost, LiveSessionAuthority, LiveTransport,
-    SessionMetadata, SystemCredentialIssuer, TransportLimits,
+    HttpConnection, HttpIoError, Limits, LiveApplication, LiveHost, LiveSessionAuthority,
+    LiveTransport, SessionMetadata, SystemCredentialIssuer, TransportLimits, parse_http_request,
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{Repository, inspect_metadata};
@@ -188,27 +189,113 @@ impl LiveOnceHost {
             () = &mut *cancellation => return Err(LiveHostError::Cancelled),
         };
         let (reader, writer) = stream.into_split();
-        let mut reader = TokioReader(reader);
+        let reader = TokioReader(reader);
+        let mut reader = PrefixedReader::new(reader);
         let mut writer = TokioWriter(writer);
+        let initial = read_initial_request(&mut reader, cancellation).await?;
+        let websocket = parse_http_request(&initial, TransportLimits::default())
+            .map_err(|_| LiveHostError::Connection)?
+            .is_some_and(|request| {
+                request.request().method == "GET"
+                    && request.request().path.starts_with("/orna/live/")
+            });
+        reader.replay(initial);
         let mut connection = HttpConnection::new(TransportLimits::default());
         let mut issuer = SystemCredentialIssuer::default();
         let mut clock = system_seconds;
-        self.transport
-            .serve_http_connection_with_cancellation(
-                &mut reader,
-                &mut writer,
-                &mut connection,
-                &mut clock,
-                cancellation,
-                &mut self.authority,
-                &mut issuer,
-                &mut self.deletion,
-            )
-            .await
-            .map_err(|error| match error {
-                HttpIoError::Cancelled => LiveHostError::Cancelled,
-                _ => LiveHostError::Connection,
-            })
+        if websocket {
+            let mut application = RejectLiveApplication;
+            let attachment = opaque_attachment().map_err(|_| LiveHostError::Configuration)?;
+            self.transport
+                .serve_websocket_connection(
+                    &mut reader,
+                    &mut writer,
+                    &mut connection,
+                    attachment,
+                    &mut clock,
+                    cancellation,
+                    &mut application,
+                )
+                .await
+                .map_err(map_connection_error)
+        } else {
+            self.transport
+                .serve_http_connection_with_cancellation(
+                    &mut reader,
+                    &mut writer,
+                    &mut connection,
+                    &mut clock,
+                    cancellation,
+                    &mut self.authority,
+                    &mut issuer,
+                    &mut self.deletion,
+                )
+                .await
+                .map_err(map_connection_error)
+        }
+    }
+}
+
+fn map_connection_error(error: HttpIoError) -> LiveHostError {
+    match error {
+        HttpIoError::Cancelled => LiveHostError::Cancelled,
+        _ => LiveHostError::Connection,
+    }
+}
+
+async fn read_initial_request<C>(
+    reader: &mut (impl futures::io::AsyncRead + Unpin),
+    cancellation: &mut C,
+) -> Result<Vec<u8>, LiveHostError>
+where
+    C: Future<Output = ()> + Unpin,
+{
+    let limits = TransportLimits::default();
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        match parse_http_request(&bytes, limits) {
+            Ok(Some(_)) => return Ok(bytes),
+            Ok(None) => {}
+            Err(_) => return Err(LiveHostError::Connection),
+        }
+        let mut read = reader.read(&mut chunk);
+        let count = futures::future::poll_fn(|context| {
+            if Pin::new(&mut *cancellation).poll(context).is_ready() {
+                return Poll::Ready(Err(LiveHostError::Cancelled));
+            }
+            Pin::new(&mut read)
+                .poll(context)
+                .map(|result| result.map_err(|_| LiveHostError::Connection))
+        })
+        .await?;
+        if count == 0 {
+            return Err(LiveHostError::Connection);
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn opaque_attachment() -> Result<[u8; 16], ()> {
+    let mut attachment = [0; 16];
+    for _ in 0..8 {
+        getrandom::fill(&mut attachment).map_err(|_| ())?;
+        if attachment != [0; 16] {
+            return Ok(attachment);
+        }
+    }
+    Err(())
+}
+
+struct RejectLiveApplication;
+
+impl LiveApplication for RejectLiveApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> orna_live_v1::Result<Envelope> {
+        Err(orna_live_v1::Error::UnsupportedOperation)
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> orna_live_v1::Result<Envelope> {
+        Err(orna_live_v1::Error::UnsupportedOperation)
     }
 }
 
@@ -243,6 +330,46 @@ impl futures::io::AsyncWrite for TokioWriter {
 
     fn poll_close(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), context)
+    }
+}
+
+struct PrefixedReader<R> {
+    prefix: Vec<u8>,
+    offset: usize,
+    reader: R,
+}
+
+impl<R> PrefixedReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            prefix: Vec::new(),
+            offset: 0,
+            reader,
+        }
+    }
+
+    fn replay(&mut self, prefix: Vec<u8>) {
+        self.prefix = prefix;
+        self.offset = 0;
+    }
+}
+
+impl<R> futures::io::AsyncRead for PrefixedReader<R>
+where
+    R: futures::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.offset < self.prefix.len() {
+            let count = (self.prefix.len() - self.offset).min(buffer.len());
+            buffer[..count].copy_from_slice(&self.prefix[self.offset..self.offset + count]);
+            self.offset += count;
+            return Poll::Ready(Ok(count));
+        }
+        Pin::new(&mut self.reader).poll_read(context, buffer)
     }
 }
 
