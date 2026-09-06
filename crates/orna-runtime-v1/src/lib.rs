@@ -269,6 +269,7 @@ pub enum FaultPoint {
     AfterCapture,
     AfterFailureRecord,
     AfterFailurePayload,
+    AfterReplayFailureRecord,
 }
 
 /// Deterministic seam for proving transaction rollback. Production callers use
@@ -1718,6 +1719,17 @@ impl RuntimeState {
         grant: &ReplayGrant,
         diagnostic: SafeDiagnostic,
     ) -> Result<CommitResult, RuntimeError> {
+        self.fail_stream_replay_with_faults(writer, grant, diagnostic, &NoFault)
+            .await
+    }
+
+    async fn fail_stream_replay_with_faults(
+        &self,
+        writer: WriterLease,
+        grant: &ReplayGrant,
+        diagnostic: SafeDiagnostic,
+        faults: &dyn FaultInjector,
+    ) -> Result<CommitResult, RuntimeError> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1733,6 +1745,9 @@ impl RuntimeState {
             },
         )
         .await?;
+        if matches!(result, CommitResult::ReplayFailed { .. }) {
+            faults.check(FaultPoint::AfterReplayFailureRecord)?;
+        }
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -7300,6 +7315,51 @@ mod tests {
                 CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn replay_failure_rolls_back_before_publishing_terminal_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let (grant, checkpoint, delivery) =
+            protected_replay_fixture(&state, writer, "replay-fault", digest(5)).await;
+
+        assert_eq!(
+            state
+                .fail_stream_replay_with_faults(
+                    writer,
+                    &grant,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::Internal,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    &Fail(FaultPoint::AfterReplayFailureRecord),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(
+                FaultPoint::AfterReplayFailureRecord
+            ))
+        );
+        assert_eq!(state.pending().await.unwrap(), Vec::<Mutation>::new());
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .failure_async(&grant.failure)
+                .await
+                .unwrap()
+                .expect("replay failure remains durable")
+                .status,
+            FailureStatus::Replaying
+        );
     }
 
     #[tokio::test]
