@@ -1035,18 +1035,10 @@ impl LiveHost {
             .map_err(|error| map_runtime(&error))?;
         if !inserted {
             if reserved.state == DurableRequestState::Reserved {
-                match runtime.start_request(identity, fingerprint).await {
-                    Ok(_) => return Ok(DurableAdmission::Execute),
-                    Err(RuntimeError::RequestStateConflict) => {
-                        let current = runtime
-                            .request_status_for_identity(identity)
-                            .await
-                            .map_err(|error| map_runtime(&error))?
-                            .ok_or(Error::RuntimeUnavailable)?;
-                        return self.durable_admission(current, envelope);
-                    }
-                    Err(error) => return Err(map_runtime(&error)),
-                }
+                // REQUEST-1 reserves before the first effect. A recovered
+                // reservation has no proof that executing it again is safe,
+                // so an existing row remains active rather than being started.
+                return Ok(DurableAdmission::Active);
             }
             if reserved.state == DurableRequestState::Running {
                 return self
