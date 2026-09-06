@@ -153,6 +153,21 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
     }
 }
 
+#[test]
+fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
+    let directory = tempfile::tempdir().expect("REPL working directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["repl", "1 + 2"])
+        .output()
+        .expect("CLI process");
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"3 : Int\n");
+    assert!(output.stderr.is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
