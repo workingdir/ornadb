@@ -14,8 +14,8 @@ use crate::{
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
-    PureFunction as RetainedFunction, evaluate_expression_with_functions, invoke_named,
-    invoke_named_with_effects,
+    PureFunction as RetainedFunction, evaluate_expression_with_functions, evaluate_with_functions,
+    invoke_named, invoke_named_with_effects,
 };
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
@@ -857,12 +857,12 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let (functions, key_fields) = match admit_transaction_source(unit, self.limits, &self.entry)
-        {
-            Ok(value) => value,
-            Err(outcome) => return *outcome,
-        };
-        match self.execute_admitted(&functions, &key_fields) {
+        let (functions, key_fields, assertions) =
+            match admit_transaction_source(unit, self.limits, &self.entry) {
+                Ok(value) => value,
+                Err(outcome) => return *outcome,
+            };
+        match self.execute_admitted(&functions, &key_fields, &assertions) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
@@ -880,12 +880,12 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let (functions, _) = match admit_transaction_source(unit, self.limits, "bad") {
+        let (functions, _, assertions) = match admit_transaction_source(unit, self.limits, "bad") {
             Ok(value) => value,
             Err(outcome) => return Some(*outcome),
         };
         let key_fields = BTreeMap::from([(String::from("Contact"), String::from("id"))]);
-        let outcome = match evaluator.execute_admitted(&functions, &key_fields) {
+        let outcome = match evaluator.execute_admitted(&functions, &key_fields, &assertions) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         };
@@ -965,6 +965,7 @@ impl TransactionalEvaluator {
         &mut self,
         functions: &Functions,
         key_fields: &BTreeMap<String, String>,
+        assertions: &TableAssertions,
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         let entry = self.entry.clone();
         let limits = self.limits;
@@ -977,7 +978,7 @@ impl TransactionalEvaluator {
                 next_mutation: 0,
             };
             invoke_named_with_effects(&entry, functions, &Environment::new(), limits, &mut effects)
-                .map(|_| ())
+                .and_then(|_| validate_table_assertions(activation, assertions, functions, limits))
         });
         match result {
             Ok(()) => Ok(mutations),
@@ -1026,11 +1027,11 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let (functions, key_fields) = match admit_transaction_source(unit, self.limits, &self.entry)
-        {
-            Ok(value) => value,
-            Err(outcome) => return Ok(*outcome),
-        };
+        let (functions, key_fields, assertions) =
+            match admit_transaction_source(unit, self.limits, &self.entry) {
+                Ok(value) => value,
+                Err(outcome) => return Ok(*outcome),
+            };
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let lease = state.acquire_lease(owner_id).await?;
         let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
@@ -1043,7 +1044,7 @@ impl DurableTransactionalEvaluator {
                 evaluator.seed_committed(table.clone(), key.clone(), row)?;
             }
         }
-        let mutations = match evaluator.execute_admitted(&functions, &key_fields) {
+        let mutations = match evaluator.execute_admitted(&functions, &key_fields, &assertions) {
             Ok(mutations) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
         };
@@ -1255,7 +1256,7 @@ fn admit_list_stream_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
-    let (_, key_fields) = admit_transaction_source(unit, limits, entry)?;
+    let (_, key_fields, _) = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -1743,7 +1744,8 @@ impl TableEffectHandler<'_, '_> {
     }
 }
 
-type AdmittedTransaction = (Functions, BTreeMap<String, String>);
+type TableAssertions = BTreeMap<String, Vec<Expr>>;
+type AdmittedTransaction = (Functions, BTreeMap<String, String>, TableAssertions);
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
 
 fn admit_transaction_source(
@@ -1774,7 +1776,7 @@ fn admit_transaction_source(
             diagnostic.clone().redacted(),
         )));
     }
-    let (functions, key_fields) = admitted_transaction_module(&parsed.value.items)
+    let (functions, key_fields, assertions) = admitted_transaction_module(&parsed.value.items)
         .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -1784,7 +1786,7 @@ fn admit_transaction_source(
             reason: "configured transaction entry function is not present".into(),
         }));
     }
-    Ok((functions, key_fields))
+    Ok((functions, key_fields, assertions))
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -1807,9 +1809,10 @@ fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) ->
 
 fn admitted_transaction_module(
     items: &[orna_syntax_v1::Item],
-) -> Result<(Functions, BTreeMap<String, String>), String> {
+) -> Result<(Functions, BTreeMap<String, String>, TableAssertions), String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
+    let mut assertions = TableAssertions::new();
     for item in items {
         match &item.declaration {
             Declaration::Function { signature, body } => {
@@ -1822,7 +1825,11 @@ fn admitted_transaction_module(
                     },
                 );
             }
-            Declaration::Table { name, keys, .. } => {
+            Declaration::Table {
+                name,
+                keys,
+                members,
+            } => {
                 let [key] = keys.as_slice() else {
                     return Err("transactional source seam requires one explicit table key".into());
                 };
@@ -1830,6 +1837,16 @@ fn admitted_transaction_module(
                     return Err("transactional source seam requires a named table key".into());
                 };
                 key_fields.insert(name.clone(), field.clone());
+                let expressions = members
+                    .iter()
+                    .filter_map(|member| match member {
+                        orna_syntax_v1::TableMember::Assertion { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !expressions.is_empty() {
+                    assertions.insert(name.clone(), expressions);
+                }
             }
             Declaration::Use { .. } => {
                 return Err("transactional source seam does not load module imports yet".into());
@@ -1837,7 +1854,66 @@ fn admitted_transaction_module(
             _ => return Err("transactional source seam admits only tables and functions".into()),
         }
     }
-    Ok((functions, key_fields))
+    Ok((functions, key_fields, assertions))
+}
+
+/// Checks every candidate row before the root activation can publish. This
+/// deliberately admits only table-local `every`; uniqueness and module
+/// assertions remain outside this bounded source-execution seam.
+fn validate_table_assertions(
+    activation: &TransactionActivation<'_>,
+    assertions: &TableAssertions,
+    functions: &Functions,
+    limits: EvaluatorLimits,
+) -> Result<(), EvaluationError> {
+    for (table, assertions) in assertions {
+        for assertion in assertions {
+            let (binding, predicate) = table_every_predicate(assertion)?;
+            for (_, row) in activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+            {
+                let environment = Environment::from([(binding.to_owned(), row)]);
+                match evaluate_with_functions(predicate, &environment, functions, limits)?.raw() {
+                    OvbRaw::Bool(true) => {}
+                    OvbRaw::Bool(false) => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
+                    _ => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn table_every_predicate(assertion: &Expr) -> Result<(&str, &Expr), EvaluationError> {
+    let Expr::Call {
+        callee, arguments, ..
+    } = assertion
+    else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    let Expr::Name { text, .. } = callee.as_ref() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    let [parameter] = parameters.as_slice() else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    };
+    if text != "every" {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+    }
+    Ok((binding, body))
 }
 
 fn record_field(row: &Value, field: &str) -> Option<Value> {
