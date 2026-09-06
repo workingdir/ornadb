@@ -2,7 +2,7 @@ use std::{fs, path::Path, process::Command};
 
 use orna_project_v1::{ProjectLimits, ProjectLoadError, ProjectLoader};
 use orna_repository_v1::Repository;
-use orna_semantic_v1::{Catalogue, analyze_with_catalogue};
+use orna_semantic_v1::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use tempfile::TempDir;
 
 fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {
@@ -49,6 +49,32 @@ fn loads_only_reachable_modules_in_deterministic_logical_order() {
     assert_eq!(
         project.identities()[2].namespace(),
         ["sensors", "greenhouse"]
+    );
+}
+
+#[test]
+fn carries_only_an_explicit_standard_dependency_profile() {
+    let (_directory, repository) = repository(&[("main.orna", "pub fn run() {}")]);
+    let profile = StandardDependencyProfile::from_sources(
+        "std-snapshot-1",
+        [(
+            "std/math.orna".into(),
+            "fn increment(value: Int) = value + 1;".into(),
+        )],
+    )
+    .unwrap();
+
+    let project = ProjectLoader::default()
+        .load_with_standard_profile(&repository, Some(profile.clone()))
+        .unwrap();
+    assert_eq!(project.standard_profile(), Some(&profile));
+    assert_eq!(project.modules().len(), 1);
+    assert!(
+        ProjectLoader::default()
+            .load(&repository)
+            .unwrap()
+            .standard_profile()
+            .is_none()
     );
 }
 
