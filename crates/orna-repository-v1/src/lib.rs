@@ -1097,9 +1097,14 @@ impl Repository {
         if journal.stage() == PublicationJournalStage::Prepared {
             match self.head()? {
                 Some(head) if &head == journal.old_head() => {
-                    return self
-                        .publish_candidate(&expected_index, &candidate, &mut journal)
-                        .map(Some);
+                    let actual = self.index_generation()?;
+                    if actual != expected_index {
+                        return Err(RepositoryError::StaleIndex {
+                            expected: expected_index,
+                            actual,
+                        });
+                    }
+                    return Err(RepositoryError::PublicationPending);
                 }
                 Some(head) if &head == journal.new_head() => {
                     journal.advance(PublicationJournalStage::RefAdvanced)?;
@@ -2290,6 +2295,7 @@ pub enum RepositoryError {
     RepositoryBusy,
     GitIndexLockPresent,
     StaleHead,
+    PublicationPending,
     CheckoutPlanStale,
     RuntimeCompletionRequired,
     /// This profile implements atomic index replacement only on POSIX
@@ -2332,6 +2338,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("Git index lock is present; resolve it with Git before retrying")
             }
             Self::StaleHead => f.write_str("Git HEAD changed during repository operation"),
+            Self::PublicationPending => {
+                f.write_str("publication remains pending before Git ref advancement")
+            }
             Self::CheckoutPlanStale => f.write_str("checkout preflight is stale"),
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
