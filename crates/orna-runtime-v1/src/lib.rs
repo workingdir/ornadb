@@ -461,6 +461,27 @@ pub struct StreamDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
+pub struct StreamTableDeliveryCommit<'a> {
+    pub writer: WriterLease,
+    pub expected_capture: &'a CwdCapture,
+    pub mutations: &'a [TableMutation],
+    pub next_digest: [u8; 32],
+    pub delivery: DeliveryLease,
+    pub expected_stream: CheckpointPrecondition,
+    pub faults: &'a dyn FaultInjector,
+}
+
+struct StreamDeliveryParts<'a> {
+    writer: WriterLease,
+    expected_capture: &'a CwdCapture,
+    mutations: &'a [Mutation],
+    table_mutations: &'a [TableMutation],
+    next_digest: [u8; 32],
+    delivery: DeliveryLease,
+    expected_stream: CheckpointPrecondition,
+    faults: &'a dyn FaultInjector,
+}
+
 pub struct StreamReplayCommit<'a> {
     pub writer: WriterLease,
     pub expected_capture: &'a CwdCapture,
@@ -1804,6 +1825,66 @@ impl RuntimeState {
             expected_stream,
             faults,
         } = request;
+        self.commit_stream_delivery_inner(StreamDeliveryParts {
+            writer,
+            expected_capture,
+            mutations,
+            table_mutations: &[],
+            next_digest,
+            delivery,
+            expected_stream,
+            faults,
+        })
+        .await
+    }
+
+    /// Commits typed table mutations and the corresponding stream checkpoint
+    /// in one writer-fenced transaction. Rejected or faulted deliveries leave
+    /// both the table rows and stream checkpoint unchanged.
+    pub async fn commit_stream_table_delivery(
+        &self,
+        request: StreamTableDeliveryCommit<'_>,
+    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
+        let StreamTableDeliveryCommit {
+            writer,
+            expected_capture,
+            mutations,
+            next_digest,
+            delivery,
+            expected_stream,
+            faults,
+        } = request;
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.commit_stream_delivery_inner(StreamDeliveryParts {
+            writer,
+            expected_capture,
+            mutations: &encoded,
+            table_mutations: mutations,
+            next_digest,
+            delivery,
+            expected_stream,
+            faults,
+        })
+        .await
+    }
+
+    async fn commit_stream_delivery_inner(
+        &self,
+        parts: StreamDeliveryParts<'_>,
+    ) -> Result<(CwdCapture, CommitResult), RuntimeError> {
+        let StreamDeliveryParts {
+            writer,
+            expected_capture,
+            mutations,
+            table_mutations,
+            next_digest,
+            delivery,
+            expected_stream,
+            faults,
+        } = parts;
         validate_id(writer.owner_id)?;
         validate_stream_mutations(mutations, next_digest)?;
         let current = self.capture().await?;
@@ -1832,6 +1913,9 @@ impl RuntimeState {
         if matches!(result, CommitResult::Rejected(_)) {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
+        }
+        for mutation in table_mutations {
+            apply_table_mutation_tx(&tx, mutation).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -2585,8 +2669,12 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence \
+                "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence, publication_commit.intent_id \
                  FROM checkpoint LEFT JOIN pending_mutation ON pending_mutation.sequence = checkpoint.mutation_sequence \
+                 LEFT JOIN publication_freeze ON publication_freeze.checkpoint_generation = checkpoint.generation \
+                 AND publication_freeze.checkpoint_mutation_sequence = checkpoint.mutation_sequence \
+                 AND publication_freeze.checkpoint_digest = checkpoint.digest \
+                 LEFT JOIN publication_commit ON publication_commit.intent_id = publication_freeze.intent_id \
                  ORDER BY checkpoint.generation",
                 (),
             )
@@ -2613,9 +2701,12 @@ impl RuntimeState {
             )
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let referenced: Option<i64> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let completed: Option<Vec<u8>> =
+                row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if sequence == 0
                 || sequence <= previous_sequence
-                || referenced.and_then(|value| u64::try_from(value).ok()) != Some(sequence)
+                || (referenced.and_then(|value| u64::try_from(value).ok()) != Some(sequence)
+                    && completed.is_none())
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
@@ -7632,6 +7723,57 @@ mod tests {
                 mutation_sequence: 2,
             })
         );
+        assert_eq!(next.generation_digest(), digest(9));
+    }
+
+    #[tokio::test]
+    async fn typed_stream_delivery_publishes_rows_and_checkpoint_atomically() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        let delivery = stream_delivery("one", "two");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let delivery_lease = {
+            let mut stream = state.stream_backend(writer);
+            match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            }
+        };
+
+        let (next, result) = state
+            .commit_stream_table_delivery(StreamTableDeliveryCommit {
+                writer,
+                expected_capture: &capture,
+                mutations: &[table_mutation(5, 1, Some(9))],
+                next_digest: digest(9),
+                delivery: delivery_lease,
+                expected_stream: expected,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(result, CommitResult::CheckpointAdvanced { .. }));
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        let pending = state.pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, [5; 16]);
+        assert!(pending[0].payload.starts_with(b"ORNA-TABLE-MUTATION\0"));
         assert_eq!(next.generation_digest(), digest(9));
     }
 
