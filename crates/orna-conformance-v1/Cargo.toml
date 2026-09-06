@@ -19,6 +19,7 @@ orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-stream-v1 = { path = "../orna-stream-v1" }
 orna-storage-v1 = { path = "../orna-storage-v1" }
+orna-serving-v1 = { path = "../orna-serving-v1" }
 orna-table-v1 = { path = "../orna-table-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 num-bigint = "0.4.6"
