@@ -1563,6 +1563,54 @@ fn http_create_and_resume_negotiate_and_replace_connections() {
 }
 
 #[test]
+fn http_resume_retires_the_active_attachment_without_closing_the_session() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &credential,
+            attachment: [5; 16],
+            now: 1,
+        }))
+        .unwrap(),
+        orna_security_v1::AttachOutcome::Attached
+    );
+
+    let mut replacement_issuer = Issuer(2, None);
+    let (replacement, retired) = block_on(host.rotate_and_retire(
+        [1; 16],
+        &origin(),
+        &credential,
+        2,
+        &mut replacement_issuer,
+    ))
+    .unwrap();
+    assert_eq!(retired, Some([5; 16]));
+    assert_eq!(
+        block_on(host.handle_frame([5; 16], 3, Frame::Close)),
+        Err(Error::Closed)
+    );
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin(),
+            credential: &replacement,
+            attachment: [6; 16],
+            now: 3,
+        }))
+        .unwrap(),
+        orna_security_v1::AttachOutcome::Reconnected
+    );
+    assert_eq!(
+        block_on(host.handle_frame([6; 16], 4, Frame::Close)),
+        Ok(FrameOutcome::Closed)
+    );
+}
+
+#[test]
 fn http_contract_has_stable_status_headers_and_redacted_errors() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
