@@ -333,14 +333,17 @@ fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner
             "PIPE-002",
             "TXN-001",
             "TXN-002",
-            "LIVE-001",
-            "LIVE-002",
-            "LIVE-003",
-            "LIVE-004",
-            "SYS-RT-RENAME-100",
         ]
     );
-    for scenario_id in ["STREAM-001", "STREAM-002"] {
+    for scenario_id in [
+        "LIVE-001",
+        "LIVE-002",
+        "LIVE-003",
+        "LIVE-004",
+        "SYS-RT-RENAME-100",
+        "STREAM-001",
+        "STREAM-002",
+    ] {
         let result = report["scenarios"]
             .as_array()
             .expect("scenario results are an array")
@@ -351,5 +354,14 @@ fn published_report_declares_only_the_scenarios_executed_by_the_composite_runner
             result["status"], "skipped",
             "{scenario_id} must remain skipped"
         );
+        if matches!(
+            scenario_id,
+            "LIVE-001" | "LIVE-002" | "LIVE-003" | "LIVE-004" | "SYS-RT-RENAME-100"
+        ) {
+            assert_eq!(
+                result["detail"],
+                "scenario execution skipped: scenario is covered by direct serving or semantic adapter tests, not Orna-engine execution"
+            );
+        }
     }
 }
