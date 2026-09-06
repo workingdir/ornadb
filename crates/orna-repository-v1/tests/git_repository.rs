@@ -501,3 +501,52 @@ fn published_candidate_reconciles_only_managed_index_entries() {
         "unstaged human edit\n"
     );
 }
+
+#[test]
+fn publication_journal_round_trips_atomically_and_advances_monotonically() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new(
+        head.clone(),
+        candidate.commit().clone(),
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    repo.write_publication_journal(&journal).unwrap();
+    assert_eq!(
+        repo.read_publication_journal().unwrap(),
+        Some(journal.clone())
+    );
+    let mut resumed = repo.read_publication_journal().unwrap().unwrap();
+    resumed
+        .advance(orna_repository_v1::PublicationJournalStage::RefAdvanced)
+        .unwrap();
+    assert!(matches!(
+        resumed.advance(orna_repository_v1::PublicationJournalStage::Complete),
+        Err(orna_repository_v1::RepositoryError::InvalidPublicationJournal)
+    ));
+    repo.write_publication_journal(&resumed).unwrap();
+    assert_eq!(
+        repo.read_publication_journal().unwrap().unwrap().stage(),
+        orna_repository_v1::PublicationJournalStage::RefAdvanced
+    );
+    repo.clear_publication_journal().unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
