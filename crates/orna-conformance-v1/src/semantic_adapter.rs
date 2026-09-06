@@ -96,6 +96,7 @@ fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
         }
         "same durable source consumed twice without distinct consumer identity" => "E9101".into(),
         "cross-database writes are not atomic/supported" => "E9001".into(),
+        "a durable consumer function may own only one checkpointed source root" => "E9102".into(),
         _ => diagnostic.code().into(),
     }
 }
