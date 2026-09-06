@@ -158,3 +158,26 @@ fn adapter_rejects_capture_from_another_runtime_or_database() {
         Err(OrnaRepositoryAdapterError::Identity)
     ));
 }
+
+#[test]
+fn adapter_exposes_the_real_head_as_a_committed_snapshot() {
+    let root = repository();
+    let expected = capture(1, 1);
+    let adapter = OrnaRepositoryAdapter::new(
+        Repository::discover(root.path()).unwrap(),
+        Store::new(expected),
+    );
+
+    let snapshot = adapter.committed_snapshot().unwrap().unwrap();
+    let CanonicalSnapshot::Commit {
+        database,
+        algorithm,
+        oid,
+    } = snapshot
+    else {
+        panic!("expected a committed snapshot");
+    };
+    assert_eq!(database, [1; 16]);
+    assert_eq!(algorithm, orna_foundation_v1::GitHash::Sha1);
+    assert_eq!(oid.len(), 20);
+}
