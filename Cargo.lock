@@ -1875,6 +1875,7 @@ version = "1.0.0"
 name = "orna-traceability-v1"
 version = "1.0.0"
 dependencies = [
+ "orna-conformance-v1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
