@@ -884,6 +884,76 @@ mod tests {
         assert_eq!(plan.journal().entries().len(), 1);
     }
 
+    #[tokio::test]
+    async fn coordinator_publishes_and_completes_a_real_runtime_prefix() {
+        let (_temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            [3; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([4; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        let mutation =
+            TableMutation::new([5; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
+                .unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[mutation],
+                [6; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [7; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [6; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
+            &repository,
+            &runtime,
+            &head,
+            index,
+            &freeze,
+            |mutation| {
+                LoosePath::for_key(
+                    mutation.table(),
+                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+                )
+            },
+            "orna: publish runtime data",
+        )
+        .await
+        .unwrap();
+        plan.publish(&repository).unwrap();
+        plan.complete(&repository, &runtime, &freeze).await.unwrap();
+        assert!(runtime.pending().await.unwrap().is_empty());
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        assert_eq!(
+            repository
+                .managed_file_bytes(managed.as_managed_path())
+                .unwrap(),
+            Some(b"row".to_vec())
+        );
+    }
+
     #[test]
     fn logical_keys_are_encoded_before_path_safety_validation() {
         for (key, encoded) in [
