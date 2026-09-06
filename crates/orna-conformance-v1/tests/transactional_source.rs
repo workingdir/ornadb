@@ -203,3 +203,40 @@ fn table_every_assertion_evaluation_failure_rolls_back_the_activation() {
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
 }
+
+#[test]
+fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_table_assertion(
+        "all_unique(note => note.text)",
+        r#"Note.insert({ id: 7, text: "duplicate" }); Note.insert({ id: 8, text: "duplicate" });"#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
+
+#[test]
+fn table_all_unique_assertion_permits_atomic_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_table_assertion(
+        "all_unique(note => note.text)",
+        r#"Note.insert({ id: 7, text: "first" }); Note.insert({ id: 8, text: "second" });"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(7.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
+    );
+}
