@@ -450,6 +450,20 @@ impl LiveHost {
         Ok(outcome)
     }
 
+    fn validate_resume(&self, request: &ResumeRequest<'_>) -> Result<()> {
+        self.security
+            .validate_attach(
+                session_id(request.id),
+                request.origin,
+                &request.credential.security,
+                request.now,
+            )
+            .map_err(map_boundary)?;
+        self.serving
+            .validate_reconnect(request.id, &request.credential.serving)
+            .map_err(map_serving)
+    }
+
     /// Rotates an authenticated session credential across both security and
     /// serving state without changing its attachment. HTTP resume uses this
     /// before the later cookie-authenticated WebSocket upgrade.
@@ -1740,7 +1754,8 @@ impl WireResponse {
         limits: TransportLimits,
     ) -> std::result::Result<Vec<u8>, HttpEncodeError> {
         let reason = http_reason(self.status).ok_or(HttpEncodeError::UnsupportedStatus)?;
-        if ((100..200).contains(&self.status) || self.status == 204) && !self.body.is_empty() {
+        let body_allowed = !(100..200).contains(&self.status) && self.status != 204;
+        if !body_allowed && !self.body.is_empty() {
             return Err(HttpEncodeError::Malformed);
         }
         let mut length = 0usize;
@@ -1761,10 +1776,12 @@ impl WireResponse {
                 .checked_add(name.len() + value.len() + 4)
                 .ok_or(HttpEncodeError::Limit)?;
         }
-        length = length
-            .checked_add("Content-Length: ".len() + self.body.len().to_string().len() + 4)
-            .and_then(|length| length.checked_add(self.body.len()))
-            .ok_or(HttpEncodeError::Limit)?;
+        if body_allowed {
+            length = length
+                .checked_add("Content-Length: ".len() + self.body.len().to_string().len() + 4)
+                .and_then(|length| length.checked_add(self.body.len()))
+                .ok_or(HttpEncodeError::Limit)?;
+        }
         if length > limits.max_outgoing_bytes {
             return Err(HttpEncodeError::Limit);
         }
@@ -1774,9 +1791,14 @@ impl WireResponse {
         for (name, value) in &self.headers {
             encoded.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
         }
-        encoded
-            .extend_from_slice(format!("Content-Length: {}\r\n\r\n", self.body.len()).as_bytes());
-        encoded.extend_from_slice(&self.body);
+        if body_allowed {
+            encoded.extend_from_slice(
+                format!("Content-Length: {}\r\n\r\n", self.body.len()).as_bytes(),
+            );
+            encoded.extend_from_slice(&self.body);
+        } else {
+            encoded.extend_from_slice(b"\r\n");
+        }
         Ok(encoded)
     }
 }
@@ -1854,6 +1876,8 @@ pub struct HttpConnection {
 pub enum HttpConnectionError {
     Parse(HttpParseError),
     Encode(HttpEncodeError),
+    Protocol(Error),
+    WebSocket(WebSocketEncodeError),
 }
 
 impl core::fmt::Display for HttpConnectionError {
@@ -1864,6 +1888,10 @@ impl core::fmt::Display for HttpConnectionError {
                 HttpEncodeError::Limit => "HTTP response exceeds the configured limit",
                 HttpEncodeError::Malformed => "HTTP response is malformed",
                 HttpEncodeError::UnsupportedStatus => "HTTP response status is unsupported",
+            }),
+            Self::Protocol(error) => error.fmt(formatter),
+            Self::WebSocket(error) => formatter.write_str(match error {
+                WebSocketEncodeError::Limit => "WebSocket output exceeds the configured limit",
             }),
         }
     }
@@ -1975,6 +2003,27 @@ impl HttpConnection {
         let parsed = self.push(bytes)?;
         self.pending.extend(parsed);
         Ok(self.pending.pop_front())
+    }
+
+    fn push_one_preserving_remainder(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::result::Result<Option<ParsedHttpRequest>, HttpParseError> {
+        let mut candidate = self.buffered.clone();
+        candidate.extend_from_slice(bytes);
+        let Some(request) = parse_http_request(&candidate, self.limits)? else {
+            if candidate.len() > self.limits.max_request_bytes {
+                return Err(HttpParseError::Limit);
+            }
+            self.buffered = candidate;
+            return Ok(None);
+        };
+        self.buffered = candidate.split_off(request.consumed());
+        Ok(Some(request))
+    }
+
+    fn take_buffered(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffered)
     }
 }
 
@@ -2173,6 +2222,13 @@ pub fn encode_websocket_output(
 struct SessionRecord {
     metadata: SessionMetadata,
     credential: SessionCredential,
+}
+
+struct UpgradeAdmission {
+    id: [u8; 16],
+    origin: Origin,
+    credential: SessionCredential,
+    response: WireResponse,
 }
 
 /// A bounded HTTP/RFC-6455 parser and adapter. It deliberately has no listener,
@@ -2499,6 +2555,124 @@ impl LiveTransport {
         }
     }
 
+    /// Performs one injected HTTP upgrade and continues on the same byte
+    /// stream as WebSocket. Bytes co-read after the HTTP headers are handed to
+    /// the WebSocket state machine; the 101 response is written before any
+    /// application output is emitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted read, write, cancellation, framing, protocol, or
+    /// WebSocket-output error. After cancellation or a partial write, callers
+    /// must dispose of the stream.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve_websocket_connection<R, W, C, X, A>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        connection: &mut HttpConnection,
+        attachment: [u8; 16],
+        clock: &mut C,
+        cancellation: &mut X,
+        application: &mut A,
+    ) -> std::result::Result<(), HttpIoError>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+        C: FnMut() -> u64,
+        X: Future<Output = ()> + Unpin,
+        A: LiveApplication,
+    {
+        let mut chunk = [0; 8192];
+        let request = loop {
+            let read =
+                await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read).await?;
+            if read == 0 {
+                return if connection.buffered_bytes() == 0 {
+                    Ok(())
+                } else {
+                    Err(HttpIoError::Transport(HttpConnectionError::Parse(
+                        HttpParseError::Incomplete,
+                    )))
+                };
+            }
+            if let Some(request) = connection
+                .push_one_preserving_remainder(&chunk[..read])
+                .map_err(HttpConnectionError::Parse)
+                .map_err(HttpIoError::Transport)?
+            {
+                break request;
+            }
+        };
+        let now = clock();
+        let admission = match self.prepare_upgrade(request.request(), attachment, now) {
+            Ok(admission) => admission,
+            Err(response) => {
+                let encoded = response
+                    .encode_http(self.limits)
+                    .map_err(HttpConnectionError::Encode)
+                    .map_err(HttpIoError::Transport)?;
+                await_http_io(writer.write_all(&encoded), cancellation, HttpIoError::Write).await?;
+                await_http_io(writer.flush(), cancellation, HttpIoError::Write).await?;
+                return Ok(());
+            }
+        };
+        let response = admission.response.clone();
+        let encoded = response
+            .encode_http(self.limits)
+            .map_err(HttpConnectionError::Encode)
+            .map_err(HttpIoError::Transport)?;
+        await_http_io(writer.write_all(&encoded), cancellation, HttpIoError::Write).await?;
+        await_http_io(writer.flush(), cancellation, HttpIoError::Write).await?;
+        if response.status != 101 {
+            return Ok(());
+        }
+        self.commit_upgrade(admission, attachment, now)
+            .await
+            .map_err(HttpConnectionError::Protocol)
+            .map_err(HttpIoError::Transport)?;
+
+        let mut socket = WebSocketState::new(attachment);
+        let mut initial = connection.take_buffered();
+        loop {
+            if initial.is_empty() {
+                let read =
+                    await_http_io(reader.read(&mut chunk), cancellation, HttpIoError::Read).await?;
+                if read == 0 {
+                    return Ok(());
+                }
+                if self
+                    .serve_websocket_bytes(
+                        &mut socket,
+                        &chunk[..read],
+                        clock,
+                        writer,
+                        cancellation,
+                        application,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+            } else {
+                let bytes = std::mem::take(&mut initial);
+                if self
+                    .serve_websocket_bytes(
+                        &mut socket,
+                        &bytes,
+                        clock,
+                        writer,
+                        cancellation,
+                        application,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     /// Validates the RFC 6455 handshake and attaches the cookie-authenticated
     /// session. The caller supplies its socket identity after accepting bytes.
     pub async fn upgrade(
@@ -2507,23 +2681,39 @@ impl LiveTransport {
         attachment: [u8; 16],
         now: u64,
     ) -> WireResponse {
+        let admission = match self.prepare_upgrade(&request, attachment, now) {
+            Ok(admission) => admission,
+            Err(response) => return response,
+        };
+        match self.commit_upgrade(admission, attachment, now).await {
+            Ok(response) => response,
+            Err(error) => host_error(error),
+        }
+    }
+
+    fn prepare_upgrade(
+        &self,
+        request: &WireRequest,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> std::result::Result<UpgradeAdmission, WireResponse> {
         if !request.body.is_empty() || header_size(&request.headers) > self.limits.max_header_bytes
         {
-            return wire_error(400, "live.malformed_request");
+            return Err(wire_error(400, "live.malformed_request"));
         }
         let SessionPath::Live(id) = session_path(&request.path) else {
-            return wire_error(400, "live.malformed_request");
+            return Err(wire_error(400, "live.malformed_request"));
         };
         let Ok(origin) = required_origin(&request.headers) else {
-            return wire_error(403, "live.origin_denied");
+            return Err(wire_error(403, "live.origin_denied"));
         };
         let Some(record) = self.sessions.get(&id) else {
-            return wire_error(410, "live.expired");
+            return Err(wire_error(410, "live.expired"));
         };
         let Some(cookie) =
             cookie(&request.headers, "orna_session").and_then(|value| decode_token(&value))
         else {
-            return wire_error(401, "live.unauthenticated");
+            return Err(wire_error(401, "live.unauthenticated"));
         };
         if request.method != "GET"
             || !header_token(&request.headers, "connection", "upgrade")
@@ -2531,34 +2721,39 @@ impl LiveTransport {
             || !header_eq(&request.headers, "sec-websocket-version", "13")
             || !header_token(&request.headers, "sec-websocket-protocol", SUBPROTOCOL)
         {
-            return wire_error(400, "live.malformed_request");
+            return Err(wire_error(400, "live.malformed_request"));
         }
         let Some(key) = header(&request.headers, "sec-websocket-key").and_then(decode_base64)
         else {
-            return wire_error(400, "live.malformed_request");
+            return Err(wire_error(400, "live.malformed_request"));
         };
         if key.len() != 16 {
-            return wire_error(400, "live.malformed_request");
+            return Err(wire_error(400, "live.malformed_request"));
         }
         let credential = SessionCredential {
             security: OpaqueCredential::from_bytes(cookie),
             serving: ServingCredential::new(cookie),
         };
         if credential != record.credential {
-            return wire_error(401, "live.unauthenticated");
+            return Err(wire_error(401, "live.unauthenticated"));
         }
-        match self
-            .host
-            .resume(ResumeRequest {
+        self.host
+            .validate_resume(&ResumeRequest {
                 id,
                 origin: &origin,
                 credential: &credential,
                 attachment,
                 now,
             })
-            .await
-        {
-            Ok(_) => WireResponse {
+            .map_err(|error| match error {
+                Error::Closed | Error::Denied => wire_error(410, "live.expired"),
+                error => host_error(error),
+            })?;
+        Ok(UpgradeAdmission {
+            id,
+            origin,
+            credential,
+            response: WireResponse {
                 status: 101,
                 headers: vec![
                     ("connection".into(), "Upgrade".into()),
@@ -2573,9 +2768,25 @@ impl LiveTransport {
                 ],
                 body: Vec::new(),
             },
-            Err(Error::Closed | Error::Denied) => wire_error(410, "live.expired"),
-            Err(error) => host_error(error),
-        }
+        })
+    }
+
+    async fn commit_upgrade(
+        &mut self,
+        admission: UpgradeAdmission,
+        attachment: [u8; 16],
+        now: u64,
+    ) -> Result<WireResponse> {
+        self.host
+            .resume(ResumeRequest {
+                id: admission.id,
+                origin: &admission.origin,
+                credential: &admission.credential,
+                attachment,
+                now,
+            })
+            .await
+            .map(|_| admission.response)
     }
 
     /// Reassembles client RFC 6455 frames and forwards only complete binary
@@ -2611,32 +2822,105 @@ impl LiveTransport {
         bytes: &[u8],
         application: &mut impl LiveApplication,
     ) -> Result<Vec<WebSocketOutput>> {
-        let events = socket.push(bytes, self.limits.max_frame_bytes)?;
         let mut output = Vec::new();
-        for event in events {
-            match event {
-                SocketEvent::Binary(message) => {
-                    let dispatched = self
-                        .host
-                        .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
-                        .await?;
-                    output.push(self.websocket_output(dispatched)?);
-                }
-                SocketEvent::Text => return Err(Error::InvalidFrame),
-                SocketEvent::Ping(payload) => output.push(WebSocketOutput::Pong(payload)),
-                SocketEvent::Pong => {}
-                SocketEvent::Close => {
-                    output.push(WebSocketOutput::Accepted(
-                        self.host
-                            .dispatch_frame(socket.attachment, now, Frame::Close, application)
-                            .await?
-                            .outcome,
-                    ));
+        let mut input = bytes;
+        loop {
+            if let Some(next) = self
+                .receive_one_with_application(socket, now, input, application)
+                .await?
+            {
+                output.push(next);
+                if socket.closed {
                     output.push(WebSocketOutput::Close);
                 }
             }
+            input = &[];
+            if !socket.has_complete_frame(self.limits.max_frame_bytes)? {
+                break;
+            }
         }
         Ok(output)
+    }
+
+    async fn receive_one_with_application(
+        &mut self,
+        socket: &mut WebSocketState,
+        now: u64,
+        bytes: &[u8],
+        application: &mut impl LiveApplication,
+    ) -> Result<Option<WebSocketOutput>> {
+        let Some(event) = socket.push_one(bytes, self.limits.max_frame_bytes)? else {
+            return Ok(None);
+        };
+        match event {
+            SocketEvent::Binary(message) => {
+                let dispatched = self
+                    .host
+                    .dispatch_frame(socket.attachment, now, Frame::Binary(message), application)
+                    .await?;
+                Ok(Some(self.websocket_output(dispatched)?))
+            }
+            SocketEvent::Text => Err(Error::InvalidFrame),
+            SocketEvent::Ping(payload) => Ok(Some(WebSocketOutput::Pong(payload))),
+            SocketEvent::Pong => Ok(None),
+            SocketEvent::Close => {
+                let outcome = self
+                    .host
+                    .dispatch_frame(socket.attachment, now, Frame::Close, application)
+                    .await?
+                    .outcome;
+                Ok(Some(WebSocketOutput::Accepted(outcome)))
+            }
+        }
+    }
+
+    async fn serve_websocket_bytes<W, C, X, A>(
+        &mut self,
+        socket: &mut WebSocketState,
+        bytes: &[u8],
+        clock: &mut C,
+        writer: &mut W,
+        cancellation: &mut X,
+        application: &mut A,
+    ) -> std::result::Result<bool, HttpIoError>
+    where
+        W: AsyncWrite + Unpin,
+        C: FnMut() -> u64,
+        X: Future<Output = ()> + Unpin,
+        A: LiveApplication,
+    {
+        let mut input = bytes;
+        loop {
+            let output = self
+                .receive_one_with_application(socket, clock(), input, application)
+                .await
+                .map_err(HttpConnectionError::Protocol)
+                .map_err(HttpIoError::Transport)?;
+            if let Some(output) = output {
+                let closed = socket.closed;
+                if write_websocket_outputs(self.limits, writer, cancellation, vec![output]).await? {
+                    return Ok(true);
+                }
+                if closed {
+                    write_websocket_outputs(
+                        self.limits,
+                        writer,
+                        cancellation,
+                        vec![WebSocketOutput::Close],
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            }
+            input = &[];
+            if !socket
+                .has_complete_frame(self.limits.max_frame_bytes)
+                .map_err(HttpConnectionError::Protocol)
+                .map_err(HttpIoError::Transport)?
+            {
+                return Ok(false);
+            }
+        }
     }
 
     fn websocket_output(&self, dispatched: DispatchOutcome) -> Result<WebSocketOutput> {
@@ -2649,6 +2933,34 @@ impl LiveTransport {
             .map_err(|_| Error::ApplicationRejected)?;
         Ok(WebSocketOutput::Binary { outcome, payload })
     }
+}
+
+async fn write_websocket_outputs<W, X>(
+    limits: TransportLimits,
+    writer: &mut W,
+    cancellation: &mut X,
+    outputs: Vec<WebSocketOutput>,
+) -> std::result::Result<bool, HttpIoError>
+where
+    W: AsyncWrite + Unpin,
+    X: Future<Output = ()> + Unpin,
+{
+    for output in outputs {
+        let closing = matches!(output, WebSocketOutput::Close);
+        let Some(frame) = encode_websocket_output(&output, limits)
+            .map_err(HttpConnectionError::WebSocket)
+            .map_err(HttpIoError::Transport)?
+        else {
+            continue;
+        };
+        await_http_io(writer.write_all(&frame), cancellation, HttpIoError::Write).await?;
+        await_http_io(writer.flush(), cancellation, HttpIoError::Write).await?;
+        if closing {
+            await_http_io(writer.close(), cancellation, HttpIoError::Write).await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2917,7 +3229,7 @@ impl WebSocketState {
             closed: false,
         }
     }
-    fn push(&mut self, bytes: &[u8], limit: usize) -> Result<Vec<SocketEvent>> {
+    fn push_one(&mut self, bytes: &[u8], limit: usize) -> Result<Option<SocketEvent>> {
         if self.closed {
             return Err(Error::Closed);
         }
@@ -2925,56 +3237,60 @@ impl WebSocketState {
         if self.pending.len() > limit.saturating_add(14) {
             return Err(Error::Limit);
         }
-        let mut events = Vec::new();
-        while let Some((used, fin, opcode, payload)) = ws_frame(&self.pending, limit)? {
-            self.pending.drain(..used);
-            match opcode {
-                0 => {
-                    let Some((kind, mut whole)) = self.fragment.take() else {
-                        return Err(Error::InvalidFrame);
-                    };
-                    whole.extend(payload);
-                    if whole.len() > limit {
-                        return Err(Error::Limit);
-                    }
-                    if fin {
-                        events.push(if kind == 2 {
-                            SocketEvent::Binary(whole)
-                        } else {
-                            SocketEvent::Text
-                        });
+        let Some((used, fin, opcode, payload)) = ws_frame(&self.pending, limit)? else {
+            return Ok(None);
+        };
+        self.pending.drain(..used);
+        match opcode {
+            0 => {
+                let Some((kind, mut whole)) = self.fragment.take() else {
+                    return Err(Error::InvalidFrame);
+                };
+                whole.extend(payload);
+                if whole.len() > limit {
+                    return Err(Error::Limit);
+                }
+                if fin {
+                    Ok(Some(if kind == 2 {
+                        SocketEvent::Binary(whole)
                     } else {
-                        self.fragment = Some((kind, whole));
-                    }
+                        SocketEvent::Text
+                    }))
+                } else {
+                    self.fragment = Some((kind, whole));
+                    Ok(None)
                 }
-                1 | 2 => {
-                    if self.fragment.is_some() {
-                        return Err(Error::InvalidFrame);
-                    }
-                    if fin {
-                        events.push(if opcode == 2 {
-                            SocketEvent::Binary(payload)
-                        } else {
-                            SocketEvent::Text
-                        });
-                    } else {
-                        self.fragment = Some((opcode, payload));
-                    }
-                }
-                8 => {
-                    validate_close_payload(&payload)?;
-                    self.closed = true;
-                    self.fragment = None;
-                    self.pending.clear();
-                    events.push(SocketEvent::Close);
-                    break;
-                }
-                9 => events.push(SocketEvent::Ping(payload)),
-                10 => events.push(SocketEvent::Pong),
-                _ => return Err(Error::InvalidFrame),
             }
+            1 | 2 => {
+                if self.fragment.is_some() {
+                    return Err(Error::InvalidFrame);
+                }
+                if fin {
+                    Ok(Some(if opcode == 2 {
+                        SocketEvent::Binary(payload)
+                    } else {
+                        SocketEvent::Text
+                    }))
+                } else {
+                    self.fragment = Some((opcode, payload));
+                    Ok(None)
+                }
+            }
+            8 => {
+                validate_close_payload(&payload)?;
+                self.closed = true;
+                self.fragment = None;
+                self.pending.clear();
+                Ok(Some(SocketEvent::Close))
+            }
+            9 => Ok(Some(SocketEvent::Ping(payload))),
+            10 => Ok(Some(SocketEvent::Pong)),
+            _ => Err(Error::InvalidFrame),
         }
-        Ok(events)
+    }
+
+    fn has_complete_frame(&self, limit: usize) -> Result<bool> {
+        Ok(ws_frame(&self.pending, limit)?.is_some())
     }
 }
 enum SocketEvent {
