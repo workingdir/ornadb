@@ -1,7 +1,7 @@
 //! Git-valid repository state for Orna 1.0.
 //!
-//! This crate intentionally models only the repository boundary.  It does not
-//! write `.orna/` metadata or advance an ordinary ref.  In particular,
+//! This crate intentionally models the repository boundary. It can initialize
+//! canonical `.orna/` metadata, but never advances an ordinary ref. In particular,
 //! [`Repository::stage_managed`] delegates to Git's ordinary index and touches
 //! only the supplied worktree-relative paths.
 
@@ -15,6 +15,13 @@ use std::{
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
+
+mod init;
+
+pub use init::{
+    DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
+    initialize_repository, inspect_metadata,
+};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
 /// shared foundation owns the portable Orna `SnapshotRef` row identity and
@@ -707,10 +714,15 @@ impl Repository {
         } else {
             input.parent().ok_or(RepositoryError::NotAWorktree)?
         };
-        let worktree = PathBuf::from(Self::git_at(directory, ["rev-parse", "--show-toplevel"])?);
+        let worktree = PathBuf::from(Self::git_at(
+            directory,
+            ["rev-parse", "--show-toplevel"],
+            true,
+        )?);
         let runtime = PathBuf::from(Self::git_at(
             &worktree,
             ["rev-parse", "--git-path", "orna"],
+            true,
         )?);
         // Git intentionally prints a path relative to its current directory
         // for an ordinary worktree, but a linked worktree may resolve through
@@ -1902,7 +1914,7 @@ impl Repository {
         command
     }
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
-        Self::git_at(&self.worktree, args)
+        Self::git_at(&self.worktree, args, false)
     }
     fn git_optional_tree<const N: usize>(
         &self,
@@ -2081,9 +2093,13 @@ impl Repository {
     fn git_at<const N: usize>(
         directory: &Path,
         args: [&str; N],
+        scrub_routing_environment: bool,
     ) -> Result<String, RepositoryError> {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
+        if scrub_routing_environment {
+            scrub_git_routing_environment(&mut command);
+        }
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -2651,6 +2667,21 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
         Ok(output)
     } else {
         Err(RepositoryError::GitOperationFailed)
+    }
+}
+
+/// Prevent inherited Git routing from selecting a repository, worktree, or
+/// index other than the explicitly supplied command directory.
+pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(variable);
     }
 }
 fn valid_branch_name(name: &str) -> bool {
