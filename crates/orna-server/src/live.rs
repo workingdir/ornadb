@@ -1,9 +1,10 @@
-//! One-shot loopback live-session host.
+//! Loopback live-session host.
 //!
-//! This is the first executable-owned live boundary. It accepts one local
-//! HTTP session-create connection and then exits. TLS, remote exposure,
-//! WebSocket handoff, durable live-session rows, and application dispatch are
-//! deliberately outside this slice.
+//! This is the first executable-owned live boundary. Its basic entry point
+//! accepts one local HTTP connection; the cancellable entry point retains
+//! transport/session state across sequential connections. TLS, remote
+//! exposure, WebSocket handoff, durable live-session rows, and application
+//! dispatch are deliberately outside this slice.
 
 use futures::{Future, executor::block_on};
 use orna_live_v1::{
@@ -75,17 +76,26 @@ impl LiveOnceHost {
             return Err(LiveHostError::Runtime);
         }
 
-        let origin = Origin::parse("http://localhost").map_err(|_| LiveHostError::Configuration)?;
+        let listener =
+            LiveTransport::bind_default_listener(port).map_err(|_| LiveHostError::Listener)?;
+        let address = listener.status().address;
+        let localhost = Origin::parse(format!("http://localhost:{}", address.port()))
+            .map_err(|_| LiveHostError::Configuration)?;
+        let loopback = Origin::parse(format!("http://127.0.0.1:{}", address.port()))
+            .map_err(|_| LiveHostError::Configuration)?;
+        let bare_localhost =
+            Origin::parse("http://localhost").map_err(|_| LiveHostError::Configuration)?;
         let host = LiveHost::new(
             Limits::default(),
-            SessionBoundary::new(OriginPolicy::new([origin], []), 30_000),
+            SessionBoundary::new(
+                OriginPolicy::new([bare_localhost, localhost, loopback], []),
+                30_000,
+            ),
             Serving::new(ServingLimits::default()).map_err(|_| LiveHostError::Configuration)?,
         )
         .map_err(|_| LiveHostError::Configuration)?;
         let transport = LiveTransport::new(host, TransportLimits::default())
             .map_err(|_| LiveHostError::Configuration)?;
-        let listener =
-            LiveTransport::bind_default_listener(port).map_err(|_| LiveHostError::Listener)?;
         let sessions = Rc::new(RefCell::new(BTreeSet::new()));
         Ok(Self {
             listener,

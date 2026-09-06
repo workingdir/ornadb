@@ -35,10 +35,11 @@ impl Drop for TemporaryRepository {
     }
 }
 
-fn request(database: &str) -> String {
+fn request(address: std::net::SocketAddr, database: &str) -> String {
     let body = format!(r#"{{"database":"{database}","protocol":"orna.present.v1"}}"#);
     format!(
-        "POST /orna/session HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /orna/session HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        address.port(),
         body.len()
     )
 }
@@ -83,7 +84,7 @@ fn loopback_host_creates_a_session_from_a_real_repository() {
     let client = std::thread::spawn(move || {
         let mut client = TcpStream::connect(address).unwrap();
         client
-            .write_all(request(&request_database).as_bytes())
+            .write_all(request(address, &request_database).as_bytes())
             .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -110,7 +111,7 @@ fn loopback_host_rejects_a_session_for_another_database() {
     let client = std::thread::spawn(move || {
         let mut client = TcpStream::connect(address).unwrap();
         client
-            .write_all(request("00000000-0000-0000-0000-000000000001").as_bytes())
+            .write_all(request(address, "00000000-0000-0000-0000-000000000001").as_bytes())
             .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut response = String::new();
@@ -171,7 +172,7 @@ fn loopback_host_runs_create_resume_and_delete_on_one_connection() {
     let client = std::thread::spawn(move || {
         let mut client = TcpStream::connect(address).unwrap();
         client
-            .write_all(request(&request_database).as_bytes())
+            .write_all(request(address, &request_database).as_bytes())
             .unwrap();
         let created = read_response(&mut client);
         assert!(created.starts_with("HTTP/1.1 201 Created\r\n"));
@@ -180,7 +181,8 @@ fn loopback_host_runs_create_resume_and_delete_on_one_connection() {
 
         let body = format!(r#"{{"resume_token":"{first_token}","protocol":"orna.present.v1"}}"#);
         let resume = format!(
-            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            address.port(),
             body.len()
         );
         client.write_all(resume.as_bytes()).unwrap();
@@ -191,7 +193,8 @@ fn loopback_host_runs_create_resume_and_delete_on_one_connection() {
         assert_ne!(second_token, first_token);
 
         let delete = format!(
-            "DELETE /orna/session/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nAuthorization: Bearer {second_token}\r\nContent-Length: 0\r\n\r\n"
+            "DELETE /orna/session/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nAuthorization: Bearer {second_token}\r\nContent-Length: 0\r\n\r\n",
+            address.port()
         );
         client.write_all(delete.as_bytes()).unwrap();
         let deleted = read_response(&mut client);
@@ -214,7 +217,7 @@ fn loopback_host_reuses_session_state_across_connections_until_cancelled() {
     let client = std::thread::spawn(move || {
         let mut first = TcpStream::connect(address).unwrap();
         first
-            .write_all(request(&request_database).as_bytes())
+            .write_all(request(address, &request_database).as_bytes())
             .unwrap();
         first.shutdown(Shutdown::Write).unwrap();
         let mut first_response = Vec::new();
@@ -223,7 +226,7 @@ fn loopback_host_reuses_session_state_across_connections_until_cancelled() {
 
         let mut second = TcpStream::connect(address).unwrap();
         second
-            .write_all(request("00000000-0000-0000-0000-000000000001").as_bytes())
+            .write_all(request(address, "00000000-0000-0000-0000-000000000001").as_bytes())
             .unwrap();
         second.shutdown(Shutdown::Write).unwrap();
         let mut second_response = Vec::new();
