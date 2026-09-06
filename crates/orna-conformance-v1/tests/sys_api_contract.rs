@@ -1,5 +1,15 @@
 use std::collections::BTreeSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
+use orna_sys_v1::{
+    AdmissionError, AdmissionRequest, ArgumentMap, ExecutionBoundary, FunctionDescriptor,
+    FunctionId, FunctionIdentity, InvocationContext, InvocationExecutor, InvocationMode,
+    InvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId, TransactionMode,
+    TypeId, TypeWitness, TypedValue,
+};
 use serde_json::Value;
 
 const SYS_API: &str = include_str!("../../../api/sys.json");
@@ -10,6 +20,69 @@ fn array_len(document: &Value, name: &str) -> usize {
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("{name} must be an array"))
         .len()
+}
+
+struct CountingExecutor(Arc<AtomicUsize>);
+
+impl InvocationExecutor for CountingExecutor {
+    fn execute(&mut self, _: &ExecutionBoundary) -> InvocationResult<TypedValue> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        InvocationResult::Success(TypedValue::public(TypeId::new("Contact"), []))
+    }
+}
+
+fn incompatible_typed_request(mode: InvocationMode) -> AdmissionRequest<()> {
+    AdmissionRequest {
+        function: FunctionDescriptor {
+            identity: FunctionIdentity {
+                function: FunctionId::new("contact"),
+                revision: RevisionId::new("r1"),
+                snapshot: SnapshotId::new("s1"),
+            },
+            parameters: Vec::new(),
+            result_type: TypeId::new("Contact"),
+            visible: true,
+            callable: true,
+            generics_resolved: true,
+        },
+        arguments: ArgumentMap::default(),
+        explicit_snapshot: None,
+        mode,
+        transaction: match mode {
+            InvocationMode::Invoke => TransactionMode::Inherit,
+            InvocationMode::Start => TransactionMode::Separate,
+        },
+        witness: TypeWitness::new(TypeId::new("Invoice")),
+        idempotency_key: None,
+        context: InvocationContext::default(),
+    }
+}
+
+#[test]
+fn sys_invoke_result_type_rejects_typed_invoke_and_start_before_effects() {
+    // SYS-INVOKE-RESULT-TYPE-100 / ORNA-SYS-132: neither overload attempts a
+    // conversion or reaches its executor when the explicit witness disagrees.
+    let supervisor = RuntimeSupervisor::new(RuntimeId::new("runtime"));
+    let invoke_calls = Arc::new(AtomicUsize::new(0));
+    let mut invoke = CountingExecutor(Arc::clone(&invoke_calls));
+    assert_eq!(
+        supervisor.run(
+            incompatible_typed_request(InvocationMode::Invoke),
+            &mut invoke
+        ),
+        Err(AdmissionError::ReturnType)
+    );
+    assert_eq!(invoke_calls.load(Ordering::SeqCst), 0);
+
+    let start_calls = Arc::new(AtomicUsize::new(0));
+    assert_eq!(
+        supervisor.start(
+            incompatible_typed_request(InvocationMode::Start),
+            CountingExecutor(Arc::clone(&start_calls)),
+        ),
+        Err(AdmissionError::ReturnType)
+    );
+    assert_eq!(start_calls.load(Ordering::SeqCst), 0);
 }
 
 fn object_keys(document: &Value, name: &str) -> BTreeSet<String> {
