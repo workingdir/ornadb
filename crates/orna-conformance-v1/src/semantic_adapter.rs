@@ -1858,8 +1858,9 @@ fn admitted_transaction_module(
 }
 
 /// Checks every candidate row before the root activation can publish. This
-/// deliberately admits only table-local `every`; uniqueness and module
-/// assertions remain outside this bounded source-execution seam.
+/// deliberately admits only table-local `every` and projection-based
+/// `all_unique`; module assertions remain outside this bounded source-execution
+/// seam.
 fn validate_table_assertions(
     activation: &TransactionActivation<'_>,
     assertions: &TableAssertions,
@@ -1868,16 +1869,30 @@ fn validate_table_assertions(
 ) -> Result<(), EvaluationError> {
     for (table, assertions) in assertions {
         for assertion in assertions {
-            let (binding, predicate) = table_every_predicate(assertion)?;
+            let (kind, binding, predicate) = table_assertion_predicate(assertion)?;
+            let mut projections = BTreeSet::new();
             for (_, row) in activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
                 let environment = Environment::from([(binding.to_owned(), row)]);
-                match evaluate_with_functions(predicate, &environment, functions, limits)?.raw() {
-                    OvbRaw::Bool(true) => {}
-                    OvbRaw::Bool(false) => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
-                    _ => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
+                let value = evaluate_with_functions(predicate, &environment, functions, limits)?;
+                match kind {
+                    TableAssertionKind::Every => match value.raw() {
+                        OvbRaw::Bool(true) => {}
+                        OvbRaw::Bool(false) => {
+                            return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                        }
+                        _ => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
+                    },
+                    TableAssertionKind::AllUnique => {
+                        let encoded = value
+                            .encode()
+                            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?;
+                        if !projections.insert(encoded) {
+                            return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                        }
+                    }
                 }
             }
         }
@@ -1885,7 +1900,15 @@ fn validate_table_assertions(
     Ok(())
 }
 
-fn table_every_predicate(assertion: &Expr) -> Result<(&str, &Expr), EvaluationError> {
+#[derive(Clone, Copy)]
+enum TableAssertionKind {
+    Every,
+    AllUnique,
+}
+
+fn table_assertion_predicate(
+    assertion: &Expr,
+) -> Result<(TableAssertionKind, &str, &Expr), EvaluationError> {
     let Expr::Call {
         callee, arguments, ..
     } = assertion
@@ -1910,10 +1933,12 @@ fn table_every_predicate(assertion: &Expr) -> Result<(&str, &Expr), EvaluationEr
     let Pattern::Name(binding, _) = &parameter.pattern else {
         return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
     };
-    if text != "every" {
-        return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
-    }
-    Ok((binding, body))
+    let kind = match text.as_str() {
+        "every" => TableAssertionKind::Every,
+        "all_unique" => TableAssertionKind::AllUnique,
+        _ => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
+    };
+    Ok((kind, binding, body))
 }
 
 fn record_field(row: &Value, field: &str) -> Option<Value> {
