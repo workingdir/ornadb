@@ -157,6 +157,7 @@ use orna_client::{
     evaluate_client_function_in_state_context_with_grants_and_arguments as evaluate_authorised_client_function_with_state_context_and_arguments,
     evaluate_client_function_in_state_context_with_grants_and_arguments_and_executor_with_parent_invocation as evaluate_authorised_client_function_with_state_context_and_arguments_and_executor,
     evaluate_client_function_with_grants as evaluate_authorised_client_function,
+    evaluate_client_function_with_grants_and_arguments as evaluate_authorised_client_function_with_arguments,
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InspectEpochId, InvocationAuditEventId,
