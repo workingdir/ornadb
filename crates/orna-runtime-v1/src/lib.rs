@@ -5030,6 +5030,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn table_activation_snapshot_remains_immutable_after_later_commit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 2, Some(8)), table_mutation(6, 1, Some(9))],
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["books"]).await.unwrap();
+        let later_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &later_context,
+                &[
+                    table_mutation(7, 1, Some(10)),
+                    table_mutation(8, 3, Some(11)),
+                ],
+                digest(9),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.context().capture().generation(), &BigInt::from(1));
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![8])])
+        );
+
+        let fresh = state.begin_table_activation(&["books"]).await.unwrap();
+        assert_eq!(fresh.context().capture().generation(), &BigInt::from(2));
+        assert_eq!(
+            fresh.table_rows().get("books"),
+            Some(&vec![
+                (vec![1], vec![10]),
+                (vec![2], vec![8]),
+                (vec![3], vec![11]),
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn typed_pending_mutations_round_trip_through_the_public_decoder() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
