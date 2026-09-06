@@ -14,11 +14,11 @@ use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, Retain
 use std::collections::BTreeMap;
 
 /// Routes each conformance surface to the evaluator that actually owns it.
-/// Fixture and project stages stay on the bounded evaluator; only the two
-/// exact transactional scenario contracts and the authoritative duplicate-key
-/// fixture are delegated to the real table evaluator. Direct serving and
-/// semantic adapter contracts remain explicit corpus skips: their unit tests
-/// do not constitute Orna-engine execution evidence.
+/// Fixture and project stages stay on the bounded evaluator; the authoritative
+/// duplicate-key fixture is delegated to the real table evaluator. Behavioral
+/// scenarios remain explicit corpus skips until an authoritative compiler/runtime
+/// witness exists. Direct bounded evaluator and table adapter tests do not
+/// constitute Orna-engine execution evidence.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -67,25 +67,12 @@ impl RuntimeEvaluator for CompositeEvaluator {
 
     fn run_scenario(
         &mut self,
-        scenario: &Scenario,
+        _scenario: &Scenario,
     ) -> StageOutcome<orna_foundation_v1::Diagnostic> {
-        if matches!(scenario.id.as_str(), "TXN-001" | "TXN-002") {
-            self.transactional.run_scenario(scenario)
-        } else if direct_adapter_contract(scenario) {
-            StageOutcome::Skipped {
-                reason: "scenario is covered by direct serving or semantic adapter tests, not Orna-engine execution".into(),
-            }
-        } else {
-            self.bounded.run_scenario(scenario)
+        StageOutcome::Skipped {
+            reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
     }
-}
-
-fn direct_adapter_contract(scenario: &Scenario) -> bool {
-    matches!(
-        scenario.id.as_str(),
-        "LIVE-001" | "LIVE-002" | "LIVE-003" | "LIVE-004" | "SYS-RT-RENAME-100"
-    )
 }
 
 #[cfg(test)]
@@ -522,21 +509,12 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the two bounded transactional scenarios execute; direct serving and semantic adapter contracts plus module, effectful, and remaining scenario stages remain explicit skips".into(),
+                    "pure row/expression units and the authoritative duplicate-key fixture execute; all behavioral scenarios remain explicit skips until authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
             .collect(),
-            executed_scenario_contracts: [
-                "LET-REBIND-091",
-                "PIPE-001",
-                "PIPE-002",
-                "TXN-001",
-                "TXN-002",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+            executed_scenario_contracts: Vec::new(),
         })
         .run(&mut adapter);
     println!(
