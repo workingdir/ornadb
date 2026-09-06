@@ -93,6 +93,192 @@ pub struct PrivateCommit {
     commit: GitCommitRef,
 }
 
+const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
+const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// The recovery stages persisted for one publication attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationJournalStage {
+    Prepared,
+    RefAdvanced,
+    IndexReconciled,
+    WorktreeReconciled,
+    Complete,
+}
+
+impl PublicationJournalStage {
+    fn code(self) -> u8 {
+        match self {
+            Self::Prepared => 1,
+            Self::RefAdvanced => 2,
+            Self::IndexReconciled => 3,
+            Self::WorktreeReconciled => 4,
+            Self::Complete => 5,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, RepositoryError> {
+        match code {
+            1 => Ok(Self::Prepared),
+            2 => Ok(Self::RefAdvanced),
+            3 => Ok(Self::IndexReconciled),
+            4 => Ok(Self::WorktreeReconciled),
+            5 => Ok(Self::Complete),
+            _ => Err(RepositoryError::InvalidPublicationJournal),
+        }
+    }
+}
+
+/// One managed path's captured and desired worktree bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationJournalEntry {
+    path: ManagedPath,
+    expected: Option<Vec<u8>>,
+    next: Option<Vec<u8>>,
+}
+
+impl PublicationJournalEntry {
+    pub fn new(path: ManagedPath, expected: Option<Vec<u8>>, next: Option<Vec<u8>>) -> Self {
+        Self {
+            path,
+            expected,
+            next,
+        }
+    }
+
+    pub fn path(&self) -> &ManagedPath {
+        &self.path
+    }
+
+    pub fn expected(&self) -> Option<&[u8]> {
+        self.expected.as_deref()
+    }
+
+    pub fn next(&self) -> Option<&[u8]> {
+        self.next.as_deref()
+    }
+}
+
+/// A restart-safe publication record stored in the private runtime area.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationJournal {
+    old_head: GitCommitRef,
+    new_head: GitCommitRef,
+    entries: Vec<PublicationJournalEntry>,
+    stage: PublicationJournalStage,
+}
+
+impl PublicationJournal {
+    pub fn new(
+        old_head: GitCommitRef,
+        new_head: GitCommitRef,
+        entries: Vec<PublicationJournalEntry>,
+    ) -> Result<Self, RepositoryError> {
+        if entries.is_empty() {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        let mut paths = HashSet::new();
+        if entries.iter().any(|entry| {
+            entry.path.as_path().to_str().is_none() || !paths.insert(entry.path.clone())
+        }) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(Self {
+            old_head,
+            new_head,
+            entries,
+            stage: PublicationJournalStage::Prepared,
+        })
+    }
+
+    pub fn old_head(&self) -> &GitCommitRef {
+        &self.old_head
+    }
+
+    pub fn new_head(&self) -> &GitCommitRef {
+        &self.new_head
+    }
+
+    pub fn entries(&self) -> &[PublicationJournalEntry] {
+        &self.entries
+    }
+
+    pub const fn stage(&self) -> PublicationJournalStage {
+        self.stage
+    }
+
+    pub fn advance(&mut self, next: PublicationJournalStage) -> Result<(), RepositoryError> {
+        if next.code() != self.stage.code() + 1 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        self.stage = next;
+        Ok(())
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(JOURNAL_MAGIC);
+        bytes.push(1);
+        put_string(&mut bytes, self.old_head.as_str())?;
+        put_string(&mut bytes, self.new_head.as_str())?;
+        bytes.push(self.stage.code());
+        put_u32(&mut bytes, self.entries.len())?;
+        for entry in &self.entries {
+            let path = entry
+                .path
+                .as_path()
+                .to_str()
+                .ok_or(RepositoryError::InvalidPublicationJournal)?;
+            put_string(&mut bytes, path)?;
+            put_optional_bytes(&mut bytes, entry.expected.as_deref())?;
+            put_optional_bytes(&mut bytes, entry.next.as_deref())?;
+        }
+        if bytes.len() > MAX_JOURNAL_BYTES {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8], object_id_length: usize) -> Result<Self, RepositoryError> {
+        if bytes.len() > MAX_JOURNAL_BYTES || !bytes.starts_with(JOURNAL_MAGIC) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut cursor = JOURNAL_MAGIC.len();
+        if take_byte(bytes, &mut cursor)? != 1 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let old_head =
+            GitCommitRef::from_verified_commit(take_string(bytes, &mut cursor)?, object_id_length)?;
+        let new_head =
+            GitCommitRef::from_verified_commit(take_string(bytes, &mut cursor)?, object_id_length)?;
+        let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
+        let count = take_u32(bytes, &mut cursor)? as usize;
+        if count == 0 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let mut entries = Vec::with_capacity(count.min(1024));
+        let mut paths = HashSet::new();
+        for _ in 0..count {
+            let path = ManagedPath::new(take_string(bytes, &mut cursor)?)?;
+            let expected = take_optional_bytes(bytes, &mut cursor)?;
+            let next = take_optional_bytes(bytes, &mut cursor)?;
+            if !paths.insert(path.clone()) {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            entries.push(PublicationJournalEntry::new(path, expected, next));
+        }
+        if cursor != bytes.len() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(Self {
+            old_head,
+            new_head,
+            entries,
+            stage,
+        })
+    }
+}
+
 impl PrivateCommit {
     pub fn tree(&self) -> &IndexTreeRef {
         &self.tree
@@ -515,6 +701,90 @@ impl Repository {
         })();
         let _ = fs::remove_file(&candidate_index);
         result
+    }
+
+    /// Atomically persists the current publication journal in private runtime
+    /// state. The ordinary Git namespace is not touched.
+    pub fn write_publication_journal(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let encoded = journal.encode()?;
+        let _lock = self.acquire_coordination_lock()?;
+        self.runtime.ensure_exists()?;
+        let path = self.runtime.root().join("publication-journal.bin");
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let temporary = self.runtime.root().join(format!(
+            ".publication-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            file.write_all(&encoded)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            file.sync_all()
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::rename(&temporary, &path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::File::open(self.runtime.root())
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    /// Reads the last atomically persisted publication journal, if present.
+    pub fn read_publication_journal(&self) -> Result<Option<PublicationJournal>, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let path = self.runtime.root().join("publication-journal.bin");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let bytes = fs::read(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(Some(PublicationJournal::decode(
+            &bytes,
+            self.native_object_id_length()?,
+        )?))
+    }
+
+    /// Removes a completed or abandoned journal idempotently and flushes the
+    /// containing private runtime directory.
+    pub fn clear_publication_journal(&self) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let path = self.runtime.root().join("publication-journal.bin");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            Ok(_) => {
+                fs::remove_file(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                fs::File::open(self.runtime.root())
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+        Ok(())
     }
 
     /// Observes the ordinary Git index without modifying it.
@@ -1260,6 +1530,90 @@ fn trim_output(bytes: &[u8]) -> String {
         .trim_end_matches(['\r', '\n'])
         .to_owned()
 }
+
+fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), RepositoryError> {
+    let value = u32::try_from(value).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    bytes.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), RepositoryError> {
+    put_u32(bytes, value.len())?;
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn put_optional_bytes(bytes: &mut Vec<u8>, value: Option<&[u8]>) -> Result<(), RepositoryError> {
+    match value {
+        Some(value) => {
+            let length = u32::try_from(value.len())
+                .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(value);
+        }
+        None => bytes.extend_from_slice(&u32::MAX.to_le_bytes()),
+    }
+    Ok(())
+}
+
+fn take_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, RepositoryError> {
+    let value = *bytes
+        .get(*cursor)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor += 1;
+    Ok(value)
+}
+
+fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    Ok(u32::from_le_bytes(
+        value
+            .try_into()
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?,
+    ))
+}
+
+fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryError> {
+    let length = usize::try_from(take_u32(bytes, cursor)?)
+        .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    let end = cursor
+        .checked_add(length)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    *cursor = end;
+    String::from_utf8(value.to_vec()).map_err(|_| RepositoryError::InvalidPublicationJournal)
+}
+
+fn take_optional_bytes(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    let length = take_u32(bytes, cursor)?;
+    if length == u32::MAX {
+        return Ok(None);
+    }
+    let length = usize::try_from(length).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+    if length > MAX_JOURNAL_BYTES {
+        return Err(RepositoryError::InvalidPublicationJournal);
+    }
+    let end = cursor
+        .checked_add(length)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(RepositoryError::InvalidPublicationJournal)?
+        .to_vec();
+    *cursor = end;
+    Ok(Some(value))
+}
 fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     let output = command
         .output()
@@ -1298,6 +1652,7 @@ pub enum RepositoryError {
     InvalidBranchName,
     InvalidCommitMessage,
     DetachedHead,
+    InvalidPublicationJournal,
     UnsafeManagedPath,
     NoManagedPaths,
     UnbornHead,
@@ -1332,6 +1687,7 @@ impl fmt::Display for RepositoryError {
             Self::InvalidBranchName => f.write_str("invalid Git branch name"),
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
             Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
+            Self::InvalidPublicationJournal => f.write_str("invalid publication journal"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
