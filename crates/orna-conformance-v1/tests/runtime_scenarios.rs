@@ -1,9 +1,13 @@
 use orna_conformance_v1::{
-    BoundedEvaluator, ConformanceAdapter, Corpus, EvidenceStatus, Harness, RuntimeAdapter,
-    RuntimeEvaluator, Scenario, StageOutcome,
+    BoundedEvaluator, ConformanceAdapter, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
+    Harness, RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
+use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use std::process::Command;
+use std::{fs, path::Path, process::Command as ProcessCommand};
+use tempfile::TempDir;
 
 fn scenario(id: &str) -> Scenario {
     let corpus = Corpus::load_default().expect("frozen corpus loads");
@@ -17,6 +21,41 @@ fn scenario(id: &str) -> Scenario {
             .clone(),
     )
     .unwrap()
+}
+
+fn git(path: &Path, args: &[&str]) {
+    assert!(
+        ProcessCommand::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("git command")
+            .success()
+    );
+}
+
+fn durable_repository() -> (TempDir, Repository) {
+    let temp = TempDir::new().expect("temporary repository");
+    git(temp.path(), &["init", "--quiet"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(temp.path(), &["config", "user.name", "conformance test"]);
+    fs::write(temp.path().join("main.orna"), "module main;\n").expect("source");
+    git(temp.path(), &["add", "main.orna"]);
+    git(temp.path(), &["commit", "--quiet", "-m", "initial"]);
+    let repository = Repository::discover(temp.path()).expect("repository");
+    (temp, repository)
+}
+
+fn durable_source(fixture_id: &str, source: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: fixture_id.into(),
+        source_id: format!("{fixture_id}.orna"),
+        parse_as: "module_unit".into(),
+        source: source.into(),
+    }
 }
 
 #[test]
@@ -142,6 +181,70 @@ fn transaction_scenarios_execute_through_the_real_table_evaluator() {
         runtime.run_scenario(&scenario("TXN-002")),
         StageOutcome::Passed
     ));
+}
+
+#[tokio::test]
+async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
+    let rollback = scenario("TXN-001");
+    assert_eq!(
+        rollback.requirements,
+        ["ORNA-TXN-001", "ORNA-TXN-002", "ORNA-TXN-003"]
+    );
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
+    let identity = RuntimeIdentity {
+        database_id: [41; 16],
+        repository_id: [42; 16],
+    };
+    let outcome = evaluator
+        .execute_source(
+            &repository,
+            identity,
+            [43; 16],
+            [44; 32],
+            &durable_source(
+                "TXN-001",
+                "pub table Note(id: Int) { text: Str, } fn child() { Note.insert({ id: 7, text: \"nested\" }); } fn parent() { child(); assert false; }",
+            ),
+        )
+        .await
+        .expect("durable rollback execution");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+    );
+    let state = RuntimeState::open(&repository, identity, [44; 32])
+        .await
+        .expect("reopen after rollback");
+    assert!(state.committed_table_rows("Note").await.unwrap().is_empty());
+
+    let commit = scenario("TXN-002");
+    assert_eq!(commit.requirements, ["ORNA-TXN-001"]);
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let identity = RuntimeIdentity {
+        database_id: [51; 16],
+        repository_id: [52; 16],
+    };
+    let outcome = evaluator
+        .execute_source(
+            &repository,
+            identity,
+            [53; 16],
+            [54; 32],
+            &durable_source(
+                "TXN-002",
+                "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+            ),
+        )
+        .await
+        .expect("durable commit execution");
+    assert!(matches!(outcome, StageOutcome::Passed));
+    let state = RuntimeState::open(&repository, identity, [54; 32])
+        .await
+        .expect("reopen after commit");
+    for table in ["Order", "Payment", "Audit"] {
+        assert_eq!(state.committed_table_rows(table).await.unwrap().len(), 1);
+    }
 }
 
 #[test]
