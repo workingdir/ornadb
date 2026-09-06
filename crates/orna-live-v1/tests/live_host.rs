@@ -2,10 +2,10 @@ use futures::executor::block_on;
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
-    HttpEncodeError, HttpParseError, Limits, LiveApplication, LiveCredentialIssuer, LiveHost,
-    LiveSessionAuthority, LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential,
-    SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState, WireRequest, WireResponse,
-    parse_http_request,
+    HttpConnectionError, HttpEncodeError, HttpParseError, Limits, LiveApplication,
+    LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
+    SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
+    WebSocketState, WireRequest, WireResponse, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -307,6 +307,68 @@ fn http_connection_bounds_an_incomplete_request_before_append() {
         Err(HttpParseError::Limit)
     );
     assert_eq!(connection.buffered_bytes(), 0);
+}
+
+#[test]
+fn http_connection_driver_routes_partial_reads_and_encodes_the_response() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut connection = HttpConnection::new(TransportLimits::default());
+    let body = format!(
+        r#"{{"database":"{}","protocol":"{}"}}"#,
+        uuid(2),
+        SUBPROTOCOL
+    );
+    let request = format!(
+        "POST /orna/session HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let request_bytes = request.as_bytes();
+    let split = request.len() / 2;
+    let mut authority = Authority;
+    let mut issuer = Issuer(7, None);
+    let mut deletion = Delete(true);
+    assert!(
+        block_on(transport.handle_http_read(
+            &mut connection,
+            &request_bytes[..split],
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ))
+        .unwrap()
+        .is_empty()
+    );
+    let responses = block_on(transport.handle_http_read(
+        &mut connection,
+        &request_bytes[split..],
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ))
+    .unwrap();
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].starts_with(b"HTTP/1.1 201 Created\r\n"));
+    assert!(
+        responses[0]
+            .windows(b"Content-Length: ".len())
+            .any(|window| window == b"Content-Length: ")
+    );
+    assert_eq!(connection.buffered_bytes(), 0);
+    let mut rejected_connection = HttpConnection::new(TransportLimits::default());
+    assert!(matches!(
+        block_on(transport.handle_http_read(
+            &mut rejected_connection,
+            b"GET /orna/session HTTP/1.1\r\n\r\n",
+            0,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        )),
+        Err(HttpConnectionError::Parse(HttpParseError::Malformed))
+    ));
 }
 fn subscribe() -> Vec<u8> {
     Envelope {
