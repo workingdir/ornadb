@@ -1503,6 +1503,30 @@ impl Repository {
         plan.authorize_force(force, token)
     }
 
+    /// Admits the exact precomputed discard set for a later divergent checkout.
+    ///
+    /// This is deliberately only an admission boundary: it holds the same
+    /// coordination lock as checkout execution, revalidates the complete
+    /// preflight, and requires the canonical force witness, but does not alter
+    /// the ref, index, worktree, or runtime state. A future journaled executor
+    /// must consume this validated set rather than infer a replacement set.
+    pub fn validate_checkout_discard_set(
+        &self,
+        plan: &CheckoutPreflight,
+        force: bool,
+        token: Option<&CheckoutPlanToken>,
+        discard_paths: &[ManagedPath],
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(plan)?;
+        plan.authorize_force(force, token)?;
+        if discard_paths == plan.git.discardable_paths() {
+            Ok(())
+        } else {
+            Err(RepositoryError::CheckoutDiscardSetMismatch)
+        }
+    }
+
     /// Explicitly resolves a Git selector to an immutable commit. This is the
     /// repository primitive behind `sys.snapshot(selector)`, not new source
     /// grammar for bare branch expressions.
@@ -2473,6 +2497,7 @@ pub enum RepositoryError {
     StaleHead,
     PublicationPending,
     CheckoutPlanStale,
+    CheckoutDiscardSetMismatch,
     CheckoutExecutionUnsafe,
     RuntimeCompletionRequired,
     /// This profile implements atomic index replacement only on POSIX
@@ -2519,6 +2544,9 @@ impl fmt::Display for RepositoryError {
                 f.write_str("publication remains pending before Git ref advancement")
             }
             Self::CheckoutPlanStale => f.write_str("checkout preflight is stale"),
+            Self::CheckoutDiscardSetMismatch => {
+                f.write_str("checkout discard set does not match the preflight")
+            }
             Self::CheckoutExecutionUnsafe => {
                 f.write_str("checkout target does not match the current commit")
             }
