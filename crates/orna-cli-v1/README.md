@@ -13,8 +13,10 @@ endpoint, manage credentials, or call a sensor provider. `SessionAdapter` is
 the explicit integration seam for authenticated transport/runtime work. The
 binary reports plans only and never claims provider or repository execution.
 
-Session close cancels only children owned by that root session, drains the
-terminal event, then closes transport. Repeated close is deterministic.
+Session close seals child admission, cancels only unfinished children owned by
+that root session, joins terminal cleanup, then closes transport. A failed
+cleanup keeps admission sealed and can be retried; repeated completed close is
+deterministic.
 
 ## Checks
 
