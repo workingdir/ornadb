@@ -375,6 +375,95 @@ fn loopback_host_serves_websocket_and_resumes_the_session_after_close() {
 }
 
 #[test]
+fn loopback_host_retires_an_open_websocket_before_resume_completes() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token_a = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket_a = TcpStream::connect(address).unwrap();
+        let handshake_a = format!(
+            "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token_a}\r\n\r\n",
+            address.port()
+        );
+        websocket_a.write_all(handshake_a.as_bytes()).unwrap();
+        let upgrade_a = read_response(&mut websocket_a);
+        assert!(upgrade_a.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+
+        let body = format!(r#"{{"resume_token":"{token_a}","protocol":"orna.present.v1"}}"#);
+        let mut resume = TcpStream::connect(address).unwrap();
+        let resume_request = format!(
+            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            address.port(),
+            body.len()
+        );
+        resume.write_all(resume_request.as_bytes()).unwrap();
+        let (retired_sender, retired_receiver) = std::sync::mpsc::channel();
+        let retired_reader = std::thread::spawn(move || {
+            websocket_a
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut retired = Vec::new();
+            websocket_a.read_to_end(&mut retired).unwrap();
+            retired_sender.send(()).unwrap();
+        });
+        retired_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let resumed = read_response(&mut resume);
+        assert!(resumed.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(json_field(&resumed, "session"), session);
+        let token_b = json_field(&resumed, "resume_token");
+        assert_ne!(token_a, token_b);
+        retired_reader.join().unwrap();
+
+        let stale_body = format!(r#"{{"resume_token":"{token_a}","protocol":"orna.present.v1"}}"#);
+        let mut stale = TcpStream::connect(address).unwrap();
+        let stale_request = format!(
+            "POST /orna/session/{session}/resume HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{stale_body}",
+            address.port(),
+            stale_body.len()
+        );
+        stale.write_all(stale_request.as_bytes()).unwrap();
+        stale.shutdown(Shutdown::Write).unwrap();
+        assert!(read_response(&mut stale).starts_with("HTTP/1.1 410 Gone\r\n"));
+
+        let mut websocket_c = TcpStream::connect(address).unwrap();
+        let handshake_c = format!(
+            "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token_b}\r\n\r\n",
+            address.port()
+        );
+        websocket_c.write_all(handshake_c.as_bytes()).unwrap();
+        assert!(
+            read_response(&mut websocket_c).starts_with("HTTP/1.1 101 Switching Protocols\r\n")
+        );
+        sender.send(()).unwrap();
+        let mut closed = Vec::new();
+        websocket_c.read_to_end(&mut closed).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
 fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
