@@ -1524,17 +1524,27 @@ mod tests {
         let first = delivery("receipt:stable", "resume:first");
         let failed = acquire_and_fail(&mut backend, first.clone());
         let same_delivery = delivery("receipt:stable", "resume:changed");
-        match backend.apply(CommitIntent::Retry {
+        let retry = match backend.apply(CommitIntent::Retry {
             failure: FailureIdentity(same_delivery.clone()),
             expected_version: failed.version,
             expected: expected(&backend, &same_delivery),
         }) {
-            CommitResult::RetryScheduled { .. } => (),
-            _ => panic!(),
+            CommitResult::RetryScheduled { failure } => failure,
+            result => panic!("unexpected retry result: {result:?}"),
         };
-        let failed_again = acquire_and_fail(&mut backend, same_delivery);
-        assert_eq!(failed_again.identity, failed.identity);
-        assert_eq!(failed_again.attempts, 2);
+        let lease = acquire(&mut backend, same_delivery);
+        let advanced = match backend.apply(CommitIntent::Complete {
+            lease,
+            expected: expected(&backend, &first),
+        }) {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            result => panic!("unexpected retry completion result: {result:?}"),
+        };
+        assert_eq!(advanced.committed, Some(position("resume:changed")));
+        let succeeded = backend.failure(&failed.identity).unwrap();
+        assert_eq!(succeeded.identity, failed.identity);
+        assert_eq!(succeeded.attempts, retry.attempts);
+        assert_eq!(succeeded.status, FailureStatus::Succeeded);
     }
 
     #[test]
