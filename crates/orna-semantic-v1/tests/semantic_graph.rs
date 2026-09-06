@@ -602,6 +602,34 @@ fn failure_replay_requires_a_typed_version_precondition() {
 }
 
 #[test]
+fn checkpoint_and_failure_cas_admission_requires_typed_versions() {
+    let valid = analyze(&[ModuleInput::new(
+        "cas.orna",
+        r#"
+            pub fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) =
+                sys.admin.reset_checkpoint(checkpoint.reference, expected_version: checkpoint.version, expected_position: checkpoint.position, to: to, reason: reason);
+            pub fn retry(failure: sys.Failure) =
+                sys.admin.retry_failure(failure.reference, expected_version: failure.version);
+            pub fn resolve(failure: sys.Failure, reason: Str) =
+                sys.admin.resolve_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    for source in [
+        "fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) = sys.admin.reset_checkpoint(checkpoint.reference, expected_position: checkpoint.position, to: to, reason: reason);",
+        "fn retry(failure: sys.Failure) = sys.admin.retry_failure(failure.reference, expected_version: 1);",
+        "fn resolve(failure: sys.Failure, reason: Str) = sys.admin.resolve_failure(failure.reference, expected_status: failure.status, reason: reason);",
+    ] {
+        let invalid = analyze(&[ModuleInput::new("cas.orna", source)]);
+        assert!(
+            has(&invalid, DIAG_TYPE),
+            "{source}: {:?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
 fn unicode_nfkc_casefold_sibling_collision_is_rejected() {
     let result = analyze(&[
         ModuleInput::new("ff/left.orna", ""),
