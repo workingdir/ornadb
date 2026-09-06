@@ -16,8 +16,8 @@ Use `--db PATH repl` to import from an explicitly selected, checked pure project
 For example:
 
 ```text
-let n = 21;
-fn twice(value) = value + value;
+let n: Int = 21;
+fn twice(value: Int): Int = value + value;
 twice(n)
 $_
 :quit
@@ -34,8 +34,11 @@ The interactive session does not yet implement the complete language or console
 command set, durable table execution, watches, or remote transport. `init` and
 unsupported reference workflows report that execution is unavailable. Planner
 tests alone do not establish reference-database execution.
-Input is currently line-oriented. Session declarations with type annotations
-are rejected pending semantic admission; annotations are never silently ignored.
+Input is currently line-oriented. Submissions are checked against the session's
+types and imports before execution. A type error or execution failure leaves
+both the retained declarations and last successful result unchanged. Project
+imports expose public declarations; private implementation helpers remain
+available only inside their defining modules.
 
 Session close seals child admission, cancels only unfinished children owned by
 that root session, joins terminal cleanup, then closes transport. A failed
