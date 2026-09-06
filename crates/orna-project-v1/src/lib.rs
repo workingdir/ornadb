@@ -63,6 +63,7 @@ pub struct LoadedProject {
     identities: Vec<ModuleIdentity>,
     standard_profile: Option<StandardDependencyProfile>,
     standard_imports: bool,
+    standard_modules: BTreeSet<String>,
 }
 
 impl LoadedProject {
@@ -89,6 +90,11 @@ impl LoadedProject {
     /// that a verified standard profile was supplied.
     pub const fn has_standard_imports(&self) -> bool {
         self.standard_imports
+    }
+
+    /// Returns the logical standard modules requested by reachable source.
+    pub fn standard_modules(&self) -> &BTreeSet<String> {
+        &self.standard_modules
     }
 
     /// Derives the semantic catalogue for this project's explicitly pinned
@@ -137,6 +143,7 @@ impl ProjectLoader {
         let mut namespaces = BTreeMap::<Vec<String>, String>::new();
         let mut total_bytes = 0usize;
         let mut standard_imports = false;
+        let mut standard_modules = BTreeSet::new();
 
         while let Some(logical_path) = pending.pop_front() {
             if loaded.contains_key(&logical_path) {
@@ -171,6 +178,13 @@ impl ProjectLoader {
                 }
                 if matches!(segments[0], "sys" | "std") {
                     standard_imports |= segments[0] == "std";
+                    if segments[0] == "std" {
+                        let mut logical_path = segments.join("/");
+                        if !logical_path.ends_with(".orna") {
+                            logical_path.push_str(".orna");
+                        }
+                        standard_modules.insert(logical_path);
+                    }
                     continue;
                 }
                 imports.insert(resolve_import(&root, &segments)?);
@@ -193,6 +207,7 @@ impl ProjectLoader {
             identities,
             standard_profile,
             standard_imports,
+            standard_modules,
         })
     }
 }
