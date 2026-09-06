@@ -53,6 +53,40 @@ fn loads_only_reachable_modules_in_deterministic_logical_order() {
 }
 
 #[test]
+fn records_reachable_standard_module_names_without_changing_ordinary_loading() {
+    let (_directory, repository) = repository(&[
+        (
+            "main.orna",
+            "use library; use sys.catalogue; pub fn run() {}",
+        ),
+        (
+            "library.orna",
+            "use std.math.{increment}; pub fn seed(value: Int): Int = increment(value);",
+        ),
+        ("unreachable.orna", "use std.unreachable;"),
+    ]);
+
+    let project = ProjectLoader::default().load(&repository).unwrap();
+
+    assert_eq!(
+        project
+            .standard_modules()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["std/math.orna"]
+    );
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["library.orna", "main.orna"]
+    );
+}
+
+#[test]
 fn carries_only_an_explicit_standard_dependency_profile() {
     let (_directory, repository) = repository(&[("main.orna", "pub fn run() {}")]);
     let profile = StandardDependencyProfile::from_sources(
