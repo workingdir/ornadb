@@ -1221,6 +1221,16 @@ impl Repository {
         if &commit != journal.new_head() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
+        // Recovery must reconstruct the same private H + P candidate that
+        // publication prepared. An existing commit is not enough: accepting
+        // a journal whose new head is not the sole child of the recorded old
+        // head could reconcile the ordinary index and worktree against an
+        // unrelated history after a crash.
+        let parents = self.git(["show", "-s", "--format=%P", journal.new_head().as_str()])?;
+        let parents = parents.split_ascii_whitespace().collect::<Vec<_>>();
+        if parents.len() != 1 || parents[0] != journal.old_head().as_str() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
         let tree_expression = format!("{}^{{tree}}", journal.new_head().as_str());
         let tree = self.index_tree_from_native_oid(self.git([
             "rev-parse",

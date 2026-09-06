@@ -1106,6 +1106,48 @@ fn recovery_keeps_a_pre_ref_publication_pending() {
 }
 
 #[test]
+fn recovery_rejects_a_journal_candidate_outside_the_recorded_head_lineage() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let unrelated = git(
+        root.path(),
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-m",
+            "unrelated recovery candidate",
+        ],
+    );
+    git(root.path(), &["switch", "--detach", &unrelated]);
+    let unrelated_head = repo.head().unwrap().unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        old_head,
+        unrelated_head,
+        index_before.tree().unwrap().clone(),
+        [18; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&journal).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::InvalidPublicationJournal)
+    ));
+    assert_eq!(repo.head().unwrap().unwrap(), *journal.new_head());
+    assert_eq!(repo.index_generation().unwrap().tree(), index_before.tree());
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+#[test]
 fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
