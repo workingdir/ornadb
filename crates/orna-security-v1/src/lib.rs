@@ -323,6 +323,35 @@ impl SessionBoundary {
         Ok(outcome)
     }
 
+    /// Validates an attachment without changing the current attachment.
+    /// Hosts use this before delivering a protocol handshake whose later
+    /// commit will call [`Self::attach`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same admission error as [`Self::attach`] except that an
+    /// expired session is not closed until the committing call.
+    pub fn validate_attach(
+        &self,
+        session: SessionId,
+        origin: &Origin,
+        credential: &OpaqueCredential,
+        now: u64,
+    ) -> Result<(), BoundaryError> {
+        let record = self.sessions.get(&session).ok_or(BoundaryError::Denied)?;
+        if now >= record.expires_at {
+            return Err(BoundaryError::Expired);
+        }
+        match &record.state {
+            State::Closed => Err(BoundaryError::Closed),
+            State::Open {
+                credential: expected,
+                ..
+            } if &record.origin == origin && constant_time_eq(&expected.0, &credential.0) => Ok(()),
+            State::Open { .. } => Err(BoundaryError::Denied),
+        }
+    }
+
     /// Releases the active attachment and starts its reconnect lease.
     ///
     /// # Errors

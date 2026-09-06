@@ -249,6 +249,20 @@ impl Serving {
         Ok(())
     }
 
+    /// Validates a reconnect without changing the connection state. The
+    /// committing operation is [`Self::reconnect`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same session or credential error as [`Self::reconnect`].
+    pub fn validate_reconnect(&self, session_id: Id, credential: &Credential) -> Result<()> {
+        let session = self.session(session_id)?;
+        if &session.credential != credential {
+            return Err(Error::CredentialRejected);
+        }
+        Ok(())
+    }
+
     /// Replace a session credential only after checking the credential that
     /// currently protects the serving state.  A host uses this while rotating
     /// one shared session credential across the security and serving layers.
