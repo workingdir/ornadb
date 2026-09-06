@@ -5,10 +5,11 @@ use futures::{
 use orna_foundation_v1::CanonicalValue;
 use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
-    HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, LiveApplication,
-    LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, ResumeRequest,
-    SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput,
-    WebSocketState, WireRequest, WireResponse, encode_websocket_output, parse_http_request,
+    HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
+    ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
+    LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
+    WebSocketOutput, WebSocketState, WireRequest, WireResponse, encode_websocket_output,
+    parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -611,8 +612,11 @@ fn async_http_connection_loop_writes_routed_responses_until_eof() {
 
 #[test]
 fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = LiveTransport::bind_default_listener(0).unwrap();
+    let status = listener.status();
+    assert_eq!(status.exposure, ListenerExposure::Loopback);
+    assert!(status.address.ip().is_loopback());
+    let address = status.address;
     let server = thread::spawn(move || {
         let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
         let mut connection = HttpConnection::new(TransportLimits::default());
@@ -620,7 +624,7 @@ fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
         let mut issuer = Issuer(7, None);
         let mut deletion = Delete(true);
         transport.serve_one_http_listener(
-            &listener,
+            listener.listener(),
             &mut connection,
             &mut || 0,
             &mut authority,
@@ -648,6 +652,26 @@ fn accepted_tcp_socket_routes_a_session_request_end_to_end() {
 
     assert!(response.starts_with(b"HTTP/1.1 201 Created\r\n"));
     assert!(response.windows(4).any(|window| window == b"\r\n\r\n"));
+}
+
+#[test]
+fn listener_policy_reports_loopback_rejects_exposure_and_releases_on_drop() {
+    let listener = LiveTransport::bind_default_listener(0).unwrap();
+    let address = listener.status().address;
+    assert_eq!(listener.status().exposure, ListenerExposure::Loopback);
+    assert!(address.ip().is_loopback());
+
+    assert!(matches!(
+        LiveTransport::bind_explicit_listener(([0, 0, 0, 0], address.port()).into()),
+        Err(ListenerBindError::NonLoopback)
+    ));
+
+    drop(listener);
+    let _released = TcpListener::bind(address).unwrap();
+
+    let listener = LiveTransport::bind_explicit_listener(([127, 0, 0, 1], 0).into()).unwrap();
+    assert_eq!(listener.status().exposure, ListenerExposure::Explicit);
+    assert!(listener.status().address.ip().is_loopback());
 }
 
 #[test]
