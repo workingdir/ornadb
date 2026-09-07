@@ -30,6 +30,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -149,6 +150,7 @@ impl LiveOnceHost {
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()
             .map_err(|_| LiveHostError::Configuration)?;
         runtime.block_on(self.serve_with_cancellation_async(&mut cancellation))
@@ -162,6 +164,7 @@ impl LiveOnceHost {
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()
             .map_err(|_| LiveHostError::Configuration)?;
         let local = tokio::task::LocalSet::new();
@@ -362,10 +365,10 @@ enum ActorCommand {
         bytes: Vec<u8>,
         reply: futures::channel::oneshot::Sender<Result<ActorHttpResult, HttpConnectionError>>,
     },
-    Prepare {
+    Begin {
         request: orna_live_v1::WireRequest,
         attachment: [u8; 16],
-        now: u64,
+        worker_id: u64,
         reply: futures::channel::oneshot::Sender<
             Result<orna_live_v1::WebSocketUpgrade, orna_live_v1::WireResponse>,
         >,
@@ -375,6 +378,10 @@ enum ActorCommand {
         reply: futures::channel::oneshot::Sender<
             Result<(orna_live_v1::WireResponse, RetirementGates), ()>,
         >,
+    },
+    Abort {
+        upgrade: orna_live_v1::WebSocketUpgrade,
+        reply: futures::channel::oneshot::Sender<()>,
     },
     Receive {
         socket: WebSocketState,
@@ -407,7 +414,29 @@ async fn run_host_actor(
     registry: Rc<RefCell<WorkerRegistry>>,
 ) {
     use futures::StreamExt;
-    while let Some(command) = commands.next().await {
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            command = commands.next() => match command {
+                Some(command) => command,
+                None => break,
+            },
+            _ = ticker.tick() => {
+                state
+                    .transport
+                    .expire_pending_websocket_upgrades(system_milliseconds());
+                if capture_retirement_gates(
+                    &registry,
+                    state.transport.take_retired_attachments(),
+                )
+                .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+        };
         match command {
             ActorCommand::Http {
                 mut connection,
@@ -447,31 +476,53 @@ async fn run_host_actor(
                     retirement,
                 }));
             }
-            ActorCommand::Prepare {
+            ActorCommand::Begin {
                 request,
                 attachment,
-                now,
+                worker_id,
                 reply,
             } => {
-                let _ = reply.send(
-                    state
-                        .transport
-                        .prepare_websocket_upgrade(&request, attachment, now),
+                // Register before transport admission. Because this is one
+                // actor turn, a subsequent DELETE or replacement observes a
+                // worker retirement gate for every successful reservation.
+                registry.borrow_mut().attach(attachment, worker_id);
+                let result = state.transport.begin_websocket_upgrade(
+                    &request,
+                    attachment,
+                    system_milliseconds(),
                 );
+                if result.is_err() {
+                    registry
+                        .borrow_mut()
+                        .unregister_candidate(attachment, worker_id);
+                }
+                if capture_retirement_gates(&registry, state.transport.take_retired_attachments())
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = reply.send(result);
             }
             ActorCommand::Commit { upgrade, reply } => {
-                let result = state.transport.commit_websocket_upgrade(upgrade).await;
-                let Ok(response) = result else {
-                    let _ = reply.send(Err(()));
-                    continue;
-                };
+                let result = state
+                    .transport
+                    .commit_websocket_upgrade(upgrade, system_milliseconds())
+                    .await;
                 let Ok(retirement) =
                     capture_retirement_gates(&registry, state.transport.take_retired_attachments())
                 else {
                     let _ = reply.send(Err(()));
                     return;
                 };
+                let Ok(response) = result else {
+                    let _ = reply.send(Err(()));
+                    continue;
+                };
                 let _ = reply.send(Ok((response, retirement)));
+            }
+            ActorCommand::Abort { upgrade, reply } => {
+                state.transport.abort_websocket_upgrade(&upgrade);
+                let _ = reply.send(());
             }
             ActorCommand::Receive {
                 mut socket,
@@ -683,6 +734,41 @@ mod shutdown_tests {
     }
 
     #[test]
+    fn pending_handshake_candidate_has_the_same_retirement_gate() {
+        run_local(async {
+            let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
+            let (worker_id, cancellation) = registry.borrow_mut().register();
+            let attachment = [13; 16];
+            // Begin records the candidate before transport may publish it for
+            // retirement, so DELETE can use the ordinary retirement queue.
+            registry.borrow_mut().attach(attachment, worker_id);
+            let mut workers = tokio::task::JoinSet::new();
+            let task = workers.spawn_local(async move {
+                cancellation.await.unwrap();
+                worker_id
+            });
+            registry.borrow_mut().bind_task(worker_id, task.id());
+
+            let retirement = capture_retirement_gates(&registry, vec![attachment]).unwrap();
+            let joined = workers.join_next_with_id().await.unwrap();
+            assert!(!acknowledge_worker_join(&registry, joined));
+            assert_eq!(retire_and_join(retirement).await, Ok(()));
+        });
+    }
+
+    #[test]
+    fn failed_begin_unregisters_its_candidate() {
+        let mut registry = WorkerRegistry::default();
+        let (worker_id, _cancellation) = registry.register();
+        let attachment = [14; 16];
+        registry.attach(attachment, worker_id);
+        registry.unregister_candidate(attachment, worker_id);
+        assert!(
+            capture_retirement_gates(&Rc::new(RefCell::new(registry)), vec![attachment]).is_err()
+        );
+    }
+
+    #[test]
     fn panicked_worker_fails_its_retirement_acknowledgement() {
         run_local(async {
             let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
@@ -851,6 +937,19 @@ impl WorkerRegistry {
                 .get(&attachment)
                 .is_none_or(|worker| *worker == id)
         );
+    }
+
+    /// Removes a candidate that failed before it became transport-owned.
+    /// Unlike [`Self::detach`], this is only used in the Begin actor turn;
+    /// no retirement can have observed it yet.
+    fn unregister_candidate(&mut self, attachment: [u8; 16], id: u64) {
+        if self
+            .attachments
+            .get(&attachment)
+            .is_some_and(|worker| *worker == id)
+        {
+            self.attachments.remove(&attachment);
+        }
     }
 
     fn take_retired(
@@ -1085,7 +1184,7 @@ async fn serve_websocket_worker<C>(
         Ok(attachment) => attachment,
         Err(()) => return,
     };
-    let prepared = match actor_prepare(&actor, request, attachment, cancellation).await {
+    let prepared = match actor_begin(&actor, request, attachment, worker_id).await {
         Ok(Ok(prepared)) => prepared,
         Ok(Err(response)) => {
             let Ok(encoded) = response.encode_http(TransportLimits::default()) else {
@@ -1100,20 +1199,27 @@ async fn serve_websocket_worker<C>(
     let response = prepared.response().clone();
     let encoded = match response.encode_http(TransportLimits::default()) {
         Ok(encoded) => encoded,
-        Err(_) => return,
+        Err(_) => {
+            actor_abort(&actor, prepared).await;
+            return;
+        }
     };
     if await_socket_io(writer.write_all(&encoded), cancellation)
         .await
         .is_err()
         || await_socket_io(writer.flush(), cancellation).await.is_err()
     {
+        actor_abort(&actor, prepared).await;
         return;
     }
     if response.status != 101 {
+        actor_abort(&actor, prepared).await;
         return;
     }
-    registry.borrow_mut().attach(attachment, worker_id);
-    let retirement = match actor_commit(&actor, prepared, cancellation).await {
+    // Commit deliberately cannot be interrupted. Once the 101 response has
+    // crossed the delivery boundary, abandoning its actor turn could leave an
+    // attachment without a socket owner.
+    let retirement = match actor_commit(&actor, prepared).await {
         Ok(retirement) => retirement,
         Err(()) => {
             registry.borrow_mut().detach(attachment, worker_id);
@@ -1162,28 +1268,27 @@ async fn serve_websocket_worker<C>(
     close_worker_attachment(&actor, &registry, attachment, worker_id, cancellation).await;
 }
 
-async fn actor_prepare(
+async fn actor_begin(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     request: orna_live_v1::WireRequest,
     attachment: [u8; 16],
-    cancellation: &mut (impl Future<Output = ()> + Unpin),
+    worker_id: u64,
 ) -> Result<Result<orna_live_v1::WebSocketUpgrade, orna_live_v1::WireResponse>, ()> {
     let (sender, receiver) = futures::channel::oneshot::channel();
     actor
-        .unbounded_send(ActorCommand::Prepare {
+        .unbounded_send(ActorCommand::Begin {
             request,
             attachment,
-            now: system_milliseconds(),
+            worker_id,
             reply: sender,
         })
         .map_err(|_| ())?;
-    await_actor_response(receiver, cancellation).await
+    receiver.await.map_err(|_| ())
 }
 
 async fn actor_commit(
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
     upgrade: orna_live_v1::WebSocketUpgrade,
-    cancellation: &mut (impl Future<Output = ()> + Unpin),
 ) -> Result<RetirementGates, ()> {
     let (sender, receiver) = futures::channel::oneshot::channel();
     actor
@@ -1192,10 +1297,27 @@ async fn actor_commit(
             reply: sender,
         })
         .map_err(|_| ())?;
-    let (_, retirement) = await_actor_response(receiver, cancellation)
-        .await?
-        .map_err(|_| ())?;
+    let (_, retirement) = receiver.await.map_err(|_| ())?.map_err(|_| ())?;
     Ok(retirement)
+}
+
+/// Serializes abandonment of an opaque admission with the actor. This wait is
+/// intentionally non-cancellable: callers invoke it only after Begin has
+/// acknowledged ownership, and returning earlier would strand that admission.
+async fn actor_abort(
+    actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    upgrade: orna_live_v1::WebSocketUpgrade,
+) {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    if actor
+        .unbounded_send(ActorCommand::Abort {
+            upgrade,
+            reply: sender,
+        })
+        .is_ok()
+    {
+        let _ = receiver.await;
+    }
 }
 
 async fn serve_websocket_bytes<C>(
@@ -1243,7 +1365,7 @@ async fn close_worker_attachment(
     registry: &Rc<RefCell<WorkerRegistry>>,
     attachment: [u8; 16],
     worker_id: u64,
-    cancellation: &mut (impl Future<Output = ()> + Unpin),
+    _cancellation: &mut (impl Future<Output = ()> + Unpin),
 ) {
     let (sender, receiver) = futures::channel::oneshot::channel();
     if actor
@@ -1254,7 +1376,11 @@ async fn close_worker_attachment(
         })
         .is_ok()
     {
-        let _ = await_actor_response(receiver, cancellation).await;
+        // A committed attachment must be closed in actor order even when this
+        // worker is itself retiring. The acknowledgement is intentionally not
+        // raced with cancellation: cancellation is the reason this cleanup is
+        // required, not permission to abandon it.
+        let _ = receiver.await;
     }
     registry.borrow_mut().detach(attachment, worker_id);
 }
