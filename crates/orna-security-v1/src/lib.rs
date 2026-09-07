@@ -357,6 +357,36 @@ impl SessionBoundary {
         }
     }
 
+    /// Validates that an already-attached transport is still the session's
+    /// active attachment at `now`.
+    ///
+    /// This is credential-free because a frame has already crossed the
+    /// authenticated attachment boundary, but it must not continue operating
+    /// after expiry, replacement, or revocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BoundaryError::Expired`] and closes the session when its
+    /// lease has elapsed, or a stable closed/denied error when the attachment
+    /// is no longer active for the supplied session.
+    pub fn validate_active_attachment(
+        &mut self,
+        session: SessionId,
+        attachment: AttachmentId,
+        now: u64,
+    ) -> Result<(), BoundaryError> {
+        self.expire(session, now)?;
+        let record = self.sessions.get(&session).ok_or(BoundaryError::Denied)?;
+        match &record.state {
+            State::Open {
+                attachment: Some(Attachment::Active(current)),
+                ..
+            } if *current == attachment => Ok(()),
+            State::Open { .. } => Err(BoundaryError::Denied),
+            State::Closed => Err(BoundaryError::Closed),
+        }
+    }
+
     /// Releases the active attachment and starts its reconnect lease.
     ///
     /// # Errors
@@ -616,6 +646,34 @@ mod tests {
         boundary.revoke(revoked).unwrap();
         assert_eq!(
             boundary.attach(revoked, &app, &revoked_credential, attachment(3), 1),
+            Err(BoundaryError::Closed)
+        );
+    }
+
+    #[test]
+    fn active_attachment_cannot_outlive_the_session_lease() {
+        let mut boundary = boundary();
+        let mut issuer = Issuer(1);
+        let session = id(7);
+        let app = origin("https://app.example");
+        let credential = boundary
+            .create(session, app.clone(), 3, 0, &mut issuer)
+            .unwrap();
+        let active = attachment(7);
+        boundary
+            .attach(session, &app, &credential, active, 1)
+            .unwrap();
+
+        assert_eq!(
+            boundary.validate_active_attachment(session, active, 2),
+            Ok(())
+        );
+        assert_eq!(
+            boundary.validate_active_attachment(session, active, 3),
+            Err(BoundaryError::Expired)
+        );
+        assert_eq!(
+            boundary.validate_active_attachment(session, active, 2),
             Err(BoundaryError::Closed)
         );
     }
