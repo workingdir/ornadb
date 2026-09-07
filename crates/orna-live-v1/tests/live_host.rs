@@ -311,6 +311,34 @@ impl LiveSessionChildren for RecordingChildren {
     }
 }
 
+struct LateAdmissionChildren<'a> {
+    runtime: &'a RuntimeState,
+    identity: RequestIdentity,
+    fingerprint: [u8; 32],
+    calls: usize,
+}
+
+impl LiveSessionChildren for LateAdmissionChildren<'_> {
+    fn cancel_and_join_session<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        _: &'a [RequestIdentity],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
+        self.calls += 1;
+        Box::pin(async move {
+            match self
+                .runtime
+                .reserve_request(self.identity, self.fingerprint)
+                .await
+            {
+                Err(RuntimeError::SessionClosed) => Ok(()),
+                Ok(_) => Err(Error::ApplicationRejected),
+                Err(_) => Err(Error::RuntimeUnavailable),
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 struct UnitApplication {
     calls: usize,
@@ -3375,6 +3403,143 @@ fn delete_enumerates_reserved_durable_work_before_joining_children() {
 }
 
 #[test]
+fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let reserved = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [96; 16],
+    };
+    let running = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [97; 16],
+    };
+    let reserved_fingerprint = [98; 32];
+    let running_fingerprint = [99; 32];
+    let owner = [100; 16];
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
+    block_on(runtime.reserve_request(reserved, reserved_fingerprint)).unwrap();
+    block_on(runtime.reserve_request(running, running_fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(running, running_fingerprint, lease)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    let mut children = RecordingChildren {
+        fail: true,
+        ..RecordingChildren::default()
+    };
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        400
+    );
+    assert_eq!(deletion.calls, 0);
+    assert_eq!(children.calls, 1);
+    assert_eq!(children.requests, vec![reserved, running]);
+    for (identity, fingerprint) in [
+        (reserved, reserved_fingerprint),
+        (running, running_fingerprint),
+    ] {
+        assert!(matches!(
+            block_on(open_durable_state(&repository).request_status(identity, fingerprint))
+                .unwrap(),
+            Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+        ));
+    }
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            attachment: [101; 16],
+            now: 1,
+        })),
+        Err(Error::Closed)
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let initial = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [102; 16],
+    };
+    let late = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [103; 16],
+    };
+    let initial_fingerprint = [104; 32];
+    let late_fingerprint = [105; 32];
+    block_on(runtime.reserve_request(initial, initial_fingerprint)).unwrap();
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    let mut children = LateAdmissionChildren {
+        runtime: &runtime,
+        identity: late,
+        fingerprint: late_fingerprint,
+        calls: 0,
+    };
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(children.calls, 1);
+    assert_eq!(deletion.calls, 1);
+    assert!(matches!(
+        block_on(runtime.request_status(initial, initial_fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert_eq!(
+        block_on(runtime.request_status(late, late_fingerprint)).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            attachment: [107; 16],
+            now: 1,
+        })),
+        Err(Error::Closed)
+    );
+    drop(host);
+    drop(runtime);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn application_admission_requires_an_explicit_delete_join_boundary() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
@@ -3464,7 +3629,7 @@ fn failed_durable_drain_never_reports_delete_success() {
             &mut children,
         ))
         .status,
-        400
+        503
     );
     assert_eq!(deletion.calls, 0);
     assert_eq!(children.calls, 0);
