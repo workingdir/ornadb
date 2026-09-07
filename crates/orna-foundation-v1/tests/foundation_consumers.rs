@@ -4,9 +4,10 @@
 
 use orna_conformance_v1::StageOutcome;
 use orna_foundation_v1::{
-    CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, OvbRaw, RowRef, SYS_RUN_TABLE_ID,
-    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, validate_run_reference,
-    validate_stream_reference,
+    CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, OvbRaw, RowRef,
+    SYS_INVOCATION_ARGUMENT_TABLE_ID, SYS_INVOCATION_TABLE_ID, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, validate_invocation_argument_reference,
+    validate_invocation_reference, validate_run_reference, validate_stream_reference,
 };
 use orna_repository_v1::Repository;
 use orna_syntax_v1::parse_expression_with_file;
@@ -46,6 +47,16 @@ fn run(capture: &CwdCapture) -> RowRef {
     .unwrap()
 }
 
+fn invocation(capture: &CwdCapture) -> RowRef {
+    RowRef::new(
+        capture.database_id(),
+        SYS_INVOCATION_TABLE_ID,
+        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![5; 16]))),
+        capture.snapshot().clone(),
+    )
+    .unwrap()
+}
+
 fn encoded_run(run: &RowRef) -> OvbRaw {
     OvbRaw::Tag(
         60_010,
@@ -68,6 +79,17 @@ fn stream(capture: &CwdCapture) -> RowRef {
             OvbRaw::Text("source".into()),
             OvbRaw::Null,
         ]),
+        capture.snapshot().clone(),
+    )
+    .unwrap()
+}
+
+fn invocation_argument(capture: &CwdCapture) -> RowRef {
+    let invocation = invocation(capture);
+    RowRef::new(
+        capture.database_id(),
+        SYS_INVOCATION_ARGUMENT_TABLE_ID,
+        OvbRaw::Array(vec![encoded_run(&invocation), OvbRaw::Int(0.into())]),
         capture.snapshot().clone(),
     )
     .unwrap()
@@ -225,4 +247,123 @@ fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn invocation_reference_validation_requires_declared_relation_and_natural_keys() {
+    let capture = cwd();
+    let valid_invocation = invocation(&capture);
+    let valid_argument = invocation_argument(&capture);
+    assert_eq!(
+        validate_invocation_reference(valid_invocation.clone(), &capture)
+            .unwrap()
+            .as_row_ref(),
+        &valid_invocation
+    );
+    assert_eq!(
+        validate_invocation_argument_reference(valid_argument.clone(), &capture)
+            .unwrap()
+            .as_row_ref(),
+        &valid_argument
+    );
+
+    let wrong_relation = RowRef::new(
+        capture.database_id(),
+        SYS_INVOCATION_ARGUMENT_TABLE_ID,
+        valid_invocation.key.clone(),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_invocation_reference(wrong_relation, &capture),
+        Err(SystemReferenceError::RelationMismatch)
+    );
+
+    let wrong_database = RowRef::new(
+        [2; 16],
+        SYS_INVOCATION_TABLE_ID,
+        valid_invocation.key.clone(),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_invocation_reference(wrong_database, &capture),
+        Err(SystemReferenceError::DatabaseMismatch)
+    );
+
+    let wrong_snapshot = RowRef::new(
+        capture.database_id(),
+        SYS_INVOCATION_TABLE_ID,
+        valid_invocation.key.clone(),
+        CanonicalSnapshot::cwd([1; 16], [9; 16], 8.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_invocation_reference(wrong_snapshot, &capture),
+        Err(SystemReferenceError::SnapshotMismatch)
+    );
+
+    for invalid_key in [
+        OvbRaw::Text("not-an-invocation-id".into()),
+        OvbRaw::Array(vec![]),
+    ] {
+        let reference = RowRef::new(
+            capture.database_id(),
+            SYS_INVOCATION_TABLE_ID,
+            invalid_key,
+            capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_invocation_reference(reference, &capture),
+            Err(SystemReferenceError::InvalidInvocationKey)
+        );
+    }
+
+    let wrong_embedded_relation = RowRef::new(
+        capture.database_id(),
+        SYS_INVOCATION_ARGUMENT_TABLE_ID,
+        OvbRaw::Array(vec![
+            encoded_run(
+                &RowRef::new(
+                    capture.database_id(),
+                    SYS_RUN_TABLE_ID,
+                    valid_invocation.key.clone(),
+                    capture.snapshot().clone(),
+                )
+                .unwrap(),
+            ),
+            OvbRaw::Int(0.into()),
+        ]),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_invocation_argument_reference(wrong_embedded_relation, &capture),
+        Err(SystemReferenceError::InvalidInvocationArgumentKey)
+    );
+
+    for invalid_key in [
+        OvbRaw::Array(vec![encoded_run(&valid_invocation)]),
+        OvbRaw::Array(vec![
+            encoded_run(&valid_invocation),
+            OvbRaw::Int((-1).into()),
+        ]),
+        OvbRaw::Array(vec![
+            encoded_run(&valid_invocation),
+            OvbRaw::Int(num_bigint::BigInt::from(u64::MAX) + 1),
+        ]),
+    ] {
+        let reference = RowRef::new(
+            capture.database_id(),
+            SYS_INVOCATION_ARGUMENT_TABLE_ID,
+            invalid_key,
+            capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_invocation_argument_reference(reference, &capture),
+            Err(SystemReferenceError::InvalidInvocationArgumentKey)
+        );
+    }
 }
