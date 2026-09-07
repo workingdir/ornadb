@@ -21,6 +21,7 @@ use parquet::{
     },
     schema::parser::parse_message_type,
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -2135,6 +2136,162 @@ fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_stat
         fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
         "untracked ordinary\n"
     );
+}
+
+#[test]
+fn compact_publication_rejects_a_noncanonical_reordered_candidate_manifest() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let segments = (1..=2)
+        .map(|ordinal| compact_segment(table, ordinal, format!("segment-{ordinal}\n").into_bytes()))
+        .collect::<Vec<_>>();
+    let plan = compact_plan(&repo, table, [44; 16], &segments);
+
+    let head = repo.head().unwrap().unwrap();
+    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+    let shard_path =
+        ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
+    let manifest = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate().commit(),
+                manifest_path.as_path().display()
+            ),
+        ],
+    );
+    let shard = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate().commit(),
+                shard_path.as_path().display()
+            ),
+        ],
+    );
+    let reordered_shard = reorder_two_canonical_shard_entries(&shard);
+    let reordered_hash = hex_digest(&Sha256::digest(&reordered_shard));
+    let original_manifest_hash: [u8; 32] = Sha256::digest(&manifest).into();
+    let original_hash = manifest_hash_for(&manifest, "shards/00000000.orna");
+    let reordered_manifest = String::from_utf8(manifest)
+        .unwrap()
+        .replacen(&original_hash, &reordered_hash, 1)
+        .into_bytes();
+    let reordered_manifest_hash: [u8; 32] = Sha256::digest(&reordered_manifest).into();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(reordered_manifest)),
+                orna_repository_v1::ManagedFileChange::new(shard_path, Some(reordered_shard)),
+            ],
+            "test: commit reordered compact records",
+        )
+        .unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let mut journal = plan.journal().clone();
+    repo.write_publication_journal(&journal).unwrap();
+
+    // The public candidate API consumes a durable journal.  Bind this test
+    // journal to the altered private candidate so the candidate reader, not
+    // an earlier candidate-identity mismatch, decides the result.
+    let journal_path = repo.runtime_paths().root().join("publication-journal.bin");
+    let mut journal_bytes = fs::read(&journal_path).unwrap();
+    replace_once(
+        &mut journal_bytes,
+        plan.candidate().commit().as_str().as_bytes(),
+        candidate.commit().as_str().as_bytes(),
+    );
+    replace_once(
+        &mut journal_bytes,
+        &original_manifest_hash,
+        &reordered_manifest_hash,
+    );
+    fs::write(&journal_path, journal_bytes).unwrap();
+    journal = repo.read_publication_journal().unwrap().unwrap();
+    let state_before_read = git_state(&repo, root.path());
+
+    let error = repo
+        .publish_candidate(&expected_index, &candidate, &mut journal)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            orna_repository_v1::RepositoryError::InvalidPublicationJournal
+        ),
+        "unexpected candidate rejection: {error:?}"
+    );
+    assert_eq!(git_state(&repo, root.path()), state_before_read);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged ordinary\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+}
+
+fn replace_once(bytes: &mut [u8], old: &[u8], new: &[u8]) {
+    assert_eq!(old.len(), new.len());
+    let offset = bytes
+        .windows(old.len())
+        .position(|window| window == old)
+        .expect("journal contains original binding");
+    bytes[offset..offset + old.len()].copy_from_slice(new);
+    assert!(
+        !bytes.windows(old.len()).any(|window| window == old),
+        "journal binding is unique"
+    );
+}
+
+fn git_bytes(directory: &Path, arguments: &[&str]) -> Vec<u8> {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn reorder_two_canonical_shard_entries(bytes: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(bytes).unwrap();
+    let entries = text
+        .strip_prefix("{entries: [")
+        .unwrap()
+        .strip_suffix("]}\n")
+        .unwrap();
+    let (first, second) = entries.split_once("}, {").unwrap();
+    format!("{{entries: [{{{second}}}, {{{first}}}]}}\n").into_bytes()
+}
+
+fn manifest_hash_for(bytes: &[u8], shard: &str) -> String {
+    let text = std::str::from_utf8(bytes).unwrap();
+    let marker = format!("file: \"{shard}\", hash: \"");
+    let hash = text.split_once(&marker).unwrap().1;
+    hash[..64].to_owned()
+}
+
+fn hex_digest(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
