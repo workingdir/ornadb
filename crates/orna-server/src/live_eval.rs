@@ -10,7 +10,7 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use orna_evaluator_v1::{
-    AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
+    reference_standard_profile, reference_standard_sources, AdmittedReplSession, Limits,
 };
 use orna_foundation_v1::{
     CanonicalSnapshot, CwdCapture, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw,
@@ -304,7 +304,15 @@ impl LiveApplication for PureEvalApplication {
         let result = {
             let (state, _) = match self.session(session, database, presentation) {
                 Ok(state) => state,
-                Err(code) => return self.failure(request, *fingerprint, code),
+                Err(code) => {
+                    let response = self.failure(request, *fingerprint, code)?;
+                    // A session that was already admitted can retain this
+                    // terminal rejection just like an evaluator failure. The
+                    // matching request must replay the original outcome
+                    // rather than re-admitting against a later CWD capture.
+                    self.retain_terminal(session_id, request, *fingerprint, &response);
+                    return Ok(response);
+                }
             };
             state.repl.submit(source)
         };
@@ -543,11 +551,14 @@ mod tests {
 
     struct TestAdmissionSource {
         capture: Rc<RefCell<CwdCapture>>,
+        capture_admissions: Rc<Cell<usize>>,
         repl_admissions: Rc<Cell<usize>>,
     }
 
     impl OperationAdmissionSource for TestAdmissionSource {
         fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
+            self.capture_admissions
+                .set(self.capture_admissions.get() + 1);
             Ok(self.capture.borrow().clone())
         }
 
@@ -588,21 +599,31 @@ mod tests {
         [u8; 16],
         Rc<RefCell<CwdCapture>>,
         Rc<Cell<usize>>,
+        Rc<Cell<usize>>,
     ) {
         let database_id = [1; 16];
         let capture = Rc::new(RefCell::new(capture(database_id, 0)));
+        let capture_admissions = Rc::new(Cell::new(0));
         let repl_admissions = Rc::new(Cell::new(0));
         let expiries = Rc::new(RefCell::new(BTreeMap::new()));
         let application = PureEvalApplication {
             database_id,
             admissions: Box::new(TestAdmissionSource {
                 capture: Rc::clone(&capture),
+                capture_admissions: Rc::clone(&capture_admissions),
                 repl_admissions: Rc::clone(&repl_admissions),
             }),
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
         };
-        (application, expiries, database_id, capture, repl_admissions)
+        (
+            application,
+            expiries,
+            database_id,
+            capture,
+            capture_admissions,
+            repl_admissions,
+        )
     }
 
     fn eval_message(database_id: [u8; 16], source: &str, fingerprint: [u8; 32]) -> Message {
@@ -636,7 +657,7 @@ mod tests {
 
     #[test]
     fn eval_failure_is_a_correlated_structured_diagnostic() {
-        let (mut application, expiries, database_id, _, _) = application();
+        let (mut application, expiries, database_id, _, _, _) = application();
         let session = [3; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let request = [4; 16];
@@ -667,7 +688,7 @@ mod tests {
 
     #[test]
     fn watch_is_read_only_and_resync_advances_its_revision() {
-        let (mut application, expiries, database_id, _, _) = application();
+        let (mut application, expiries, database_id, _, _, _) = application();
         let session = [6; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let watch_request = [7; 16];
@@ -719,7 +740,7 @@ mod tests {
 
     #[test]
     fn watch_with_refresh_floor_is_rejected_without_a_scheduler() {
-        let (mut application, expiries, database_id, _, _) = application();
+        let (mut application, expiries, database_id, _, _, _) = application();
         let session = [27; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let result = application.watch(
@@ -742,7 +763,7 @@ mod tests {
 
     #[test]
     fn sessions_are_isolated_and_context_remains_pinned() {
-        let (mut application, expiries, database_id, _, _) = application();
+        let (mut application, expiries, database_id, _, _, _) = application();
         let first = [17; 16];
         let second = [18; 16];
         expiries.borrow_mut().insert(SessionId::new(first), 100);
@@ -806,7 +827,7 @@ mod tests {
 
     #[test]
     fn null_context_is_captured_at_operation_admission() {
-        let (mut application, expiries, database_id, current_capture, repl_admissions) =
+        let (mut application, expiries, database_id, current_capture, _, repl_admissions) =
             application();
         let session = [39; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
@@ -835,7 +856,7 @@ mod tests {
 
     #[test]
     fn explicit_stale_context_is_rejected_without_overlay_mutation() {
-        let (mut application, expiries, database_id, current_capture, repl_admissions) =
+        let (mut application, expiries, database_id, current_capture, _, repl_admissions) =
             application();
         let session = [42; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
@@ -861,7 +882,7 @@ mod tests {
 
     #[test]
     fn matching_terminal_replay_does_not_readmit_or_reexecute() {
-        let (mut application, expiries, database_id, _, repl_admissions) = application();
+        let (mut application, expiries, database_id, _, _, repl_admissions) = application();
         let session = [45; 16];
         let request = [46; 16];
         let message = eval_message(database_id, "let answer: Int = 40;", [47; 32]);
@@ -891,8 +912,50 @@ mod tests {
     }
 
     #[test]
+    fn rejected_eval_replays_its_correlated_terminal_without_readmission() {
+        let (mut application, expiries, database_id, current_capture, capture_admissions, _) =
+            application();
+        let session = [50; 16];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        application
+            .eval(
+                session,
+                [51; 16],
+                &eval_message(database_id, "let retained: Int = 1;", [52; 32]),
+            )
+            .unwrap();
+
+        let request = [53; 16];
+        let fingerprint = [54; 32];
+        let mut stale = eval_message(database_id, "retained", fingerprint);
+        let Message::Eval { database, .. } = &mut stale else {
+            unreachable!();
+        };
+        database.snapshot = Some(capture(database_id, 9).snapshot().clone());
+
+        let first = application.eval(session, request, &stale).unwrap();
+        assert!(matches!(
+            first.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+        let captures_after_failure = capture_admissions.get();
+        *current_capture.borrow_mut() = capture(database_id, 10);
+
+        let replay = application.eval(session, request, &stale).unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(capture_admissions.get(), captures_after_failure);
+        assert!(application.sessions[&SessionId::new(session)]
+            .terminal
+            .contains_key(&request));
+    }
+
+    #[test]
     fn eval_requires_the_pinned_cwd_snapshot() {
-        let (mut application, expiries, database_id, current_capture, _) = application();
+        let (mut application, expiries, database_id, current_capture, _, _) = application();
         let session = [30; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let mut current = eval_message(database_id, "1 + 1", [35; 32]);
@@ -929,7 +992,7 @@ mod tests {
 
     #[test]
     fn deletion_and_expiry_remove_state_but_ordinary_resume_keeps_it() {
-        let (mut application, expiries, database_id, _, _) = application();
+        let (mut application, expiries, database_id, _, _, _) = application();
         let session = [9; 16];
         let session_id = SessionId::new(session);
         expiries.borrow_mut().insert(session_id, 100);
@@ -969,11 +1032,9 @@ mod tests {
             .unwrap()
             .watch
             .unwrap();
-        assert!(
-            application.sessions[&session_id]
-                .watches
-                .contains_key(&watch)
-        );
+        assert!(application.sessions[&session_id]
+            .watches
+            .contains_key(&watch));
         application.remove(session_id);
         assert!(!application.sessions.contains_key(&session_id));
         assert!(!expiries.borrow().contains_key(&session_id));
