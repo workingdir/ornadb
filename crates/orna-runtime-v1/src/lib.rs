@@ -560,6 +560,16 @@ pub struct RunObservationRegistration {
     pub invocation_id: [u8; 16],
 }
 
+/// The result of atomically admitting an observed request before evaluator
+/// code may run. A matching terminal request is replayed without requiring a
+/// writer lease or creating a second run observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedRequestStart {
+    pub request: RequestStatus,
+    pub run: Option<RunObservation>,
+    pub admitted: bool,
+}
+
 /// All caller-supplied metadata required before a stream may consume an item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamObservationRegistration {
@@ -1368,6 +1378,92 @@ impl RuntimeState {
         self.run_observation(id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)
+    }
+
+    /// Atomically admits a request, pins its capture, creates its `sys.Run`
+    /// observation, and records the owner-fenced running state. Callers must
+    /// invoke this before evaluator code. A matching terminal request is
+    /// replayed without acquiring or checking a new writer lease.
+    pub async fn begin_observed_request(
+        &self,
+        registration: RunObservationRegistration,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+    ) -> Result<ObservedRequestStart, RuntimeError> {
+        validate_request_identity(registration.request)?;
+        validate_id(registration.invocation_id)?;
+        validate_id(owner.owner_id)?;
+        if owner.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        validate_observation_text(&registration.function)?;
+        if let Some(source) = &registration.source_identity {
+            validate_observation_text(source)?;
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(status) = request_status_tx(&tx, registration.request).await? {
+            require_fingerprint(&status, fingerprint)?;
+            if status.state.is_terminal() {
+                tx.commit()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                return Ok(ObservedRequestStart {
+                    request: status,
+                    run: None,
+                    admitted: false,
+                });
+            }
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        ensure_session_admission_open(&tx, registration.request.session_id).await?;
+        self.require_owner(&tx, owner).await?;
+        let capture = capture_tx(&tx).await?;
+        tx.execute(
+            "INSERT INTO request_ledger (session_id, request_id, fingerprint, state, terminal_outcome, owner_id, owner_epoch) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            params![
+                registration.request.session_id.to_vec(),
+                registration.request.request_id.to_vec(),
+                fingerprint.to_vec(),
+                RequestState::Running.code(),
+                owner.owner_id.to_vec(),
+                i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let id = RunObservationId(*Uuid::new_v4().as_bytes());
+        tx.execute(
+            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 0, NULL, NULL)",
+            params![
+                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
+                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
+                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Running),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let run = self
+            .run_observation(id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        Ok(ObservedRequestStart {
+            request: RequestStatus {
+                identity: registration.request,
+                fingerprint,
+                state: RequestState::Running,
+                terminal_outcome: None,
+            },
+            run: Some(run),
+            admitted: true,
+        })
     }
 
     /// Registers exactly one durable `sys.Stream` observation for a runtime
@@ -4304,6 +4400,42 @@ impl RuntimeState {
         .await
     }
 
+    /// Marks an observed request successful while the owner fence is current.
+    pub async fn complete_observed_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.complete_request_with_owner(identity, fingerprint, owner, outcome)
+            .await
+    }
+
+    /// Retains an ordinary evaluator failure as a completed request terminal
+    /// while keeping the observed run distinctly `Failed`. The runtime makes
+    /// no rollback assertion here; callers may only record such proof through
+    /// runtime-owned transaction handling.
+    pub async fn fail_observed_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        outcome: TerminalOutcome,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request_with_owner_and_run_status(
+            identity,
+            fingerprint,
+            owner,
+            RequestState::Completed,
+            outcome,
+            RunObservationStatus::Failed,
+            Some(diagnostic),
+        )
+        .await
+    }
+
     /// Cancels a request only while the activation still owns its writer
     /// epoch. A stale activation cannot publish a terminal cancellation.
     pub async fn cancel_request_with_owner(
@@ -4321,6 +4453,19 @@ impl RuntimeState {
             outcome,
         )
         .await
+    }
+
+    /// Marks an observed request cancelled while preserving cancellation as a
+    /// distinct run terminal state.
+    pub async fn cancel_observed_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.cancel_request_with_owner(identity, fingerprint, owner, outcome)
+            .await
     }
 
     pub async fn complete_request(
@@ -4820,6 +4965,33 @@ impl RuntimeState {
         next: RequestState,
         terminal_outcome: TerminalOutcome,
     ) -> Result<RequestStatus, RuntimeError> {
+        let observation_status = match next {
+            RequestState::Completed => RunObservationStatus::Completed,
+            RequestState::Cancelled => RunObservationStatus::Cancelled,
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        self.transition_request_with_owner_and_run_status(
+            identity,
+            fingerprint,
+            owner,
+            next,
+            terminal_outcome,
+            observation_status,
+            None,
+        )
+        .await
+    }
+
+    async fn transition_request_with_owner_and_run_status(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        next: RequestState,
+        terminal_outcome: TerminalOutcome,
+        observation_status: RunObservationStatus,
+        diagnostic: Option<SafeDiagnostic>,
+    ) -> Result<RequestStatus, RuntimeError> {
         validate_request_identity(identity)?;
         validate_id(owner.owner_id)?;
         if owner.epoch == 0 || !next.is_terminal() {
@@ -4897,12 +5069,8 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let observation_status = match next {
-            RequestState::Completed => RunObservationStatus::Completed,
-            RequestState::Cancelled => RunObservationStatus::Cancelled,
-            _ => return Err(RuntimeError::RecoveryInvalid),
-        };
-        sync_run_request_state_tx(&tx, identity, observation_status).await?;
+        sync_run_request_state_with_diagnostic_tx(&tx, identity, observation_status, diagnostic)
+            .await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -6086,8 +6254,19 @@ async fn sync_run_request_state_tx(
     identity: RequestIdentity,
     status: RunObservationStatus,
 ) -> Result<(), RuntimeError> {
+    sync_run_request_state_with_diagnostic_tx(connection, identity, status, None).await
+}
+
+async fn sync_run_request_state_with_diagnostic_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+    status: RunObservationStatus,
+    diagnostic: Option<SafeDiagnostic>,
+) -> Result<(), RuntimeError> {
     let now = now_ms()?;
-    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END WHERE session_id = ?4 AND request_id = ?5 AND status IN (?6, ?7)", params![run_status_code(status), status.is_terminal(), now, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let code = diagnostic.map(|value| encode_code(value.code));
+    let class = diagnostic.map(|value| encode_class(value.class));
+    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     if status.is_terminal() {
         connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     }
@@ -14323,6 +14502,138 @@ mod tests {
         assert_eq!(restored.snapshot, pin);
         assert_eq!(restored.status, RunObservationStatus::Starting);
         assert!(restored.live);
+    }
+
+    #[tokio::test]
+    async fn observed_request_lifecycle_admits_before_work_and_keeps_terminals_distinct() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(151)).await.unwrap();
+        let consumer = stream_delivery("observed", "request").consumer;
+
+        let failed_request = request(152, 153);
+        let failed = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: failed_request,
+                    consumer_identity: consumer.clone(),
+                    function: "pkg.failed".into(),
+                    source_identity: Some("source-failed".into()),
+                    invocation_id: id(154),
+                },
+                digest(155),
+                owner,
+            )
+            .await
+            .unwrap();
+        let failed_run = failed.run.unwrap();
+        assert!(failed.admitted);
+        assert_eq!(failed.request.state, RequestState::Running);
+        assert_eq!(failed_run.status, RunObservationStatus::Running);
+        assert_eq!(failed_run.invocation_id, id(154));
+        let failure = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        state
+            .fail_observed_request_with_owner(
+                failed_request,
+                digest(155),
+                owner,
+                outcome(156),
+                failure,
+            )
+            .await
+            .unwrap();
+        let failed_observation = state.run_observation(failed_run.id).await.unwrap().unwrap();
+        assert_eq!(failed_observation.status, RunObservationStatus::Failed);
+        assert_eq!(failed_observation.diagnostic, Some(failure));
+
+        let replay = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: failed_request,
+                    consumer_identity: consumer.clone(),
+                    function: "pkg.never-runs".into(),
+                    source_identity: None,
+                    invocation_id: id(157),
+                },
+                digest(155),
+                WriterLease {
+                    owner_id: id(158),
+                    epoch: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!replay.admitted);
+        assert_eq!(replay.request.terminal_outcome, Some(outcome(156)));
+        assert_eq!(replay.run, None);
+
+        let cancelled_request = request(159, 160);
+        let cancelled = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: cancelled_request,
+                    consumer_identity: consumer.clone(),
+                    function: "pkg.cancelled".into(),
+                    source_identity: None,
+                    invocation_id: id(161),
+                },
+                digest(162),
+                owner,
+            )
+            .await
+            .unwrap();
+        let cancelled_run = cancelled.run.unwrap();
+        state
+            .cancel_observed_request_with_owner(cancelled_request, digest(162), owner, outcome(163))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .run_observation(cancelled_run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RunObservationStatus::Cancelled
+        );
+
+        let orphaned_request = request(164, 165);
+        let orphaned = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: orphaned_request,
+                    consumer_identity: consumer,
+                    function: "pkg.orphaned".into(),
+                    source_identity: None,
+                    invocation_id: id(166),
+                },
+                digest(167),
+                owner,
+            )
+            .await
+            .unwrap();
+        let orphaned_run = orphaned.run.unwrap();
+        let fence = state.recover_abandoned(id(151), id(168)).await.unwrap();
+        state
+            .recover_running_request(
+                orphaned_request,
+                digest(167),
+                RequestOwner::from(owner),
+                fence,
+                outcome(169),
+            )
+            .await
+            .unwrap();
+        let retained = state
+            .run_observation(orphaned_run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.status, RunObservationStatus::Orphaned);
+        assert!(!retained.live);
     }
 
     #[tokio::test]
