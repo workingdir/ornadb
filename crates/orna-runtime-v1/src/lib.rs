@@ -721,13 +721,13 @@ pub trait StreamSource {
         Self: 'a;
 
     fn descriptor(&self) -> StreamSourceDescriptor;
-    /// Returns the exact durable stream key served by this connector when it
-    /// can declare one. The default preserves compatibility with legacy
-    /// connectors; keyed connectors are rejected before provider polling when
-    /// their declaration does not match the requested durable stream.
-    fn checkpoint_key(&self) -> Option<CheckpointKey> {
-        None
-    }
+    /// Returns the exact durable stream key served by this connector.
+    ///
+    /// A connector cannot be admitted without declaring the stable source,
+    /// partition, and position-format identities represented by its durable
+    /// checkpoint. The runner compares this key before it loads a checkpoint
+    /// or polls the provider.
+    fn checkpoint_key(&self) -> CheckpointKey;
     /// Selects how a failed item can be preserved for administrative skip or
     /// replay. The default fails closed; every connector that can fail a
     /// delivery must explicitly select plaintext or a protected reference.
@@ -839,8 +839,8 @@ impl StreamSource for ListStreamSource {
         }
     }
 
-    fn checkpoint_key(&self) -> Option<CheckpointKey> {
-        Some(self.key.clone())
+    fn checkpoint_key(&self) -> CheckpointKey {
+        self.key.clone()
     }
 
     fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
@@ -1645,11 +1645,7 @@ impl RuntimeState {
         H: StreamHandler,
         C: StreamRunControl,
     {
-        if source
-            .checkpoint_key()
-            .as_ref()
-            .is_some_and(|source_key| source_key != key)
-        {
+        if source.checkpoint_key() != *key {
             return Err(StreamStepError::Runtime(
                 RuntimeError::StreamIdentityMismatch,
             ));
@@ -1847,11 +1843,7 @@ impl RuntimeState {
         H: StreamHandler,
         C: StreamRunControl,
     {
-        if source
-            .checkpoint_key()
-            .as_ref()
-            .is_some_and(|source_key| source_key != key)
-        {
+        if source.checkpoint_key() != *key {
             return Err(StreamStepError::Runtime(
                 RuntimeError::StreamIdentityMismatch,
             ));
@@ -6450,8 +6442,8 @@ mod tests {
             }
         }
 
-        fn checkpoint_key(&self) -> Option<CheckpointKey> {
-            Some(self.key.clone())
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
         }
 
         fn failure_payload(&self, item: &StreamItem) -> StreamFailurePayload {
@@ -6507,8 +6499,8 @@ mod tests {
             self.descriptor
         }
 
-        fn checkpoint_key(&self) -> Option<CheckpointKey> {
-            Some(self.key.clone())
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -6525,12 +6517,13 @@ mod tests {
         }
     }
 
-    struct LegacySource {
+    struct DefaultPayloadSource {
+        key: CheckpointKey,
         item: Option<StreamItem>,
         polls: usize,
     }
 
-    impl StreamSource for LegacySource {
+    impl StreamSource for DefaultPayloadSource {
         type NextFuture<'a>
             = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
         where
@@ -6545,6 +6538,10 @@ mod tests {
                 kind: StreamSourceKind::Finite,
                 replayable: true,
             }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -6584,8 +6581,8 @@ mod tests {
             }
         }
 
-        fn checkpoint_key(&self) -> Option<CheckpointKey> {
-            Some(self.key.clone())
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -6623,8 +6620,8 @@ mod tests {
             }
         }
 
-        fn checkpoint_key(&self) -> Option<CheckpointKey> {
-            Some(self.key.clone())
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
         }
 
         fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
@@ -6798,6 +6795,8 @@ mod tests {
             ))
         );
         assert_eq!(mismatch_source.polls, 0);
+        assert_eq!(mismatch_handler.calls, 0);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
         let mut long_mismatch_handler = CommitHandler { calls: 0 };
         assert_eq!(
             state
@@ -6816,27 +6815,7 @@ mod tests {
         assert_eq!(mismatch_source.polls, 0);
         assert_eq!(mismatch_source.waits, 0);
         assert_eq!(long_mismatch_handler.calls, 0);
-
-        let mut legacy_delivery = stream_delivery("legacy:one", "legacy:two");
-        legacy_delivery.source = Component::new("legacy-source").unwrap();
-        let legacy_key = legacy_delivery.checkpoint_key();
-        let mut legacy_source = LegacySource {
-            item: Some(StreamItem {
-                delivery: legacy_delivery,
-                payload: vec![8],
-            }),
-            polls: 0,
-        };
-        let mut legacy_handler = CommitHandler { calls: 0 };
-        assert!(matches!(
-            state
-                .run_stream_once(writer, &legacy_key, &mut legacy_source, &mut legacy_handler,)
-                .await
-                .unwrap(),
-            StreamStep::Committed { .. }
-        ));
-        assert_eq!(legacy_source.polls, 1);
-        assert_eq!(legacy_handler.calls, 1);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
 
         let mut source = SequenceSource {
             key: key.clone(),
@@ -8153,13 +8132,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_source_without_payload_policy_fails_closed_and_releases_lease() {
+    async fn keyed_source_without_payload_policy_fails_closed_and_releases_lease() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
         let delivery = stream_delivery("legacy:one", "legacy:two");
         let key = delivery.checkpoint_key();
-        let mut source = LegacySource {
+        let mut source = DefaultPayloadSource {
+            key: key.clone(),
             item: Some(StreamItem {
                 delivery: delivery.clone(),
                 payload: vec![1, 2, 3],
