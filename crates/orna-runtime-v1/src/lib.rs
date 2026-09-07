@@ -3531,6 +3531,48 @@ impl RuntimeState {
         Ok(requests)
     }
 
+    /// Enumerates every non-terminal request owned by one durable session.
+    ///
+    /// This is intentionally broader than [`Self::running_requests`]: a
+    /// `Reserved` record is unfinished work too. A session-ending owner must
+    /// account for it before reporting orderly termination, even though a
+    /// recovered reservation is never authorization to execute it.
+    pub async fn unfinished_session_requests(
+        &self,
+        session_id: [u8; 16],
+    ) -> Result<Vec<RequestStatus>, RuntimeError> {
+        validate_id(session_id)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
+                        owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                        controlled_transaction_proof
+                 FROM request_ledger
+                 WHERE session_id = ?1 AND state IN (?2, ?3)
+                 ORDER BY request_id",
+                params![
+                    session_id.to_vec(),
+                    RequestState::Reserved.code(),
+                    RequestState::Running.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut requests = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let evidence = decode_request_execution_evidence(&row, 5)?;
+            validate_request_execution_evidence(&status, evidence)?;
+            requests.push(status);
+        }
+        Ok(requests)
+    }
+
     /// Returns the active owner recorded for a Running request. `None` means
     /// a validated legacy Running row or a non-running request; it never
     /// authorizes recovery by itself.
