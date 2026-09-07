@@ -1,17 +1,16 @@
 use std::{
     fs,
-    future::Future,
     path::{Path, PathBuf},
     process::Command,
-    task::{Context, Poll, Waker},
 };
 
+use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{
-    CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactSegment, CompactSegmentRole,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedPath, Repository,
-    RuntimeGeneration, WorktreeState,
+    CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
+    CompactSegmentRole, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
+    ManagedPath, Repository, RuntimeGeneration, WorktreeState,
 };
 use parquet::{
     basic::{Compression, PageType},
@@ -28,18 +27,6 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = Box::pin(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -505,6 +492,42 @@ fn publish_compact_repository_boundary(
     repository
         .publish_compact_repository_boundary(plan)
         .map(|pending| pending.index().clone())
+}
+
+fn compact_receipt_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[0x5a; 32])
+}
+
+fn provision_compact_receipt_trust_root(repository: &Repository, key: &SigningKey) {
+    repository.runtime_paths().ensure_exists().unwrap();
+    fs::write(
+        repository
+            .runtime_paths()
+            .compact_runtime_receipt_public_key(),
+        key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+}
+
+fn compact_runtime_receipt(
+    pending: &orna_repository_v1::CompactPublicationPending,
+    key: &SigningKey,
+) -> CompactRuntimeReceipt {
+    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
+        pending.runtime_intent_id(),
+        pending.cleanup_watermark(),
+        pending.commit(),
+        pending.journal_verifier(),
+    )
+    .unwrap();
+    CompactRuntimeReceipt::new(
+        pending.runtime_intent_id(),
+        pending.cleanup_watermark(),
+        pending.commit().clone(),
+        pending.journal_verifier(),
+        key.sign(&signing_bytes).to_bytes(),
+    )
+    .unwrap()
 }
 
 /// Builds a real filtered clone when the installed Git supports file-protocol
@@ -2572,6 +2595,8 @@ fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_pos
 fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
     let table = Uuid::new_v4();
     let stale_segment = compact_segment(table, 1, b"stale candidate\n".to_vec());
 
@@ -2581,7 +2606,10 @@ fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
         [46; 16],
         &[compact_segment(table, 2, b"winner\n".to_vec())],
     );
-    block_on(repo.publish_and_complete_compact(winner, |_| async { Ok::<(), ()>(()) })).unwrap();
+    let pending = repo.publish_compact_repository_boundary(winner).unwrap();
+    let receipt = compact_runtime_receipt(&pending, &signing_key);
+    repo.finish_compact_with_receipt(&receipt).unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
 
     let rebuilt = repo
         .rebuild_compact_publication_with_watermark(
@@ -2610,6 +2638,8 @@ fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
 fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
     let table = Uuid::new_v4();
     let intent = [49; 16];
     let plan = compact_plan(
@@ -2619,16 +2649,22 @@ fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
         &[compact_segment(table, 1, b"compact object\n".to_vec())],
     );
     let candidate = plan.candidate_commit().clone();
-    let result = block_on(
-        repo.publish_and_complete_compact(plan, |operation| async move {
-            assert_eq!(operation.runtime_intent_id(), intent);
-            assert_eq!(operation.cleanup_watermark(), [49; 32]);
-            Err::<(), ()>(())
-        }),
-    );
+    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+    assert_eq!(pending.runtime_intent_id(), intent);
+    assert_eq!(pending.cleanup_watermark(), [49; 32]);
+    let recovered = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    let recovered_again = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered, recovered_again);
     assert!(matches!(
-        result,
-        Err(orna_repository_v1::CompactPublicationError::Runtime(()))
+        recovered,
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value)
+            if value == &pending
     ));
     assert!(repo.read_publication_journal().unwrap().is_some());
     assert_eq!(repo.head().unwrap(), Some(candidate));
@@ -2638,6 +2674,8 @@ fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
 fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
     let table = Uuid::new_v4();
     let intent = [51; 16];
     let plan = compact_plan(
@@ -2646,17 +2684,30 @@ fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
         intent,
         &[compact_segment(table, 1, b"compact object\n".to_vec())],
     );
-    let result = block_on(repo.publish_and_complete_compact(plan, |_operation| async {
-        fs::write(root.path().join("ordinary.txt"), "native writer\n").unwrap();
-        git(root.path(), &["add", "ordinary.txt"]);
-        git(root.path(), &["commit", "-m", "native writer"]);
-        Ok::<(), ()>(())
-    }));
+    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+    let receipt = compact_runtime_receipt(&pending, &signing_key);
+    fs::write(root.path().join("ordinary.txt"), "native writer\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "native writer"]);
+    let result = repo.finish_compact_with_receipt(&receipt);
     assert!(matches!(
         result,
-        Err(orna_repository_v1::CompactPublicationError::Repository(
-            orna_repository_v1::RepositoryError::StaleHead
-        ))
+        Err(orna_repository_v1::RepositoryError::StaleHead)
     ));
     assert!(repo.read_publication_journal().unwrap().is_some());
+    let reconciliation = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    match reconciliation {
+        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
+            assert_eq!(value.candidate(), pending.commit());
+            assert_ne!(value.current_head(), pending.commit());
+            assert_eq!(value.runtime_intent_id(), intent);
+            assert_eq!(value.cleanup_watermark(), [51; 32]);
+        }
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
+            panic!("ref drift must require explicit reconciliation")
+        }
+    }
 }
