@@ -10,11 +10,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::Future,
 };
 
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
-use orna_syntax_v1::{parse_row, Expr, LiteralKind};
+use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, PageType, Type},
     file::reader::{FileReader, SerializedFileReader},
@@ -24,7 +25,8 @@ use uuid::{Uuid, Version};
 
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
-    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
+    PublicationJournal, PublicationJournalEntry, PublicationJournalStage, Repository,
+    RepositoryError,
 };
 
 /// Maximum number of entries in one canonical compact-manifest shard.
@@ -1025,78 +1027,276 @@ impl CompactManifestWitness {
     }
 }
 
-/// A private compact candidate and its journal binding.  Calling `publish`
-/// still uses the ordinary loose-publication executor, preserving its index and
-/// worktree protections.
+/// An opaque compact candidate and its journal binding.
+///
+/// A caller can prepare this value but cannot inspect, publish, or finalize
+/// its raw candidate. Compact publication has a distinct, runtime-backed API;
+/// ordinary [`Repository::publish_candidate`] deliberately refuses this type
+/// of journal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactPublicationPlan {
     expected_index: IndexGeneration,
     candidate: PrivateCommit,
     manifest: CompactManifest,
     journal: PublicationJournal,
-    source: CompactPublicationSource,
 }
 
+/// The visible result of the repository half of compact publication.
+///
+/// This is deliberately a pending value: runtime cleanup and journal
+/// finalization have not happened. Callers that need a completed compact
+/// publication must use the runtime-backed coordinator instead of treating
+/// this boundary as completion.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CompactPublicationSource {
-    table: Uuid,
-    empty_schema: [u8; 32],
-    runtime_intent_id: [u8; 16],
-    cleanup_watermark: [u8; 32],
-    segments: Vec<CompactSegment>,
-    message: String,
+pub struct CompactPublicationPending {
+    index: IndexGeneration,
+    commit: GitCommitRef,
+}
+
+impl CompactPublicationPending {
+    pub fn index(&self) -> &IndexGeneration {
+        &self.index
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
 }
 
 impl CompactPublicationPlan {
-    pub fn candidate(&self) -> &PrivateCommit {
-        &self.candidate
-    }
-
+    /// Returns the logical compact manifest prepared for publication. The
+    /// private Git candidate and durable journal remain inaccessible here.
     pub fn manifest(&self) -> &CompactManifest {
         &self.manifest
     }
 
-    pub fn journal(&self) -> &PublicationJournal {
-        &self.journal
+    /// Returns only the opaque Git identity of the prepared candidate.
+    pub fn candidate_commit(&self) -> &GitCommitRef {
+        self.candidate.commit()
+    }
+}
+
+/// The only runtime facts released after a compact ref has been reconciled
+/// and its witness has been proved. This is intentionally not a compact plan:
+/// it contains no candidate, index, manifest, or journal access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactRuntimeOperation {
+    runtime_intent_id: [u8; 16],
+    cleanup_watermark: [u8; 32],
+    commit: GitCommitRef,
+}
+
+impl CompactRuntimeOperation {
+    pub const fn runtime_intent_id(&self) -> [u8; 16] {
+        self.runtime_intent_id
     }
 
-    pub fn publish(&mut self, repository: &Repository) -> Result<IndexGeneration, RepositoryError> {
-        for attempt in 0..=2 {
-            match repository.publish_candidate(
-                &self.expected_index,
-                &self.candidate,
-                &mut self.journal,
-            ) {
-                Ok(result) => return Ok(result),
-                Err(RepositoryError::StaleHead)
-                    if attempt < 2
-                        && repository.head()?.as_ref() != Some(self.journal.old_head()) =>
-                {
-                    *self = repository.rebuild_compact_publication_with_watermark(
-                        self.source.table,
-                        self.source.empty_schema,
-                        self.source.runtime_intent_id,
-                        self.source.cleanup_watermark,
-                        &self.source.segments,
-                        &self.source.message,
-                    )?;
-                }
-                Err(RepositoryError::StaleIndex { actual, .. })
-                    if attempt < 2 && actual.head() != Some(self.journal.old_head()) =>
-                {
-                    *self = repository.rebuild_compact_publication_with_watermark(
-                        self.source.table,
-                        self.source.empty_schema,
-                        self.source.runtime_intent_id,
-                        self.source.cleanup_watermark,
-                        &self.source.segments,
-                        &self.source.message,
-                    )?;
-                }
-                Err(error) => return Err(error),
-            }
+    pub const fn cleanup_watermark(&self) -> [u8; 32] {
+        self.cleanup_watermark
+    }
+
+    pub fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
+}
+
+/// A typed failure from a repository-owned compact runtime operation.
+#[derive(Debug)]
+pub enum CompactPublicationError<E> {
+    Repository(RepositoryError),
+    Runtime(E),
+}
+
+/// Holds the repository coordination lock across the separately owned runtime
+/// transaction. It is private so only the repository-owned operation can
+/// finalize a compact journal.
+struct CompactRuntimeCompletionFence {
+    _coordination_lock: crate::CoordinationLock,
+}
+
+impl CompactRuntimeCompletionFence {}
+
+impl Repository {
+    /// Persists a prepared compact journal without advancing the selected ref.
+    /// This is the crash-before-publication boundary used by restart tests and
+    /// recovery callers; runtime cleanup remains pending.
+    pub fn persist_compact_publication(
+        &self,
+        plan: &CompactPublicationPlan,
+    ) -> Result<(), RepositoryError> {
+        if self.read_publication_journal()?.is_some()
+            || self.head()?.as_ref() != Some(plan.journal.old_head())
+            || self.index_generation()? != plan.expected_index
+        {
+            return Err(RepositoryError::PublicationPending);
         }
-        Err(RepositoryError::StaleHead)
+        self.verify_compact_publication_binding(&plan.journal, &plan.candidate)?;
+        self.write_publication_journal(&plan.journal)
+    }
+
+    /// Publishes the repository half of a compact operation and returns only
+    /// its typed pending identity. The journal deliberately remains pending
+    /// until the runtime-owned frozen prefix has been durably consumed.
+    pub fn publish_compact_repository_boundary(
+        &self,
+        mut plan: CompactPublicationPlan,
+    ) -> Result<CompactPublicationPending, RepositoryError> {
+        let index = self.publish_compact_plan(&mut plan)?;
+        Ok(CompactPublicationPending {
+            index,
+            commit: plan.candidate.commit().clone(),
+        })
+    }
+
+    /// Publishes a compact candidate and executes the caller's runtime cleanup
+    /// inside the witnessed completion boundary. The plan is consumed, so a
+    /// compact ref advance is typed as pending until this operation reaches its
+    /// durable journal finalization.
+    pub async fn publish_and_complete_compact<T, E, F, Fut>(
+        &self,
+        mut plan: CompactPublicationPlan,
+        complete_runtime: F,
+    ) -> Result<(IndexGeneration, T), CompactPublicationError<E>>
+    where
+        F: FnOnce(CompactRuntimeOperation) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let index = self
+            .publish_compact_plan(&mut plan)
+            .map_err(CompactPublicationError::Repository)?;
+        let (fence, operation) = self
+            .begin_compact_runtime_completion(&plan.journal)
+            .map_err(CompactPublicationError::Repository)?;
+        let output = complete_runtime(operation)
+            .await
+            .map_err(CompactPublicationError::Runtime)?;
+        self.mark_fenced_compact_runtime_complete(&mut plan.journal, fence)
+            .map_err(CompactPublicationError::Repository)?;
+        Ok((index, output))
+    }
+
+    /// Recovers a compact journal through the same witnessed runtime
+    /// completion operation used by normal publication. It is the only
+    /// compact recovery API; generic recovery reports the pending boundary
+    /// rather than clearing it.
+    pub async fn recover_and_complete_compact<T, E, F, Fut>(
+        &self,
+        complete_runtime: F,
+    ) -> Result<Option<(IndexGeneration, T)>, CompactPublicationError<E>>
+    where
+        F: FnOnce(CompactRuntimeOperation) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let Some(existing) = self
+            .read_publication_journal()
+            .map_err(CompactPublicationError::Repository)?
+        else {
+            return Ok(None);
+        };
+        if existing.compact_manifest().is_none() {
+            return Err(CompactPublicationError::Repository(
+                RepositoryError::RuntimeCompletionRequired,
+            ));
+        }
+        match self.recover_publication() {
+            // The runtime prefix was already durably completed and the
+            // journal cleared by a prior recovery step. No callback is safe
+            // or needed in that state.
+            Ok(_) => return Ok(None),
+            Err(RepositoryError::RuntimeCompletionRequired) => {}
+            Err(error) => return Err(CompactPublicationError::Repository(error)),
+        }
+        let mut journal = self
+            .read_publication_journal()
+            .map_err(CompactPublicationError::Repository)?
+            .ok_or(CompactPublicationError::Repository(
+                RepositoryError::InvalidPublicationJournal,
+            ))?;
+        let (fence, operation) = self
+            .begin_compact_runtime_completion(&journal)
+            .map_err(CompactPublicationError::Repository)?;
+        let output = complete_runtime(operation)
+            .await
+            .map_err(CompactPublicationError::Runtime)?;
+        self.mark_fenced_compact_runtime_complete(&mut journal, fence)
+            .map_err(CompactPublicationError::Repository)?;
+        let index = self
+            .index_generation()
+            .map_err(CompactPublicationError::Repository)?;
+        Ok(Some((index, output)))
+    }
+
+    fn publish_compact_plan(
+        &self,
+        plan: &mut CompactPublicationPlan,
+    ) -> Result<IndexGeneration, RepositoryError> {
+        self.publish_candidate_impl(
+            &plan.expected_index,
+            &plan.candidate,
+            &mut plan.journal,
+            true,
+        )
+    }
+
+    fn begin_compact_runtime_completion(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(CompactRuntimeCompletionFence, CompactRuntimeOperation), RepositoryError> {
+        let coordination_lock = self.acquire_coordination_lock()?;
+        if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
+        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || journal.runtime_intent_id() != Some(witness.runtime_intent_id())
+        {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        let candidate = self.candidate_from_journal(journal)?;
+        self.verify_compact_publication_binding(journal, &candidate)?;
+        if self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok((
+            CompactRuntimeCompletionFence {
+                _coordination_lock: coordination_lock,
+            },
+            CompactRuntimeOperation {
+                runtime_intent_id: witness.runtime_intent_id(),
+                cleanup_watermark: witness.cleanup_watermark(),
+                commit: journal.new_head().clone(),
+            },
+        ))
+    }
+
+    fn mark_fenced_compact_runtime_complete(
+        &self,
+        journal: &mut PublicationJournal,
+        _fence: CompactRuntimeCompletionFence,
+    ) -> Result<(), RepositoryError> {
+        if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
+        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || journal.runtime_intent_id() != Some(witness.runtime_intent_id())
+        {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        let candidate = self.candidate_from_journal(journal)?;
+        self.verify_compact_publication_binding(journal, &candidate)?;
+        if self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        journal.advance(PublicationJournalStage::RuntimeCompleted)?;
+        self.write_publication_journal_locked(journal)?;
+        journal.advance(PublicationJournalStage::Complete)?;
+        self.write_publication_journal_locked(journal)?;
+        self.clear_publication_journal_locked()
     }
 }
 
@@ -1251,14 +1451,6 @@ impl Repository {
             candidate,
             manifest,
             journal,
-            source: CompactPublicationSource {
-                table: base.table,
-                empty_schema: base.schema,
-                runtime_intent_id,
-                cleanup_watermark,
-                segments: segments.to_vec(),
-                message: message.to_owned(),
-            },
         })
     }
 
