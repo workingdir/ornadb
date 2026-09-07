@@ -1411,12 +1411,11 @@ impl LiveHost {
                                                             RequestState::Orphaned
                                                         }
                                                     };
-                                                    let result = durable_result_body(
-                                                        *target,
-                                                        *expected,
-                                                        &status,
-                                                        self.limits.protocol,
-                                                    );
+                                                    let result = self
+                                                        .durable_result_body(
+                                                            *target, *expected, &status,
+                                                        )
+                                                        .await?;
                                                     (state, Some(status.fingerprint), result)
                                                 }
                                                 None => (RequestState::Unknown, None, None),
@@ -1488,7 +1487,7 @@ impl LiveHost {
                     .admit_running_request(identity, session, request, fingerprint, envelope)
                     .await;
             }
-            return self.durable_admission(reserved, envelope);
+            return self.durable_admission(reserved, envelope).await;
         }
         match reserved.state {
             DurableRequestState::Reserved => {
@@ -1510,7 +1509,7 @@ impl LiveHost {
                             .await
                             .map_err(|error| map_runtime(&error))?
                             .ok_or(Error::RuntimeUnavailable)?;
-                        self.durable_admission(current, envelope)
+                        self.durable_admission(current, envelope).await
                     }
                     Err(error) => Err(map_runtime(&error)),
                 }
@@ -1521,7 +1520,7 @@ impl LiveHost {
             }
             DurableRequestState::Completed
             | DurableRequestState::Cancelled
-            | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope),
+            | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope).await,
         }
     }
 
@@ -1561,14 +1560,14 @@ impl LiveHost {
             }
         };
         match recovered {
-            Ok(recovered) => self.durable_admission(recovered.status, envelope),
+            Ok(recovered) => self.durable_admission(recovered.status, envelope).await,
             Err(RuntimeError::RequestStateConflict) => {
                 let current = runtime
                     .request_status_for_identity(identity)
                     .await
                     .map_err(|error| map_runtime(&error))?
                     .ok_or(Error::RuntimeUnavailable)?;
-                self.durable_admission(current, envelope)
+                self.durable_admission(current, envelope).await
             }
             Err(error) => Err(map_runtime(&error)),
         }
@@ -1614,7 +1613,7 @@ impl LiveHost {
         }
     }
 
-    fn durable_admission(
+    async fn durable_admission(
         &self,
         status: DurableRequestStatus,
         envelope: &Envelope,
@@ -1622,12 +1621,24 @@ impl LiveHost {
         if !status.state.is_terminal() {
             return Ok(DurableAdmission::Active);
         }
-        let bytes = status
-            .terminal_outcome
+        let response = if let Some(disposition) = self
+            .recovery_disposition(status.identity, status.fingerprint, status.state)
+            .await?
+        {
+            recovery_outcome(
+                envelope.request.ok_or(Error::RuntimeUnavailable)?,
+                status.fingerprint,
+                disposition,
+            )
+            .response
             .ok_or(Error::RuntimeUnavailable)?
-            .into_bytes();
-        let response = Envelope::decode(&bytes, self.limits.protocol)
-            .map_err(|_| Error::RuntimeUnavailable)?;
+        } else {
+            let bytes = status
+                .terminal_outcome
+                .ok_or(Error::RuntimeUnavailable)?
+                .into_bytes();
+            Envelope::decode(&bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?
+        };
         self.validate_retained_response(status.fingerprint, envelope, &response)?;
         let outcome = if matches!(envelope.message, Message::Cancel { .. })
             || matches!(
@@ -1649,6 +1660,53 @@ impl LiveHost {
             outcome,
             response: Some(response),
         })))
+    }
+
+    /// Returns the durable meaning of an orphaned recovery. The wire state is
+    /// deliberately unchanged: only its retained redacted result differs.
+    async fn recovery_disposition(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        state: DurableRequestState,
+    ) -> Result<Option<RecoveryDisposition>> {
+        if state != DurableRequestState::Orphaned {
+            return Ok(None);
+        }
+        self.runtime
+            .as_ref()
+            .ok_or(Error::RuntimeUnavailable)?
+            .request_recovery_disposition(identity, fingerprint)
+            .await
+            .map_err(|error| map_runtime(&error))
+    }
+
+    async fn durable_result_body(
+        &self,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        status: &DurableRequestStatus,
+    ) -> Result<Option<ResultBody>> {
+        let outcome = match self
+            .recovery_disposition(status.identity, fingerprint, status.state)
+            .await?
+        {
+            Some(disposition) => recovery_outcome(request, fingerprint, disposition),
+            None => {
+                return Ok(durable_result_body(
+                    request,
+                    fingerprint,
+                    status,
+                    self.limits.protocol,
+                ));
+            }
+        };
+        Ok(retained_result_body(
+            request,
+            fingerprint,
+            Some(&outcome),
+            self.limits.protocol,
+        ))
     }
 
     fn validate_retained_response(
