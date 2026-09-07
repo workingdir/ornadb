@@ -13,7 +13,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use orna_syntax_v1::{parse_row, Expr, LiteralKind};
+use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, PageType},
     file::reader::{FileReader, SerializedFileReader},
