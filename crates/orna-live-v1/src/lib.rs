@@ -24,9 +24,9 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    RequestIdentity, RequestOwner, RequestState as DurableRequestState,
-    RequestStatus as DurableRequestStatus, RuntimeError, RuntimeState, TerminalOutcome,
-    WriterLease,
+    Component, ConsumerIdentity, RequestIdentity, RequestOwner,
+    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
+    RunObservationRegistration, RuntimeError, RuntimeState, TerminalOutcome, WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -35,6 +35,7 @@ use orna_security_v1::{
 use orna_serving_v1::{
     Credential as ServingCredential, Error as ServingError, Origin as ServingOrigin, Serving,
 };
+use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
 
@@ -906,7 +907,7 @@ impl LiveHost {
         let terminal = self.terminal_outcome(&outcome)?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         match runtime
-            .cancel_request_with_owner(identity, fingerprint, lease, terminal)
+            .cancel_observed_request_with_owner(identity, fingerprint, lease, terminal)
             .await
         {
             Ok(cancelled) if cancelled.state == DurableRequestState::Cancelled => {}
@@ -1468,59 +1469,62 @@ impl LiveHost {
             session_id: session,
             request_id: request,
         };
-        let (reserved, inserted) = self
+        // A matching terminal is an exact replay, not a fresh admission. In
+        // particular, it must not need a new writer lease after a host has
+        // reconstructed around a completed request.
+        if let Some(current) = self
             .runtime
             .as_ref()
             .ok_or(Error::RuntimeUnavailable)?
-            .reserve_request_with_admission(identity, fingerprint)
+            .request_status(identity, fingerprint)
             .await
-            .map_err(|error| map_runtime(&error))?;
-        if !inserted {
-            if reserved.state == DurableRequestState::Reserved {
-                // REQUEST-1 reserves before the first effect. A recovered
-                // reservation has no proof that executing it again is safe,
-                // so an existing row remains active rather than being started.
-                return Ok(DurableAdmission::Active);
-            }
-            if reserved.state == DurableRequestState::Running {
-                return self
-                    .admit_running_request(identity, session, request, fingerprint, envelope)
-                    .await;
-            }
-            return self.durable_admission(reserved, envelope).await;
+            .map_err(|error| map_runtime(&error))?
+            && current.state.is_terminal()
+        {
+            return self.durable_admission(current, envelope).await;
         }
-        match reserved.state {
-            DurableRequestState::Reserved => {
-                let lease = self.writer_lease().await?;
-                match self
-                    .runtime
-                    .as_ref()
-                    .ok_or(Error::RuntimeUnavailable)?
-                    .start_request_with_owner(identity, fingerprint, lease)
+        let lease = self.writer_lease().await?;
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        match runtime
+            .begin_observed_request(
+                live_run_registration(identity, &envelope.message),
+                fingerprint,
+                lease,
+            )
+            .await
+        {
+            Ok(start) if start.admitted => Ok(DurableAdmission::Execute),
+            Ok(start) => self.durable_admission(start.request, envelope).await,
+            Err(RuntimeError::RequestStateConflict) => {
+                let current = runtime
+                    .request_status_for_identity(identity)
                     .await
-                {
-                    Ok(_) => Ok(DurableAdmission::Execute),
-                    Err(RuntimeError::RequestStateConflict) => {
-                        let current = self
-                            .runtime
-                            .as_ref()
-                            .ok_or(Error::RuntimeUnavailable)?
-                            .request_status_for_identity(identity)
-                            .await
-                            .map_err(|error| map_runtime(&error))?
-                            .ok_or(Error::RuntimeUnavailable)?;
+                    .map_err(|error| map_runtime(&error))?
+                    .ok_or(Error::RuntimeUnavailable)?;
+                match current.state {
+                    DurableRequestState::Reserved => {
+                        // A pre-observation reservation is recovery evidence,
+                        // never permission to invoke the application again.
+                        Ok(DurableAdmission::Active)
+                    }
+                    DurableRequestState::Running => {
+                        self.admit_running_request(
+                            identity,
+                            session,
+                            request,
+                            fingerprint,
+                            envelope,
+                        )
+                        .await
+                    }
+                    DurableRequestState::Completed
+                    | DurableRequestState::Cancelled
+                    | DurableRequestState::Orphaned => {
                         self.durable_admission(current, envelope).await
                     }
-                    Err(error) => Err(map_runtime(&error)),
                 }
             }
-            DurableRequestState::Running => {
-                self.admit_running_request(identity, session, request, fingerprint, envelope)
-                    .await
-            }
-            DurableRequestState::Completed
-            | DurableRequestState::Cancelled
-            | DurableRequestState::Orphaned => self.durable_admission(reserved, envelope).await,
+            Err(error) => Err(map_runtime(&error)),
         }
     }
 
@@ -1764,7 +1768,7 @@ impl LiveHost {
             let terminal = self.terminal_outcome(&outcome)?;
             let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             runtime
-                .complete_request_with_owner(
+                .complete_observed_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
@@ -1810,7 +1814,7 @@ impl LiveHost {
             let lease = self.writer_lease().await?;
             let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             runtime
-                .complete_request_with_owner(
+                .fail_observed_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
@@ -1818,6 +1822,10 @@ impl LiveHost {
                     fingerprint,
                     lease,
                     self.terminal_outcome(&failure)?,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
                 )
                 .await
                 .map_err(|error| map_runtime(&error))?;
@@ -1878,7 +1886,7 @@ impl LiveHost {
             let lease = self.writer_lease().await?;
             let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             match runtime
-                .cancel_request_with_owner(
+                .cancel_observed_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
@@ -2092,6 +2100,39 @@ fn durable_result_body(
     let response = Envelope::decode(bytes, limits).ok()?;
     validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
     ResultBody::from_result(&response, limits).ok()
+}
+
+fn live_run_registration(
+    request: RequestIdentity,
+    message: &Message,
+) -> RunObservationRegistration {
+    let operation = match message {
+        Message::Subscribe { .. } => "subscribe",
+        Message::Resync => "resync",
+        Message::Unsubscribe => "unsubscribe",
+        Message::Event { .. } => "event",
+        Message::Eval { .. } => "eval",
+        Message::Watch { .. } => "watch",
+        Message::Cancel { .. } => "cancel",
+        Message::RequestStatus { .. }
+        | Message::Snapshot { .. }
+        | Message::Delta { .. }
+        | Message::Result { .. }
+        | Message::Diagnostic { .. }
+        | Message::RequestStatusResult { .. } => "query",
+    };
+    RunObservationRegistration {
+        request,
+        consumer_identity: ConsumerIdentity {
+            principal: Component::new("orna").expect("constant consumer component"),
+            root: Component::new("live").expect("constant consumer component"),
+            function: Component::new("dispatch").expect("constant consumer component"),
+            binding: Component::new(operation).expect("constant consumer component"),
+        },
+        function: format!("orna.live.{operation}"),
+        source_identity: Some(format!("live/{operation}")),
+        invocation_id: request.request_id,
+    }
 }
 
 fn validate_result_response(
