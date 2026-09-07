@@ -2485,26 +2485,143 @@ fn admitted_transaction_module(
     Ok((functions, key_fields, assertions, module_assertions))
 }
 
-/// Materializes the narrow relation-binding form used by durable transaction
-/// functions: `let row = Table | filter(predicate) | one();`.  Rows come from
-/// the active candidate relation and predicates are evaluated through the
-/// admitted pure-function map; no fixture data is embedded in this seam.
+/// Materializes the narrow relation forms admitted by the durable transaction
+/// seam. `Table | filter(predicate) | one()` becomes a keyed lookup, and the
+/// terminal `Table | count` / `Table | count()` form becomes `Table.count()`.
+/// Both read from the active candidate relation; other relation operators stay
+/// unsupported rather than being materialized by this seam.
 fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
     let mut materialized = functions.clone();
     for function in materialized.values_mut() {
-        let Expr::Block { statements, .. } = &mut function.body else {
-            continue;
-        };
-        for statement in statements {
-            let Statement::Let { value, .. } = statement else {
-                continue;
-            };
-            if let Some(lookup) = relation_lookup(value, table_keys) {
-                *value = lookup;
-            }
-        }
+        lower_relation_expression(&mut function.body, table_keys);
     }
     materialized
+}
+
+fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
+    if let Some(lowered) =
+        relation_lookup(expression, table_keys).or_else(|| relation_count(expression, table_keys))
+    {
+        *expression = lowered;
+        return;
+    }
+    match expression {
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+            lower_relation_expression(rhs, table_keys);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            lower_relation_expression(lhs, table_keys);
+            lower_relation_expression(rhs, table_keys);
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            lower_relation_expression(callee, table_keys);
+            for argument in arguments {
+                lower_relation_expression(&mut argument.value, table_keys);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            lower_relation_expression(base, table_keys);
+            lower_relation_expression(index, table_keys);
+        }
+        Expr::Field { base, .. } => lower_relation_expression(base, table_keys),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                lower_relation_expression(element, table_keys);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                lower_relation_expression(&mut field.value, table_keys);
+            }
+        }
+        Expr::Lambda { body, .. } => lower_relation_expression(body, table_keys),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                lower_relation_statement(statement, table_keys);
+            }
+            if let Some(tail) = tail {
+                lower_relation_expression(tail, table_keys);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            alternate,
+            ..
+        } => {
+            for expression in [condition, body, alternate].into_iter().flatten() {
+                lower_relation_expression(expression, table_keys);
+            }
+        }
+        Expr::Name { .. }
+        | Expr::Literal { .. }
+        | Expr::InterpolatedString { .. }
+        | Expr::ReplBinding { .. } => {}
+    }
+}
+
+fn lower_relation_statement(statement: &mut Statement, table_keys: &TableKeys) {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Assignment { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => lower_relation_expression(value, table_keys),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            if let Some(value) = value {
+                lower_relation_expression(value, table_keys);
+            }
+        }
+        Statement::Continue { .. } => {}
+    }
+}
+
+fn relation_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|" {
+        return None;
+    }
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    if !table_keys.contains_key(table) || !relation_count_target(rhs) {
+        return None;
+    }
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::Name {
+                text: table.clone(),
+                span: table_span.clone(),
+            }),
+            name: "count".into(),
+            span: expression.span(),
+        }),
+        arguments: Vec::new(),
+        span: expression.span(),
+    })
+}
+
+fn relation_count_target(expression: &Expr) -> bool {
+    match expression {
+        Expr::Name { text, .. } => text == "count",
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            arguments.is_empty()
+                && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "count")
+        }
+        _ => false,
+    }
 }
 
 fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
