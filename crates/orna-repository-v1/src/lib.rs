@@ -22,8 +22,8 @@ mod init;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, CompactManifest, CompactManifestEntry, CompactManifestWitness,
-    CompactPublicationError, CompactPublicationPending, CompactPublicationPlan,
-    CompactRuntimeOperation, CompactSegment, CompactSegmentRole,
+    CompactPublicationPending, CompactPublicationPlan, CompactPublicationReconciliation,
+    CompactPublicationRecovery, CompactRuntimeReceipt, CompactSegment, CompactSegmentRole,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
@@ -718,6 +718,12 @@ impl RuntimePaths {
     }
     pub fn locks(&self) -> PathBuf {
         self.root.join("locks")
+    }
+    /// The runtime-initialized Ed25519 public key used only to authenticate
+    /// compact completion receipts. Runtime initialization creates this fixed
+    /// private-state record; repository code never provisions or replaces it.
+    pub fn compact_runtime_receipt_public_key(&self) -> PathBuf {
+        self.root.join("compact-runtime-receipt-public-key-v1")
     }
 
     /// Creates the private local directory, never a tracked `.orna/` path.
@@ -3276,6 +3282,10 @@ pub enum RepositoryError {
     CheckoutDiscardSetMismatch,
     CheckoutExecutionUnsafe,
     RuntimeCompletionRequired,
+    /// A compact candidate is stale at the selected branch head. Its journal
+    /// remains retained and the caller must use the typed compact recovery
+    /// boundary to rebuild or reconcile it.
+    CompactReconciliationRequired,
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
@@ -3329,6 +3339,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
+            }
+            Self::CompactReconciliationRequired => {
+                f.write_str("compact publication requires explicit reconciliation")
             }
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
