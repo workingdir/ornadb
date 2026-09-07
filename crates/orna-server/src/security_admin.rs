@@ -16,6 +16,7 @@
 
 use std::{fmt, io, io::Write};
 
+use orna_core::security::AuthenticatedSession;
 use orna_core::{
     FunctionId, PrincipalId,
     inspect::InspectPrivilege,
@@ -25,8 +26,114 @@ use orna_core::{
     },
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
+use orna_runtime_v1::{
+    CheckpointKey, RuntimeError, RuntimeState, StreamAdministrationOutcome, WriterLease,
+};
 
 use crate::{EmbeddedHostError, inspect_current_embedded_host};
+
+/// A resolved stream-administration request from a trusted authenticated host.
+///
+/// The stream key is intentionally not decoded from an untrusted `sys.StreamRef`
+/// here: the current server has no durable projection that resolves that public
+/// reference. The caller must obtain this key from an authoritative runtime
+/// observation first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthenticatedStreamAdminRequest {
+    /// Stop new delivery admission and pause at the next transaction boundary.
+    Pause {
+        /// The authoritative stream identity selected by the host.
+        stream: CheckpointKey,
+        /// The requested public reason. The runtime cannot yet retain it.
+        reason: Option<String>,
+    },
+    /// Resume an already paused stream.
+    Resume {
+        /// The authoritative stream identity selected by the host.
+        stream: CheckpointKey,
+    },
+}
+
+/// The truthful intermediate result of a durable authenticated stream action.
+///
+/// `PausePending` is not converted to `Bool`: the public pause contract needs
+/// an invocation owner that waits for the active delivery boundary and records
+/// its terminal result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedStreamAdminOutcome {
+    Paused { changed: bool },
+    PausePending { changed: bool },
+    Running { changed: bool },
+}
+
+/// A closed failure before, during, or after a durable stream transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedStreamAdminError {
+    /// The authenticated principal does not own the selected stream.
+    OwnershipDenied,
+    /// The current host has no durable way to retain the requested reason.
+    AuditUnavailable,
+    /// A lease or unresolved delivery state rejects the transition.
+    Busy,
+    /// A retained blocking failure prevents resume.
+    BlockingFailure,
+    /// The runtime store could not apply the writer-fenced transition.
+    Runtime,
+}
+
+/// Applies one authenticated, ownership-checked stream transition through the
+/// durable runtime backend.
+///
+/// This is a host adapter prerequisite, not the complete public `sys.admin`
+/// entry point. It deliberately refuses a non-null pause reason until the
+/// invocation/audit bridge can retain it with the transition.
+pub async fn run_authenticated_stream_admin(
+    state: &RuntimeState,
+    writer: WriterLease,
+    session: &AuthenticatedSession,
+    request: AuthenticatedStreamAdminRequest,
+) -> Result<AuthenticatedStreamAdminOutcome, AuthenticatedStreamAdminError> {
+    let stream = match &request {
+        AuthenticatedStreamAdminRequest::Pause { stream, .. }
+        | AuthenticatedStreamAdminRequest::Resume { stream } => stream,
+    };
+    if stream.consumer.principal.as_str() != session.principal().canonical() {
+        return Err(AuthenticatedStreamAdminError::OwnershipDenied);
+    }
+    let outcome = match request {
+        AuthenticatedStreamAdminRequest::Pause {
+            stream: _,
+            reason: Some(_),
+        } => return Err(AuthenticatedStreamAdminError::AuditUnavailable),
+        AuthenticatedStreamAdminRequest::Pause {
+            stream,
+            reason: None,
+        } => state.pause_stream(writer, stream).await,
+        AuthenticatedStreamAdminRequest::Resume { stream } => {
+            state.resume_stream(writer, stream).await
+        }
+    }
+    .map_err(map_stream_runtime_error)?;
+    match outcome {
+        StreamAdministrationOutcome::Paused { changed } => {
+            Ok(AuthenticatedStreamAdminOutcome::Paused { changed })
+        }
+        StreamAdministrationOutcome::PausePending { changed } => {
+            Ok(AuthenticatedStreamAdminOutcome::PausePending { changed })
+        }
+        StreamAdministrationOutcome::Running { changed } => {
+            Ok(AuthenticatedStreamAdminOutcome::Running { changed })
+        }
+        StreamAdministrationOutcome::Busy => Err(AuthenticatedStreamAdminError::Busy),
+        StreamAdministrationOutcome::BlockingFailure => {
+            Err(AuthenticatedStreamAdminError::BlockingFailure)
+        }
+    }
+}
+
+fn map_stream_runtime_error(_: RuntimeError) -> AuthenticatedStreamAdminError {
+    AuthenticatedStreamAdminError::Runtime
+}
 
 /// A closed failure from the fixed catalogue-health execution-grant command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -626,5 +733,172 @@ pub fn parse_privilege_class(value: &str) -> Option<PrivilegeClass> {
             Some(PrivilegeClass::Inspect(InspectPrivilege::RuntimeInternals))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod stream_admin_tests {
+    use super::*;
+    use std::{
+        path::{Path, PathBuf},
+        process::Command,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use orna_core::{
+        CatalogueRevisionId, PrincipalId, SourceRevisionId,
+        revision::RevisionPair,
+        security::{Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot},
+    };
+    use orna_repository_v1::Repository;
+    use orna_runtime_v1::{Component, ConsumerIdentity, RuntimeIdentity};
+
+    const OWNER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
+    const OTHER: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
+    const REVISION: RevisionPair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0x33; 16]),
+        CatalogueRevisionId::from_bytes([0x34; 16]),
+    );
+
+    fn run_git(path: &Path, arguments: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(path)
+                .status()
+                .expect("git must run")
+                .success()
+        );
+    }
+
+    fn repository() -> (PathBuf, Repository) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "orna-stream-admin-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&path).expect("temporary repository directory");
+        run_git(&path, &["init", "--quiet"]);
+        run_git(&path, &["config", "user.email", "test@example.invalid"]);
+        run_git(&path, &["config", "user.name", "test"]);
+        run_git(&path, &["config", "commit.gpgsign", "false"]);
+        let repository = Repository::discover(&path).expect("repository discovery");
+        (path, repository)
+    }
+
+    fn session(principal: PrincipalId) -> AuthenticatedSession {
+        SecuritySnapshot::new(
+            REVISION,
+            vec![],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("security snapshot")
+        .bind_authenticated_session(principal, vec![])
+        .expect("authenticated session")
+    }
+
+    fn stream(principal: PrincipalId) -> CheckpointKey {
+        CheckpointKey {
+            consumer: ConsumerIdentity {
+                principal: Component::new(principal.canonical()).expect("principal component"),
+                root: Component::new("root").expect("root component"),
+                function: Component::new("callback").expect("function component"),
+                binding: Component::new("binding").expect("binding component"),
+            },
+            source_format: Component::new("test").expect("source format"),
+            source: Component::new("source").expect("source"),
+            partition_format: Component::new("test").expect("partition format"),
+            partition: Component::new("partition").expect("partition"),
+            position_format: Component::new("test").expect("position format"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_owner_reaches_durable_pause_and_resume() {
+        let (path, repository) = repository();
+        let state = RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [0x41; 16],
+                repository_id: [0x42; 16],
+            },
+            [0x43; 32],
+        )
+        .await
+        .expect("runtime state");
+        let writer = state.acquire_lease([0x44; 16]).await.expect("writer lease");
+        let request = AuthenticatedStreamAdminRequest::Pause {
+            stream: stream(OWNER),
+            reason: None,
+        };
+        assert_eq!(
+            run_authenticated_stream_admin(&state, writer, &session(OWNER), request).await,
+            Ok(AuthenticatedStreamAdminOutcome::Paused { changed: true }),
+        );
+        assert_eq!(
+            run_authenticated_stream_admin(
+                &state,
+                writer,
+                &session(OWNER),
+                AuthenticatedStreamAdminRequest::Resume {
+                    stream: stream(OWNER),
+                },
+            )
+            .await,
+            Ok(AuthenticatedStreamAdminOutcome::Running { changed: true }),
+        );
+        drop(state);
+        std::fs::remove_dir_all(path).expect("temporary repository cleanup");
+    }
+
+    #[tokio::test]
+    async fn foreign_stream_and_unretained_reason_fail_before_transition() {
+        let (path, repository) = repository();
+        let state = RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [0x51; 16],
+                repository_id: [0x52; 16],
+            },
+            [0x53; 32],
+        )
+        .await
+        .expect("runtime state");
+        let writer = state.acquire_lease([0x54; 16]).await.expect("writer lease");
+        assert_eq!(
+            run_authenticated_stream_admin(
+                &state,
+                writer,
+                &session(OWNER),
+                AuthenticatedStreamAdminRequest::Pause {
+                    stream: stream(OTHER),
+                    reason: None,
+                },
+            )
+            .await,
+            Err(AuthenticatedStreamAdminError::OwnershipDenied),
+        );
+        assert_eq!(
+            run_authenticated_stream_admin(
+                &state,
+                writer,
+                &session(OWNER),
+                AuthenticatedStreamAdminRequest::Pause {
+                    stream: stream(OWNER),
+                    reason: Some("operator request".into()),
+                },
+            )
+            .await,
+            Err(AuthenticatedStreamAdminError::AuditUnavailable),
+        );
+        drop(state);
+        std::fs::remove_dir_all(path).expect("temporary repository cleanup");
     }
 }
