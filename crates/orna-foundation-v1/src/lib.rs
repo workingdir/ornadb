@@ -102,6 +102,8 @@ pub enum FunctionKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InvocationKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvocationArgumentKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamKind {}
@@ -123,6 +125,9 @@ pub type FunctionRef = TypedRowRef<FunctionKind>;
 /// Typed `sys.RowRef<sys.Invocation>` marker. This is not proof that an
 /// invocation exists or grants observation, cancellation, or await authority.
 pub type InvocationRef = TypedRowRef<InvocationKind>;
+/// Typed `sys.RowRef<sys.InvocationArgument>` marker. This is not proof that
+/// an argument observation exists or permits reading retained argument values.
+pub type InvocationArgumentRef = TypedRowRef<InvocationArgumentKind>;
 /// Typed `sys.RowRef<sys.Run>` alias. The generic wrapper remains a marker;
 /// use `validate_run_reference` when checked relation/context coordinates are
 /// required.
@@ -158,16 +163,65 @@ pub fn validate_reference_context<Kind>(
 }
 
 /// Stable implementation-defined physical identities for the canonical
-/// `sys.Run` and `sys.Stream` relations. The Orna specification names these
-/// relations but does not prescribe their sixteen-byte physical identities.
+/// `sys.Invocation`, `sys.InvocationArgument`, `sys.Run`, and `sys.Stream`
+/// relations. The Orna specification names these relations but does not
+/// prescribe their sixteen-byte physical identities.
 /// These constants are therefore versioned implementation compatibility
 /// values, not per-runtime generated identifiers.
+pub const SYS_INVOCATION_TABLE_ID: [u8; 16] = [
+    0x26, 0x90, 0x51, 0xdc, 0x83, 0x3a, 0x48, 0x61, 0x91, 0x07, 0x65, 0xe8, 0x2b, 0x74, 0x19, 0x03,
+];
+pub const SYS_INVOCATION_ARGUMENT_TABLE_ID: [u8; 16] = [
+    0x4b, 0x17, 0x8d, 0x20, 0x6f, 0x91, 0x44, 0x72, 0xa8, 0x3e, 0x10, 0xc5, 0x59, 0xd2, 0x84, 0x04,
+];
 pub const SYS_RUN_TABLE_ID: [u8; 16] = [
     0x3d, 0x64, 0x87, 0x71, 0x5a, 0x4c, 0x4e, 0x80, 0x9d, 0x2f, 0x11, 0xa4, 0x92, 0x36, 0x70, 0x01,
 ];
 pub const SYS_STREAM_TABLE_ID: [u8; 16] = [
     0x7c, 0x10, 0x5b, 0xa9, 0x63, 0x2e, 0x43, 0x8c, 0x88, 0x19, 0x56, 0xd0, 0x47, 0xaf, 0x20, 0x02,
 ];
+
+/// Checks a candidate `sys.InvocationRef` against a supplied CWD context,
+/// fixed `sys.Invocation` relation identity, and the declared `id` key. This
+/// is reference-coordinate validation only; it does not establish
+/// provenance, row existence, projection ownership, or authority.
+pub fn validate_invocation_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<InvocationRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_INVOCATION_TABLE_ID)?;
+    if !is_opaque_id_key(&reference.key) {
+        return Err(SystemReferenceError::InvalidInvocationKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+/// Checks a candidate `sys.InvocationArgumentRef` against a supplied CWD
+/// context, fixed `sys.InvocationArgument` relation identity, and the
+/// declared natural key (`invocation + position`). The position is a
+/// nonnegative implementation-defined `u64` physical coordinate, rejecting
+/// values that cannot be represented without overflow. This is a validation
+/// primitive only; it does not establish durable observation or authority.
+pub fn validate_invocation_argument_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<InvocationArgumentRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_INVOCATION_ARGUMENT_TABLE_ID)?;
+    let OvbRaw::Array(key) = &reference.key else {
+        return Err(SystemReferenceError::InvalidInvocationArgumentKey);
+    };
+    let [invocation, position] = key.as_slice() else {
+        return Err(SystemReferenceError::InvalidInvocationArgumentKey);
+    };
+    let invocation = row_ref_from_raw(invocation)
+        .map_err(|_| SystemReferenceError::InvalidInvocationArgumentKey)?;
+    validate_invocation_reference(invocation, capture)
+        .map_err(|_| SystemReferenceError::InvalidInvocationArgumentKey)?;
+    if !is_nonnegative_u64_integer(position) {
+        return Err(SystemReferenceError::InvalidInvocationArgumentKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
 
 /// Checks a candidate `sys.RunRef` against a supplied CWD context and the
 /// fixed `sys.Run` relation identity. This is a validation primitive only:
@@ -231,6 +285,8 @@ pub enum SystemReferenceError {
     DatabaseMismatch,
     SnapshotMismatch,
     RelationMismatch,
+    InvalidInvocationKey,
+    InvalidInvocationArgumentKey,
     InvalidRunKey,
     InvalidStreamKey,
 }
@@ -241,6 +297,10 @@ impl fmt::Display for SystemReferenceError {
             Self::SnapshotMismatch => f.write_str("system reference snapshot does not match CWD"),
             Self::RelationMismatch => {
                 f.write_str("system reference relation identity does not match")
+            }
+            Self::InvalidInvocationKey => f.write_str("invalid sys.Invocation natural key"),
+            Self::InvalidInvocationArgumentKey => {
+                f.write_str("invalid sys.InvocationArgument natural key")
             }
             Self::InvalidRunKey => f.write_str("invalid sys.Run natural key"),
             Self::InvalidStreamKey => f.write_str("invalid sys.Stream natural key"),
@@ -953,7 +1013,15 @@ fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, FoundationError> {
 fn is_run_id_key(raw: &OvbRaw) -> bool {
     // The 1.0.0 sys contract uses the canonical UUID representation for
     // `sys.RunId`: OVB tag 37 wrapping exactly sixteen bytes.
+    is_opaque_id_key(raw)
+}
+fn is_opaque_id_key(raw: &OvbRaw) -> bool {
+    // The 1.0.0 sys contract declares InvocationId and RunId as opaque
+    // identifiers; this implementation uses the canonical UUID OVB form.
     matches!(raw, OvbRaw::Tag(37, value) if matches!(value.as_ref(), OvbRaw::Bytes(bytes) if bytes.len() == 16))
+}
+fn is_nonnegative_u64_integer(raw: &OvbRaw) -> bool {
+    matches!(raw, OvbRaw::Int(value) if value.sign() != Sign::Minus && value <= &BigInt::from(u64::MAX))
 }
 fn array(raw: &OvbRaw) -> Result<&Vec<OvbRaw>, FoundationError> {
     if let OvbRaw::Array(values) = raw {
