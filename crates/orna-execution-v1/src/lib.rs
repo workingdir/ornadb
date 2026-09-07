@@ -128,13 +128,39 @@ pub enum RollbackReason {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
-    Committed { receipt: CommitReceipt },
-    RolledBack { reason: RollbackReason },
+    Committed {
+        receipt: CommitReceipt,
+    },
+    RolledBack {
+        reason: RollbackReason,
+    },
+    /// Termination has begun but an unfinished child has not acknowledged its
+    /// cancellation and joined. This is deliberately non-terminal.
+    ChildrenJoining {
+        reason: RollbackReason,
+    },
 }
 
 /// Stable child identity; every spawned child must be joined before prepare.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ChildId(u64);
+
+/// The execution host's cancellation and join boundary for an owned child.
+///
+/// The coordinator calls these methods in child-id order after it has fenced
+/// new admissions. An adapter which cannot interrupt a child must return an
+/// error and retain the owner in [`TransactionPhase::ChildrenJoining`]; it
+/// must not report a terminal owner while that child can still publish.
+pub trait ChildSupervisor {
+    fn request_cancellation(&mut self, child: ChildId) -> Result<(), ChildTerminationError>;
+    fn join(&mut self, child: ChildId) -> Result<(), ChildTerminationError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildTerminationError {
+    Rejected,
+    Incomplete,
+}
 
 /// A fully fenced atomic request. A store must check the supplied owner fence in
 /// the same atomic operation that makes both values visible.
@@ -211,6 +237,7 @@ pub struct ActivationCoordinator {
     next_child: u64,
     owner: Option<OwnerLease>,
     phase: TransactionPhase,
+    ending: bool,
     children: BTreeMap<ChildId, bool>,
 }
 
@@ -221,13 +248,36 @@ impl Default for ActivationCoordinator {
             next_child: 0,
             owner: None,
             phase: TransactionPhase::RolledBack,
+            ending: false,
             children: BTreeMap::new(),
         }
     }
 }
 
 impl ActivationCoordinator {
+    /// Starts an owner only when no earlier owner still requires child cleanup.
+    /// Callers which can handle an admission error should prefer this method.
+    pub fn try_activate(
+        &mut self,
+        activation: ActivationId,
+    ) -> Result<OwnerLease, CoordinationError> {
+        if matches!(
+            self.phase,
+            TransactionPhase::Running
+                | TransactionPhase::ChildrenJoining
+                | TransactionPhase::Prepared
+        ) {
+            return Err(CoordinationError::ChildOutstanding);
+        }
+        Ok(self.activate_unchecked(activation))
+    }
+    /// Compatibility convenience for fresh coordinators. Starting another
+    /// owner while cleanup is pending is rejected before any child is lost.
     pub fn activate(&mut self, activation: ActivationId) -> OwnerLease {
+        self.try_activate(activation)
+            .expect("activation admission must not discard owned children")
+    }
+    fn activate_unchecked(&mut self, activation: ActivationId) -> OwnerLease {
         self.next_epoch += 1;
         let lease = OwnerLease {
             activation,
@@ -236,6 +286,7 @@ impl ActivationCoordinator {
         };
         self.owner = Some(lease);
         self.phase = TransactionPhase::Running;
+        self.ending = false;
         self.children.clear();
         lease
     }
@@ -246,10 +297,14 @@ impl ActivationCoordinator {
         activation: ActivationId,
     ) -> Result<OwnerLease, CoordinationError> {
         self.require_current(stale)?;
-        Ok(self.activate(activation))
+        if self.children.values().any(|joined| !joined) {
+            return Err(CoordinationError::ChildOutstanding);
+        }
+        Ok(self.activate_unchecked(activation))
     }
     pub fn cancel(&mut self, owner: OwnerLease) -> Result<(), CoordinationError> {
         self.require_current(owner)?;
+        self.ending = true;
         let current = self.owner.as_mut().expect("checked");
         current.cancellation_epoch += 1;
         self.phase = if self.children.values().any(|joined| !joined) {
@@ -257,6 +312,19 @@ impl ActivationCoordinator {
         } else {
             TransactionPhase::RolledBack
         };
+        Ok(())
+    }
+    /// Cancel and join all children before making this owner terminal.
+    pub fn cancel_with_children<C: ChildSupervisor>(
+        &mut self,
+        owner: OwnerLease,
+        children: &mut C,
+    ) -> Result<(), CoordinationError> {
+        self.cancel(owner)?;
+        if self.join_unfinished_children(owner, children).is_err() {
+            return Err(CoordinationError::ChildOutstanding);
+        }
+        self.phase = TransactionPhase::RolledBack;
         Ok(())
     }
     pub fn spawn_child(&mut self, owner: OwnerLease) -> Result<ChildId, CoordinationError> {
@@ -310,10 +378,61 @@ impl ActivationCoordinator {
             return self.rollback_for(owner);
         }
         if self.children.values().any(|joined| !joined) {
+            self.ending = true;
             self.phase = TransactionPhase::ChildrenJoining;
-            return Outcome::RolledBack {
+            return Outcome::ChildrenJoining {
                 reason: RollbackReason::ChildOutstanding,
             };
+        }
+        self.execute_after_children(owner, provider, store, checkpoint, faults)
+    }
+
+    /// Execute an owner completion through a supervisor that can cancel and
+    /// join each recorded unfinished child. The coordinator first fences child
+    /// admission, then drains children in deterministic [`ChildId`] order,
+    /// and only then permits its own provider and atomic publication.
+    pub fn execute_with_children<
+        T: WritePayload,
+        P: ProviderExecutor<T>,
+        S: AtomicCommitStore,
+        F: FaultInjector,
+        C: ChildSupervisor,
+    >(
+        &mut self,
+        owner: OwnerLease,
+        provider: &mut P,
+        store: &mut S,
+        checkpoint: CheckpointIntent,
+        faults: &mut F,
+        children: &mut C,
+    ) -> Outcome {
+        if self.require_live(owner).is_err() {
+            return self.rollback_for(owner);
+        }
+        self.ending = true;
+        if self.join_unfinished_children(owner, children).is_err() {
+            return Outcome::ChildrenJoining {
+                reason: RollbackReason::ChildOutstanding,
+            };
+        }
+        self.execute_after_children(owner, provider, store, checkpoint, faults)
+    }
+
+    fn execute_after_children<
+        T: WritePayload,
+        P: ProviderExecutor<T>,
+        S: AtomicCommitStore,
+        F: FaultInjector,
+    >(
+        &mut self,
+        owner: OwnerLease,
+        provider: &mut P,
+        store: &mut S,
+        checkpoint: CheckpointIntent,
+        faults: &mut F,
+    ) -> Outcome {
+        if self.require_committable(owner).is_err() {
+            return self.rollback_for(owner);
         }
         self.phase = TransactionPhase::Prepared;
         if faults.check(FaultPoint::BeforeProvider).is_err() {
@@ -323,14 +442,14 @@ impl ActivationCoordinator {
             Ok(value) => TypedWrite::new(value).into_record(),
             Err(_) => return self.rollback(RollbackReason::ProviderFailed),
         };
-        if self.require_live(owner).is_err() {
+        if self.require_committable(owner).is_err() {
             return self.rollback_for(owner);
         }
         if faults.check(FaultPoint::BeforeAtomicCommit).is_err() {
             return self.rollback(RollbackReason::FaultInjected);
         }
         // This final validation is adjacent to the only publication call.
-        if self.require_live(owner).is_err() {
+        if self.require_committable(owner).is_err() {
             return self.rollback_for(owner);
         }
         match store.commit(CommitRequest {
@@ -344,6 +463,26 @@ impl ActivationCoordinator {
             }
             Err(_) => self.rollback(RollbackReason::StoreRejected),
         }
+    }
+    fn join_unfinished_children<C: ChildSupervisor>(
+        &mut self,
+        owner: OwnerLease,
+        children: &mut C,
+    ) -> Result<(), ChildTerminationError> {
+        self.require_owner_identity(owner)
+            .map_err(|_| ChildTerminationError::Rejected)?;
+        self.phase = TransactionPhase::ChildrenJoining;
+        let pending = self
+            .children
+            .iter()
+            .filter_map(|(child, joined)| (!*joined).then_some(*child))
+            .collect::<Vec<_>>();
+        for child in pending {
+            children.request_cancellation(child)?;
+            children.join(child)?;
+            *self.children.get_mut(&child).expect("recorded child") = true;
+        }
+        Ok(())
     }
     fn require_current(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         if self.owner == Some(owner) {
@@ -362,6 +501,14 @@ impl ActivationCoordinator {
         }
     }
     fn require_live(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
+        self.require_current(owner)?;
+        if owner.cancellation_epoch == 0 && !self.ending {
+            Ok(())
+        } else {
+            Err(CoordinationError::Cancelled)
+        }
+    }
+    fn require_committable(&self, owner: OwnerLease) -> Result<(), CoordinationError> {
         self.require_current(owner)?;
         if owner.cancellation_epoch == 0 {
             Ok(())
@@ -629,15 +776,13 @@ mod tests {
         let mut fault = NoFault;
         assert_eq!(
             c.execute(owner, &mut provider, &mut store, checkpoint(), &mut fault),
-            Outcome::RolledBack {
+            Outcome::ChildrenJoining {
                 reason: RollbackReason::ChildOutstanding
             }
         );
         assert!(store.visible().is_empty());
         c.join_child(owner, child).unwrap();
-        assert!(matches!(
-            c.execute(owner, &mut provider, &mut store, checkpoint(), &mut fault),
-            Outcome::Committed { .. }
-        ));
+        assert_eq!(c.phase(), TransactionPhase::ChildrenJoining);
+        assert!(store.visible().is_empty());
     }
 }
