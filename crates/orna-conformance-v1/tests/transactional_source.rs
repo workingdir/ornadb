@@ -13,6 +13,17 @@ fn source(parent_body: &str) -> SourceUnit {
     }
 }
 
+fn source_with_count_function(count_body: &str, parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-source".into(),
+        source_id: "txn-source.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Note(id: Int) {{ text: Str, }} fn count_notes() = {count_body}; fn parent() {{ {parent_body} }}"
+        ),
+    }
+}
+
 fn source_with_table_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
@@ -54,11 +65,9 @@ fn parsed_nested_insert_commits_when_parent_returns_successfully() {
         runtime.execute_source(&source("")),
         StageOutcome::Passed
     ));
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(7.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
 }
 
 #[test]
@@ -109,11 +118,9 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
             if fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("text".into())
                 && value == &orna_foundation_v1::OvbRaw::Text("updated".into()))
     ));
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
 }
 
 #[test]
@@ -123,6 +130,82 @@ fn parsed_table_count_observes_nested_read_your_writes() {
         runtime.execute_source(&source("assert Note.count() == 1;")),
         StageOutcome::Passed
     ));
+}
+
+#[test]
+fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_count_function(
+        "Note | count",
+        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+}
+
+#[test]
+fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source_with_count_function(
+        "Note | count()",
+        r#"Note.insert({ id: 7, text: "first" }); assert count_notes() == 1;"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+}
+
+#[test]
+fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        r#"Note | count; Note.insert({ id: 8, text: "second" }); assert Note | count == 2;"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
+}
+
+#[test]
+fn parsed_pipeline_count_read_your_writes_succeeds_before_a_distinct_failure_rolls_back() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        r#"Note.insert({ id: 8, text: "second" }); assert Note | count() == 2; assert 1 == 2;"#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
+
+#[test]
+fn parsed_unsupported_relation_pipelines_fail_closed() {
+    for pipeline in [
+        r#"Note | filter(note => note.id == 7) | count"#,
+        r#"Note | map(note => note.text)"#,
+    ] {
+        let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+        let outcome = runtime.execute_source(&source(&format!("{pipeline};")));
+
+        assert!(
+            matches!(outcome, StageOutcome::Failed(_)),
+            "unsupported pipeline must fail closed: {pipeline}: {outcome:?}"
+        );
+        assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    }
 }
 
 #[test]
@@ -143,11 +226,9 @@ fn parsed_rekey_moves_the_row_atomically() {
         StageOutcome::Passed
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
 }
 
 #[test]
@@ -190,16 +271,12 @@ fn table_every_assertion_permits_atomic_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(7.into()))
-            .is_some()
-    );
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
 }
 
 #[test]
@@ -240,16 +317,12 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(7.into()))
-            .is_some()
-    );
-    assert!(
-        runtime
-            .committed_row("Note", &Value::int(8.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
 }
 
 #[test]
@@ -277,14 +350,10 @@ fn module_every_exists_assertion_permits_atomic_cross_table_publication() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed));
-    assert!(
-        runtime
-            .committed_row("Book", &Value::int(7.into()))
-            .is_some()
-    );
-    assert!(
-        runtime
-            .committed_row("Loan", &Value::int(1.into()))
-            .is_some()
-    );
+    assert!(runtime
+        .committed_row("Book", &Value::int(7.into()))
+        .is_some());
+    assert!(runtime
+        .committed_row("Loan", &Value::int(1.into()))
+        .is_some());
 }
