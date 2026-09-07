@@ -19,6 +19,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 mod repl;
+mod system_api;
 
 pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
 
@@ -1381,6 +1382,9 @@ fn collect_header(
         let Some((name, kind, ty)) = declared_symbol(item) else {
             continue;
         };
+        if rejects_portable_sys_shadow(&name, diagnostics) {
+            continue;
+        }
         let public = matches!(item.visibility, Visibility::Public { .. });
         if symbols
             .insert(
@@ -1411,6 +1415,21 @@ fn collect_header(
         implicit: false,
     }
 }
+
+/// `sys` is an implementation-provided portable root, not an ordinary source
+/// symbol. Reject every attempted source admission before it can enter a
+/// header, import scope, or local binding table.
+fn rejects_portable_sys_shadow(name: &str, diagnostics: &mut Vec<Diagnostic>) -> bool {
+    if name != "sys" {
+        return false;
+    }
+    diagnostics.push(diag(
+        DIAG_RESERVED,
+        "`sys` is an implementation-provided namespace and cannot be shadowed",
+    ));
+    true
+}
+
 fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
     match &item.declaration {
         Declaration::Function { signature, body } => {
@@ -1765,6 +1784,9 @@ fn resolve_imports(
                 }
             }
             UseTail::Alias { name, .. } => {
+                if rejects_portable_sys_shadow(name, diagnostics) {
+                    continue;
+                }
                 scope
                     .modules
                     .entry(name.clone())
@@ -1808,6 +1830,9 @@ fn resolve_imports(
         scope.names.entry(name).or_insert(symbol);
     }
     for (name, candidates) in glob {
+        if rejects_portable_sys_shadow(&name, diagnostics) {
+            continue;
+        }
         if scope.names.contains_key(&name) {
             continue;
         }
@@ -1826,6 +1851,9 @@ fn insert_explicit(
     symbol: Symbol,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if rejects_portable_sys_shadow(&name, diagnostics) {
+        return;
+    }
     if map.insert(name, symbol).is_some() {
         diagnostics.push(diag(DIAG_AMBIGUOUS, "conflicting explicit imports"));
     }
@@ -2158,16 +2186,7 @@ fn bind_pattern(
 ) {
     match pattern {
         Pattern::Name(name, _) => {
-            into.insert(
-                name.clone(),
-                Symbol {
-                    table_schema: None,
-                    kind: SymbolKind::Let,
-                    ty,
-                    public: false,
-                    effects: EffectSummary::default(),
-                },
-            );
+            insert_local_binding(name, ty, into, diagnostics);
         }
         Pattern::Wildcard(_) => {}
         _ => diagnostics.push(diag(
@@ -2175,6 +2194,27 @@ fn bind_pattern(
             "destructuring pattern inference is not supported in this slice",
         )),
     }
+}
+
+fn insert_local_binding(
+    name: &str,
+    ty: Type,
+    into: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if rejects_portable_sys_shadow(name, diagnostics) {
+        return;
+    }
+    into.insert(
+        name.to_owned(),
+        Symbol {
+            table_schema: None,
+            kind: SymbolKind::Let,
+            ty,
+            public: false,
+            effects: EffectSummary::default(),
+        },
+    );
 }
 #[derive(Clone)]
 struct Inferred {
@@ -2431,7 +2471,7 @@ fn infer(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
-                && let Some(inferred) = infer_system_path(&path)
+                && let Some(inferred) = infer_system_path(&path, diagnostics)
             {
                 return inferred;
             }
@@ -2475,16 +2515,28 @@ fn infer(
                     effects: base.effects,
                 };
             }
-            if let Some(ty) = infer_text_member(&base.ty, name) {
-                return Inferred {
-                    ty,
-                    effects: base.effects,
-                };
-            }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
                 diagnostics.push(diag(DIAG_TYPE, message));
                 return Inferred {
                     ty: Type::Error,
+                    effects: base.effects,
+                };
+            }
+            if let Type::Named(system_type) = &base.ty
+                && system_api::embedded_system_api().describes_type(system_type)
+            {
+                diagnostics.push(diag(
+                    DIAG_UNSUPPORTED,
+                    "portable system member is described but not implemented by this semantic slice",
+                ));
+                return Inferred {
+                    ty: Type::Error,
+                    effects: base.effects,
+                };
+            }
+            if let Some(ty) = infer_text_member(&base.ty, name) {
+                return Inferred {
+                    ty,
                     effects: base.effects,
                 };
             }
@@ -2670,6 +2722,13 @@ fn infer(
                     ty: Type::Error,
                     effects: EffectSummary::default(),
                 };
+            }
+            if let Some(path) = qualified_path(callee)
+                && path.first() == Some(&"sys")
+                && let Some(inferred) =
+                    infer_descriptor_system_call(&path, arguments, scope, local, diagnostics)
+            {
+                return inferred;
             }
             if let Some(currency) = money_constructor_currency(callee)
                 && arguments.len() == 1
@@ -3813,8 +3872,10 @@ fn bind_enum_case_pattern(
             continue;
         }
         match &field.pattern {
-            None => insert_case_binding(&field.name, ty.clone(), local),
-            Some(Pattern::Name(name, _)) => insert_case_binding(name, ty.clone(), local),
+            None => insert_case_binding(&field.name, ty.clone(), local, diagnostics),
+            Some(Pattern::Name(name, _)) => {
+                insert_case_binding(name, ty.clone(), local, diagnostics)
+            }
             Some(Pattern::Wildcard(_)) => {}
             Some(_) => {
                 diagnostics.push(diag(
@@ -3856,7 +3917,9 @@ fn bind_optional_case_pattern(
                 return None;
             };
             match binding {
-                Pattern::Name(name, _) => insert_case_binding(name, inner.clone(), local),
+                Pattern::Name(name, _) => {
+                    insert_case_binding(name, inner.clone(), local, diagnostics)
+                }
                 Pattern::Wildcard(_) => {}
                 _ => {
                     diagnostics.push(diag(
@@ -3882,17 +3945,13 @@ fn bind_optional_case_pattern(
     }
 }
 
-fn insert_case_binding(name: &str, ty: Type, local: &mut BTreeMap<String, Symbol>) {
-    local.insert(
-        name.to_owned(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty,
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    );
+fn insert_case_binding(
+    name: &str,
+    ty: Type,
+    local: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    insert_local_binding(name, ty, local, diagnostics);
 }
 
 fn infer_case_arm_body(
@@ -4499,16 +4558,7 @@ fn infer_recovery_pipeline(
         };
     };
     let mut callback_locals = local.clone();
-    callback_locals.insert(
-        name.clone(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: Type::Error,
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    );
+    insert_local_binding(name, Type::Error, &mut callback_locals, diagnostics);
     let recovered = infer(body, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
     effects.join(&recovered.effects);
@@ -4566,16 +4616,7 @@ fn infer_lambda_pipeline_stage(
         .unwrap_or_else(|| input.ty.clone());
     require_same(&parameter_type, &input.ty, diagnostics);
     let mut lambda_locals = local.clone();
-    lambda_locals.insert(
-        name.clone(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: parameter_type,
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    );
+    insert_local_binding(name, parameter_type, &mut lambda_locals, diagnostics);
     let body = infer(body, scope, &lambda_locals, diagnostics);
     let mut effects = input.effects;
     effects.join(&body.effects);
@@ -4752,16 +4793,7 @@ fn infer_callback(
         };
     };
     let mut callback_locals = local.clone();
-    callback_locals.insert(
-        name.clone(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: parameter,
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    );
+    insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
     let inferred = infer(body, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
@@ -5234,321 +5266,342 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
     }
 }
 
-fn infer_system_path(path: &[&str]) -> Option<Inferred> {
-    let inferred = match path {
-        ["sys", "database"] => Inferred {
-            ty: Type::Named("sys.DatabaseView".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "database", "as_of"] => Inferred {
+enum DescriptorPathInference {
+    Resolved(Inferred),
+    Rejected,
+}
+
+/// Resolves only the JSON-described, read-only descriptor surface. The
+/// descriptor is metadata, not a runtime-value factory: a schema-known member
+/// that has no implementation route fails explicitly instead of acquiring a
+/// guessed type or effect.
+fn infer_descriptor_system_path(
+    path: &[&str],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> DescriptorPathInference {
+    use system_api::PathResolution;
+
+    let api = system_api::embedded_system_api();
+    let name = path.join(".");
+    if let Some(relation) = api.historical_relation(path) {
+        return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
-                Type::Named("sys.DatabaseView".into()),
+                Type::Relation(Box::new(Type::Named(relation.name.clone()))),
             ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "Checkpoint"] => Inferred {
-            ty: Type::Named("sys.Checkpoint".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "Run"] => Inferred {
-            ty: Type::Named("sys.Run".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "Storage"] => Inferred {
-            ty: Type::Relation(Box::new(Type::Named("sys.Storage".into()))),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "File"] => Inferred {
-            ty: Type::Named("sys.File".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "Object"] => Inferred {
-            ty: Type::Named("sys.Object".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "Failure"] => Inferred {
-            ty: Type::Relation(Box::new(Type::Named("sys.Failure".into()))),
-            effects: Inferred {
-                ty: Type::Named("sys.Failure".into()),
-                effects: EffectSummary::default(),
-            }
-            .effects,
-        },
-        ["sys", "FailureStatus", "open" | "skipped"] => Inferred {
-            ty: Type::Named("sys.FailureStatus".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "rt", "streams"] => Inferred {
-            ty: Type::Relation(Box::new(Type::Named("sys.Stream".into()))),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "history"] => Inferred {
-            ty: function(
-                vec![Type::Named("sys.FileRef".into())],
-                Type::Relation(Box::new(Type::Named("sys.FileVersion".into()))),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "dependents"] => Inferred {
-            ty: function(
-                vec![Type::Named("sys.ObjectRef".into())],
-                Type::Relation(Box::new(Type::Named("sys.Dependency".into()))),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "snapshot"] => Inferred {
-            ty: function(vec![Type::Text], Type::Named("sys.SnapshotRef".into())),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "catalog", "definitions"] => Inferred {
-            ty: Type::Relation(Box::new(Type::Named("sys.Definition".into()))),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "catalog", "objects"] => Inferred {
-            ty: Type::Relation(Box::new(Type::Named("sys.Object".into()))),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "ObjectKind"] => Inferred {
-            ty: Type::Named("sys.ObjectKind".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "ObjectKind", _] => Inferred {
-            ty: Type::Named("sys.ObjectKind".into()),
-            effects: EffectSummary::default(),
-        },
-        ["sys", "Checkpoint", "as_of"] => Inferred {
+            effects: descriptor_effects(system_api::SystemEffect::Read),
+        });
+    }
+    if let Some(singleton) = api.historical_singleton(path) {
+        return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
-                Type::Relation(Box::new(Type::Named("sys.Checkpoint".into()))),
+                descriptor_type(&singleton.ty),
             ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "Run", "as_of"] => Inferred {
-            ty: function(
-                vec![Type::Named("sys.SnapshotRef".into())],
-                Type::Relation(Box::new(Type::Named("sys.Run".into()))),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "admin", "reset_checkpoint"] => Inferred {
-            ty: named_function(
-                vec![
-                    ("checkpoint", Type::Named("sys.CheckpointRef".into())),
-                    (
-                        "expected_version",
-                        Type::Named("sys.CheckpointVersion".into()),
-                    ),
-                    (
-                        "expected_position",
-                        Type::Named("sys.CheckpointPosition".into()),
-                    ),
-                    ("to", Type::Named("sys.CheckpointPosition".into())),
-                    ("reason", Type::Text),
-                ],
-                Type::Named("sys.Checkpoint".into()),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["admin".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "admin", "retry_failure"] => Inferred {
-            ty: {
-                let mut callable = named_function(
-                    vec![
-                        ("failure", Type::Named("sys.FailureRef".into())),
-                        ("expected_version", Type::Named("sys.FailureVersion".into())),
-                        ("expected_status", Type::Named("sys.FailureStatus".into())),
-                    ],
-                    Type::Applied {
-                        base: "sys.InvocationHandle".into(),
-                        arguments: vec![Type::Named("sys.Value".into())],
-                    },
-                );
-                if let Type::Function {
-                    default_parameters, ..
-                } = &mut callable
-                {
-                    default_parameters.insert(2);
-                }
-                callable
-            },
-            effects: EffectSummary {
-                effects: BTreeSet::from(["admin".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "rt"] => Inferred {
-            ty: Type::Named("sys.RuntimeView".into()),
+            effects: descriptor_effects(system_api::SystemEffect::Read),
+        });
+    }
+    if let Some(function) = api.function(&name).and_then(|functions| {
+        functions
+            .iter()
+            .find(|function| descriptor_function_is_staticly_supported(function))
+    }) && let Some(ty) = descriptor_function_type(function)
+    {
+        return DescriptorPathInference::Resolved(Inferred {
+            ty,
+            effects: descriptor_effects(function.effect),
+        });
+    }
+    if let Some(relation) = api.relation(&name) {
+        return DescriptorPathInference::Resolved(Inferred {
+            ty: Type::Relation(Box::new(Type::Named(relation.name.clone()))),
+            effects: descriptor_effects(system_api::SystemEffect::Read),
+        });
+    }
+    if let Some(enum_name) = api.enum_value(path) {
+        return DescriptorPathInference::Resolved(Inferred {
+            ty: Type::Named(enum_name),
             effects: EffectSummary::default(),
-        },
-        ["sys", "rt", "info"] => Inferred {
-            ty: function(Vec::new(), Type::Named("sys.RuntimeInfo".into())),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
+        });
+    }
+    match api.resolve(path) {
+        PathResolution::ReadOnly(ty) => DescriptorPathInference::Resolved(Inferred {
+            ty: descriptor_type(ty),
+            effects: EffectSummary::default(),
+        }),
+        PathResolution::Removed(removed) => {
+            diagnostics.push(diag(
+                if removed.diagnostic == DIAG_LEGACY_SYS_RUNTIME {
+                    DIAG_LEGACY_SYS_RUNTIME
+                } else {
+                    DIAG_UNSUPPORTED
+                },
+                if removed.diagnostic == DIAG_LEGACY_SYS_RUNTIME {
+                    "`sys.runtime` was renamed to `sys.rt`"
+                } else {
+                    "removed portable system name; use the documented replacement"
+                },
+            ));
+            DescriptorPathInference::Rejected
+        }
+        PathResolution::KnownUnsupported | PathResolution::Unknown => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "portable system member is described but not implemented by this semantic slice",
+            ));
+            DescriptorPathInference::Rejected
+        }
+    }
+}
+
+fn descriptor_function_is_staticly_supported(function: &system_api::FunctionDescriptor) -> bool {
+    // Semantic admission can model every concrete portable signature and its
+    // declared effect. Generic functions remain explicitly unsupported until
+    // this layer has descriptor-driven type-argument inference.
+    function.type_parameters.is_empty()
+}
+
+fn descriptor_function_type(function: &system_api::FunctionDescriptor) -> Option<Type> {
+    let parameters = function
+        .parameters
+        .iter()
+        .map(|parameter| descriptor_call_type(&parameter.ty, &function.type_parameters))
+        .collect::<Option<Vec<_>>>()?;
+    let names = function
+        .parameters
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .collect();
+    let default_parameters = function
+        .parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| parameter.has_default.then_some(index))
+        .collect();
+    Some(Type::Function {
+        parameters,
+        parameter_names: Some(names),
+        default_parameters,
+        result: Box::new(descriptor_call_type(
+            &function.result,
+            &function.type_parameters,
+        )?),
+    })
+}
+
+/// Calls to the portable surface select one JSON descriptor overload before
+/// argument validation. This prevents a broad handwritten callable from
+/// accepting a mixture of arguments that no portable overload permits.
+fn infer_descriptor_system_call(
+    path: &[&str],
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    let supported = functions
+        .iter()
+        .filter(|function| descriptor_function_is_staticly_supported(function))
+        .collect::<Vec<_>>();
+    if supported.is_empty() {
+        diagnostics.push(diag(
+            DIAG_UNSUPPORTED,
+            "portable system function is described but not implemented by this semantic slice",
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    }
+    let mut effects = EffectSummary::default();
+    let values = arguments
+        .iter()
+        .map(|argument| {
+            let value = if argument.name.as_deref() == Some("as") {
+                infer_type_argument(&argument.value)
+                    .unwrap_or_else(|| infer(&argument.value, scope, local, diagnostics))
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            };
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let Some(function) = supported
+        .iter()
+        .copied()
+        .find(|function| descriptor_arguments_match(function, arguments, &values))
+    else {
+        let code = if functions
+            .iter()
+            .any(|function| !function.type_parameters.is_empty())
+        {
+            DIAG_UNSUPPORTED
+        } else {
+            DIAG_TYPE
+        };
+        diagnostics.push(diag(
+            code,
+            if code == DIAG_UNSUPPORTED {
+                "portable generic system function is described but not implemented by this semantic slice"
+            } else {
+                "arguments do not match a portable system function overload"
             },
-        },
-        ["sys", "admin", "replay_failure"] => Inferred {
-            ty: {
-                let mut callable = named_function(
-                    vec![
-                        ("failure", Type::Named("sys.FailureRef".into())),
-                        ("expected_version", Type::Named("sys.FailureVersion".into())),
-                        ("expected_status", Type::Named("sys.FailureStatus".into())),
-                    ],
-                    Type::Applied {
-                        base: "sys.InvocationHandle".into(),
-                        arguments: vec![Type::Named("sys.Value".into())],
-                    },
-                );
-                if let Type::Function {
-                    default_parameters, ..
-                } = &mut callable
-                {
-                    default_parameters.insert(2);
-                }
-                callable
-            },
-            effects: EffectSummary {
-                effects: BTreeSet::from(["admin".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "admin", "resolve_failure"] => Inferred {
-            ty: named_function(
-                vec![
-                    ("failure", Type::Named("sys.FailureRef".into())),
-                    ("expected_version", Type::Named("sys.FailureVersion".into())),
-                    ("expected_status", Type::Named("sys.FailureStatus".into())),
-                    ("reason", Type::Text),
-                ],
-                Type::Named("sys.Failure".into()),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["admin".into()]),
-                may_fail: true,
-            },
-        },
-        ["sys", "admin", "skip_failure"] => Inferred {
-            ty: named_function(
-                vec![
-                    ("failure", Type::Named("sys.FailureRef".into())),
-                    ("expected_version", Type::Named("sys.FailureVersion".into())),
-                    ("expected_status", Type::Named("sys.FailureStatus".into())),
-                    ("reason", Type::Text),
-                ],
-                Type::Named("sys.Checkpoint".into()),
-            ),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["admin".into()]),
-                may_fail: true,
-            },
-        },
-        _ => return None,
+        ));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
     };
-    Some(inferred)
+    effects.join(&descriptor_effects(function.effect));
+    Some(Inferred {
+        ty: descriptor_call_type(&function.result, &function.type_parameters)
+            .expect("supported descriptor functions have concrete types"),
+        effects,
+    })
+}
+
+fn descriptor_arguments_match(
+    function: &system_api::FunctionDescriptor,
+    arguments: &[orna_syntax_v1::Argument],
+    values: &[Type],
+) -> bool {
+    let mut used = vec![false; function.parameters.len()];
+    let mut next_positional = 0usize;
+    for (argument, value) in arguments.iter().zip(values) {
+        let index = if let Some(name) = &argument.name {
+            function
+                .parameters
+                .iter()
+                .position(|parameter| parameter.name == *name)
+        } else {
+            while used.get(next_positional) == Some(&true) {
+                next_positional += 1;
+            }
+            let index = (next_positional < function.parameters.len()).then_some(next_positional);
+            next_positional += 1;
+            index
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        if used[index]
+            || !descriptor_call_type(&function.parameters[index].ty, &function.type_parameters)
+                .is_some_and(|expected| types_match(&expected, value))
+        {
+            return false;
+        }
+        used[index] = true;
+    }
+    function
+        .parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parameter)| used[index] || parameter.has_default)
+}
+
+fn descriptor_call_type(
+    ty: &system_api::SystemType,
+    type_parameters: &BTreeSet<String>,
+) -> Option<Type> {
+    match ty {
+        system_api::SystemType::Named(name) if type_parameters.contains(name) => None,
+        system_api::SystemType::Named(_) => Some(descriptor_type(ty)),
+        system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| descriptor_call_type(argument, type_parameters))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        system_api::SystemType::List(element) => Some(Type::List(Box::new(descriptor_call_type(
+            element,
+            type_parameters,
+        )?))),
+        system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
+            descriptor_call_type(element, type_parameters)?,
+        ))),
+    }
+}
+
+fn descriptor_effects(effect: system_api::SystemEffect) -> EffectSummary {
+    match effect {
+        system_api::SystemEffect::Read => EffectSummary {
+            effects: BTreeSet::from(["database read".into()]),
+            may_fail: true,
+        },
+        system_api::SystemEffect::Invoke => EffectSummary {
+            effects: BTreeSet::from(["invoke".into()]),
+            may_fail: true,
+        },
+        system_api::SystemEffect::Admin => EffectSummary {
+            effects: BTreeSet::from(["admin".into()]),
+            may_fail: true,
+        },
+    }
+}
+
+fn descriptor_type(ty: &system_api::SystemType) -> Type {
+    match ty {
+        system_api::SystemType::Named(name) => match name.as_str() {
+            "Int" => Type::Int,
+            "Decimal" => Type::Decimal,
+            "Float" => Type::Float,
+            "Date" => Type::Date,
+            "Instant" => Type::Instant,
+            "Str" => Type::Text,
+            "Bool" => Type::Bool,
+            "Null" => Type::Null,
+            other => Type::Named(other.into()),
+        },
+        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+            Type::Relation(Box::new(
+                arguments
+                    .first()
+                    .map(descriptor_type)
+                    .unwrap_or(Type::Error),
+            ))
+        }
+        system_api::SystemType::Applied { base, arguments } if base == "Stream" => {
+            Type::Stream(Box::new(
+                arguments
+                    .first()
+                    .map(descriptor_type)
+                    .unwrap_or(Type::Error),
+            ))
+        }
+        system_api::SystemType::Applied { base, arguments } => Type::Applied {
+            base: base.clone(),
+            arguments: arguments.iter().map(descriptor_type).collect(),
+        },
+        system_api::SystemType::List(element) => Type::List(Box::new(descriptor_type(element))),
+        system_api::SystemType::Optional(element) => {
+            Type::Optional(Box::new(descriptor_type(element)))
+        }
+    }
+}
+
+fn infer_system_path(path: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Option<Inferred> {
+    if path.first() != Some(&"sys") {
+        return None;
+    }
+    match infer_descriptor_system_path(path, diagnostics) {
+        DescriptorPathInference::Resolved(inferred) => Some(inferred),
+        DescriptorPathInference::Rejected => Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        }),
+    }
 }
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
-    match (base, name) {
-        (Type::Named(system_type), "energy") if system_type == "sys.DatabaseView" => {
-            Some(Type::Named("sys.EnergyView".into()))
-        }
-        (Type::Named(system_type), "daily") if system_type == "sys.EnergyView" => {
-            Some(function(Vec::new(), Type::Error))
-        }
-        (Type::Named(system_type), "consumer") if system_type == "sys.Stream" => Some(Type::Error),
-        (Type::Named(system_type), "last_failure") if system_type == "sys.Stream" => Some(
-            Type::Optional(Box::new(Type::Named("sys.FailureRef".into()))),
-        ),
-        (Type::Named(system_type), "reference") if system_type == "sys.Failure" => {
-            Some(Type::Named("sys.FailureRef".into()))
-        }
-        (Type::Named(system_type), "consumer") if system_type == "sys.Failure" => Some(Type::Error),
-        (Type::Named(system_type), "status") if system_type == "sys.Failure" => {
-            Some(Type::Named("sys.FailureStatus".into()))
-        }
-        (Type::Named(system_type), "source_identity") if system_type == "sys.Failure" => {
-            Some(Type::Text)
-        }
-        (Type::Named(system_type), "partition") if system_type == "sys.Failure" => {
-            Some(Type::Optional(Box::new(Type::Text)))
-        }
-        (Type::Named(system_type), "position_format") if system_type == "sys.Failure" => {
-            Some(Type::Text)
-        }
-        (Type::Named(system_type), "position") if system_type == "sys.Failure" => Some(Type::Error),
-        (Type::Named(system_type), "version") if system_type == "sys.Failure" => {
-            Some(Type::Named("sys.FailureVersion".into()))
-        }
-        (Type::Named(system_type), "reference") if system_type == "sys.Checkpoint" => {
-            Some(Type::Named("sys.CheckpointRef".into()))
-        }
-        (Type::Named(system_type), "position") if system_type == "sys.Checkpoint" => {
-            Some(Type::Named("sys.CheckpointPosition".into()))
-        }
-        (Type::Named(system_type), "version") if system_type == "sys.Checkpoint" => {
-            Some(Type::Named("sys.CheckpointVersion".into()))
-        }
-        (Type::Named(system_type), "started") if system_type == "sys.Run" => Some(Type::Instant),
-        (Type::Named(system_type), "pending_rows") if system_type == "sys.Storage" => {
-            Some(Type::Int)
-        }
-        (Type::Named(system_type), "reference") if system_type == "sys.File" => {
-            Some(Type::Named("sys.FileRef".into()))
-        }
-        (Type::Named(system_type), "definition") if system_type == "sys.Function" => {
-            Some(Type::Named("sys.DefinitionRef".into()))
-        }
-        (Type::Named(system_type), "reference") if system_type == "sys.Definition" => {
-            Some(Type::Named("sys.DefinitionRef".into()))
-        }
-        (Type::Named(system_type), "file") if system_type == "sys.Definition" => {
-            Some(Type::Named("sys.FileRef".into()))
-        }
-        (Type::Named(system_type), "kind") if system_type == "sys.Object" => {
-            Some(Type::Named("sys.ObjectKind".into()))
-        }
-        (Type::Named(system_type), "reference") if system_type == "sys.Object" => {
-            Some(Type::Named("sys.ObjectRef".into()))
-        }
-        (Type::Named(system_type), "qualified_name") if system_type == "sys.Object" => {
-            Some(Type::Text)
-        }
-        _ => None,
+    if let Type::Named(system_type) = base
+        && let Some(ty) = system_api::embedded_system_api().field(system_type, name)
+    {
+        return Some(descriptor_type(ty));
     }
+    None
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
@@ -5565,23 +5618,33 @@ fn infer_refined_member(base: &Type, name: &str, scope: &Scope) -> Option<Type> 
 }
 
 fn legacy_sys_admin_message(base: &Type, member: &str) -> Option<&'static str> {
-    match (base, member) {
-        (Type::Named(name), "reset") if name == "sys.Checkpoint" => Some(
+    let Type::Named(name) = relation_element_type(base) else {
+        return None;
+    };
+    match (name.as_str(), member) {
+        ("sys.Checkpoint", "reset") => Some(
             "system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments",
         ),
-        (Type::Named(name), "replay") if name == "sys.Failure" => Some(
+        ("sys.Failure", "replay") => Some(
             "system rows are read-only; use `sys.admin.replay_failure(failure.reference, ...)`",
         ),
-        (Type::Named(name), "resolve") if name == "sys.Failure" => Some(
+        ("sys.Failure", "resolve") => Some(
             "system rows are read-only; use `sys.admin.resolve_failure(failure.reference, ...)`",
         ),
-        (Type::Named(name), "retry") if name == "sys.Stream" => {
+        ("sys.Stream", "retry") => {
             Some("system rows are read-only; use `sys.admin.retry_failure` on a `sys.FailureRef`")
         }
-        (Type::Named(name), "skip") if name == "sys.Stream" => {
+        ("sys.Stream", "skip") => {
             Some("system rows are read-only; use `sys.admin.skip_failure` on a `sys.FailureRef`")
         }
         _ => None,
+    }
+}
+
+fn relation_element_type(ty: &Type) -> &Type {
+    match ty {
+        Type::Relation(element) => element,
+        _ => ty,
     }
 }
 
@@ -5909,16 +5972,8 @@ fn infer_table_assertion(
             effects: EffectSummary::default(),
         };
     };
-    let local = BTreeMap::from([(
-        name.clone(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: row.clone(),
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    )]);
+    let mut local = BTreeMap::new();
+    insert_local_binding(name, row.clone(), &mut local, diagnostics);
     let inferred = infer(body, scope, &local, diagnostics);
     let valid = text == "all_unique" || inferred.ty == Type::Bool;
     Inferred {
@@ -5992,16 +6047,7 @@ fn infer_module_relation(
         };
     };
     let mut locals = local.clone();
-    locals.insert(
-        name.clone(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: row.clone(),
-            public: false,
-            effects: EffectSummary::default(),
-        },
-    );
+    insert_local_binding(name, row.clone(), &mut locals, diagnostics);
     let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
     Inferred {
         ty: if inferred.ty == Type::Bool {
@@ -6452,7 +6498,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_failure_cas_default_statuses_keep_version_required() {
+    fn descriptor_admin_defaults_keep_version_required() {
         for (operation, status) in [("retry_failure", "open"), ("replay_failure", "skipped")] {
             let valid = checked(&[ModuleInput::new(
                 "failure-cas.orna",
