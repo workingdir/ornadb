@@ -732,9 +732,8 @@ impl SealedInvocationContinuation {
 
 impl SealedInvocationOperation {
     /// Persists the private lifecycle admission in the same transaction as
-    /// the protected prepared-audit evidence.  Only prepared outcomes with a
-    /// resolved authority can enter this relation: its target foreign key is
-    /// deliberately non-null.
+    /// the protected prepared-audit evidence. An unresolved denial retains no
+    /// invented target identity and is terminally failed in that transaction.
     async fn append_prepared_audit_lifecycle(
         &self,
         transaction: &Transaction<'_>,
@@ -742,23 +741,30 @@ impl SealedInvocationOperation {
         let (target, failure) = match &self.outcome {
             SealedInvocationPreparedOutcome::Allowed {
                 security_target, ..
-            } => (*security_target, None),
+            } => (Some(*security_target), None),
             SealedInvocationPreparedOutcome::BindFailure {
                 security_target, ..
-            } => (*security_target, Some(SealedInvocationFailureClass::Bind)),
+            } => (
+                Some(*security_target),
+                Some(SealedInvocationFailureClass::Bind),
+            ),
             SealedInvocationPreparedOutcome::TargetDenied {
                 security_target: Some(target),
                 ..
-            } => (*target, Some(SealedInvocationFailureClass::Target)),
+            } => (Some(*target), Some(SealedInvocationFailureClass::Target)),
             SealedInvocationPreparedOutcome::TargetDenied {
                 security_target: None,
                 ..
-            } => return Ok(()),
+            } => (None, Some(SealedInvocationFailureClass::Target)),
         };
         let invocation = self.invocation.to_bytes().to_vec();
-        let source = target.revision().source().to_bytes().to_vec();
-        let catalogue = target.revision().catalogue().to_bytes().to_vec();
-        let function = target.function().to_bytes().to_vec();
+        let (source, catalogue, function) = target.map_or((None, None, None), |target| {
+            (
+                Some(target.revision().source().to_bytes().to_vec()),
+                Some(target.revision().catalogue().to_bytes().to_vec()),
+                Some(target.function().to_bytes().to_vec()),
+            )
+        });
         let owner = self.authenticated_session.principal().to_bytes().to_vec();
         transaction
             .execute(
