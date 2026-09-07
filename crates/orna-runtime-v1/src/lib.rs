@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS request_ledger (
     effect_evidence INTEGER NOT NULL DEFAULT 0 CHECK (effect_evidence IN (0, 1, 2)),
     recovery_disposition INTEGER NOT NULL DEFAULT 0 CHECK (recovery_disposition IN (0, 1, 2)),
     controlled_transaction_proof BLOB,
+    controlled_rollback_proof BLOB,
     PRIMARY KEY (session_id, request_id),
     CHECK (
         (state IN (1, 2) AND terminal_outcome IS NULL)
@@ -1777,8 +1778,52 @@ impl RuntimeState {
     /// The request must already be `Running` under `lease`; admission and
     /// owner assignment remain separate durable steps. On a successful first
     /// call, typed table rows, the mutation/checkpoint capture, and the
-    /// validated bounded terminal outcome commit in one writer-fenced
-    /// transaction. Any validation, cancellation, fault, or owner-loss error
+    /// validated terminal outcome commit together. If the controlled table
+    /// transaction faults before commit, this method records a runtime-owned
+    /// rollback receipt. That proof is deliberately narrower than an entry
+    /// marker: only this method observes the transaction unwind after the
+    /// controlled table boundary. An externally marked activation remains
+    /// conservatively uncertain.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_table_request_activation(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        context: &RuntimeActivationContext,
+        mutations: &[TableMutation],
+        next_digest: [u8; 32],
+        outcome: TerminalOutcome,
+        faults: &dyn FaultInjector,
+    ) -> Result<RequestActivationCommit, RuntimeError> {
+        match self
+            .commit_table_request_activation_tx(
+                lease,
+                identity,
+                fingerprint,
+                context,
+                mutations,
+                next_digest,
+                outcome,
+                faults,
+            )
+            .await
+        {
+            Err(RuntimeError::FaultInjected(point)) => {
+                // The inner transaction is out of scope here, so its failed
+                // mutation/checkpoint/terminal write cannot commit. Persist
+                // that fact under the still-current owner fence.
+                self.record_controlled_rollback_proof(identity, fingerprint, lease, point)
+                    .await?;
+                Err(RuntimeError::FaultInjected(point))
+            }
+            result => result,
+        }
+    }
+
+    /// Performs the validated bounded terminal outcome commit in one
+    /// writer-fenced transaction. Any validation, cancellation, fault, or
+    /// owner-loss error
     /// rolls the complete transaction back. A matching terminal request is
     /// replayed from durable state without applying `mutations` again.
     ///
@@ -1789,7 +1834,7 @@ impl RuntimeState {
     /// activation does not successfully finalize. External effects remain
     /// outside this transaction and are never implied reversible.
     #[allow(clippy::too_many_arguments)]
-    pub async fn commit_table_request_activation(
+    async fn commit_table_request_activation_tx(
         &self,
         lease: WriterLease,
         identity: RequestIdentity,
@@ -1870,7 +1915,8 @@ impl RuntimeState {
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
                      owner_epoch = NULL, effect_evidence = 0,
-                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                     recovery_disposition = 0, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                    AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8
                    AND terminal_outcome IS NULL",
@@ -2641,7 +2687,7 @@ impl RuntimeState {
         let applied = transaction
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
-                 VALUES ('request-recovery-evidence-v1')",
+                 VALUES ('request-recovery-evidence-v2')",
                 (),
             )
             .await
@@ -2680,6 +2726,10 @@ impl RuntimeState {
                 (
                     "controlled_transaction_proof",
                     "ALTER TABLE request_ledger ADD COLUMN controlled_transaction_proof BLOB",
+                ),
+                (
+                    "controlled_rollback_proof",
+                    "ALTER TABLE request_ledger ADD COLUMN controlled_rollback_proof BLOB",
                 ),
             ] {
                 if !columns.contains_key(column) {
@@ -3948,7 +3998,7 @@ impl RuntimeState {
                 "UPDATE request_ledger
                  SET state = ?1, owner_id = ?2, owner_epoch = ?3,
                      effect_evidence = 0, recovery_disposition = 0,
-                     controlled_transaction_proof = NULL
+                     controlled_transaction_proof = NULL, controlled_rollback_proof = NULL
                  WHERE session_id = ?4 AND request_id = ?5 AND fingerprint = ?6 AND state = ?7",
                 params![
                     RequestState::Running.code(),
@@ -4052,6 +4102,87 @@ impl RuntimeState {
     ) -> Result<(), RuntimeError> {
         self.record_effect_evidence(identity, fingerprint, owner, 2)
             .await
+    }
+
+    /// Persists evidence only after this runtime observed its own controlled
+    /// table transaction fail before commit. An entry marker alone never
+    /// reaches this transition, and a possible external effect keeps recovery
+    /// conservative.
+    async fn record_controlled_rollback_proof(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        point: FaultPoint,
+    ) -> Result<(), RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        if evidence.owner != Some(RequestOwner::from(owner)) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        if evidence.effects == Some(EffectEvidence::ExternalPossible) {
+            tx.commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(());
+        }
+        if evidence.rollback_proof.is_some()
+            || !matches!(
+                evidence.effects,
+                None | Some(EffectEvidence::ControlledTransaction)
+            )
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let marker = controlled_transaction_marker(identity, fingerprint, owner);
+        if evidence
+            .controlled_marker
+            .is_some_and(|existing| existing != marker)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let proof = controlled_rollback_proof(marker, point);
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+             SET effect_evidence = 1, controlled_transaction_proof = ?1,
+                 controlled_rollback_proof = ?2
+             WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
+               AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8
+               AND effect_evidence IN (0, 1)
+               AND (controlled_transaction_proof IS NULL OR controlled_transaction_proof = ?1)
+               AND controlled_rollback_proof IS NULL",
+                params![
+                    marker.to_vec(),
+                    proof.to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
     async fn record_effect_evidence(
@@ -4239,22 +4370,45 @@ impl RuntimeState {
         if evidence.owner != Some(lost_owner) || lost_owner == RequestOwner::from(fence) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        // A durable entry marker does not establish that the transaction
-        // rolled back or that every effect joined it. Keep recovery
-        // conservative until the runtime has a genuine rollback receipt.
-        let disposition = RecoveryDisposition::ExternalEffectsUncertain;
+        let disposition = if evidence.effects == Some(EffectEvidence::ControlledTransaction)
+            && evidence.controlled_marker.is_some()
+            && evidence.rollback_proof.is_some()
+        {
+            RecoveryDisposition::RollbackProven
+        } else {
+            RecoveryDisposition::ExternalEffectsUncertain
+        };
+        let retained_effect_evidence = if disposition == RecoveryDisposition::RollbackProven {
+            1
+        } else {
+            0
+        };
+        let retained_marker = if disposition == RecoveryDisposition::RollbackProven {
+            evidence.controlled_marker.map(|value| value.to_vec())
+        } else {
+            None
+        };
+        let retained_rollback_proof = if disposition == RecoveryDisposition::RollbackProven {
+            evidence.rollback_proof.map(|value| value.to_vec())
+        } else {
+            None
+        };
         let changed = tx
             .execute(
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
-                     owner_epoch = NULL, effect_evidence = 0,
-                     recovery_disposition = ?3, controlled_transaction_proof = NULL
-                 WHERE session_id = ?4 AND request_id = ?5 AND fingerprint = ?6
-                   AND state = ?7 AND owner_id = ?8 AND owner_epoch = ?9",
+                     owner_epoch = NULL, effect_evidence = ?3,
+                     recovery_disposition = ?4, controlled_transaction_proof = ?5,
+                     controlled_rollback_proof = ?6
+                 WHERE session_id = ?7 AND request_id = ?8 AND fingerprint = ?9
+                   AND state = ?10 AND owner_id = ?11 AND owner_epoch = ?12",
                 params![
                     RequestState::Orphaned.code(),
                     outcome.as_bytes().to_vec(),
+                    retained_effect_evidence,
                     disposition.code(),
+                    retained_marker,
+                    retained_rollback_proof,
                     identity.session_id.to_vec(),
                     identity.request_id.to_vec(),
                     fingerprint.to_vec(),
@@ -4328,6 +4482,7 @@ impl RuntimeState {
                  WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                    AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
                    AND effect_evidence = 0 AND controlled_transaction_proof IS NULL
+                   AND controlled_rollback_proof IS NULL
                    AND recovery_disposition = 0",
                 params![
                     RequestState::Orphaned.code(),
@@ -4409,7 +4564,7 @@ impl RuntimeState {
             .query(
                 "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
                         owner_id, owner_epoch, effect_evidence, recovery_disposition,
-                        controlled_transaction_proof
+                        controlled_transaction_proof, controlled_rollback_proof
                  FROM request_ledger
                  WHERE state = ?1
                  ORDER BY session_id, request_id",
@@ -4447,7 +4602,7 @@ impl RuntimeState {
             .query(
                 "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
                         owner_id, owner_epoch, effect_evidence, recovery_disposition,
-                        controlled_transaction_proof
+                        controlled_transaction_proof, controlled_rollback_proof
                  FROM request_ledger
                  WHERE session_id = ?1 AND state IN (?2, ?3)
                  ORDER BY request_id",
@@ -4553,7 +4708,8 @@ impl RuntimeState {
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
                      owner_epoch = NULL, effect_evidence = 0,
-                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                     recovery_disposition = 0, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5 AND state = ?6",
                 params![
                     next.code(),
@@ -4629,7 +4785,8 @@ impl RuntimeState {
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
                      owner_epoch = NULL, effect_evidence = 0,
-                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                     recovery_disposition = 0, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                    AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8",
                 params![
@@ -4650,11 +4807,13 @@ impl RuntimeState {
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
                      owner_epoch = NULL, effect_evidence = 0,
-                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                     recovery_disposition = 0, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                    AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
                    AND effect_evidence = 0 AND recovery_disposition = 0
-                   AND controlled_transaction_proof IS NULL",
+                   AND controlled_transaction_proof IS NULL
+                   AND controlled_rollback_proof IS NULL",
                 params![
                     next.code(),
                     terminal_outcome.as_bytes().to_vec(),
@@ -4794,7 +4953,7 @@ impl RuntimeState {
             .query(
                 "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
                         owner_id, owner_epoch, effect_evidence, recovery_disposition,
-                        controlled_transaction_proof
+                        controlled_transaction_proof, controlled_rollback_proof
                  FROM request_ledger",
                 (),
             )
@@ -7179,6 +7338,7 @@ struct RequestExecutionEvidence {
     owner: Option<RequestOwner>,
     effects: Option<EffectEvidence>,
     controlled_marker: Option<[u8; 32]>,
+    rollback_proof: Option<[u8; 32]>,
     disposition: Option<RecoveryDisposition>,
 }
 
@@ -7189,7 +7349,7 @@ async fn request_execution_evidence_tx(
     let mut rows = connection
         .query(
             "SELECT owner_id, owner_epoch, effect_evidence, recovery_disposition,
-                    controlled_transaction_proof
+                    controlled_transaction_proof, controlled_rollback_proof
              FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
             params![identity.session_id.to_vec(), identity.request_id.to_vec()],
         )
@@ -7233,6 +7393,11 @@ fn decode_request_execution_evidence(
         .map_err(|_| RuntimeError::RecoveryInvalid)?
         .map(fixed)
         .transpose()?;
+    let rollback_proof = row
+        .get::<Option<Vec<u8>>>(offset + 5)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(fixed)
+        .transpose()?;
     let disposition = match row
         .get::<i64>(offset + 3)
         .map_err(|_| RuntimeError::RecoveryInvalid)?
@@ -7246,6 +7411,7 @@ fn decode_request_execution_evidence(
         owner,
         effects,
         controlled_marker,
+        rollback_proof,
         disposition,
     })
 }
@@ -7261,17 +7427,25 @@ fn validate_request_execution_evidence(
         }
     }
     let marker_matches_owner = match evidence.controlled_marker {
-        Some(marker) => evidence.owner.is_some_and(|owner| {
-            marker
-                == controlled_transaction_marker(
-                    status.identity,
-                    status.fingerprint,
-                    WriterLease {
-                        owner_id: owner.owner_id,
-                        epoch: owner.epoch,
-                    },
-                )
-        }),
+        Some(marker) => match evidence.owner {
+            Some(owner) => {
+                marker
+                    == controlled_transaction_marker(
+                        status.identity,
+                        status.fingerprint,
+                        WriterLease {
+                            owner_id: owner.owner_id,
+                            epoch: owner.epoch,
+                        },
+                    )
+            }
+            // A terminal rollback receipt deliberately retains the paired
+            // marker/proof after the active owner has been fenced away.
+            None => {
+                status.state == RequestState::Orphaned
+                    && evidence.disposition == Some(RecoveryDisposition::RollbackProven)
+            }
+        },
         None => true,
     };
     if !marker_matches_owner {
@@ -7285,9 +7459,35 @@ fn validate_request_execution_evidence(
     if evidence.disposition.is_some() && status.state != RequestState::Orphaned {
         return Err(RuntimeError::RecoveryInvalid);
     }
-    if evidence.disposition == Some(RecoveryDisposition::RollbackProven) {
-        // This runtime has no durable rollback receipt. An entry marker is
-        // intentionally insufficient to admit the proven disposition.
+    let rollback_proof_matches = evidence.controlled_marker.is_some_and(|marker| {
+        [
+            FaultPoint::BeforeTableWrite,
+            FaultPoint::AfterTableWrite,
+            FaultPoint::AfterMutation,
+            FaultPoint::AfterCheckpoint,
+            FaultPoint::AfterCapture,
+            FaultPoint::BeforeTerminalClaim,
+            FaultPoint::AfterTerminalClaim,
+        ]
+        .into_iter()
+        .any(|point| evidence.rollback_proof == Some(controlled_rollback_proof(marker, point)))
+    });
+    if evidence.rollback_proof.is_some() && !rollback_proof_matches {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.rollback_proof.is_some()
+        && evidence.effects != Some(EffectEvidence::ControlledTransaction)
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.disposition == Some(RecoveryDisposition::RollbackProven)
+        && !(status.state == RequestState::Orphaned
+            && evidence.owner.is_none()
+            && evidence.effects == Some(EffectEvidence::ControlledTransaction)
+            && evidence.controlled_marker.is_some()
+            && evidence.rollback_proof.is_some()
+            && rollback_proof_matches)
+    {
         return Err(RuntimeError::RecoveryInvalid);
     }
     if evidence.disposition == Some(RecoveryDisposition::ExternalEffectsUncertain)
@@ -7299,12 +7499,14 @@ fn validate_request_execution_evidence(
         && evidence.owner.is_none()
         && evidence.effects.is_none()
         && evidence.controlled_marker.is_none()
+        && evidence.rollback_proof.is_none()
         && evidence.disposition.is_none();
     let owned_running = status.state == RequestState::Running && evidence.owner.is_some();
     if status.state == RequestState::Reserved
         && (evidence.owner.is_some()
             || evidence.effects.is_some()
             || evidence.controlled_marker.is_some()
+            || evidence.rollback_proof.is_some()
             || evidence.disposition.is_some())
     {
         return Err(RuntimeError::RecoveryInvalid);
@@ -7327,6 +7529,7 @@ fn validate_request_execution_evidence(
     ) && (evidence.owner.is_some()
         || evidence.effects.is_some()
         || evidence.controlled_marker.is_some()
+        || evidence.rollback_proof.is_some()
         || evidence.disposition.is_some())
     {
         return Err(RuntimeError::RecoveryInvalid);
@@ -7335,13 +7538,21 @@ fn validate_request_execution_evidence(
         let documented_legacy = evidence.owner.is_none()
             && evidence.effects.is_none()
             && evidence.controlled_marker.is_none()
+            && evidence.rollback_proof.is_none()
             && evidence.disposition.is_none();
         let recovered_uncertain = evidence.disposition
             == Some(RecoveryDisposition::ExternalEffectsUncertain)
             && evidence.owner.is_none()
             && evidence.effects.is_none()
-            && evidence.controlled_marker.is_none();
-        if !(documented_legacy || recovered_uncertain) {
+            && evidence.controlled_marker.is_none()
+            && evidence.rollback_proof.is_none();
+        let recovered_rollback = evidence.disposition == Some(RecoveryDisposition::RollbackProven)
+            && evidence.owner.is_none()
+            && evidence.effects == Some(EffectEvidence::ControlledTransaction)
+            && evidence.controlled_marker.is_some()
+            && evidence.rollback_proof.is_some()
+            && rollback_proof_matches;
+        if !(documented_legacy || recovered_uncertain || recovered_rollback) {
             return Err(RuntimeError::RecoveryInvalid);
         }
     }
@@ -7871,6 +8082,24 @@ fn controlled_transaction_marker(
     digest.update(fingerprint);
     digest.update(owner.owner_id);
     digest.update(owner.epoch.to_be_bytes());
+    digest.finalize().into()
+}
+fn controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.runtime.controlled-rollback.v1");
+    digest.update(marker);
+    digest.update([match point {
+        FaultPoint::BeforeTableWrite => 1,
+        FaultPoint::AfterTableWrite => 2,
+        FaultPoint::AfterMutation => 3,
+        FaultPoint::AfterCheckpoint => 4,
+        FaultPoint::AfterCapture => 5,
+        FaultPoint::AfterFailureRecord => 6,
+        FaultPoint::AfterFailurePayload => 7,
+        FaultPoint::AfterReplayFailureRecord => 8,
+        FaultPoint::BeforeTerminalClaim => 9,
+        FaultPoint::AfterTerminalClaim => 10,
+    }]);
     digest.finalize().into()
 }
 fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
@@ -11544,6 +11773,153 @@ mod tests {
             assert_eq!(reopened_status.state, RequestState::Running);
             assert_eq!(reopened_status.terminal_outcome, None);
         }
+    }
+
+    #[tokio::test]
+    async fn controlled_fault_receipt_recovers_as_proven_after_owner_takeover_and_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::AfterTerminalClaim),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        // The current owner cannot convert its own still-live activation into
+        // a recovered terminal result.
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    owner,
+                    outcome(12),
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(12),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.disposition, RecoveryDisposition::RollbackProven);
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(13),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state.reserve_request(identity, fingerprint).await.unwrap(),
+            recovered.status
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::RollbackProven)
+        );
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened
+                .reserve_request(identity, fingerprint)
+                .await
+                .unwrap(),
+            recovered.status
+        );
+    }
+
+    #[tokio::test]
+    async fn external_effect_marker_keeps_fault_recovery_uncertain() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        state
+            .record_external_effect(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert!(matches!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::AfterTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
+        ));
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(12),
+                )
+                .await
+                .unwrap()
+                .disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
     }
 
     #[tokio::test]
