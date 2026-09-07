@@ -8,24 +8,25 @@
 //! outside this slice. Verified runtime request reservations and terminal
 //! outcomes are retained through the existing runtime state boundary.
 
+use crate::live_eval::{PureEvalApplication, SessionExpiries};
 use futures::{
     Future, FutureExt,
     executor::block_on,
     io::{AsyncReadExt, AsyncWriteExt},
 };
 use orna_live_v1::{
-    HttpConnection, HttpConnectionError, HttpIoError, Limits, LiveApplication, LiveHost,
-    LiveSessionAuthority, LiveTransport, SessionMetadata, SystemCredentialIssuer, TransportLimits,
+    HttpConnection, HttpConnectionError, HttpIoError, Limits, LiveHost, LiveSessionAuthority,
+    LiveSessionChildren, LiveTransport, SessionMetadata, SystemCredentialIssuer, TransportLimits,
     WebSocketOutput, WebSocketState, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RequestIdentity, RuntimeIdentity, RuntimeState};
 use orna_security_v1::{Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter, SessionId};
 use orna_serving_v1::{Limits as ServingLimits, Serving};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt, io,
     pin::Pin,
     rc::Rc,
@@ -67,7 +68,11 @@ pub struct LiveOnceHost {
     transport: LiveTransport,
     authority: HostAuthority,
     deletion: HostDeletion,
+    application: SharedApplication,
 }
+
+type SharedApplication = Rc<RefCell<Option<PureEvalApplication>>>;
+type DeletedLeaseIndex = Rc<RefCell<BTreeMap<SessionId, u64>>>;
 
 impl LiveOnceHost {
     /// Binds a one-shot host to the default loopback listener.
@@ -81,6 +86,26 @@ impl LiveOnceHost {
             .map_err(|_| LiveHostError::Runtime)?;
         let persisted = block_on(state.identity()).map_err(|_| LiveHostError::Runtime)?;
         if persisted.database_id != database_id || persisted != identity {
+            return Err(LiveHostError::Runtime);
+        }
+        let capture = block_on(state.capture()).map_err(|_| LiveHostError::Runtime)?;
+        if capture.database_id() != database_id {
+            return Err(LiveHostError::Runtime);
+        }
+        let runtime_id = capture.runtime_id();
+        let expiries: SessionExpiries = Rc::new(RefCell::new(BTreeMap::new()));
+        let deleted_leases: DeletedLeaseIndex = Rc::new(RefCell::new(BTreeMap::new()));
+        let application = Rc::new(RefCell::new(Some(
+            PureEvalApplication::from_repository(
+                repository,
+                database_id,
+                capture.clone(),
+                Rc::clone(&expiries),
+            )
+            .map_err(|_| LiveHostError::Repository)?,
+        )));
+        let retained_capture = block_on(state.capture()).map_err(|_| LiveHostError::Runtime)?;
+        if retained_capture != capture {
             return Err(LiveHostError::Runtime);
         }
 
@@ -105,16 +130,20 @@ impl LiveOnceHost {
         .map_err(|_| LiveHostError::Configuration)?;
         let transport = LiveTransport::new(host, TransportLimits::default())
             .map_err(|_| LiveHostError::Configuration)?;
-        let sessions = Rc::new(RefCell::new(BTreeSet::new()));
         Ok(Self {
             listener,
             transport,
             authority: HostAuthority {
                 database_id,
-                runtime_id: identity.repository_id,
-                sessions: Rc::clone(&sessions),
+                runtime_id,
+                expiries: Rc::clone(&expiries),
             },
-            deletion: HostDeletion { sessions },
+            deletion: HostDeletion {
+                expiries,
+                deleted_leases,
+                application: Rc::clone(&application),
+            },
+            application,
         })
     }
 
@@ -125,20 +154,8 @@ impl LiveOnceHost {
     }
 
     /// Accepts and serves exactly one bounded HTTP session-create connection.
-    pub fn serve(mut self) -> Result<(), LiveHostError> {
-        let mut connection = HttpConnection::new(TransportLimits::default());
-        let mut issuer = SystemCredentialIssuer::default();
-        let mut clock = system_milliseconds;
-        self.transport
-            .serve_one_http_listener(
-                self.listener.listener(),
-                &mut connection,
-                &mut clock,
-                &mut self.authority,
-                &mut issuer,
-                &mut self.deletion,
-            )
-            .map_err(|_| LiveHostError::Connection)
+    pub fn serve(self) -> Result<(), LiveHostError> {
+        self.serve_with_cancellation(futures::future::pending())
     }
 
     /// Serves one loopback connection while racing accept and connection I/O
@@ -186,6 +203,7 @@ impl LiveOnceHost {
             transport,
             authority,
             deletion,
+            application,
         } = self;
         let listener = listener
             .listener()
@@ -205,6 +223,7 @@ impl LiveOnceHost {
                 authority,
                 issuer: SystemCredentialIssuer::default(),
                 deletion,
+                application,
             },
             Rc::clone(&registry),
         ));
@@ -320,9 +339,15 @@ impl LiveOnceHost {
         let mut issuer = SystemCredentialIssuer::default();
         let mut clock = system_milliseconds;
         if websocket {
-            let mut application = RejectLiveApplication;
             let attachment = opaque_attachment().map_err(|_| LiveHostError::Configuration)?;
-            self.transport
+            let application = Rc::clone(&self.application);
+            let mut application = application
+                .borrow_mut()
+                .take()
+                .ok_or(LiveHostError::Connection)?;
+            application.expire(system_milliseconds());
+            let outcome = self
+                .transport
                 .serve_websocket_connection(
                     &mut reader,
                     &mut writer,
@@ -332,22 +357,75 @@ impl LiveOnceHost {
                     cancellation,
                     &mut application,
                 )
-                .await
-                .map_err(map_connection_error)
+                .await;
+            self.application.borrow_mut().replace(application);
+            outcome.map_err(map_connection_error)
         } else {
-            self.transport
-                .serve_http_connection_with_cancellation(
-                    &mut reader,
-                    &mut writer,
-                    &mut connection,
-                    &mut clock,
-                    cancellation,
-                    &mut self.authority,
-                    &mut issuer,
-                    &mut self.deletion,
-                )
-                .await
-                .map_err(map_connection_error)
+            self.serve_http_connection_with_children(
+                &mut reader,
+                &mut writer,
+                &mut connection,
+                &mut clock,
+                cancellation,
+                &mut issuer,
+            )
+            .await
+        }
+    }
+
+    /// Runs the one-connection HTTP boundary through the same child-aware
+    /// DELETE route as the concurrent host. The generic transport stream
+    /// helpers deliberately remain child-agnostic for embedders that have no
+    /// application callbacks; this executable adapter cannot use them for a
+    /// request that may delete a session.
+    async fn serve_http_connection_with_children<C>(
+        &mut self,
+        reader: &mut (impl futures::io::AsyncRead + Unpin),
+        writer: &mut (impl futures::io::AsyncWrite + Unpin),
+        connection: &mut HttpConnection,
+        clock: &mut C,
+        cancellation: &mut (impl Future<Output = ()> + Unpin),
+        issuer: &mut SystemCredentialIssuer,
+    ) -> Result<(), LiveHostError>
+    where
+        C: FnMut() -> u64,
+    {
+        let mut chunk = [0; 8192];
+        loop {
+            let count = await_host_io(reader.read(&mut chunk), cancellation).await?;
+            if count == 0 {
+                return if connection.buffered_bytes() == 0 {
+                    Ok(())
+                } else {
+                    Err(LiveHostError::Connection)
+                };
+            }
+            let requests = connection
+                .push(&chunk[..count])
+                .map_err(|_| LiveHostError::Connection)?;
+            for request in requests {
+                let now = clock();
+                let request = request.request().clone();
+                let response = if self.deletion.expired_deleted_lease(&request, now) {
+                    expired_delete_response()
+                } else {
+                    let mut children = HostApplicationChildren::new(Rc::clone(&self.application));
+                    self.transport
+                        .handle_with_children(
+                            request,
+                            now,
+                            &mut self.authority,
+                            issuer,
+                            &mut self.deletion,
+                            &mut children,
+                        )
+                        .await
+                }
+                .encode_http(TransportLimits::default())
+                .map_err(|_| LiveHostError::Connection)?;
+                await_host_io(writer.write_all(&response), cancellation).await?;
+                await_host_io(writer.flush(), cancellation).await?;
+            }
         }
     }
 }
@@ -357,6 +435,7 @@ struct ConcurrentHostState {
     authority: HostAuthority,
     issuer: SystemCredentialIssuer,
     deletion: HostDeletion,
+    application: SharedApplication,
 }
 
 enum ActorCommand {
@@ -423,9 +502,13 @@ async fn run_host_actor(
                 None => break,
             },
             _ = ticker.tick() => {
-                state
-                    .transport
-                    .expire_pending_websocket_upgrades(system_milliseconds());
+                let now = system_milliseconds();
+                state.transport.expire_pending_websocket_upgrades(now);
+                let mut application = state.application.borrow_mut();
+                let Some(application) = application.as_mut() else {
+                    return;
+                };
+                application.expire(now);
                 if capture_retirement_gates(
                     &registry,
                     state.transport.take_retired_attachments(),
@@ -443,27 +526,52 @@ async fn run_host_actor(
                 bytes,
                 reply,
             } => {
-                let host = &mut state;
-                let result = host
-                    .transport
-                    .handle_http_read(
-                        &mut connection,
-                        &bytes,
-                        system_milliseconds(),
-                        &mut host.authority,
-                        &mut host.issuer,
-                        &mut host.deletion,
-                    )
-                    .await;
-                let responses = match result {
-                    Ok(responses) => responses,
+                // The generic transport byte helper deliberately has no
+                // application-child argument. The executable adapter owns
+                // that proof, so it routes each parsed request through the
+                // child-aware HTTP entry point instead.
+                let requests = match connection.push(&bytes) {
+                    Ok(requests) => requests,
                     Err(error) => {
-                        let _ = reply.send(Err(error));
+                        let _ = reply.send(Err(HttpConnectionError::Parse(error)));
                         continue;
                     }
                 };
+                let mut children = HostApplicationChildren::new(Rc::clone(&state.application));
+                let mut responses = Vec::with_capacity(requests.len());
+                let mut failed = None;
+                for request in requests {
+                    let now = system_milliseconds();
+                    let request = request.request().clone();
+                    let response = if state.deletion.expired_deleted_lease(&request, now) {
+                        expired_delete_response()
+                    } else {
+                        state
+                            .transport
+                            .handle_with_children(
+                                request,
+                                now,
+                                &mut state.authority,
+                                &mut state.issuer,
+                                &mut state.deletion,
+                                &mut children,
+                            )
+                            .await
+                    };
+                    match response.encode_http(TransportLimits::default()) {
+                        Ok(response) => responses.push(response),
+                        Err(error) => {
+                            failed = Some(HttpConnectionError::Encode(error));
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = failed {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let Ok(retirement) =
-                    capture_retirement_gates(&registry, host.transport.take_retired_attachments())
+                    capture_retirement_gates(&registry, state.transport.take_retired_attachments())
                 else {
                     let _ = reply.send(Err(HttpConnectionError::Protocol(
                         orna_live_v1::Error::Closed,
@@ -530,11 +638,19 @@ async fn run_host_actor(
                 now,
                 reply,
             } => {
+                let mut application = match state.application.borrow_mut().take() {
+                    Some(application) => application,
+                    None => {
+                        let _ = reply.send(Err(orna_live_v1::Error::Closed));
+                        continue;
+                    }
+                };
                 let result = state
                     .transport
-                    .receive(&mut socket, now, &bytes)
-                    .await
-                    .map(|outputs| (socket, outputs));
+                    .receive_with_application(&mut socket, now, &bytes, &mut application)
+                    .await;
+                state.application.borrow_mut().replace(application);
+                let result = result.map(|outputs| (socket, outputs));
                 let _ = reply.send(result);
             }
             ActorCommand::Close {
@@ -1400,6 +1516,23 @@ where
     .await
 }
 
+async fn await_host_io<T, F, C>(operation: F, cancellation: &mut C) -> Result<T, LiveHostError>
+where
+    F: Future<Output = io::Result<T>> + Unpin,
+    C: Future<Output = ()> + Unpin,
+{
+    let mut operation = operation;
+    futures::future::poll_fn(|context| {
+        if Pin::new(&mut *cancellation).poll(context).is_ready() {
+            return Poll::Ready(Err(LiveHostError::Cancelled));
+        }
+        Pin::new(&mut operation)
+            .poll(context)
+            .map_err(|_| LiveHostError::Connection)
+    })
+    .await
+}
+
 fn map_connection_error(error: HttpIoError) -> LiveHostError {
     match error {
         HttpIoError::Cancelled => LiveHostError::Cancelled,
@@ -1449,18 +1582,6 @@ fn opaque_attachment() -> Result<[u8; 16], ()> {
         }
     }
     Err(())
-}
-
-struct RejectLiveApplication;
-
-impl LiveApplication for RejectLiveApplication {
-    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> orna_live_v1::Result<Envelope> {
-        Err(orna_live_v1::Error::UnsupportedOperation)
-    }
-
-    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> orna_live_v1::Result<Envelope> {
-        Err(orna_live_v1::Error::UnsupportedOperation)
-    }
 }
 
 struct TokioReader(tokio::net::tcp::OwnedReadHalf);
@@ -1540,7 +1661,7 @@ where
 struct HostAuthority {
     database_id: [u8; 16],
     runtime_id: [u8; 16],
-    sessions: Rc<RefCell<BTreeSet<SessionId>>>,
+    expiries: SessionExpiries,
 }
 
 impl LiveSessionAuthority for HostAuthority {
@@ -1557,12 +1678,14 @@ impl LiveSessionAuthority for HostAuthority {
             getrandom::fill(&mut id).map_err(|_| orna_live_v1::Error::Denied)?;
             if id != [0; 16] {
                 let session = SessionId::new(id);
-                if self.sessions.borrow_mut().insert(session) {
+                let expires_at = now.saturating_add(30_000);
+                if !self.expiries.borrow().contains_key(&session) {
+                    self.expiries.borrow_mut().insert(session, expires_at);
                     return Ok(SessionMetadata {
                         session: id,
                         database,
                         runtime: self.runtime_id,
-                        expires_at: now.saturating_add(30_000),
+                        expires_at,
                         subscribe: subscribe_payload(),
                     });
                 }
@@ -1573,15 +1696,124 @@ impl LiveSessionAuthority for HostAuthority {
 }
 
 struct HostDeletion {
-    sessions: Rc<RefCell<BTreeSet<SessionId>>>,
+    expiries: SessionExpiries,
+    deleted_leases: DeletedLeaseIndex,
+    application: SharedApplication,
+}
+
+impl HostDeletion {
+    /// The transport keeps a short idempotency record after successful
+    /// deletion. Its record intentionally contains only bearer/origin match
+    /// data, so the executable adapter retains the original lease deadline
+    /// and prevents that cache from extending authentication past expiry.
+    fn expired_deleted_lease(&self, request: &orna_live_v1::WireRequest, now: u64) -> bool {
+        if request.method != "DELETE" {
+            return false;
+        }
+        let Some(id) = parse_session_delete_path(&request.path) else {
+            return false;
+        };
+        self.deleted_leases
+            .borrow()
+            .get(&SessionId::new(id))
+            .is_some_and(|expires_at| *expires_at <= now)
+    }
+}
+
+/// Executable ownership proof for the concrete live application.
+///
+/// `PureEvalApplication` runs only inside the host actor: callbacks never
+/// spawn detached work and are returned to the actor before the next command
+/// is admitted. Session deletion therefore either obtains its unique mutable
+/// application owner and proves no callback remains in flight, or fails
+/// closed if a callback owner cannot be obtained. The deletion adapter removes
+/// evaluator/watch state only after this proof succeeds, while the actor's
+/// worker registry separately cancels and joins transport-owned socket tasks
+/// before an HTTP response is written.
+struct HostApplicationChildren {
+    application: SharedApplication,
+}
+
+impl HostApplicationChildren {
+    fn new(application: SharedApplication) -> Self {
+        Self { application }
+    }
+}
+
+impl LiveSessionChildren for HostApplicationChildren {
+    fn cancel_and_join_session<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        requests: &'a [RequestIdentity],
+    ) -> Pin<Box<dyn Future<Output = orna_live_v1::Result<()>> + 'a>> {
+        Box::pin(async move {
+            if requests.iter().any(|request| request.session_id != session) {
+                return Err(orna_live_v1::Error::DeletionFailed);
+            }
+            let mut application = self
+                .application
+                .try_borrow_mut()
+                .map_err(|_| orna_live_v1::Error::DeletionFailed)?;
+            let application = application
+                .as_mut()
+                .ok_or(orna_live_v1::Error::DeletionFailed)?;
+            // Holding the unique mutable application owner is the complete
+            // supervisor proof for this synchronous adapter. It has no
+            // spawned callback, transaction, or writer to cancel or join;
+            // `HostDeletion` performs resource removal after this boundary
+            // returns successfully.
+            let _ = application;
+            Ok(())
+        })
+    }
 }
 
 impl SessionDeletionAdapter for HostDeletion {
     type Error = ();
 
     fn delete(&mut self, session: SessionId) -> Result<(), Self::Error> {
-        self.sessions.borrow_mut().remove(&session);
+        let expires_at = self.expiries.borrow_mut().remove(&session).ok_or(())?;
+        self.deleted_leases.borrow_mut().insert(session, expires_at);
+        self.application
+            .borrow_mut()
+            .as_mut()
+            .ok_or(())?
+            .remove(session);
         Ok(())
+    }
+}
+
+fn expired_delete_response() -> orna_live_v1::WireResponse {
+    orna_live_v1::WireResponse {
+        status: 410,
+        headers: Vec::new(),
+        body: b"live.expired".to_vec(),
+    }
+}
+
+fn parse_session_delete_path(path: &str) -> Option<[u8; 16]> {
+    let value = path.strip_prefix("/orna/session/")?;
+    if value.len() != 36
+        || ![8, 13, 18, 23]
+            .into_iter()
+            .all(|index| value.as_bytes()[index] == b'-')
+    {
+        return None;
+    }
+    let mut id = [0; 16];
+    let mut digits = value.bytes().filter(|byte| *byte != b'-');
+    for byte in &mut id {
+        *byte = (hex_digit(digits.next()?)? << 4) | hex_digit(digits.next()?)?;
+    }
+    digits.next().is_none().then_some(id)
+}
+
+const fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1639,11 +1871,41 @@ fn duration_milliseconds(duration: std::time::Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::duration_milliseconds;
+    use super::{
+        DeletedLeaseIndex, HostDeletion, SharedApplication, duration_milliseconds,
+        expired_delete_response,
+    };
+    use orna_security_v1::SessionId;
     use std::time::Duration;
+    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
     #[test]
     fn live_clock_uses_milliseconds_for_the_advertised_lease() {
         assert_eq!(duration_milliseconds(Duration::from_secs(30)), 30_000);
+    }
+
+    #[test]
+    fn expired_deleted_lease_blocks_transport_idempotency_cache() {
+        let id = [7; 16];
+        let deleted_leases: DeletedLeaseIndex =
+            Rc::new(RefCell::new(BTreeMap::from([(SessionId::new(id), 100)])));
+        let deletion = HostDeletion {
+            expiries: Rc::new(RefCell::new(BTreeMap::new())),
+            deleted_leases,
+            application: Rc::new(RefCell::new(None)) as SharedApplication,
+        };
+        let request = orna_live_v1::WireRequest {
+            method: "DELETE".into(),
+            path: "/orna/session/07070707-0707-0707-0707-070707070707".into(),
+            headers: vec![
+                ("origin".into(), "http://localhost".into()),
+                ("authorization".into(), "Bearer retained".into()),
+            ],
+            body: Vec::new(),
+        };
+
+        assert!(!deletion.expired_deleted_lease(&request, 99));
+        assert!(deletion.expired_deleted_lease(&request, 100));
+        assert_eq!(expired_delete_response().status, 410);
     }
 }
