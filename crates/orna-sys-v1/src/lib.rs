@@ -446,8 +446,9 @@ impl Runtime {
         &mut self,
         request: AdmissionRequest<T>,
     ) -> Result<Admission<T>, AdmissionError> {
-        validate(&request)?;
+        validate_target(&request)?;
         let bound = bind(&request.function, &request.arguments)?;
+        validate_execution(&request)?;
         let identity = identity(&request, &bound);
         if let Some(key) = &request.idempotency_key
             && let Some(entry) = self.idempotency.get(key)
@@ -1008,7 +1009,7 @@ fn bind(
     }
     ArgumentMap::new(bound)
 }
-fn validate<T>(request: &AdmissionRequest<T>) -> Result<(), AdmissionError> {
+fn validate_target<T>(request: &AdmissionRequest<T>) -> Result<(), AdmissionError> {
     if request
         .explicit_snapshot
         .as_ref()
@@ -1022,6 +1023,9 @@ fn validate<T>(request: &AdmissionRequest<T>) -> Result<(), AdmissionError> {
     if !request.function.callable || !request.function.generics_resolved {
         return Err(AdmissionError::NotCallable);
     }
+    Ok(())
+}
+fn validate_execution<T>(request: &AdmissionRequest<T>) -> Result<(), AdmissionError> {
     if request.witness.static_type() != &request.function.result_type {
         return Err(AdmissionError::ReturnType);
     }
@@ -1401,6 +1405,19 @@ mod tests {
             runtime.admit(wrong_result),
             Err(AdmissionError::ReturnType)
         ));
+        let mut wrong_argument_and_result = request(
+            None,
+            args(vec![Argument {
+                name: "a".into(),
+                value: value("Str", "bad"),
+            }]),
+        );
+        wrong_argument_and_result.witness = TypeWitness::new(ty("Int"));
+        assert!(matches!(
+            runtime.admit(wrong_argument_and_result),
+            Err(AdmissionError::ArgumentType { .. })
+        ));
+        assert!(runtime.invocations.is_empty());
         let mut snap = request(Some(value("Int", "1")), ArgumentMap::default());
         snap.explicit_snapshot = Some(SnapshotId::new("other"));
         assert!(matches!(
