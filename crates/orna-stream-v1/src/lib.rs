@@ -367,6 +367,13 @@ pub enum CommitResult {
         state: StreamState,
         changed: bool,
     },
+    /// New delivery admission is stopped, but an already-admitted delivery
+    /// still owns the current item/batch boundary. `state` deliberately
+    /// remains `Running` until that lease reaches a terminal transition.
+    PausePending {
+        state: StreamState,
+        changed: bool,
+    },
     CheckpointReset {
         checkpoint: Checkpoint,
     },
@@ -481,6 +488,7 @@ pub struct InMemoryCheckpointBackend {
     streams: BTreeMap<CheckpointKey, StreamStatus>,
     failures: BTreeMap<FailureIdentity, FailureRecord>,
     leases: BTreeMap<CheckpointKey, DeliveryLease>,
+    pause_requested: BTreeSet<CheckpointKey>,
     next_fence: BTreeMap<CheckpointKey, u64>,
     retry_claims: BTreeSet<CheckpointKey>,
 }
@@ -511,6 +519,9 @@ impl InMemoryCheckpointBackend {
             Some(current) if current == lease => {
                 self.leases.remove(&key);
                 self.retry_claims.remove(&key);
+                if self.pause_requested.remove(&key) {
+                    self.streams.insert(key, StreamStatus::Paused);
+                }
                 Ok(())
             }
             _ => Err(RejectReason::LeaseFenced),
@@ -564,8 +575,18 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
         match intent {
             CommitIntent::Pause { key } => {
                 self.checkpoint_mut(&key);
+                if self.stream_status(&key) == StreamStatus::Paused {
+                    return CommitResult::StreamStatusChanged {
+                        state: self.stream_state(&key),
+                        changed: false,
+                    };
+                }
                 if self.leases.contains_key(&key) {
-                    return CommitResult::Rejected(RejectReason::StreamBusy);
+                    let changed = self.pause_requested.insert(key.clone());
+                    return CommitResult::PausePending {
+                        state: self.stream_state(&key),
+                        changed,
+                    };
                 }
                 let changed = self.stream_status(&key) != StreamStatus::Paused;
                 self.streams.insert(key.clone(), StreamStatus::Paused);
@@ -1468,41 +1489,55 @@ mod tests {
     }
 
     #[test]
-    fn pause_blocks_fresh_delivery_and_reset_is_opaque_and_compare_and_set() {
+    fn pause_stops_new_admission_at_the_active_delivery_boundary() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
         let active = acquire(&mut backend, item.clone());
-        assert_eq!(
+        assert!(matches!(
             backend.apply(CommitIntent::Pause {
                 key: item.checkpoint_key(),
             }),
-            CommitResult::Rejected(RejectReason::StreamBusy)
-        );
-        assert!(matches!(
-            backend.apply(CommitIntent::Cancel { lease: active }),
-            CommitResult::Cancelled { .. }
-        ));
-
-        let key = item.checkpoint_key();
-        assert!(matches!(
-            backend.apply(CommitIntent::Pause { key: key.clone() }),
-            CommitResult::StreamStatusChanged {
+            CommitResult::PausePending {
                 state: StreamState {
-                    status: StreamStatus::Paused,
+                    status: StreamStatus::Running,
                     ..
                 },
                 changed: true,
             }
         ));
         assert_eq!(
+            backend.apply(CommitIntent::Reset {
+                key: item.checkpoint_key(),
+                expected: expected(&backend, &item),
+                to: position("opaque/provider-token"),
+            }),
+            CommitResult::Rejected(RejectReason::StreamNotPaused)
+        );
+        assert_eq!(
             backend.apply(CommitIntent::Acquire {
-                delivery: item.clone(),
+                delivery: delivery("receipt:next", "resume:two"),
+                expected: expected(&backend, &item),
+                purpose: LeasePurpose::Deliver,
+            }),
+            CommitResult::Rejected(RejectReason::LeaseAlreadyHeld)
+        );
+        assert!(matches!(
+            backend.apply(CommitIntent::Complete {
+                lease: active,
+                expected: expected(&backend, &item),
+            }),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        assert_eq!(
+            backend.apply(CommitIntent::Acquire {
+                delivery: delivery("receipt:next", "resume:two"),
                 expected: expected(&backend, &item),
                 purpose: LeasePurpose::Deliver,
             }),
             CommitResult::Rejected(RejectReason::StreamPaused)
         );
 
+        let key = item.checkpoint_key();
         let before = backend.checkpoint(&key);
         let rewound = position("opaque/provider-token");
         assert!(matches!(
@@ -1514,7 +1549,7 @@ mod tests {
             CommitResult::CheckpointReset {
                 checkpoint: Checkpoint {
                     committed: Some(ref position),
-                    version: 1,
+                    version: 2,
                     ..
                 }
             } if position == &rewound
@@ -1541,6 +1576,44 @@ mod tests {
             backend.apply(CommitIntent::Resume { key }),
             CommitResult::StreamStatusChanged { changed: false, .. }
         ));
+    }
+
+    #[test]
+    fn reset_is_opaque_and_compare_and_set() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let item = delivery("receipt:zero", "resume:one");
+        let key = item.checkpoint_key();
+        assert!(matches!(
+            backend.apply(CommitIntent::Pause { key: key.clone() }),
+            CommitResult::StreamStatusChanged { .. }
+        ));
+        let rewound = position("opaque/provider-token");
+
+        assert!(matches!(
+            backend.apply(CommitIntent::Reset {
+                key: key.clone(),
+                expected: expected(&backend, &item),
+                to: rewound.clone(),
+            }),
+            CommitResult::CheckpointReset {
+                checkpoint: Checkpoint {
+                    committed: Some(ref position),
+                    version: 1,
+                    ..
+                }
+            } if position == &rewound
+        ));
+        assert_eq!(
+            backend.apply(CommitIntent::Reset {
+                key: key.clone(),
+                expected: CheckpointPrecondition {
+                    version: 0,
+                    committed: None,
+                },
+                to: position("stale-token"),
+            }),
+            CommitResult::Rejected(RejectReason::StaleCheckpoint)
+        );
     }
 
     #[test]
