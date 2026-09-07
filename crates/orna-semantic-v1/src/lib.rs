@@ -1382,6 +1382,12 @@ fn collect_header(
         let Some((name, kind, ty)) = declared_symbol(item) else {
             continue;
         };
+        // The published `sys` table diagnostic belongs to typechecking. Do
+        // not admit this invalid declaration into the header, however: it
+        // must not shadow the portable root while its declaration check runs.
+        if matches!(&item.declaration, Declaration::Table { name, .. } if name == "sys") {
+            continue;
+        }
         if rejects_portable_sys_shadow(&name, diagnostics) {
             continue;
         }
@@ -6364,6 +6370,28 @@ mod tests {
             ModuleInput::new("std/main.orna", ""),
         ]);
         assert!(has(&a, DIAG_RESERVED));
+    }
+
+    #[test]
+    fn reserved_sys_table_reaches_typechecking_without_shadowing_the_portable_root() {
+        let analysis = checked(&[ModuleInput::new(
+            "examples/invalid/reserved-sys.orna",
+            "pub table sys { value: Int, } pub fn view() = sys.rt.id;",
+        )]);
+
+        assert!(
+            !has(&analysis, DIAG_RESERVED),
+            "table-name validation must not fail during header collection: {:?}",
+            analysis.diagnostics
+        );
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+        }));
+        assert!(
+            !has(&analysis, DIAG_UNRESOLVED),
+            "the invalid table must not hide the portable root: {:?}",
+            analysis.diagnostics
+        );
     }
 
     #[test]
