@@ -12,8 +12,9 @@ use std::{
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
 use orna_repository_v1::{
-    GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
-    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError,
+    CompactPublicationError, CompactPublicationPlan, GitCommitRef, IndexGeneration,
+    ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal, PublicationJournalEntry,
+    Repository, RepositoryError,
 };
 use orna_runtime_v1::{PublicationCommitId, PublicationFreeze, RuntimeState, TableMutation};
 use orna_value_v1::{
@@ -368,6 +369,35 @@ pub struct RuntimePublicationCoordinator {
 }
 
 impl RuntimePublicationCoordinator {
+    /// The production compact route. The repository owns ref advancement,
+    /// witness proof, and journal finalization; storage receives only the
+    /// sealed runtime operation that must consume the frozen prefix.
+    pub async fn publish_compact_and_complete(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        freeze: &PublicationFreeze,
+        plan: CompactPublicationPlan,
+    ) -> Result<IndexGeneration, Error> {
+        let (index, ()) = repository
+            .publish_and_complete_compact(plan, |operation| async move {
+                if operation.runtime_intent_id() != freeze.intent_id
+                    || operation.cleanup_watermark() != freeze.checkpoint.digest
+                {
+                    return Err(Error::InvalidTransition);
+                }
+                let commit =
+                    PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
+                        .map_err(|_| Error::InvalidObjectId)?;
+                runtime
+                    .complete_publication(freeze, &commit)
+                    .await
+                    .map_err(|_| Error::RuntimeUnavailable)
+            })
+            .await
+            .map_err(map_compact_publication_error)?;
+        Ok(index)
+    }
+
     /// Reads the exact typed prefix named by `freeze`, then prepares its
     /// canonical loose-row candidate. The resolver is the schema boundary for
     /// turning a typed table key into representable path components.
@@ -491,6 +521,9 @@ impl RuntimePublicationCoordinator {
         }
         let commit = PublicationCommitId::new(self.candidate.commit().as_str().as_bytes().to_vec())
             .map_err(|_| Error::InvalidObjectId)?;
+        if self.journal.compact_manifest().is_some() {
+            return Err(Error::InvalidTransition);
+        }
         runtime
             .complete_publication(freeze, &commit)
             .await
@@ -513,6 +546,33 @@ impl RuntimePublicationCoordinator {
         else {
             return Ok(None);
         };
+        if journal.compact_manifest().is_some() {
+            let intent_id = journal
+                .runtime_intent_id()
+                .ok_or(Error::InvalidTransition)?;
+            let freeze = runtime
+                .publication_freeze(intent_id)
+                .await
+                .map_err(|_| Error::RuntimeUnavailable)?;
+            return repository
+                .recover_and_complete_compact(|operation| async move {
+                    if operation.runtime_intent_id() != freeze.intent_id
+                        || operation.cleanup_watermark() != freeze.checkpoint.digest
+                    {
+                        return Err(Error::InvalidTransition);
+                    }
+                    let commit =
+                        PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
+                            .map_err(|_| Error::InvalidObjectId)?;
+                    runtime
+                        .complete_publication(&freeze, &commit)
+                        .await
+                        .map_err(|_| Error::RuntimeUnavailable)
+                })
+                .await
+                .map_err(map_compact_publication_error)
+                .map(|result| result.map(|(index, ())| index));
+        }
         let intent_id = journal
             .runtime_intent_id()
             .ok_or(Error::InvalidTransition)?;
@@ -569,12 +629,48 @@ impl RuntimePublicationCoordinator {
     }
 }
 
+/// Publishes and completes a compact publication through the runtime
+/// coordinator. The plan's candidate is not exposed as a standalone
+/// publication operation; this production boundary owns both the repository
+/// publication and the fenced runtime cleanup.
+///
+/// The freeze checkpoint digest is the cleanup watermark: it binds the runtime
+/// range to this compact journal rather than merely to a plausible commit. The
+/// runtime transaction preserves mutations appended after the frozen prefix.
+/// The repository coordination lock stays held from witness proof through the
+/// runtime transaction, so concurrent Orna publishers cannot change the
+/// publication boundary during cleanup. Native Git writers remain outside that
+/// lock; completion rechecks HEAD and retains the journal if one wins that
+/// external race after runtime commit.
+///
+pub async fn complete_verified_compact_runtime_prefix(
+    repository: &Repository,
+    runtime: &RuntimeState,
+    freeze: &PublicationFreeze,
+    plan: CompactPublicationPlan,
+) -> Result<(), Error> {
+    RuntimePublicationCoordinator::publish_compact_and_complete(repository, runtime, freeze, plan)
+        .await
+        .map(|_| ())
+}
+
+fn map_compact_publication_error(error: CompactPublicationError<Error>) -> Error {
+    match error {
+        CompactPublicationError::Repository(error) => map_publication_repository_error(error),
+        CompactPublicationError::Runtime(error) => error,
+    }
+}
+
 fn map_publication_repository_error(error: RepositoryError) -> Error {
     match error {
-        RepositoryError::InvalidPublicationJournal => Error::InvalidPublicationJournal,
+        RepositoryError::InvalidPublicationJournal | RepositoryError::InvalidCompactManifest => {
+            Error::InvalidPublicationJournal
+        }
         RepositoryError::StaleIndex { .. } => Error::RecoveryIndexConflict,
         RepositoryError::StaleHead => Error::RefConflict,
         RepositoryError::ManagedContentConflict => Error::ManagedWorktreeConflict,
+        RepositoryError::PublicationPending => Error::PublicationPending,
+        RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
     }
 }
@@ -892,6 +988,8 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_foundation_v1::{CanonicalValue, OvbRaw};
+    use orna_repository_v1::{CompactManifest, CompactSegment, CompactSegmentRole, Uuid};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -931,12 +1029,278 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(temp.path(), &["config", "user.name", "Storage test"]);
+        git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
+    }
+
+    fn decode_base64(value: &str) -> Vec<u8> {
+        fn digit(byte: u8) -> u8 {
+            match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => 0,
+                _ => panic!("invalid fixture encoding"),
+            }
+        }
+
+        let bytes = value.as_bytes();
+        let (chunks, remainder) = bytes.as_chunks::<4>();
+        assert!(remainder.is_empty());
+        let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
+        for chunk in chunks {
+            let word = (u32::from(digit(chunk[0])) << 18)
+                | (u32::from(digit(chunk[1])) << 12)
+                | (u32::from(digit(chunk[2])) << 6)
+                | u32::from(digit(chunk[3]));
+            decoded.push((word >> 16) as u8);
+            if chunk[2] != b'=' {
+                decoded.push((word >> 8) as u8);
+            }
+            if chunk[3] != b'=' {
+                decoded.push(word as u8);
+            }
+        }
+        decoded
+    }
+
+    fn compact_columns() -> Vec<u8> {
+        let field_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+        CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec())),
+            )]),
+            OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field_id.simple()))]),
+            OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
+            OvbRaw::Text("int64".to_owned()),
+            OvbRaw::Array(Vec::new()),
+        ])]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn compact_runtime_plan(
+        repository: &Repository,
+        freeze: &PublicationFreeze,
+    ) -> CompactPublicationPlan {
+        const PARQUET: &str = "UEFSMRUGFQoVChXq3ovdBUwVAhUAFQIVChUAFQASAACAAgQBAhkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTYWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklBgoZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY2FkImCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABZ8FRQWPhU+ABY2FgImCBZCFAAAGXwYDG9ybmEucHJvZmlsZRgSY29tcGFjdC1zdG9yYWdlLXYxABgKb3JuYS50YWJsZRgkMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxABgSb3JuYS5zY2hlbWEuc2hhMjU2GEAwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3ABgPb3JuYS5zY2hlbWEub3ZiGARBQT09ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAARgIAAFBBUjE=";
+        let table = Uuid::from_u128(1);
+        let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+        let segment_path = ManagedPath::new(format!(
+            ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        ))
+        .unwrap();
+        let segment = CompactSegment::new(
+            segment_id,
+            CompactSegmentRole::Data,
+            [7; 32],
+            "test-encoder-v1",
+            segment_path,
+            decode_base64(PARQUET),
+            1u64.to_be_bytes().to_vec(),
+            1u64.to_be_bytes().to_vec(),
+            1,
+            compact_columns(),
+            true,
+            false,
+        )
+        .unwrap();
+        let head = repository.head().unwrap().unwrap();
+        repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(table, [7; 32]),
+                freeze.intent_id,
+                freeze.checkpoint.digest,
+                &[segment],
+                "orna: publish compact runtime data",
+            )
+            .unwrap()
+    }
+
+    async fn compact_runtime_unpublished_fixture() -> (
+        TempDir,
+        Repository,
+        RuntimeState,
+        PublicationFreeze,
+        CompactPublicationPlan,
+    ) {
+        let (temp, repository) = repository();
+        let runtime = RuntimeState::open(
+            &repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [71; 16],
+                repository_id: [72; 16],
+            },
+            [73; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([74; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    [75; 16],
+                    "Contact",
+                    b"compact row".to_vec(),
+                    Some(b"compact row".to_vec()),
+                )
+                .unwrap()],
+                [76; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [77; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [76; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let tail_context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &tail_context,
+                &[TableMutation::new(
+                    [78; 16],
+                    "Contact",
+                    b"Bob".to_vec(),
+                    Some(b"tail row".to_vec()),
+                )
+                .unwrap()],
+                [79; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let plan = compact_runtime_plan(&repository, &freeze);
+        (temp, repository, runtime, freeze, plan)
+    }
+
+    #[tokio::test]
+    async fn compact_production_entrypoint_publishes_and_completes_frozen_prefix() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+
+        complete_verified_compact_runtime_prefix(&repository, &runtime, &freeze, plan)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compact_coordinator_completion_consumes_only_the_frozen_prefix() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        RuntimePublicationCoordinator::publish_compact_and_complete(
+            &repository,
+            &runtime,
+            &freeze,
+            plan,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compact_restart_completion_reuses_the_witness_fence() {
+        let (_temp, repository, runtime, _freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+
+        RuntimePublicationCoordinator::recover(&repository, &runtime)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compact_witness_mismatch_preserves_journal_and_runtime_tail() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        let mismatched = PublicationFreeze {
+            intent_id: freeze.intent_id,
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: freeze.checkpoint.generation,
+                digest: [99; 32],
+                mutation_sequence: freeze.checkpoint.mutation_sequence,
+            },
+        };
+
+        assert_eq!(
+            RuntimePublicationCoordinator::publish_compact_and_complete(
+                &repository,
+                &runtime,
+                &mismatched,
+                plan,
+            )
+            .await,
+            Err(Error::InvalidTransition)
+        );
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
+        assert!(repository.read_publication_journal().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn compact_ref_drift_after_runtime_commit_preserves_journal_and_tail() {
+        let (temp, repository, runtime, freeze, plan) = compact_runtime_unpublished_fixture().await;
+        let runtime_ref = &runtime;
+        let freeze_ref = &freeze;
+        let temp_ref = &temp;
+        let result = repository
+            .publish_and_complete_compact(plan, |operation| async move {
+                let commit =
+                    PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
+                        .map_err(|_| Error::InvalidObjectId)?;
+                runtime_ref
+                    .complete_publication(freeze_ref, &commit)
+                    .await
+                    .map_err(|_| Error::RuntimeUnavailable)?;
+                fs::write(temp_ref.path().join("ordinary.txt"), "native writer\n").unwrap();
+                git(temp_ref.path(), &["add", "ordinary.txt"]);
+                git(temp_ref.path(), &["commit", "-m", "native writer"]);
+                Ok::<(), Error>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(CompactPublicationError::Repository(
+                orna_repository_v1::RepositoryError::StaleHead
+            ))
+        ));
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert!(repository.read_publication_journal().unwrap().is_some());
     }
 
     fn path() -> LoosePath {
@@ -1114,6 +1478,23 @@ mod tests {
             )
             .await
             .unwrap();
+        let tail_context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &tail_context,
+                &[TableMutation::new(
+                    [8; 16],
+                    "Contact",
+                    b"Bob".to_vec(),
+                    Some(b"later row".to_vec()),
+                )
+                .unwrap()],
+                [9; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
         let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
@@ -1134,7 +1515,7 @@ mod tests {
         .unwrap();
         plan.publish(&repository).unwrap();
         plan.complete(&repository, &runtime, &freeze).await.unwrap();
-        assert!(runtime.pending().await.unwrap().is_empty());
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
         let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
         assert_eq!(
