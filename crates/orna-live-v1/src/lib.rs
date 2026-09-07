@@ -471,6 +471,17 @@ impl LiveHost {
             .map_err(map_serving)
     }
 
+    fn validate_delete(&self, request: &DeleteRequest<'_>) -> Result<()> {
+        self.security
+            .validate_attach(
+                session_id(request.id),
+                request.origin,
+                &request.credential.security,
+                request.now,
+            )
+            .map_err(map_boundary)
+    }
+
     /// Rotates an authenticated session credential across both security and
     /// serving state without changing its attachment. HTTP resume uses this
     /// before the later cookie-authenticated WebSocket upgrade.
@@ -2362,20 +2373,30 @@ struct UpgradeAdmission {
     origin: Origin,
     credential: SessionCredential,
     attachment: [u8; 16],
-    now: u64,
     response: WireResponse,
 }
 
-/// A validated WebSocket handshake waiting for the host to deliver its 101
-/// response. The attachment is committed only after that delivery succeeds.
-pub struct WebSocketUpgrade {
+struct PendingUpgrade {
+    reservation: u128,
+    deadline: u64,
     admission: UpgradeAdmission,
+}
+
+/// An opaque, session-scoped WebSocket admission reservation.
+///
+/// A reservation authorizes exactly one later commit. It leaves the current
+/// attachment unchanged until that commit succeeds, and callers must abort it
+/// if delivery of its handshake response does not succeed.
+#[derive(Debug)]
+pub struct WebSocketUpgrade {
+    reservation: u128,
+    response: WireResponse,
 }
 
 impl WebSocketUpgrade {
     #[must_use]
     pub const fn response(&self) -> &WireResponse {
-        &self.admission.response
+        &self.response
     }
 }
 
@@ -2386,6 +2407,8 @@ pub struct LiveTransport {
     host: LiveHost,
     limits: TransportLimits,
     sessions: BTreeMap<[u8; 16], SessionRecord>,
+    pending_upgrades: BTreeMap<[u8; 16], PendingUpgrade>,
+    next_upgrade_reservation: u128,
     retired_attachments: VecDeque<[u8; 16]>,
 }
 
@@ -2469,6 +2492,8 @@ impl LiveTransport {
             limits: limits.validate(host.limits.protocol)?,
             host,
             sessions: BTreeMap::new(),
+            pending_upgrades: BTreeMap::new(),
+            next_upgrade_reservation: 0,
             retired_attachments: VecDeque::new(),
         })
     }
@@ -2479,6 +2504,23 @@ impl LiveTransport {
     /// socket task without changing session-owned work.
     pub fn take_retired_attachments(&mut self) -> Vec<[u8; 16]> {
         self.retired_attachments.drain(..).collect()
+    }
+
+    /// Expires handshake reservations whose bounded delivery window has
+    /// elapsed. Expiration never changes the current attachment; it publishes
+    /// only the candidate identity so the executable owner can cancel and
+    /// join that worker before continuing.
+    pub fn expire_pending_websocket_upgrades(&mut self, now: u64) {
+        let expired = self
+            .pending_upgrades
+            .iter()
+            .filter_map(|(session, pending)| (now >= pending.deadline).then_some(*session))
+            .collect::<Vec<_>>();
+        for session in expired {
+            if let Some(pending) = self.pending_upgrades.remove(&session) {
+                self.queue_retired_attachment(pending.admission.attachment);
+            }
+        }
     }
 
     /// Idempotently closes one attachment through the transport-owned host
@@ -2507,6 +2549,7 @@ impl LiveTransport {
         issuer: &mut impl LiveCredentialIssuer,
         deletion: &mut impl DeletionAdapter,
     ) -> WireResponse {
+        self.expire_pending_websocket_upgrades(now);
         if request.body.len() > self.limits.max_request_bytes
             || header_size(&request.headers) > self.limits.max_header_bytes
         {
@@ -2580,13 +2623,20 @@ impl LiveTransport {
                 let Some(token) = decode_token(&token) else {
                     return wire_error(400, "live.malformed_request");
                 };
-                let Some(record) = self.sessions.get_mut(&id) else {
-                    return wire_error(410, "live.expired");
-                };
                 let supplied = SessionCredential {
                     security: OpaqueCredential::from_bytes(token),
                     serving: ServingCredential::new(token),
                 };
+                let Some(record) = self.sessions.get(&id) else {
+                    return wire_error(410, "live.expired");
+                };
+                if record.credential != supplied {
+                    return wire_error(410, "live.expired");
+                }
+                let metadata = record.metadata.clone();
+                if self.pending_upgrades.contains_key(&id) {
+                    return wire_error(503, "live.unavailable");
+                }
                 match self
                     .host
                     .rotate_and_retire(id, &origin, &supplied, now, issuer)
@@ -2594,13 +2644,17 @@ impl LiveTransport {
                 {
                     Ok((credential, retired)) => {
                         if let Some(attachment) = retired {
-                            self.retired_attachments.push_back(attachment);
+                            self.queue_retired_attachment(attachment);
                         }
                         let Some(replacement) = issuer.last_issued() else {
                             return wire_error(503, "live.unavailable");
                         };
-                        record.credential = credential;
-                        session_response(&record.metadata, replacement, self.limits, 200)
+                        if let Some(record) = self.sessions.get_mut(&id) {
+                            record.credential = credential;
+                        } else {
+                            return wire_error(410, "live.expired");
+                        }
+                        session_response(&metadata, replacement, self.limits, 200)
                     }
                     Err(Error::Closed | Error::Denied) => wire_error(410, "live.expired"),
                     Err(error) => host_error(error),
@@ -2625,28 +2679,33 @@ impl LiveTransport {
                 {
                     return wire_error(410, "live.expired");
                 }
+                let delete_request = DeleteRequest {
+                    id,
+                    origin: &origin,
+                    credential: &credential,
+                    now,
+                };
+                if let Err(error) = self.host.validate_delete(&delete_request) {
+                    return host_error(error);
+                }
                 let retired = self
                     .host
                     .attachments
                     .iter()
                     .find_map(|(attachment, session)| (*session == id).then_some(*attachment));
-                match self
-                    .host
-                    .delete(
-                        DeleteRequest {
-                            id,
-                            origin: &origin,
-                            credential: &credential,
-                            now,
-                        },
-                        deletion,
-                    )
-                    .await
-                {
+                let pending = self
+                    .pending_upgrades
+                    .remove(&id)
+                    .map(|pending| pending.admission.attachment);
+                let deleted = self.host.delete(delete_request, deletion).await;
+                if let Some(attachment) = retired {
+                    self.queue_retired_attachment(attachment);
+                }
+                if let Some(attachment) = pending {
+                    self.queue_retired_attachment(attachment);
+                }
+                match deleted {
                     Ok(()) => {
-                        if let Some(attachment) = retired {
-                            self.retired_attachments.push_back(attachment);
-                        }
                         self.sessions.remove(&id);
                         WireResponse {
                             status: 204,
@@ -2658,6 +2717,12 @@ impl LiveTransport {
                 }
             }
             _ => wire_error(400, "live.malformed_request"),
+        }
+    }
+
+    fn queue_retired_attachment(&mut self, attachment: [u8; 16]) {
+        if !self.retired_attachments.contains(&attachment) {
+            self.retired_attachments.push_back(attachment);
         }
     }
 
@@ -3010,8 +3075,8 @@ impl LiveTransport {
             }
         };
         let now = clock();
-        let admission = match self.prepare_upgrade(request.request(), attachment, now) {
-            Ok(admission) => admission,
+        let upgrade = match self.begin_websocket_upgrade(request.request(), attachment, now) {
+            Ok(upgrade) => upgrade,
             Err(response) => {
                 let encoded = response
                     .encode_http(self.limits)
@@ -3022,17 +3087,29 @@ impl LiveTransport {
                 return Ok(());
             }
         };
-        let response = admission.response.clone();
-        let encoded = response
-            .encode_http(self.limits)
-            .map_err(HttpConnectionError::Encode)
-            .map_err(HttpIoError::Transport)?;
-        await_http_io(writer.write_all(&encoded), cancellation, HttpIoError::Write).await?;
-        await_http_io(writer.flush(), cancellation, HttpIoError::Write).await?;
+        let response = upgrade.response().clone();
+        let encoded = match response.encode_http(self.limits) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.abort_websocket_upgrade(&upgrade);
+                return Err(HttpIoError::Transport(HttpConnectionError::Encode(error)));
+            }
+        };
+        if let Err(error) =
+            await_http_io(writer.write_all(&encoded), cancellation, HttpIoError::Write).await
+        {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(error);
+        }
+        if let Err(error) = await_http_io(writer.flush(), cancellation, HttpIoError::Write).await {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(error);
+        }
         if response.status != 101 {
+            self.abort_websocket_upgrade(&upgrade);
             return Ok(());
         }
-        self.commit_upgrade(admission)
+        self.commit_websocket_upgrade(upgrade, clock())
             .await
             .map_err(HttpConnectionError::Protocol)
             .map_err(HttpIoError::Transport)?;
@@ -3130,33 +3207,72 @@ impl LiveTransport {
         attachment: [u8; 16],
         now: u64,
     ) -> WireResponse {
-        let admission = match self.prepare_upgrade(&request, attachment, now) {
-            Ok(admission) => admission,
+        let upgrade = match self.begin_websocket_upgrade(&request, attachment, now) {
+            Ok(upgrade) => upgrade,
             Err(response) => return response,
         };
-        match self.commit_upgrade(admission).await {
+        match self.commit_websocket_upgrade(upgrade, now).await {
             Ok(response) => response,
             Err(error) => host_error(error),
         }
     }
 
-    /// Validates a WebSocket handshake without changing session state.
+    /// Begins a session-scoped WebSocket admission reservation.
     ///
-    /// The returned value must be committed after the host has successfully
-    /// delivered its 101 response. This keeps failed socket writes from
-    /// creating an attachment that has no live owner.
+    /// A pending reservation leaves any current attachment unchanged. A
+    /// competing resume or WebSocket begin for the same session is rejected
+    /// until this reservation is committed or aborted. Other sessions remain
+    /// independently admissible.
     ///
     /// # Errors
     ///
     /// Returns the redacted handshake response when validation fails.
-    pub fn prepare_websocket_upgrade(
-        &self,
+    pub fn begin_websocket_upgrade(
+        &mut self,
         request: &WireRequest,
         attachment: [u8; 16],
         now: u64,
     ) -> std::result::Result<WebSocketUpgrade, WireResponse> {
-        self.prepare_upgrade(request, attachment, now)
-            .map(|admission| WebSocketUpgrade { admission })
+        self.expire_pending_websocket_upgrades(now);
+        let admission = self.prepare_upgrade(request, attachment, now)?;
+        if self.pending_upgrades.contains_key(&admission.id) {
+            return Err(wire_error(503, "live.unavailable"));
+        }
+        let Some(reservation) = self.allocate_reservation() else {
+            return Err(wire_error(503, "live.unavailable"));
+        };
+        let deadline = now
+            .saturating_add(self.limits.lease_ms)
+            .min(self.sessions[&admission.id].metadata.expires_at);
+        if deadline <= now {
+            return Err(wire_error(410, "live.expired"));
+        }
+        let response = admission.response.clone();
+        self.pending_upgrades.insert(
+            admission.id,
+            PendingUpgrade {
+                reservation,
+                deadline,
+                admission,
+            },
+        );
+        Ok(WebSocketUpgrade {
+            reservation,
+            response,
+        })
+    }
+
+    /// Idempotently aborts a pending WebSocket admission reservation.
+    ///
+    /// Aborting never changes a current attachment. It is safe to call after a
+    /// prior abort or after commit has consumed the reservation.
+    pub fn abort_websocket_upgrade(&mut self, upgrade: &WebSocketUpgrade) -> bool {
+        let Some(session) = self.pending_upgrades.iter().find_map(|(session, pending)| {
+            (pending.reservation == upgrade.reservation).then_some(*session)
+        }) else {
+            return false;
+        };
+        self.pending_upgrades.remove(&session).is_some()
     }
 
     /// Commits a previously validated handshake after its 101 response was
@@ -3168,8 +3284,30 @@ impl LiveTransport {
     pub async fn commit_websocket_upgrade(
         &mut self,
         upgrade: WebSocketUpgrade,
+        now: u64,
     ) -> Result<WireResponse> {
-        self.commit_upgrade(upgrade.admission).await
+        self.expire_pending_websocket_upgrades(now);
+        let session = self
+            .pending_upgrades
+            .iter()
+            .find_map(|(session, pending)| {
+                (pending.reservation == upgrade.reservation).then_some(*session)
+            })
+            .ok_or(Error::Closed)?;
+        let pending = self
+            .pending_upgrades
+            .remove(&session)
+            .ok_or(Error::Closed)?;
+        if pending.reservation != upgrade.reservation {
+            return Err(Error::Closed);
+        }
+        self.commit_upgrade(pending.admission, now).await
+    }
+
+    fn allocate_reservation(&mut self) -> Option<u128> {
+        let reservation = self.next_upgrade_reservation;
+        self.next_upgrade_reservation = reservation.checked_add(1)?;
+        Some(reservation)
     }
 
     fn prepare_upgrade(
@@ -3235,7 +3373,6 @@ impl LiveTransport {
             origin,
             credential,
             attachment,
-            now,
             response: WireResponse {
                 status: 101,
                 headers: vec![
@@ -3254,7 +3391,22 @@ impl LiveTransport {
         })
     }
 
-    async fn commit_upgrade(&mut self, admission: UpgradeAdmission) -> Result<WireResponse> {
+    async fn commit_upgrade(
+        &mut self,
+        admission: UpgradeAdmission,
+        now: u64,
+    ) -> Result<WireResponse> {
+        let record = self.sessions.get(&admission.id).ok_or(Error::Closed)?;
+        if record.credential != admission.credential {
+            return Err(Error::Denied);
+        }
+        self.host.validate_resume(&ResumeRequest {
+            id: admission.id,
+            origin: &admission.origin,
+            credential: &admission.credential,
+            attachment: admission.attachment,
+            now,
+        })?;
         let outcome = self
             .host
             .resume(ResumeRequest {
@@ -3262,11 +3414,11 @@ impl LiveTransport {
                 origin: &admission.origin,
                 credential: &admission.credential,
                 attachment: admission.attachment,
-                now: admission.now,
+                now,
             })
             .await?;
         if let AttachOutcome::Replaced(previous) = outcome {
-            self.retired_attachments.push_back(previous.as_bytes());
+            self.queue_retired_attachment(previous.as_bytes());
         }
         Ok(admission.response)
     }
