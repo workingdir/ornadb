@@ -431,8 +431,8 @@ impl From<WriterLease> for RequestOwner {
 
 /// The retained meaning of a recovered orphaned request. Protocol state stays
 /// `orphaned`; the serving layer maps this durable distinction to diagnostics.
-/// `RollbackProven` is reserved for a future durable rollback receipt; the
-/// current runtime emits only `ExternalEffectsUncertain` during recovery.
+/// `RollbackProven` requires a validated durable rollback receipt; otherwise
+/// recovery retains `ExternalEffectsUncertain`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryDisposition {
     RollbackProven,
@@ -4346,6 +4346,30 @@ impl RuntimeState {
         fence: WriterLease,
         outcome: TerminalOutcome,
     ) -> Result<RecoveredRequest, RuntimeError> {
+        self.recover_running_request_with_outcomes(
+            identity,
+            fingerprint,
+            lost_owner,
+            fence,
+            outcome.clone(),
+            outcome,
+        )
+        .await
+    }
+
+    /// Fences a known-lost activation and atomically retains the terminal
+    /// payload matching its durable recovery disposition. The caller supplies
+    /// opaque payloads for the two distinct recovery cases; the fenced owner
+    /// transaction chooses and stores exactly one after validating evidence.
+    pub async fn recover_running_request_with_outcomes(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        lost_owner: RequestOwner,
+        fence: WriterLease,
+        rollback_proven_outcome: TerminalOutcome,
+        external_effects_uncertain_outcome: TerminalOutcome,
+    ) -> Result<RecoveredRequest, RuntimeError> {
         validate_request_identity(identity)?;
         validate_id(lost_owner.owner_id)?;
         validate_id(fence.owner_id)?;
@@ -4377,6 +4401,10 @@ impl RuntimeState {
             RecoveryDisposition::RollbackProven
         } else {
             RecoveryDisposition::ExternalEffectsUncertain
+        };
+        let outcome = match disposition {
+            RecoveryDisposition::RollbackProven => rollback_proven_outcome,
+            RecoveryDisposition::ExternalEffectsUncertain => external_effects_uncertain_outcome,
         };
         let retained_effect_evidence = if disposition == RecoveryDisposition::RollbackProven {
             1
@@ -11823,17 +11851,19 @@ mod tests {
         );
         let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
         let recovered = state
-            .recover_running_request(
+            .recover_running_request_with_outcomes(
                 identity,
                 fingerprint,
                 RequestOwner::from(owner),
                 fence,
                 outcome(12),
+                outcome(13),
             )
             .await
             .unwrap();
         assert_eq!(recovered.disposition, RecoveryDisposition::RollbackProven);
         assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(recovered.status.terminal_outcome, Some(outcome(12)));
         assert_eq!(
             state
                 .recover_running_request(
@@ -11863,6 +11893,15 @@ mod tests {
         assert_eq!(
             reopened.committed_table_row("books", &[1]).await.unwrap(),
             None
+        );
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(12))
         );
         assert_eq!(
             reopened
@@ -11908,17 +11947,39 @@ mod tests {
         let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
         assert_eq!(
             state
-                .recover_running_request(
+                .recover_running_request_with_outcomes(
                     identity,
                     fingerprint,
                     RequestOwner::from(owner),
                     fence,
                     outcome(12),
+                    outcome(13),
                 )
                 .await
                 .unwrap()
                 .disposition,
             RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(13))
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(13))
         );
     }
 
