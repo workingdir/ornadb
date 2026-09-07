@@ -161,6 +161,46 @@ fn parsed_pipeline_count_call_in_a_direct_function_body_observes_activation_writ
 }
 
 #[test]
+fn parsed_filter_count_pipeline_observes_candidate_rows_and_read_your_writes() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "nested") | count == 1; assert Note | filter(note => note.text == "second") | count() == 1;"#,
+    ));
+
+    assert!(matches!(outcome, StageOutcome::Passed));
+    assert!(runtime
+        .committed_row("Note", &Value::int(7.into()))
+        .is_some());
+    assert!(runtime
+        .committed_row("Note", &Value::int(8.into()))
+        .is_some());
+}
+
+#[test]
+fn parsed_filter_count_failure_rolls_back_candidate_rows() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(
+        r#"Note.insert({ id: 8, text: "second" }); assert Note | filter(note => note.text == "second") | count == 1; assert false;"#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+    assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
+}
+
+#[test]
+fn parsed_undocumented_table_count_where_member_fails_closed() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&source(r#"Note.count_where("text", "nested");"#));
+
+    assert!(matches!(outcome, StageOutcome::Failed(_)));
+    assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
+}
+
+#[test]
 fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&source(
@@ -194,7 +234,7 @@ fn parsed_pipeline_count_read_your_writes_succeeds_before_a_distinct_failure_rol
 #[test]
 fn parsed_unsupported_relation_pipelines_fail_closed() {
     for pipeline in [
-        r#"Note | filter(note => note.id == 7) | count"#,
+        r#"Note | filter(note => note.id != 7) | count"#,
         r#"Note | map(note => note.text)"#,
     ] {
         let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
