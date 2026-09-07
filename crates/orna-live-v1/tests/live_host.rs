@@ -2420,6 +2420,129 @@ fn frames_are_bounded_binary_canonical_and_cancellable() {
 }
 
 #[test]
+fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [86; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = block_on(host.create(
+        CreateRequest {
+            id: [1; 16],
+            origin: origin(),
+            expires_at: 3,
+            now: 0,
+            subscribe: &subscribe(),
+        },
+        &mut issuer,
+    ))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [85; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = [84; 16];
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [85; 16],
+            3,
+            Frame::Binary(eval([1; 16], request, "1")),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    );
+    assert_eq!(application.calls, 0);
+    assert!(
+        block_on(
+            open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [1; 16],
+                request_id: request,
+            })
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [85; 16],
+            4,
+            Frame::Binary(eval([1; 16], request, "1")),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    );
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn replaced_attachment_cannot_admit_a_frame_or_disconnect_its_replacement() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [83; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [82; 16],
+        now: 1,
+    }))
+    .unwrap();
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [81; 16],
+        now: 2,
+    }))
+    .unwrap();
+
+    let stale_request = [80; 16];
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [82; 16],
+            3,
+            Frame::Binary(eval([1; 16], stale_request, "1")),
+            &mut application,
+        )),
+        Err(Error::Closed)
+    );
+    assert_eq!(application.calls, 0);
+    assert!(
+        block_on(
+            open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [1; 16],
+                request_id: stale_request,
+            })
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [81; 16],
+            3,
+            Frame::Binary(eval([1; 16], [79; 16], "1")),
+            &mut application,
+        ))
+        .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Accepted)
+    );
+    assert_eq!(application.calls, 1);
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn rejected_non_durable_cancellation_callback_does_not_cancel_the_target() {
     let mut host = host();
     let mut issuer = Issuer(1, None);

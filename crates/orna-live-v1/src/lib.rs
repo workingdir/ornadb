@@ -1067,6 +1067,23 @@ impl LiveHost {
         application: &mut impl LiveApplication,
     ) -> Result<DispatchOutcome> {
         let session = *self.attachments.get(&attachment).ok_or(Error::Closed)?;
+        if let Err(error) = self.security.validate_active_attachment(
+            session_id(session),
+            attachment_id(attachment),
+            now,
+        ) {
+            // Invalidate the local operational handle before any frame is
+            // decoded or admitted. A worker observing this error cannot keep
+            // using an expired or replaced attachment.
+            self.attachments.remove(&attachment);
+            // A replacement can already own this session's serving state.
+            // Only the last local attachment may disconnect that state; an
+            // obsolete socket must never disconnect its replacement.
+            if !self.attachments.values().any(|owner| *owner == session) {
+                let _ = self.serving.disconnect(session);
+            }
+            return Err(map_boundary(error));
+        }
         match frame {
             Frame::Close => {
                 self.attachments.remove(&attachment);
