@@ -1,14 +1,16 @@
 //! Bounded, deterministic `orna.present.v1` envelopes.
 //!
-//! Rich Present and Patch semantics are structurally validated here. Applying
-//! patches and renderer-specific interpretation remain responsibilities of a
-//! higher presentation layer.
+//! Present and Patch values are structurally validated here and remain opaque
+//! to callers. This crate owns bounded typed patch transformation; the client
+//! presentation layer owns watch revisions, atomic publication and resync
+//! intent. Renderer-specific interpretation remains outside both layers.
 
 use std::{collections::BTreeMap, fmt};
 
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
-use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw};
+pub use orna_foundation_v1::CanonicalSnapshot;
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use sha2::{Digest, Sha256};
 
 pub const PROFILE: &str = "orna.present.v1";
@@ -249,6 +251,8 @@ enum Node {
     Map(Vec<(Node, Node)>),
     Tag(u64, Box<Node>),
 }
+
+type PresentProperties = Vec<(Node, Node)>;
 
 impl Envelope {
     pub fn encode(&self, limits: Limits) -> Result<Vec<u8>> {
@@ -802,11 +806,426 @@ impl PresentNode {
         validate_present(node)?;
         Ok(Self(ValueNode(node.clone())))
     }
+
+    /// Applies a patch list while enforcing negotiated resource limits before
+    /// and after every operation on the private tree.
+    ///
+    /// The returned tree is published by the presentation owner only after the
+    /// whole list succeeds. Keeping this operation here preserves the opaque
+    /// typed Present representation at the protocol boundary. Callers must
+    /// supply the limits negotiated for their live session; there is no
+    /// unbounded patch-application route.
+    pub fn apply_patches(&self, patches: &PatchList, limits: Limits) -> Result<Self> {
+        self.validate_with_limits(limits)?;
+        let mut next = self.0.0.clone();
+        for operation in array(&patches.0.0).ok_or(Error::InvalidValue)? {
+            apply_patch(&mut next, operation)?;
+            // Do not let a later operation hide an invalid intermediate tree
+            // from the atomic patch boundary.
+            let candidate = Self::decode(&next)?;
+            candidate.validate_with_limits(limits)?;
+        }
+        let result = Self::decode(&next)?;
+        result.validate_with_limits(limits)?;
+        Ok(result)
+    }
+
+    /// Validates the complete Present tree against negotiated protocol
+    /// resource limits without exposing its internal representation.
+    pub fn validate_with_limits(&self, limits: Limits) -> Result<()> {
+        limits.validate()?;
+        validate_present(&self.0.0)?;
+        let mut nodes = 0;
+        validate_bounded_node(&self.0.0, 0, &mut nodes, limits)?;
+        if encode_node(&self.0.0)?.len() > limits.max_message_bytes {
+            return Err(Error::Limit);
+        }
+        Ok(())
+    }
 }
 impl PatchList {
     fn decode(node: &Node) -> Result<Self> {
         validate_patches(node)?;
         Ok(Self(ValueNode(node.clone())))
+    }
+}
+
+#[derive(Clone)]
+enum PatchPathComponent {
+    Field(Node),
+    Relation(Node, Node),
+    Index(usize),
+    Key(Node),
+}
+
+fn apply_patch(root: &mut Node, operation: &Node) -> Result<()> {
+    let fields = array(operation).ok_or(Error::InvalidValue)?;
+    let opcode = u64_value(fields.first().ok_or(Error::InvalidValue)?)?;
+    match opcode {
+        0 if fields.len() == 3 => add_at(root, &path(&fields[1])?, fields[2].clone()),
+        1 if fields.len() == 2 => {
+            let _ = remove_at(root, &path(&fields[1])?)?;
+            Ok(())
+        }
+        2 if fields.len() == 3 => replace_at(root, &path(&fields[1])?, fields[2].clone()),
+        3 if fields.len() == 3 => {
+            let from = path(&fields[1])?;
+            let to = path(&fields[2])?;
+            if from.is_empty() || from.len() <= to.len() && from == to[..from.len()] {
+                return Err(Error::InvalidValue);
+            }
+            let value = remove_at(root, &from)?;
+            add_at(root, &to, value)
+        }
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn path(node: &Node) -> Result<Vec<PatchPathComponent>> {
+    array(node)
+        .ok_or(Error::InvalidValue)?
+        .iter()
+        .map(|component| {
+            let fields = array(component).ok_or(Error::InvalidValue)?;
+            match (
+                u64_value(fields.first().ok_or(Error::InvalidValue)?)?,
+                fields.len(),
+            ) {
+                (0, 2) if matches!(fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok() => {
+                    Ok(PatchPathComponent::Field(fields[1].clone()))
+                }
+                (1, 3) if uuid(&fields[1]).is_ok() && canonical_value(&fields[2]).is_ok() => Ok(
+                    PatchPathComponent::Relation(fields[1].clone(), fields[2].clone()),
+                ),
+                (2, 2) => Ok(PatchPathComponent::Index(
+                    usize::try_from(u64_value(&fields[1])?).map_err(|_| Error::InvalidValue)?,
+                )),
+                (3, 2) if canonical_value(&fields[1]).is_ok() => {
+                    Ok(PatchPathComponent::Key(fields[1].clone()))
+                }
+                _ => Err(Error::InvalidValue),
+            }
+        })
+        .collect()
+}
+
+impl PartialEq for PatchPathComponent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Field(left), Self::Field(right)) | (Self::Key(left), Self::Key(right)) => {
+                left == right
+            }
+            (Self::Relation(left_table, left_key), Self::Relation(right_table, right_key)) => {
+                left_table == right_table && left_key == right_key
+            }
+            (Self::Index(left), Self::Index(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+fn add_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<()> {
+    let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
+    let (properties, children) = present_parts_mut(root)?;
+    match head {
+        PatchPathComponent::Field(key) => {
+            if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
+            {
+                if tail.is_empty() {
+                    return Err(Error::InvalidValue);
+                }
+                return add_at(&mut properties[property_index].1, tail, value);
+            }
+            let selector = PatchPathComponent::Field(key.clone());
+            if let Some(child_index) = child_index(children, &selector) {
+                if tail.is_empty() {
+                    return Err(Error::InvalidValue);
+                }
+                return add_at(&mut children[child_index], tail, value);
+            }
+            if !tail.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            if matches!(&value, Node::Tag(60012, _)) {
+                present_value(&value)?;
+                if matches_selector(&value, &selector)? {
+                    children.push(value);
+                    return Ok(());
+                }
+                if is_record_field_value(&value)? {
+                    return Err(Error::InvalidValue);
+                }
+            }
+            add_property(properties, key, value)
+        }
+        PatchPathComponent::Index(index) => {
+            if tail.is_empty() {
+                present_value(&value)?;
+                if *index > children.len() {
+                    return Err(Error::InvalidValue);
+                }
+                children.insert(*index, value);
+                Ok(())
+            } else {
+                add_at(
+                    children.get_mut(*index).ok_or(Error::InvalidValue)?,
+                    tail,
+                    value,
+                )
+            }
+        }
+        selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
+            let existing = child_index(children, selector);
+            if tail.is_empty() {
+                present_value(&value)?;
+                if existing.is_some() || !matches_selector(&value, selector)? {
+                    return Err(Error::InvalidValue);
+                }
+                children.push(value);
+                Ok(())
+            } else {
+                add_at(
+                    children
+                        .get_mut(existing.ok_or(Error::InvalidValue)?)
+                        .ok_or(Error::InvalidValue)?,
+                    tail,
+                    value,
+                )
+            }
+        }
+    }
+}
+
+fn remove_at(root: &mut Node, path: &[PatchPathComponent]) -> Result<Node> {
+    let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
+    let (properties, children) = present_parts_mut(root)?;
+    match head {
+        PatchPathComponent::Field(key) => {
+            if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
+            {
+                if tail.is_empty() {
+                    return Ok(properties.remove(property_index).1);
+                }
+                return remove_at(&mut properties[property_index].1, tail);
+            }
+            let selector = PatchPathComponent::Field(key.clone());
+            let child_index = child_index(children, &selector).ok_or(Error::InvalidValue)?;
+            if tail.is_empty() {
+                return Ok(children.remove(child_index));
+            }
+            remove_at(&mut children[child_index], tail)
+        }
+        PatchPathComponent::Index(index) => {
+            if tail.is_empty() {
+                (*index < children.len())
+                    .then(|| children.remove(*index))
+                    .ok_or(Error::InvalidValue)
+            } else {
+                remove_at(children.get_mut(*index).ok_or(Error::InvalidValue)?, tail)
+            }
+        }
+        selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
+            let index = child_index(children, selector).ok_or(Error::InvalidValue)?;
+            if tail.is_empty() {
+                Ok(children.remove(index))
+            } else {
+                remove_at(&mut children[index], tail)
+            }
+        }
+    }
+}
+
+fn replace_at(root: &mut Node, path: &[PatchPathComponent], value: Node) -> Result<()> {
+    if path.is_empty() {
+        present_value(&value)?;
+        *root = value;
+        return Ok(());
+    }
+    let (head, tail) = path.split_first().ok_or(Error::InvalidValue)?;
+    let (properties, children) = present_parts_mut(root)?;
+    match head {
+        PatchPathComponent::Field(key) => {
+            if let Some(property_index) = properties.iter().position(|(current, _)| current == key)
+            {
+                let child = &mut properties[property_index].1;
+                if tail.is_empty() {
+                    canonical_value(&value)?;
+                    *child = value;
+                    return Ok(());
+                }
+                return replace_at(child, tail, value);
+            }
+            let selector = PatchPathComponent::Field(key.clone());
+            let child_index = child_index(children, &selector).ok_or(Error::InvalidValue)?;
+            let child = &mut children[child_index];
+            if tail.is_empty() {
+                present_value(&value)?;
+                if !matches_selector(&value, &selector)? {
+                    return Err(Error::InvalidValue);
+                }
+                *child = value;
+                return Ok(());
+            }
+            replace_at(child, tail, value)
+        }
+        PatchPathComponent::Index(index) => {
+            let child = children.get_mut(*index).ok_or(Error::InvalidValue)?;
+            if tail.is_empty() {
+                present_value(&value)?;
+                *child = value;
+                Ok(())
+            } else {
+                replace_at(child, tail, value)
+            }
+        }
+        selector @ (PatchPathComponent::Relation(_, _) | PatchPathComponent::Key(_)) => {
+            let index = child_index(children, selector).ok_or(Error::InvalidValue)?;
+            let child = children.get_mut(index).ok_or(Error::InvalidValue)?;
+            if tail.is_empty() {
+                present_value(&value)?;
+                if !matches_selector(&value, selector)? {
+                    return Err(Error::InvalidValue);
+                }
+                *child = value;
+                Ok(())
+            } else {
+                replace_at(child, tail, value)
+            }
+        }
+    }
+}
+
+fn present_parts_mut(node: &mut Node) -> Result<(&mut PresentProperties, &mut Vec<Node>)> {
+    let Node::Tag(60012, body) = node else {
+        return Err(Error::InvalidValue);
+    };
+    let Node::Array(fields) = body.as_mut() else {
+        return Err(Error::InvalidValue);
+    };
+    if fields.len() != 4 {
+        return Err(Error::InvalidValue);
+    }
+    let (_, tail) = fields.split_at_mut(2);
+    let (properties_field, children_field) = tail.split_at_mut(1);
+    let Node::Map(properties) = &mut properties_field[0] else {
+        return Err(Error::InvalidValue);
+    };
+    let Node::Array(children) = &mut children_field[0] else {
+        return Err(Error::InvalidValue);
+    };
+    Ok((properties, children))
+}
+
+fn present_value(node: &Node) -> Result<()> {
+    PresentNode::decode(node).map(|_| ())
+}
+
+fn add_property(properties: &mut PresentProperties, key: &Node, value: Node) -> Result<()> {
+    canonical_value(&value)?;
+    if properties.iter().any(|(current, _)| current == key) {
+        return Err(Error::InvalidValue);
+    }
+    let key_bytes = encode_node(key)?;
+    let mut insertion = properties.len();
+    for (index, (current, _)) in properties.iter().enumerate() {
+        if encode_node(current)? > key_bytes {
+            insertion = index;
+            break;
+        }
+    }
+    properties.insert(insertion, (key.clone(), value));
+    Ok(())
+}
+
+fn validate_bounded_node(
+    node: &Node,
+    depth: usize,
+    nodes: &mut usize,
+    limits: Limits,
+) -> Result<()> {
+    if depth > limits.max_depth || *nodes >= limits.max_nodes {
+        return Err(Error::Limit);
+    }
+    *nodes += 1;
+    match node {
+        Node::Array(values) => {
+            if values.len() > limits.max_collection_items {
+                return Err(Error::Limit);
+            }
+            for value in values {
+                validate_bounded_node(value, depth + 1, nodes, limits)?;
+            }
+        }
+        Node::Map(values) => {
+            if values.len() > limits.max_collection_items {
+                return Err(Error::Limit);
+            }
+            for (key, value) in values {
+                validate_bounded_node(key, depth + 1, nodes, limits)?;
+                validate_bounded_node(value, depth + 1, nodes, limits)?;
+            }
+        }
+        Node::Tag(_, value) => validate_bounded_node(value, depth + 1, nodes, limits)?,
+        Node::Null
+        | Node::Bool(_)
+        | Node::Int(_)
+        | Node::Float(_)
+        | Node::Bytes(_)
+        | Node::Text(_) => {}
+    }
+    Ok(())
+}
+
+fn child_index(children: &[Node], selector: &PatchPathComponent) -> Option<usize> {
+    children
+        .iter()
+        .position(|child| matches_selector(child, selector).unwrap_or(false))
+}
+
+fn is_record_field_value(node: &Node) -> Result<bool> {
+    let Node::Tag(60012, body) = node else {
+        return Ok(false);
+    };
+    let Node::Array(fields) = body.as_ref() else {
+        return Err(Error::InvalidValue);
+    };
+    let key = fields.get(1).ok_or(Error::InvalidValue)?;
+    Ok(matches!(
+        key,
+        Node::Array(parts) if parts.len() == 2
+            && u64_value(&parts[0]).ok() == Some(0)
+    ))
+}
+
+fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> {
+    let Node::Tag(60012, body) = node else {
+        return Err(Error::InvalidValue);
+    };
+    let Node::Array(fields) = body.as_ref() else {
+        return Err(Error::InvalidValue);
+    };
+    let key = fields.get(1).ok_or(Error::InvalidValue)?;
+    match selector {
+        PatchPathComponent::Field(expected) => Ok(matches!(
+            key,
+            Node::Array(parts) if parts.len() == 2
+                && u64_value(&parts[0]).ok() == Some(0)
+                && parts[1] == *expected
+        )),
+        PatchPathComponent::Relation(table, primary_key) => Ok(matches!(
+            key,
+            Node::Array(parts) if parts.len() == 3
+                && u64_value(&parts[0]).ok() == Some(1)
+                && parts[1] == *table
+                && parts[2] == *primary_key
+        )),
+        PatchPathComponent::Key(expected) => Ok(matches!(
+            key,
+            Node::Array(parts) if parts.len() == 2
+                && u64_value(&parts[0]).ok() == Some(3)
+                && parts[1] == *expected
+        )),
+        _ => Err(Error::InvalidValue),
     }
 }
 impl Diagnostic {
@@ -864,7 +1283,7 @@ fn validate_path(node: &Node) -> Result<()> {
         let a = array(component).ok_or(Error::InvalidValue)?;
         let kind = u64_value(a.first().ok_or(Error::InvalidValue)?)?;
         match kind {
-            0 if a.len() == 2 && matches!(&a[1], Node::Text(_) | Node::Tag(37, _)) => {}
+            0 if a.len() == 2 && (matches!(&a[1], Node::Text(_)) || uuid(&a[1]).is_ok()) => {}
             1 if a.len() == 3 && uuid(&a[1]).is_ok() => {
                 let _ = canonical_value(&a[2])?;
             }
