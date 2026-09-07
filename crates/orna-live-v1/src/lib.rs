@@ -734,12 +734,53 @@ impl LiveHost {
             .map_err(map_boundary)?;
         self.attachments.retain(|_, owner| *owner != request.id);
 
+        // Durable reservation has its own transaction and is not covered by
+        // the in-memory attachment fence. Mark the session closed for new
+        // durable admission under the same writer owner used to cancel its
+        // requests, before taking the durable work snapshot.
+        let deletion_lease = if self.runtime.is_some() {
+            let lease = match self.writer_lease().await {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let _ = self.finish_failed_delete(request.id);
+                    return Err(error);
+                }
+            };
+            match self
+                .runtime
+                .as_ref()
+                .ok_or(Error::RuntimeUnavailable)?
+                .begin_session_deletion(request.id, lease)
+                .await
+            {
+                Ok(()) => Some(lease),
+                Err(error) => {
+                    let _ = self.finish_failed_delete(request.id);
+                    return Err(map_runtime(&error));
+                }
+            }
+        } else {
+            None
+        };
+
         if self.drain_session(request.id, children).await.is_err() {
             // A failed join remains fail-closed. Do not invoke durable
             // deletion or manufacture success while child termination is
             // unproven.
             let _ = self.finish_failed_delete(request.id);
             return Err(Error::DeletionFailed);
+        }
+        if let Some(lease) = deletion_lease {
+            let result = self
+                .runtime
+                .as_ref()
+                .ok_or(Error::RuntimeUnavailable)?
+                .finish_session_deletion(request.id, lease)
+                .await;
+            if let Err(error) = result {
+                let _ = self.finish_failed_delete(request.id);
+                return Err(map_runtime(&error));
+            }
         }
         let deleted = self
             .security
@@ -812,6 +853,22 @@ impl LiveHost {
         if self.application_sessions.contains(&session) || !requests.is_empty() {
             let children = children.ok_or(Error::ApplicationDrainRequired)?;
             children.cancel_and_join_session(session, &requests).await?;
+        }
+
+        // The request enumeration above is only a snapshot. Recheck it after
+        // the child supervisor has joined: a live host must not turn a
+        // concurrent durable admission into an unobserved worker and then
+        // report deletion success. The session credential and attachments
+        // were already fenced before the first enumeration, so a nonempty
+        // result here is an incomplete cleanup boundary and fails closed.
+        if let Some(runtime) = &self.runtime
+            && !runtime
+                .unfinished_session_requests(session)
+                .await
+                .map_err(|error| map_runtime(&error))?
+                .is_empty()
+        {
+            return Err(Error::ApplicationDrainRequired);
         }
 
         let watches = self
@@ -2197,6 +2254,8 @@ fn map_serving(error: ServingError) -> Error {
 fn map_runtime(error: &RuntimeError) -> Error {
     match error {
         RuntimeError::RequestFingerprintMismatch => Error::RequestMismatch,
+        RuntimeError::SessionClosed => Error::Closed,
+        RuntimeError::SessionWorkActive => Error::ApplicationDrainRequired,
         _ => Error::RuntimeUnavailable,
     }
 }
