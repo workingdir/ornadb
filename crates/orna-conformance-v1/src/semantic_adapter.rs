@@ -2079,6 +2079,32 @@ impl TableEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[Value],
     ) -> Result<Option<Value>, EvaluationError> {
+        if matches!(
+            callee,
+            Expr::Field {
+                base,
+                name,
+                ..
+            } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+                && name == "filtered_count"
+        ) {
+            let [table, field, expected] = arguments else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let (OvbRaw::Text(table), OvbRaw::Text(field)) = (table.raw(), field.raw()) else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            if !self.key_fields.contains_key(table) {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let count = self
+                .activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+                .filter(|(_, row)| record_field(row, field).as_ref() == Some(expected))
+                .count();
+            return Ok(Some(Value::int(BigInt::from(count))));
+        }
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
@@ -2486,10 +2512,14 @@ fn admitted_transaction_module(
 }
 
 /// Materializes the narrow relation forms admitted by the durable transaction
-/// seam. `Table | filter(predicate) | one()` becomes a keyed lookup, and the
-/// terminal `Table | count` / `Table | count()` form becomes `Table.count()`.
-/// Both read from the active candidate relation; other relation operators stay
-/// unsupported rather than being materialized by this seam.
+/// seam. `Table | filter(predicate) | one()` becomes a keyed lookup,
+/// `Table | filter(row => row.field == value) | count` becomes an internal
+/// lazy candidate-relation count, and the terminal `Table | count` /
+/// `Table | count()` form becomes `Table.count()`. All read the active
+/// candidate relation; other relation operators stay unsupported rather than
+/// being materialized by this seam. The filtered form uses a ReplBinding AST
+/// marker which ordinary source cannot spell, rather than an undocumented
+/// table member.
 fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Functions {
     let mut materialized = functions.clone();
     for function in materialized.values_mut() {
@@ -2499,8 +2529,9 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
 }
 
 fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
-    if let Some(lowered) =
-        relation_lookup(expression, table_keys).or_else(|| relation_count(expression, table_keys))
+    if let Some(lowered) = relation_lookup(expression, table_keys)
+        .or_else(|| relation_filter_count(expression, table_keys))
+        .or_else(|| relation_count(expression, table_keys))
     {
         *expression = lowered;
         return;
@@ -2622,6 +2653,105 @@ fn relation_count_target(expression: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|" || !relation_count_target(rhs) {
+        return None;
+    }
+    let Expr::Binary {
+        lhs: table,
+        op: filter_op,
+        rhs: filter,
+        ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = table.as_ref()
+    else {
+        return None;
+    };
+    if filter_op != "|" || !table_keys.contains_key(table) {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = filter.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter") {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Binary { lhs, op, rhs, .. } = body.as_ref() else {
+        return None;
+    };
+    let Expr::Field { base, name, .. } = lhs.as_ref() else {
+        return None;
+    };
+    if op != "==" || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+        return None;
+    }
+    let table = Expr::Literal {
+        text: format!("{table:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: table_span.clone(),
+    };
+    let field = Expr::Literal {
+        text: format!("{name:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: lhs.span(),
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: expression.span(),
+            }),
+            name: "filtered_count".into(),
+            span: expression.span(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: None,
+                span: table.span(),
+                value: table,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: field.span(),
+                value: field,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: rhs.span(),
+                value: rhs.as_ref().clone(),
+            },
+        ],
+        span: expression.span(),
+    })
 }
 
 fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
