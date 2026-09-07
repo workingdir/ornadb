@@ -2071,6 +2071,11 @@ impl RuntimeState {
             )
             .await?);
         }
+        if let Err(error) =
+            sync_run_request_state_tx(&transaction, identity, RunObservationStatus::Completed).await
+        {
+            return Err(request_activation_rollback(transaction, error).await?);
+        }
         if let Err(error) = faults.check(FaultPoint::AfterTerminalClaim) {
             return Err(request_activation_rollback(transaction, error).await?);
         }
@@ -14511,6 +14516,47 @@ mod tests {
         let owner = state.acquire_lease(id(151)).await.unwrap();
         let consumer = stream_delivery("observed", "request").consumer;
 
+        let completed_request = request(170, 171);
+        let completed = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: completed_request,
+                    consumer_identity: consumer.clone(),
+                    function: "pkg.completed".into(),
+                    source_identity: Some("source-completed".into()),
+                    invocation_id: id(172),
+                },
+                digest(173),
+                owner,
+            )
+            .await
+            .unwrap();
+        let completed_run = completed.run.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_request_activation(
+                owner,
+                completed_request,
+                digest(173),
+                &context,
+                &[table_mutation(174, 1, Some(175))],
+                digest(176),
+                outcome(177),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let completed_observation = state
+            .run_observation(completed_run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed_observation.status,
+            RunObservationStatus::Completed
+        );
+        assert!(!completed_observation.live);
+
         let failed_request = request(152, 153);
         let failed = state
             .begin_observed_request(
@@ -14634,6 +14680,37 @@ mod tests {
             .unwrap();
         assert_eq!(retained.status, RunObservationStatus::Orphaned);
         assert!(!retained.live);
+
+        // The successful activation must only transition its own observed
+        // run. Other terminal observations retain their distinct status and
+        // diagnostic evidence.
+        assert_eq!(
+            state
+                .run_observation(failed_run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .diagnostic,
+            Some(failure)
+        );
+        assert_eq!(
+            state
+                .run_observation(cancelled_run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RunObservationStatus::Cancelled
+        );
+        assert_eq!(
+            state
+                .run_observation(orphaned_run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RunObservationStatus::Orphaned
+        );
     }
 
     #[tokio::test]
