@@ -986,10 +986,18 @@ fn bind(
                 });
             }
             None => match &parameter.default {
-                Some(value) => bound.push(Argument {
-                    name: parameter.name.clone(),
-                    value: value.clone(),
-                }),
+                Some(value) if value.static_type() == &parameter.static_type => {
+                    bound.push(Argument {
+                        name: parameter.name.clone(),
+                        value: value.clone(),
+                    })
+                }
+                Some(_) => {
+                    return Err(AdmissionError::ArgumentType {
+                        name: parameter.name.clone(),
+                        detail: ArgumentTypeDetail::Mismatch,
+                    });
+                }
                 None => {
                     return Err(AdmissionError::ArgumentMissing {
                         name: parameter.name.clone(),
@@ -1307,6 +1315,23 @@ mod tests {
             _ => unreachable!(),
         };
         assert_ne!(identity(first), identity(second));
+    }
+    #[test]
+    fn rejects_mismatched_default_before_admission() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let result = runtime.admit(request(
+            Some(value("Str", "not-an-int")),
+            ArgumentMap::default(),
+        ));
+
+        assert!(matches!(
+            result,
+            Err(AdmissionError::ArgumentType {
+                name,
+                detail: ArgumentTypeDetail::Mismatch,
+            }) if name == "a"
+        ));
+        assert!(runtime.invocations.is_empty());
     }
     #[test]
     fn protected_argument_identities_remain_private_but_enforce_idempotency() {
