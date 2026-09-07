@@ -2622,7 +2622,26 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
         if target != [31; 16] {
             block_on(runtime.start_request(identity, fingerprint)).unwrap();
         }
-        let terminal = TerminalOutcome::new(Vec::new()).unwrap();
+        let terminal = if target == [35; 16] {
+            TerminalOutcome::new(
+                Envelope {
+                    request: Some(target),
+                    watch: None,
+                    message: Message::Result {
+                        status: ResultStatus::RetainedWithoutValue,
+                        value: None,
+                        fingerprint,
+                        diagnostic: None,
+                    },
+                    extensions: BTreeMap::new(),
+                }
+                .encode(Limits::default().protocol)
+                .unwrap(),
+            )
+            .unwrap()
+        } else {
+            TerminalOutcome::new(Vec::new()).unwrap()
+        };
         match target[0] {
             33 => {
                 block_on(runtime.complete_request(identity, fingerprint, terminal)).unwrap();
@@ -2895,6 +2914,14 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
         .unwrap();
     assert_eq!(status.state, orna_runtime_v1::RequestState::Orphaned);
     assert_eq!(status.fingerprint, fingerprint);
+    assert_eq!(
+        Envelope::decode(
+            status.terminal_outcome.as_ref().unwrap().as_bytes(),
+            Limits::default().protocol,
+        )
+        .unwrap(),
+        first.response.as_ref().unwrap().clone(),
+    );
 
     let status_request = Envelope {
         request: Some([26; 16]),
@@ -3050,6 +3077,23 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
         } if returned == fingerprint
     ));
     assert_eq!(application.calls, 0);
+
+    let durable_status =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        durable_status.state,
+        orna_runtime_v1::RequestState::Orphaned
+    );
+    assert_eq!(
+        Envelope::decode(
+            durable_status.terminal_outcome.as_ref().unwrap().as_bytes(),
+            Limits::default().protocol,
+        )
+        .unwrap(),
+        recovered.response.as_ref().unwrap().clone(),
+    );
 
     let status_request = Envelope {
         request: Some([80; 16]),
