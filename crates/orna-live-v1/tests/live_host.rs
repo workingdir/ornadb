@@ -7,9 +7,9 @@ use orna_live_v1::{
     CreateRequest, DeleteRequest, Error, Frame, FrameOutcome, HttpBody, HttpConnection,
     HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits, ListenerBindError,
     ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveHost, LiveListenerAcceptor,
-    LiveSessionAuthority, LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential,
-    SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState, WireRequest, WireResponse,
-    encode_websocket_output, parse_http_request,
+    LiveSessionAuthority, LiveSessionChildren, LiveTransport, ResumeRequest, SUBPROTOCOL,
+    SessionCredential, SessionMetadata, TransportLimits, WebSocketOutput, WebSocketState,
+    WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
@@ -27,9 +27,11 @@ use orna_serving_v1::{Limits as ServingLimits, Serving};
 use std::{
     collections::BTreeMap,
     fs,
+    future::Future,
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
+    pin::Pin,
     process::Command,
     sync::mpsc,
     thread,
@@ -281,6 +283,31 @@ impl SessionDeletionAdapter for RecordingDelete {
     fn delete(&mut self, _: orna_security_v1::SessionId) -> Result<(), Self::Error> {
         self.calls += 1;
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingChildren {
+    calls: usize,
+    requests: Vec<RequestIdentity>,
+    fail: bool,
+}
+
+impl LiveSessionChildren for RecordingChildren {
+    fn cancel_and_join_session<'a>(
+        &'a mut self,
+        _: [u8; 16],
+        requests: &'a [RequestIdentity],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
+        self.calls += 1;
+        self.requests = requests.to_vec();
+        Box::pin(async move {
+            if self.fail {
+                Err(Error::ApplicationRejected)
+            } else {
+                Ok(())
+            }
+        })
     }
 }
 
@@ -3232,6 +3259,283 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
         })),
         Err(Error::Closed)
     );
+}
+
+#[test]
+fn delete_cancels_durable_session_work_before_returning_success() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [91; 16],
+    };
+    let fingerprint = [92; 32];
+    let owner = [93; 16];
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    let mut children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(deletion.calls, 1);
+    assert_eq!(children.calls, 1);
+    assert_eq!(children.requests, vec![identity]);
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(deletion.calls, 1);
+    assert_eq!(children.calls, 1);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(identity, fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            attachment: [94; 16],
+            now: 1,
+        })),
+        Err(Error::Closed)
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn delete_enumerates_reserved_durable_work_before_joining_children() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [94; 16],
+    };
+    let fingerprint = [95; 32];
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [96; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    let mut children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(children.requests, vec![identity]);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(identity, fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Cancelled
+    ));
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn application_admission_requires_an_explicit_delete_join_boundary() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin,
+        credential: &credential,
+        attachment: [97; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    block_on(host.dispatch_frame(
+        [97; 16],
+        2,
+        Frame::Binary(eval([1; 16], [98; 16], "1")),
+        &mut application,
+    ))
+    .unwrap();
+
+    let mut deletion = RecordingDelete::default();
+    assert_eq!(
+        block_on(host.http_delete(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 2,
+            },
+            &mut deletion,
+        ))
+        .status,
+        400
+    );
+    assert_eq!(deletion.calls, 0);
+
+    let mut children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 2,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        204
+    );
+    assert_eq!(children.calls, 1);
+    assert!(children.requests.is_empty());
+}
+
+#[test]
+fn failed_durable_drain_never_reports_delete_success() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [95; 16],
+    };
+    let fingerprint = [96; 32];
+    let lease = block_on(runtime.acquire_lease([97; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [98; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    let mut children = RecordingChildren::default();
+    assert_eq!(
+        block_on(host.http_delete_with_children(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
+        400
+    );
+    assert_eq!(deletion.calls, 0);
+    assert_eq!(children.calls, 0);
+    assert_eq!(
+        block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            attachment: [99; 16],
+            now: 1,
+        })),
+        Err(Error::Closed)
+    );
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(identity, fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn expired_delete_cannot_cancel_durable_session_work() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [100; 16],
+    };
+    let fingerprint = [101; 32];
+    let owner = [102; 16];
+    let lease = block_on(runtime.acquire_lease(owner)).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, lease)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let mut issuer = Issuer(1, None);
+    let credential = block_on(host.create(
+        CreateRequest {
+            id: [1; 16],
+            origin: origin(),
+            expires_at: 1,
+            now: 0,
+            subscribe: &subscribe(),
+        },
+        &mut issuer,
+    ))
+    .unwrap();
+    let origin = origin();
+    let mut deletion = RecordingDelete::default();
+    assert_eq!(
+        block_on(host.http_delete(
+            DeleteRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &credential,
+                now: 1,
+            },
+            &mut deletion,
+        ))
+        .status,
+        410
+    );
+    assert_eq!(deletion.calls, 0);
+    assert!(matches!(
+        block_on(open_durable_state(&repository).request_status(identity, fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+    drop(host);
+    remove_test_repository(&root);
 }
 
 fn wire(method: &str, path: &str, body: &str) -> WireRequest {

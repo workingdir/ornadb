@@ -73,6 +73,7 @@ pub enum Error {
     Closed,
     ReplayRequired,
     DeletionFailed,
+    ApplicationDrainRequired,
     UnsupportedOperation,
     RequestMismatch,
     ApplicationRejected,
@@ -91,6 +92,7 @@ impl Error {
             Self::Closed => "live.closed",
             Self::ReplayRequired => "live.replay_required",
             Self::DeletionFailed => "live.deletion_failed",
+            Self::ApplicationDrainRequired => "live.application_drain_required",
             Self::UnsupportedOperation => "live.unsupported_operation",
             Self::RequestMismatch => "wire.request_mismatch",
             Self::ApplicationRejected => "live.application_rejected",
@@ -200,6 +202,26 @@ pub trait LiveApplication {
     }
 }
 
+/// Required ownership boundary for application children attached to a live
+/// session.
+///
+/// The live transport can fence its durable request records, but it cannot
+/// infer whether an application callback started an asynchronous child, owns
+/// a transaction, or has actually terminated. Executable adapters that admit
+/// application work must provide this boundary to session deletion and must
+/// not report success until this method returns successfully. There is
+/// deliberately no default implementation.
+pub trait LiveSessionChildren {
+    /// Requests cancellation and joins every application-owned child for the
+    /// supplied session. `requests` is the complete live boundary view of
+    /// unfinished request identities at deletion admission.
+    fn cancel_and_join_session<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        requests: &'a [RequestIdentity],
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+}
+
 struct RejectApplication;
 impl LiveApplication for RejectApplication {
     fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
@@ -214,6 +236,12 @@ impl LiveApplication for RejectApplication {
 struct RequestRecord {
     fingerprint: [u8; 32],
     terminal: Option<DispatchOutcome>,
+}
+
+#[derive(Clone)]
+struct DeletedSession {
+    origin: Origin,
+    credential: SessionCredential,
 }
 
 /// Host-issued identity for a session. The two credential representations are
@@ -272,6 +300,7 @@ impl HttpResponse {
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
                 Error::DeletionFailed
+                | Error::ApplicationDrainRequired
                 | Error::InvalidFrame
                 | Error::InvalidMessage
                 | Error::ReplayRequired
@@ -299,6 +328,8 @@ pub struct LiveHost {
     attachments: BTreeMap<[u8; 16], [u8; 16]>,
     requests: BTreeMap<([u8; 16], [u8; 16]), RequestRecord>,
     watches: BTreeSet<([u8; 16], [u8; 16])>,
+    application_sessions: BTreeSet<[u8; 16]>,
+    deleted_sessions: BTreeMap<[u8; 16], DeletedSession>,
     runtime: Option<RuntimeState>,
     runtime_owner: Option<[u8; 16]>,
     writer_lease: Option<WriterLease>,
@@ -426,6 +457,8 @@ impl LiveHost {
             attachments: BTreeMap::new(),
             requests: BTreeMap::new(),
             watches: BTreeSet::new(),
+            application_sessions: BTreeSet::new(),
+            deleted_sessions: BTreeMap::new(),
             runtime,
             runtime_owner,
             writer_lease: None,
@@ -640,39 +673,248 @@ impl LiveHost {
         }
     }
 
-    /// Closes the session before asking the host to delete its durable state.
+    /// Deletes a session which has no application-owned children to drain.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Denied`] for a mismatched session, credential, or
-    /// Origin, [`Error::Closed`] for an expired or closed session, or
-    /// [`Error::DeletionFailed`] when durable deletion fails. The in-memory
-    /// session remains closed after a deletion-adapter failure.
+    /// Returns [`Error::ApplicationDrainRequired`] when application-owned
+    /// children or durable unfinished work require the explicit join boundary
+    /// exposed by [`Self::delete_with_children`].
     pub async fn delete(
         &mut self,
         request: DeleteRequest<'_>,
         deletion: &mut impl DeletionAdapter,
     ) -> Result<()> {
+        if self.matches_deleted_session(&request) {
+            return Ok(());
+        }
+        self.validate_delete(&request)?;
+        if self.session_requires_child_drain(request.id).await? {
+            return Err(Error::ApplicationDrainRequired);
+        }
+        self.delete_after_validation(request, deletion, None).await
+    }
+
+    /// Deletes an authenticated session after fencing durable work and joining
+    /// the application-owned children supplied by the executable host.
+    ///
+    /// There is intentionally no default child supervisor: synchronous
+    /// application callbacks cannot prove that an asynchronous child, writer,
+    /// or transaction has terminated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable redacted failure when authentication, durable fencing,
+    /// child cancellation/join, watch cleanup, or credential deletion fails.
+    pub async fn delete_with_children(
+        &mut self,
+        request: DeleteRequest<'_>,
+        deletion: &mut impl DeletionAdapter,
+        children: &mut dyn LiveSessionChildren,
+    ) -> Result<()> {
+        if self.matches_deleted_session(&request) {
+            return Ok(());
+        }
+        self.validate_delete(&request)?;
+        self.delete_after_validation(request, deletion, Some(children))
+            .await
+    }
+
+    async fn delete_after_validation(
+        &mut self,
+        request: DeleteRequest<'_>,
+        deletion: &mut impl DeletionAdapter,
+        children: Option<&mut dyn LiveSessionChildren>,
+    ) -> Result<()> {
+        // TASK-END-1 starts by blocking new work. Revoking the credential
+        // prevents a resumed attachment while removing attachments prevents a
+        // racing frame from obtaining session admission at this boundary.
         self.security
-            .validate_attach(
-                session_id(request.id),
-                request.origin,
-                &request.credential.security,
-                request.now,
-            )
+            .revoke(session_id(request.id))
             .map_err(map_boundary)?;
+        self.attachments.retain(|_, owner| *owner != request.id);
+
+        if self.drain_session(request.id, children).await.is_err() {
+            // A failed join remains fail-closed. Do not invoke durable
+            // deletion or manufacture success while child termination is
+            // unproven.
+            let _ = self.finish_failed_delete(request.id);
+            return Err(Error::DeletionFailed);
+        }
         let deleted = self
             .security
             .delete(session_id(request.id), deletion)
             .is_ok();
-        self.attachments.retain(|_, session| *session != request.id);
-        self.requests
-            .retain(|(session, _), _| *session != request.id);
-        self.watches.retain(|(session, _)| *session != request.id);
+        self.finish_delete(&request, deleted)
+    }
+
+    async fn session_requires_child_drain(&self, session: [u8; 16]) -> Result<bool> {
+        if self.application_sessions.contains(&session)
+            || self
+                .requests
+                .iter()
+                .any(|((owner, _), record)| *owner == session && record.terminal.is_none())
+        {
+            return Ok(true);
+        }
+        let Some(runtime) = &self.runtime else {
+            return Ok(false);
+        };
+        Ok(!runtime
+            .unfinished_session_requests(session)
+            .await
+            .map_err(|error| map_runtime(&error))?
+            .is_empty())
+    }
+
+    async fn drain_session(
+        &mut self,
+        session: [u8; 16],
+        children: Option<&mut dyn LiveSessionChildren>,
+    ) -> Result<()> {
+        let mut requests = self
+            .requests
+            .iter()
+            .filter_map(|((owner, request), record)| {
+                (*owner == session && record.terminal.is_none()).then_some(RequestIdentity {
+                    session_id: session,
+                    request_id: *request,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut durable = Vec::new();
+        if let Some(runtime) = &self.runtime {
+            for status in runtime
+                .unfinished_session_requests(session)
+                .await
+                .map_err(|error| map_runtime(&error))?
+            {
+                if !requests.contains(&status.identity) {
+                    requests.push(status.identity);
+                }
+                durable.push(status);
+            }
+        }
+
+        // A durable cancellation is a terminal owner/epoch-fenced claim.
+        // `commit_table_request_activation` observes that claim before table
+        // writes, so a completion which races after acknowledgement is only a
+        // replay and cannot commit a later write.
+        for status in durable {
+            self.cancel_durable_session_request(status).await?;
+        }
+        if self.runtime.is_none() {
+            for request in &requests {
+                self.cancel_target_request(session, request.request_id)
+                    .await?;
+            }
+        }
+        if self.application_sessions.contains(&session) || !requests.is_empty() {
+            let children = children.ok_or(Error::ApplicationDrainRequired)?;
+            children.cancel_and_join_session(session, &requests).await?;
+        }
+
+        let watches = self
+            .watches
+            .iter()
+            .filter_map(|(owner, watch)| (*owner == session).then_some(*watch))
+            .collect::<Vec<_>>();
+        for watch in watches {
+            self.serving
+                .close_watch(session, watch)
+                .map_err(map_serving)?;
+            self.watches.remove(&(session, watch));
+        }
+        Ok(())
+    }
+
+    async fn cancel_durable_session_request(&mut self, status: DurableRequestStatus) -> Result<()> {
+        let identity = status.identity;
+        let fingerprint = status.fingerprint;
+        let outcome = DispatchOutcome {
+            outcome: FrameOutcome::Cancelled,
+            response: Some(Envelope {
+                request: Some(identity.request_id),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Cancellation,
+                    value: None,
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            }),
+        };
+        let lease = self.writer_lease().await?;
+        let terminal = self.terminal_outcome(&outcome)?;
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        match runtime
+            .cancel_request_with_owner(identity, fingerprint, lease, terminal)
+            .await
+        {
+            Ok(cancelled) if cancelled.state == DurableRequestState::Cancelled => {}
+            Ok(_) => return Err(Error::RuntimeUnavailable),
+            Err(RuntimeError::RequestStateConflict) => {
+                let current = runtime
+                    .request_status_for_identity(identity)
+                    .await
+                    .map_err(|error| map_runtime(&error))?
+                    .ok_or(Error::RuntimeUnavailable)?;
+                if current.state != DurableRequestState::Cancelled {
+                    return Err(Error::RuntimeUnavailable);
+                }
+            }
+            Err(error) => return Err(map_runtime(&error)),
+        }
+        match self
+            .serving
+            .cancel_request(identity.session_id, identity.request_id)
+        {
+            Ok(()) | Err(ServingError::RequestUnknown) => {}
+            Err(error) => return Err(map_serving(error)),
+        }
+        if let Some(record) = self
+            .requests
+            .get_mut(&(identity.session_id, identity.request_id))
+        {
+            record.terminal = Some(outcome);
+        }
+        Ok(())
+    }
+
+    fn finish_failed_delete(&mut self, session: [u8; 16]) -> Result<()> {
+        self.serving
+            .credential_deleted(session, false)
+            .map_err(|_| Error::DeletionFailed)
+    }
+
+    fn finish_delete(&mut self, request: &DeleteRequest<'_>, deleted: bool) -> Result<()> {
+        self.requests.retain(|(owner, _), _| *owner != request.id);
+        self.watches.retain(|(owner, _)| *owner != request.id);
         self.serving
             .credential_deleted(request.id, deleted)
             .map_err(|_| Error::DeletionFailed)?;
-        Ok(())
+        if deleted {
+            self.application_sessions.remove(&request.id);
+            self.deleted_sessions.insert(
+                request.id,
+                DeletedSession {
+                    origin: request.origin.clone(),
+                    credential: request.credential.clone(),
+                },
+            );
+            Ok(())
+        } else {
+            Err(Error::DeletionFailed)
+        }
+    }
+
+    fn matches_deleted_session(&self, request: &DeleteRequest<'_>) -> bool {
+        self.deleted_sessions
+            .get(&request.id)
+            .is_some_and(|deleted| {
+                deleted.origin == *request.origin && deleted.credential == *request.credential
+            })
     }
 
     /// HTTP `DELETE /v1/live/sessions/{id}`: `204` with an empty body. A
@@ -684,6 +926,24 @@ impl LiveHost {
         deletion: &mut impl DeletionAdapter,
     ) -> HttpResponse {
         match self.delete(request, deletion).await {
+            Ok(()) => HttpResponse {
+                status: 204,
+                headers: vec![],
+                body: HttpBody::Empty,
+            },
+            Err(error) => HttpResponse::error(error),
+        }
+    }
+
+    /// HTTP DELETE through the required application-child ownership boundary.
+    /// Executable hosts which admit application work must use this route.
+    pub async fn http_delete_with_children(
+        &mut self,
+        request: DeleteRequest<'_>,
+        deletion: &mut impl DeletionAdapter,
+        children: &mut dyn LiveSessionChildren,
+    ) -> HttpResponse {
+        match self.delete_with_children(request, deletion, children).await {
             Ok(()) => HttpResponse {
                 status: 204,
                 headers: vec![],
@@ -846,6 +1106,23 @@ impl LiveHost {
                 if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
                     self.retain_failure(session, request, fingerprint).await?;
                     return Err(error);
+                }
+                if matches!(
+                    envelope.message,
+                    Message::Subscribe { .. }
+                        | Message::Resync
+                        | Message::Unsubscribe
+                        | Message::Event { .. }
+                        | Message::Eval { .. }
+                        | Message::Watch { .. }
+                        | Message::Cancel { .. }
+                ) {
+                    // The application trait is synchronous, so the live host
+                    // cannot infer whether the callback retained a child. A
+                    // later DELETE therefore requires the explicit child
+                    // supervisor instead of treating callback return as a
+                    // join proof.
+                    self.application_sessions.insert(session);
                 }
                 let dispatched: Result<DispatchOutcome> = async {
                     match &envelope.message {
@@ -2749,6 +3026,45 @@ impl LiveTransport {
         issuer: &mut impl LiveCredentialIssuer,
         deletion: &mut impl DeletionAdapter,
     ) -> WireResponse {
+        self.handle_with_optional_children(request, now, authority, issuer, deletion, None)
+            .await
+    }
+
+    /// Parses one live HTTP request with the required application-child
+    /// supervisor available to DELETE. Executable adapters that dispatch
+    /// [`LiveApplication`] callbacks must use this route for a DELETE that is
+    /// allowed to return `204`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_with_children(
+        &mut self,
+        request: WireRequest,
+        now: u64,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+        children: &mut impl LiveSessionChildren,
+    ) -> WireResponse {
+        self.handle_with_optional_children(
+            request,
+            now,
+            authority,
+            issuer,
+            deletion,
+            Some(children),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_with_optional_children(
+        &mut self,
+        request: WireRequest,
+        now: u64,
+        authority: &mut impl LiveSessionAuthority,
+        issuer: &mut impl LiveCredentialIssuer,
+        deletion: &mut impl DeletionAdapter,
+        children: Option<&mut dyn LiveSessionChildren>,
+    ) -> WireResponse {
         self.expire_pending_websocket_upgrades(now);
         if request.body.len() > self.limits.max_request_bytes
             || header_size(&request.headers) > self.limits.max_header_bytes
@@ -2872,19 +3188,26 @@ impl LiveTransport {
                     security: OpaqueCredential::from_bytes(token),
                     serving: ServingCredential::new(token),
                 };
-                if !self
-                    .sessions
-                    .get(&id)
-                    .is_some_and(|record| record.credential == credential)
-                {
-                    return wire_error(410, "live.expired");
-                }
                 let delete_request = DeleteRequest {
                     id,
                     origin: &origin,
                     credential: &credential,
                     now,
                 };
+                if !self
+                    .sessions
+                    .get(&id)
+                    .is_some_and(|record| record.credential == credential)
+                {
+                    if self.host.matches_deleted_session(&delete_request) {
+                        return WireResponse {
+                            status: 204,
+                            headers: Vec::new(),
+                            body: Vec::new(),
+                        };
+                    }
+                    return wire_error(410, "live.expired");
+                }
                 if let Err(error) = self.host.validate_delete(&delete_request) {
                     return host_error(error);
                 }
@@ -2897,7 +3220,14 @@ impl LiveTransport {
                     .pending_upgrades
                     .remove(&id)
                     .map(|pending| pending.admission.attachment);
-                let deleted = self.host.delete(delete_request, deletion).await;
+                let deleted = match children {
+                    Some(children) => {
+                        self.host
+                            .delete_with_children(delete_request, deletion, children)
+                            .await
+                    }
+                    None => self.host.delete(delete_request, deletion).await,
+                };
                 if let Some(attachment) = retired {
                     self.queue_retired_attachment(attachment);
                 }
