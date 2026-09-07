@@ -7,16 +7,18 @@ license = "Apache-2.0"
 description = "Git-backed repository, CWD, index, and local runtime boundary for Orna"
 
 [dependencies]
+bytes = "1.10.1"
 fs2 = "0.4.3"
 libc = "0.2.180"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
+parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 sha2 = "0.11.0"
 tempfile = "3.23.0"
 uuid.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "0.38.44", default-features = false, features = ["fs", "std"] }
-
 [dev-dependencies]
 num-bigint = "0.4.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "0.38.44", default-features = false, features = ["fs", "std"] }
