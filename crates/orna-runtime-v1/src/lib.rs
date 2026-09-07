@@ -1278,7 +1278,22 @@ impl RuntimeState {
         lease: WriterLease,
         key: CheckpointKey,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        match apply_stream_intent(self, lease, CommitIntent::Pause { key }).await? {
+        self.pause_stream_at_capture(lease, key, None).await
+    }
+
+    /// Applies a pause only if the writer-fenced transaction still observes
+    /// the supplied CWD capture. Hosts resolving a snapshot-pinned system row
+    /// use this boundary so a capture cannot change between reference checks
+    /// and the durable transition.
+    pub async fn pause_stream_at_capture(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected_capture: Option<&CwdCapture>,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        match apply_stream_intent(self, lease, expected_capture, CommitIntent::Pause { key })
+            .await?
+        {
             CommitResult::StreamStatusChanged { state, changed }
                 if state.status == StreamStatus::Paused =>
             {
@@ -1302,7 +1317,20 @@ impl RuntimeState {
         lease: WriterLease,
         key: CheckpointKey,
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        match apply_stream_intent(self, lease, CommitIntent::Resume { key }).await? {
+        self.resume_stream_at_capture(lease, key, None).await
+    }
+
+    /// Applies a resume only if the writer-fenced transaction still observes
+    /// the supplied CWD capture.
+    pub async fn resume_stream_at_capture(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected_capture: Option<&CwdCapture>,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        match apply_stream_intent(self, lease, expected_capture, CommitIntent::Resume { key })
+            .await?
+        {
             CommitResult::StreamStatusChanged { state, changed }
                 if state.status == StreamStatus::Running =>
             {
@@ -4562,7 +4590,7 @@ impl AsyncCheckpointBackend for RuntimeStreamBackend<'_> {
         Self: 'a;
 
     fn apply_async<'a>(&'a mut self, intent: CommitIntent) -> Self::ApplyFuture<'a> {
-        Box::pin(async move { apply_stream_intent(self.state, self.lease, intent).await })
+        Box::pin(async move { apply_stream_intent(self.state, self.lease, None, intent).await })
     }
 
     fn checkpoint_async<'a>(&'a self, key: &'a CheckpointKey) -> Self::CheckpointFuture<'a> {
@@ -5161,6 +5189,7 @@ async fn stream_checkpoint_matches(
 async fn apply_stream_intent(
     state: &RuntimeState,
     lease: WriterLease,
+    expected_capture: Option<&CwdCapture>,
     intent: CommitIntent,
 ) -> Result<CommitResult, RuntimeError> {
     let transaction = state
@@ -5169,6 +5198,14 @@ async fn apply_stream_intent(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     state.require_owner(&transaction, lease).await?;
+    if let Some(expected_capture) = expected_capture {
+        let current_capture = capture_tx(&transaction).await?;
+        if &current_capture != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current_capture),
+            });
+        }
+    }
     if matches!(intent, CommitIntent::Fail { .. }) {
         return Err(RuntimeError::RecoveryInvalid);
     }
