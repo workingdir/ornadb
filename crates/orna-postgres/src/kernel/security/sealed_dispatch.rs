@@ -617,16 +617,15 @@ impl PostgresKernel {
                             executable,
                         } => {
                             if definition.domain() == FunctionDomain::Client {
-                                if select_checked_standard_artifact_executor(
+                                let authorisation = recheck_verified_standard_client_target(
                                     &active,
-                                    executable.revision(),
-                                )? != CheckedStandardArtifactExecutor::ClientExpression
-                                {
-                                    return Err(sealed_target_invariant(
-                                        &active,
-                                        "verified standard CLIENT target must retain its checked expression artifact",
-                                    ));
-                                }
+                                    &security,
+                                    authenticated_session,
+                                    definition,
+                                    executable,
+                                    security_target,
+                                    &authorisation,
+                                )?;
                                 if !invocation_audit_appended {
                                     append_allowed_invocation_audit_evidence(
                                         &transaction,
@@ -918,6 +917,72 @@ pub(super) fn select_checked_standard_artifact_executor(
         _ => Err(sealed_target_invariant(
             active,
             "verified standard executable artifact is unsupported",
+        )),
+    }
+}
+
+/// Re-derives the exact verified-standard CLIENT target at the execution
+/// boundary. A prepared continuation is evidence from preflight, not a
+/// capability to run a stale or substituted executable after the active
+/// snapshot changes.
+pub(super) fn recheck_verified_standard_client_target(
+    active: &ActiveDatabaseRevision,
+    security: &SecuritySnapshot,
+    authenticated_session: &AuthenticatedSession,
+    definition: &FunctionDefinition,
+    executable: &StandardExecutable,
+    prepared_target: InvocationTarget,
+    prepared_authorisation: &AuthorisedInvocation,
+) -> Result<AuthorisedInvocation, PostgresKernelError> {
+    if select_checked_standard_artifact_executor(active, executable.revision())?
+        != CheckedStandardArtifactExecutor::ClientExpression
+    {
+        return Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT target must retain its checked expression artifact",
+        ));
+    }
+    let Some(SealedResolvedTarget::VerifiedStandard {
+        definition: active_definition,
+        executable: active_executable,
+    }) = resolve_sealed_target(
+        active,
+        &InvocationRequestTarget::FunctionId(definition.id()),
+    )
+    else {
+        return Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT target must remain resolved by the active snapshot",
+        ));
+    };
+    if active_definition.id() != definition.id()
+        || active_definition.current_revision() != definition.current_revision()
+        || active_executable.function() != executable.function()
+        || active_executable.revision() != executable.revision()
+    {
+        return Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT target must retain its active executable identity",
+        ));
+    }
+    let target = sealed_security_target(
+        active,
+        SealedResolvedTarget::VerifiedStandard {
+            definition: active_definition,
+            executable: active_executable,
+        },
+    );
+    if target != prepared_target || prepared_authorisation.target() != target {
+        return Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT target must retain its exact authorised identity",
+        ));
+    }
+    match authorise_sealed_target(security, authenticated_session, target) {
+        ExecuteDecision::Allowed(authorisation) => Ok(authorisation),
+        ExecuteDecision::Denied(_) => Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT target must remain authorised at execution",
         )),
     }
 }
