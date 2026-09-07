@@ -25,6 +25,7 @@ pub struct ReplSession {
     session_functions: BTreeSet<String>,
     namespace_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
+    last_status: Option<CanonicalValue>,
 }
 
 /// Parses one REPL input after applying source bounds. Callers which also
@@ -51,6 +52,7 @@ impl ReplSession {
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
             last_success: None,
+            last_status: None,
         }
     }
 
@@ -83,6 +85,7 @@ impl ReplSession {
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
             last_success: None,
+            last_status: None,
         })
     }
 
@@ -108,6 +111,12 @@ impl ReplSession {
         let result = candidate.submit_checked(input)?;
         *self = candidate;
         Ok(result)
+    }
+
+    /// Publishes the typed REPL's redacted execution status. This is kept
+    /// separate from ordinary bindings so module source cannot capture it.
+    pub(crate) fn set_last_status(&mut self, status: CanonicalValue) {
+        self.last_status = Some(status);
     }
 
     fn submit_unchecked(
@@ -160,6 +169,12 @@ impl ReplSession {
         if let Some(value) = &self.last_success {
             environment.insert("$_".into(), value.clone());
         }
+        environment.insert(
+            "$?".into(),
+            self.last_status.clone().unwrap_or_else(|| {
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical")
+            }),
+        );
         let mut context = Context {
             limits: self.limits,
             steps: 0,

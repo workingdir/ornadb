@@ -213,6 +213,24 @@ impl ReplContext {
                 },
             );
         }
+        symbols.insert(
+            "$?".into(),
+            Symbol {
+                kind: SymbolKind::Let,
+                // A completed submission either clears its status to `null`
+                // or retains one redacted failure record. The static binding
+                // must expose that same nullable contract.
+                ty: Type::Optional(Box::new(Type::Record(BTreeMap::from([
+                    ("code".into(), Type::Text),
+                    ("message".into(), Type::Text),
+                    ("redacted".into(), Type::Bool),
+                    ("severity".into(), Type::Text),
+                ])))),
+                public: false,
+                effects: EffectSummary::default(),
+                table_schema: None,
+            },
+        );
         let header = ModuleHeader {
             namespace: Namespace(Vec::new()),
             exports: BTreeMap::new(),
@@ -260,6 +278,19 @@ mod tests {
         let parsed = parse_repl("let count: Int = \"wrong\";");
         assert!(parsed.is_ok());
         assert!(context.stage(&parsed.value).is_err());
+    }
+
+    #[test]
+    fn status_binding_matches_the_nullable_execution_status() {
+        assert_eq!(
+            staged(&ReplContext::empty(), "$?").ty,
+            Some(Type::Optional(Box::new(Type::Record(BTreeMap::from([
+                ("code".into(), Type::Text),
+                ("message".into(), Type::Text),
+                ("redacted".into(), Type::Bool),
+                ("severity".into(), Type::Text),
+            ])))))
+        );
     }
 
     #[test]
