@@ -627,8 +627,9 @@ pub enum FaultPoint {
     AfterTerminalClaim,
 }
 
-/// Deterministic seam for proving transaction rollback. Production callers use
-/// [`NoFault`]; the seam never manufactures successful recovery.
+/// Deterministic test seam that selects a failure. A rollback receipt still
+/// requires the runtime to observe an explicit rollback of its own
+/// transaction.
 pub trait FaultInjector: Send + Sync {
     fn check(&self, point: FaultPoint) -> Result<(), RuntimeError>;
 }
@@ -637,6 +638,25 @@ pub trait FaultInjector: Send + Sync {
 pub struct NoFault;
 impl FaultInjector for NoFault {
     fn check(&self, _: FaultPoint) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+/// Application-owned work that must succeed immediately before a prepared
+/// request activation can claim its terminal outcome. The runtime invokes it
+/// while it still owns the activation transaction, so a failure can be
+/// explicitly rolled back and durably distinguished from an unknown commit
+/// outcome.
+pub trait RequestActivationPrecommit: Send + Sync {
+    fn check(&self) -> Result<(), RuntimeError>;
+}
+
+/// The default pre-commit operation for callers that have no additional
+/// prepared work to validate.
+#[derive(Debug, Default)]
+pub struct NoRequestActivationPrecommit;
+impl RequestActivationPrecommit for NoRequestActivationPrecommit {
+    fn check(&self) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -667,6 +687,7 @@ pub enum RuntimeError {
     SessionWorkActive,
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
+    PreCommitOperationFailed,
     FaultInjected(FaultPoint),
     StorageUnavailable,
 }
@@ -702,6 +723,7 @@ impl fmt::Display for RuntimeError {
             Self::SessionWorkActive => "runtime session still has active work",
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
+            Self::PreCommitOperationFailed => "runtime pre-commit operation failed",
             Self::FaultInjected(_) => "runtime fault injected",
             Self::StorageUnavailable => "runtime state unavailable",
         })
@@ -712,6 +734,17 @@ impl std::error::Error for RuntimeError {}
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
+}
+
+enum RequestActivationTransactionError {
+    Runtime(RuntimeError),
+    RolledBack(RuntimeError),
+}
+
+impl From<RuntimeError> for RequestActivationTransactionError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Runtime(error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1796,6 +1829,43 @@ impl RuntimeState {
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
     ) -> Result<RequestActivationCommit, RuntimeError> {
+        let precommit = NoRequestActivationPrecommit;
+        self.commit_table_request_activation_with_precommit(
+            lease,
+            identity,
+            fingerprint,
+            context,
+            mutations,
+            next_digest,
+            outcome,
+            &precommit,
+            faults,
+        )
+        .await
+    }
+
+    /// Atomically finalizes one prepared table activation after a
+    /// caller-supplied pre-commit operation has succeeded.
+    ///
+    /// Unlike a failed or unknown transaction commit, a pre-commit failure is
+    /// observed while this runtime still owns the transaction. The runtime
+    /// explicitly rolls that transaction back before recording a fenced
+    /// rollback receipt. Callers with possible effects outside this boundary
+    /// must record those effects first, which conservatively suppresses the
+    /// receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_table_request_activation_with_precommit(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        context: &RuntimeActivationContext,
+        mutations: &[TableMutation],
+        next_digest: [u8; 32],
+        outcome: TerminalOutcome,
+        precommit: &dyn RequestActivationPrecommit,
+        faults: &dyn FaultInjector,
+    ) -> Result<RequestActivationCommit, RuntimeError> {
         match self
             .commit_table_request_activation_tx(
                 lease,
@@ -1805,19 +1875,21 @@ impl RuntimeState {
                 mutations,
                 next_digest,
                 outcome,
+                precommit,
                 faults,
             )
             .await
         {
-            Err(RuntimeError::FaultInjected(point)) => {
-                // The inner transaction is out of scope here, so its failed
-                // mutation/checkpoint/terminal write cannot commit. Persist
-                // that fact under the still-current owner fence.
-                self.record_controlled_rollback_proof(identity, fingerprint, lease, point)
+            Err(RequestActivationTransactionError::RolledBack(error)) => {
+                // A receipt follows only the explicit rollback observed at
+                // the runtime-owned boundary. Commit failures never enter
+                // this branch because their durable outcome is unknowable.
+                self.record_controlled_rollback_proof(identity, fingerprint, lease)
                     .await?;
-                Err(RuntimeError::FaultInjected(point))
+                Err(error)
             }
-            result => result,
+            Ok(committed) => Ok(committed),
+            Err(RequestActivationTransactionError::Runtime(error)) => Err(error),
         }
     }
 
@@ -1843,8 +1915,9 @@ impl RuntimeState {
         mutations: &[TableMutation],
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
+        precommit: &dyn RequestActivationPrecommit,
         faults: &dyn FaultInjector,
-    ) -> Result<RequestActivationCommit, RuntimeError> {
+    ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         let transaction = self
             .connection
@@ -1871,18 +1944,18 @@ impl RuntimeState {
         }
 
         if current.state != RequestState::Running {
-            return Err(RuntimeError::RequestStateConflict);
+            return Err(RuntimeError::RequestStateConflict.into());
         }
         validate_id(lease.owner_id)?;
         if lease.epoch == 0 {
-            return Err(RuntimeError::InvalidIdentity);
+            return Err(RuntimeError::InvalidIdentity.into());
         }
         self.require_owner(&transaction, lease).await?;
         if evidence.owner != Some(RequestOwner::from(lease)) {
-            return Err(RuntimeError::RequestOwnerConflict);
+            return Err(RuntimeError::RequestOwnerConflict.into());
         }
         if mutations.is_empty() {
-            return Err(RuntimeError::EmptyMutationBatch);
+            return Err(RuntimeError::EmptyMutationBatch.into());
         }
         let encoded = mutations
             .iter()
@@ -1893,24 +1966,40 @@ impl RuntimeState {
         if &current_capture != context.capture() {
             return Err(RuntimeError::StaleCapture {
                 current: Box::new(current_capture),
-            });
+            }
+            .into());
         }
 
-        faults.check(FaultPoint::BeforeTableWrite)?;
-        for mutation in mutations {
-            apply_table_mutation_tx(&transaction, mutation).await?;
+        if let Err(error) = faults.check(FaultPoint::BeforeTableWrite) {
+            return Err(request_activation_rollback(transaction, error).await?);
         }
-        faults.check(FaultPoint::AfterTableWrite)?;
-        let capture = append_mutations_tx(
+        for mutation in mutations {
+            if let Err(error) = apply_table_mutation_tx(&transaction, mutation).await {
+                return Err(request_activation_rollback(transaction, error).await?);
+            }
+        }
+        if let Err(error) = faults.check(FaultPoint::AfterTableWrite) {
+            return Err(request_activation_rollback(transaction, error).await?);
+        }
+        let capture = match append_mutations_tx(
             &transaction,
             context.capture(),
             &encoded,
             next_digest,
             faults,
         )
-        .await?;
-        faults.check(FaultPoint::BeforeTerminalClaim)?;
-        let changed = transaction
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => return Err(request_activation_rollback(transaction, error).await?),
+        };
+        if let Err(error) = precommit.check() {
+            return Err(request_activation_rollback(transaction, error).await?);
+        }
+        if let Err(error) = faults.check(FaultPoint::BeforeTerminalClaim) {
+            return Err(request_activation_rollback(transaction, error).await?);
+        }
+        let changed = match transaction
             .execute(
                 "UPDATE request_ledger
                  SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
@@ -1932,11 +2021,26 @@ impl RuntimeState {
                 ],
             )
             .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        {
+            Ok(changed) => changed,
+            Err(_) => {
+                return Err(request_activation_rollback(
+                    transaction,
+                    RuntimeError::StorageUnavailable,
+                )
+                .await?);
+            }
+        };
         if changed != 1 {
-            return Err(RuntimeError::RequestOwnerConflict);
+            return Err(request_activation_rollback(
+                transaction,
+                RuntimeError::RequestOwnerConflict,
+            )
+            .await?);
         }
-        faults.check(FaultPoint::AfterTerminalClaim)?;
+        if let Err(error) = faults.check(FaultPoint::AfterTerminalClaim) {
+            return Err(request_activation_rollback(transaction, error).await?);
+        }
         transaction
             .commit()
             .await
@@ -4113,7 +4217,6 @@ impl RuntimeState {
         identity: RequestIdentity,
         fingerprint: [u8; 32],
         owner: WriterLease,
-        point: FaultPoint,
     ) -> Result<(), RuntimeError> {
         let tx = self
             .connection
@@ -4153,7 +4256,7 @@ impl RuntimeState {
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let proof = controlled_rollback_proof(marker, point);
+        let proof = controlled_rollback_proof(marker);
         let changed = tx
             .execute(
                 "UPDATE request_ledger
@@ -7488,17 +7591,20 @@ fn validate_request_execution_evidence(
         return Err(RuntimeError::RecoveryInvalid);
     }
     let rollback_proof_matches = evidence.controlled_marker.is_some_and(|marker| {
-        [
-            FaultPoint::BeforeTableWrite,
-            FaultPoint::AfterTableWrite,
-            FaultPoint::AfterMutation,
-            FaultPoint::AfterCheckpoint,
-            FaultPoint::AfterCapture,
-            FaultPoint::BeforeTerminalClaim,
-            FaultPoint::AfterTerminalClaim,
-        ]
-        .into_iter()
-        .any(|point| evidence.rollback_proof == Some(controlled_rollback_proof(marker, point)))
+        evidence.rollback_proof == Some(controlled_rollback_proof(marker))
+            || [
+                FaultPoint::BeforeTableWrite,
+                FaultPoint::AfterTableWrite,
+                FaultPoint::AfterMutation,
+                FaultPoint::AfterCheckpoint,
+                FaultPoint::AfterCapture,
+                FaultPoint::BeforeTerminalClaim,
+                FaultPoint::AfterTerminalClaim,
+            ]
+            .into_iter()
+            .any(|point| {
+                evidence.rollback_proof == Some(legacy_controlled_rollback_proof(marker, point))
+            })
     });
     if evidence.rollback_proof.is_some() && !rollback_proof_matches {
         return Err(RuntimeError::RecoveryInvalid);
@@ -8112,7 +8218,25 @@ fn controlled_transaction_marker(
     digest.update(owner.epoch.to_be_bytes());
     digest.finalize().into()
 }
-fn controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8; 32] {
+async fn request_activation_rollback(
+    transaction: libsql::Transaction,
+    error: RuntimeError,
+) -> Result<RequestActivationTransactionError, RuntimeError> {
+    transaction
+        .rollback()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(RequestActivationTransactionError::RolledBack(error))
+}
+
+fn controlled_rollback_proof(marker: [u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.runtime.controlled-rollback.v2");
+    digest.update(marker);
+    digest.finalize().into()
+}
+
+fn legacy_controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"orna.runtime.controlled-rollback.v1");
     digest.update(marker);
@@ -8158,6 +8282,13 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    struct FailPrecommit;
+    impl RequestActivationPrecommit for FailPrecommit {
+        fn check(&self) -> Result<(), RuntimeError> {
+            Err(RuntimeError::PreCommitOperationFailed)
         }
     }
     fn id(value: u8) -> [u8; 16] {
@@ -11909,6 +12040,83 @@ mod tests {
                 .await
                 .unwrap(),
             recovered.status
+        );
+    }
+
+    #[tokio::test]
+    async fn precommit_failure_rolls_back_and_recovers_as_proven_after_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+
+        assert_eq!(
+            state
+                .commit_table_request_activation_with_precommit(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &FailPrecommit,
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::PreCommitOperationFailed)
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(state.capture().await.unwrap(), context.capture().clone());
+
+        let recovery_owner = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                recovery_owner,
+                outcome(12),
+                outcome(13),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.disposition, RecoveryDisposition::RollbackProven);
+        assert_eq!(recovered.status.terminal_outcome, Some(outcome(12)));
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::RollbackProven)
+        );
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(12))
         );
     }
 
