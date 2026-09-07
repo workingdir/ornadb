@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
     runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 0),
     started_ms INTEGER NOT NULL,
     ended_ms INTEGER,
+    observed_ms INTEGER NOT NULL,
     status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
     checkpoint_count INTEGER NOT NULL DEFAULT 0 CHECK (checkpoint_count >= 0),
     diagnostic_code INTEGER,
@@ -590,6 +591,12 @@ pub struct RunObservation {
     pub snapshot: CwdCapture,
     pub runtime_id: [u8; 16],
     pub invocation_id: [u8; 16],
+    /// Durable Unix milliseconds at which this run was admitted.
+    pub started_ms: i64,
+    /// Durable Unix milliseconds at which this run became terminal.
+    pub ended_ms: Option<i64>,
+    /// Durable Unix milliseconds at which this projection was last updated.
+    pub observed_ms: i64,
     pub status: RunObservationStatus,
     pub checkpoint_count: u64,
     pub diagnostic: Option<SafeDiagnostic>,
@@ -603,12 +610,22 @@ pub struct StreamObservation {
     pub run: RunObservationId,
     pub producer: String,
     pub consumer: Option<String>,
+    /// Durable consumer identity copied from the stream natural key.
+    pub consumer_identity: ConsumerIdentity,
+    /// Durable source identity copied from the stream natural key.
+    pub source_identity: String,
+    /// Durable optional partition copied from the stream natural key.
+    pub partition: Option<String>,
     pub checkpoint: CheckpointKey,
     pub status: StreamObservationStatus,
     pub items_seen: u64,
     pub items_committed: u64,
     pub items_failed: u64,
+    /// Durable Unix milliseconds of the most recently observed stream item.
+    pub last_item_ms: Option<i64>,
     pub diagnostic: Option<SafeDiagnostic>,
+    /// Durable Unix milliseconds at which this projection was last updated.
+    pub observed_ms: i64,
     pub live: bool,
 }
 
@@ -1326,6 +1343,7 @@ impl RuntimeState {
             connection,
             compact_receipt_signing_key,
         };
+        state.migrate_observation_projection_schema().await?;
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
         state.validate_recovery().await?;
@@ -1364,7 +1382,7 @@ impl RuntimeState {
         let capture = capture_tx(&tx).await?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
         tx.execute(
-            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 0, NULL, NULL)",
+            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
             params![
                 id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
                 registration.consumer_identity.canonical(), registration.function, registration.source_identity,
@@ -1437,7 +1455,7 @@ impl RuntimeState {
         .map_err(|_| RuntimeError::StorageUnavailable)?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
         tx.execute(
-            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 0, NULL, NULL)",
+            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
             params![
                 id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
                 registration.consumer_identity.canonical(), registration.function, registration.source_identity,
@@ -2812,6 +2830,63 @@ impl RuntimeState {
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Adds the durable run observation timestamp without reinterpreting any
+    /// retained request, lease, or recovery state. Older rows use their
+    /// terminal instant when present, otherwise their admission instant.
+    async fn migrate_observation_projection_schema(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query("PRAGMA table_info(sys_run_observation)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut columns = BTreeMap::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            columns.insert(
+                row.get::<String>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                (),
+            );
+        }
+        if !columns.contains_key("observed_ms") {
+            transaction
+                .execute(
+                    "ALTER TABLE sys_run_observation
+                     ADD COLUMN observed_ms INTEGER NOT NULL DEFAULT 0",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            transaction
+                .execute(
+                    "UPDATE sys_run_observation
+                     SET observed_ms = COALESCE(ended_ms, started_ms)",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('observation-projection-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         transaction
             .commit()
             .await
@@ -5919,7 +5994,7 @@ async fn load_run_observation_tx(
     id: RunObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<RunObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(row) = rows
         .next()
         .await
@@ -5937,8 +6012,8 @@ async fn load_run_observation_tx(
     if snapshot.runtime_id() != runtime_id || bigint_to_i64(snapshot.generation())? != generation {
         return Err(RuntimeError::RecoveryInvalid);
     }
-    let code: Option<i64> = row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let class: Option<i64> = row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let code: Option<i64> = row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let class: Option<i64> = row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let diagnostic = match (code, class) {
         (Some(code), Some(class)) => Some(SafeDiagnostic {
             code: decode_code(code)?,
@@ -5947,7 +6022,7 @@ async fn load_run_observation_tx(
         (None, None) => None,
         _ => return Err(RuntimeError::RecoveryInvalid),
     };
-    let status = decode_run_status(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let status = decode_run_status(row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     Ok(Some(RunObservation {
         id,
         request: RequestIdentity {
@@ -5960,8 +6035,11 @@ async fn load_run_observation_tx(
         snapshot,
         runtime_id,
         invocation_id: fixed(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        started_ms: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ended_ms: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        observed_ms: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
         status,
-        checkpoint_count: decode_u64(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        checkpoint_count: decode_u64(row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         diagnostic,
         live: runtime_id == capture.runtime_id()
             && generation == bigint_to_i64(capture.generation())?
@@ -6003,7 +6081,7 @@ async fn load_stream_observation_tx(
     id: StreamObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<StreamObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(row) = rows
         .next()
         .await
@@ -6046,12 +6124,17 @@ async fn load_stream_observation_tx(
         )?),
         producer: row_text(&row, 1)?,
         consumer: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        consumer_identity: decode_consumer_identity(&row_text(&row, 21)?)?,
+        source_identity: row_text(&row, 22)?,
+        partition: row.get(23).map_err(|_| RuntimeError::RecoveryInvalid)?,
         checkpoint,
         status,
         items_seen: decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         items_committed: decode_u64(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         items_failed: decode_u64(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        last_item_ms: row.get(24).map_err(|_| RuntimeError::RecoveryInvalid)?,
         diagnostic,
+        observed_ms: row.get(25).map_err(|_| RuntimeError::RecoveryInvalid)?,
         live: runtime_id == capture.runtime_id()
             && generation == bigint_to_i64(capture.generation())?
             && !run_status.is_terminal()
@@ -6271,7 +6354,7 @@ async fn sync_run_request_state_with_diagnostic_tx(
     let now = now_ms()?;
     let code = diagnostic.map(|value| encode_code(value.code));
     let class = diagnostic.map(|value| encode_class(value.class));
-    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END, observed_ms = ?3, diagnostic_code = COALESCE(?4, diagnostic_code), diagnostic_class = COALESCE(?5, diagnostic_class) WHERE session_id = ?6 AND request_id = ?7 AND status IN (?8, ?9)", params![run_status_code(status), status.is_terminal(), now, code, class, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     if status.is_terminal() {
         connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     }
@@ -14500,13 +14583,22 @@ mod tests {
             .unwrap();
         let id = registered.id;
         let pin = registered.snapshot.clone();
+        assert!(registered.ended_ms.is_none());
+        assert!(registered.observed_ms >= registered.started_ms);
+        state
+            .complete_request(request, digest(33), outcome(35))
+            .await
+            .unwrap();
         drop(state);
         let reopened = open_state(&repo).await;
         let restored = reopened.run_observation(id).await.unwrap().unwrap();
         assert_eq!(restored.id, id);
         assert_eq!(restored.snapshot, pin);
-        assert_eq!(restored.status, RunObservationStatus::Starting);
-        assert!(restored.live);
+        assert_eq!(restored.status, RunObservationStatus::Completed);
+        assert!(restored.ended_ms.is_some());
+        assert_eq!(restored.ended_ms, Some(restored.observed_ms));
+        assert!(restored.observed_ms >= restored.started_ms);
+        assert!(!restored.live);
     }
 
     #[tokio::test]
@@ -14866,6 +14958,11 @@ mod tests {
             ),
             (1, 1, 0)
         );
+        assert_eq!(observed.consumer_identity, key.consumer);
+        assert_eq!(observed.source_identity, key.source.as_str());
+        assert_eq!(observed.partition, Some(key.partition.as_str().to_owned()));
+        assert!(observed.last_item_ms.is_some());
+        assert!(observed.observed_ms >= observed.last_item_ms.unwrap());
         assert_eq!(
             state
                 .run_observation(run.id)
@@ -14890,6 +14987,27 @@ mod tests {
         assert_eq!(orphaned.status, RunObservationStatus::Orphaned);
         assert!(!orphaned.live);
         assert_eq!(state.runtime_run_observations().await.unwrap().len(), 0);
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let restored = reopened
+            .stream_observation(stream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.run, run.id);
+        assert_eq!(restored.consumer_identity, key.consumer);
+        assert_eq!(restored.source_identity, key.source.as_str());
+        assert_eq!(restored.partition, Some(key.partition.as_str().to_owned()));
+        assert_eq!(
+            (
+                restored.items_seen,
+                restored.items_committed,
+                restored.items_failed
+            ),
+            (1, 1, 0)
+        );
+        assert!(restored.last_item_ms.is_some());
+        assert!(!restored.live);
     }
 
     #[tokio::test]
