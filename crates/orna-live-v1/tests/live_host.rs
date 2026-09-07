@@ -12,12 +12,13 @@ use orna_live_v1::{
     WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
 use orna_protocol_v1::{
-    DatabaseContext, Envelope, Message, PresentationContext, ResultStatus, TargetKind,
+    DatabaseContext, Envelope, Message, PresentationContext, ResultBody, ResultStatus, TargetKind,
     canonical_request_fingerprint,
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    RequestIdentity, RequestOwner, RuntimeError, RuntimeIdentity, RuntimeState, TerminalOutcome,
+    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RuntimeError, RuntimeIdentity,
+    RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -344,6 +345,18 @@ struct UnitApplication {
     calls: usize,
     reject: bool,
     reject_cancel: bool,
+}
+
+struct FailAt(FaultPoint);
+
+impl FaultInjector for FailAt {
+    fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+        if point == self.0 {
+            Err(RuntimeError::FaultInjected(point))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn unit_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
@@ -2674,10 +2687,11 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
                 target: returned_target,
                 state: returned_state,
                 fingerprint: Some(returned_fingerprint),
-                result: None,
+                result,
             } if returned_target == target
                 && returned_state == state
                 && returned_fingerprint == fingerprint
+                && result.is_some() == (state == orna_protocol_v1::RequestState::Orphaned)
         ));
     }
     let mismatch = Envelope {
@@ -2896,14 +2910,19 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
     let status_outcome =
         block_on(host.dispatch_frame([7; 16], 3, Frame::Binary(status_request), &mut application))
             .unwrap();
+    let expected =
+        ResultBody::from_result(first.response.as_ref().unwrap(), Limits::default().protocol)
+            .unwrap();
     assert!(matches!(
         status_outcome.response.unwrap().message,
         Message::RequestStatusResult {
             target: returned_target,
             state: orna_protocol_v1::RequestState::Orphaned,
             fingerprint: Some(returned_fingerprint),
-            result: Some(_),
-        } if returned_target == [25; 16] && returned_fingerprint == fingerprint
+            result: Some(result),
+        } if returned_target == [25; 16]
+            && returned_fingerprint == fingerprint
+            && result == expected
     ));
 
     assert_eq!(
@@ -2960,6 +2979,108 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
     assert_eq!(application.calls, 0);
     assert_eq!(
         block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request), &mut application)),
+        Ok(recovered)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [79; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [79; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let old = block_on(runtime.acquire_lease([77; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let activation = block_on(runtime.begin_activation()).unwrap();
+    let mutation = TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap();
+    assert_eq!(
+        block_on(runtime.commit_table_request_activation(
+            old,
+            identity,
+            fingerprint,
+            &activation,
+            &[mutation],
+            [3; 32],
+            TerminalOutcome::new(vec![4]).unwrap(),
+            &FailAt(FaultPoint::AfterTerminalClaim),
+        )),
+        Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
+    );
+    block_on(runtime.recover_abandoned(old.owner_id, [78; 16])).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [78; 16],
+        RequestOwner::from(old),
+    );
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [11; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let recovered = block_on(host.dispatch_frame(
+        [11; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        recovered.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            fingerprint: returned,
+            diagnostic: None,
+        } if returned == fingerprint
+    ));
+    assert_eq!(application.calls, 0);
+
+    let status_request = Envelope {
+        request: Some([80; 16]),
+        watch: None,
+        message: Message::RequestStatus {
+            target: [79; 16],
+            fingerprint,
+        },
+        extensions: BTreeMap::new(),
+    }
+    .encode(Limits::default().protocol)
+    .unwrap();
+    let status =
+        block_on(host.dispatch_frame([11; 16], 3, Frame::Binary(status_request), &mut application))
+            .unwrap();
+    let expected = ResultBody::from_result(
+        recovered.response.as_ref().unwrap(),
+        Limits::default().protocol,
+    )
+    .unwrap();
+    assert!(matches!(
+        status.response.unwrap().message,
+        Message::RequestStatusResult {
+            state: orna_protocol_v1::RequestState::Orphaned,
+            fingerprint: Some(returned),
+            result: Some(result),
+            ..
+        } if returned == fingerprint && result == expected
+    ));
+    assert_eq!(
+        block_on(host.dispatch_frame([11; 16], 4, Frame::Binary(request), &mut application)),
         Ok(recovered)
     );
     assert_eq!(application.calls, 0);
