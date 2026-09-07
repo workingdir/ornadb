@@ -14,15 +14,41 @@ use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
+use orna_semantic_v1::StandardDependencyProfile;
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::Raw;
 
+mod admitted_repl;
 mod repl;
 
+pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use repl::{ReplSession, parse_admitted_repl};
+
+/// The verified standard-source bundle used by the bounded local and remote
+/// REPL boundaries. The source is included from the same canonical module
+/// file as the executable local REPL, while this crate owns verification of
+/// its profile before either boundary admits an import.
+const REFERENCE_STD_MATH_LOGICAL_PATH: &str = "std/math.orna";
+const REFERENCE_STD_MATH_SOURCE: &str = include_str!("../../orna-cli-v1/src/stdlib/std/math.orna");
+
+/// Returns the reference standard sources supplied to the bounded REPL.
+#[must_use]
+pub fn reference_standard_sources() -> [(String, String); 1] {
+    [(
+        REFERENCE_STD_MATH_LOGICAL_PATH.into(),
+        REFERENCE_STD_MATH_SOURCE.into(),
+    )]
+}
+
+/// Returns the immutable profile that verifies [`reference_standard_sources`].
+#[must_use]
+pub fn reference_standard_profile() -> StandardDependencyProfile {
+    StandardDependencyProfile::from_sources("orna.std/v1-pure-math", reference_standard_sources())
+        .expect("the bundled reference standard sources are valid")
+}
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
 const DEFAULT_STEPS: u64 = 10_000;
