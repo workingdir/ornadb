@@ -98,9 +98,17 @@ pub enum DefinitionKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraceKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvocationKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckpointKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FailureKind {}
 /// Typed portable row references. `SnapshotRef` is a snapshot metadata row
 /// reference, deliberately distinct from `CanonicalSnapshot` pin bytes.
 pub type FileRef = TypedRowRef<FileKind>;
@@ -109,6 +117,12 @@ pub type DiagnosticRef = TypedRowRef<DiagnosticKind>;
 pub type ObjectRef = TypedRowRef<ObjectKind>;
 pub type DefinitionRef = TypedRowRef<DefinitionKind>;
 pub type TraceRef = TypedRowRef<TraceKind>;
+/// Typed `sys.RowRef<sys.Function>` marker. This is not proof that the
+/// referenced row is a function, exists, or may be invoked.
+pub type FunctionRef = TypedRowRef<FunctionKind>;
+/// Typed `sys.RowRef<sys.Invocation>` marker. This is not proof that an
+/// invocation exists or grants observation, cancellation, or await authority.
+pub type InvocationRef = TypedRowRef<InvocationKind>;
 /// Typed `sys.RowRef<sys.Run>` alias. The generic wrapper remains a marker;
 /// use `validate_run_reference` when checked relation/context coordinates are
 /// required.
@@ -117,6 +131,31 @@ pub type RunRef = TypedRowRef<RunKind>;
 /// marker; use `validate_stream_reference` when checked relation/context
 /// coordinates are required.
 pub type StreamRef = TypedRowRef<StreamKind>;
+/// Typed `sys.RowRef<sys.Checkpoint>` marker. This is not proof that a
+/// checkpoint exists or grants progress-management authority.
+pub type CheckpointRef = TypedRowRef<CheckpointKind>;
+/// Typed `sys.RowRef<sys.Failure>` marker. This is not proof that a failure
+/// exists or grants retry, skip, replay, or resolution authority.
+pub type FailureRef = TypedRowRef<FailureKind>;
+
+/// Checks only that a row reference is pinned to the supplied CWD context,
+/// then attaches a noninterchangeable marker. It intentionally does not
+/// validate a relation identity: physical relation identities and row keys
+/// are owned by the projection that defines them. This helper is therefore
+/// implementation-defined coordinate validation, not authority, provenance,
+/// row-existence, or semantic-relation proof.
+pub fn validate_reference_context<Kind>(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<TypedRowRef<Kind>, SystemReferenceError> {
+    if reference.database_id != capture.database_id() {
+        return Err(SystemReferenceError::DatabaseMismatch);
+    }
+    if reference.snapshot != *capture.snapshot() {
+        return Err(SystemReferenceError::SnapshotMismatch);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
 
 /// Stable implementation-defined physical identities for the canonical
 /// `sys.Run` and `sys.Stream` relations. The Orna specification names these
@@ -1074,6 +1113,44 @@ mod tests {
         )
         .unwrap();
         assert!(span.end_byte > BigInt::from(u64::MAX));
+    }
+    #[test]
+    fn lifecycle_reference_markers_round_trip_and_require_matching_cwd_context() {
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
+        let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
+        let reference = RowRef::new(
+            [1; 16],
+            [5; 16],
+            OvbRaw::Text("implementation-defined-key".into()),
+            snapshot,
+        )
+        .unwrap();
+        let encoded = reference.encode().unwrap();
+        let decoded = row_ref_from_raw(Value::decode(&encoded).unwrap().raw()).unwrap();
+        assert_eq!(decoded, reference);
+
+        let function: FunctionRef = validate_reference_context(decoded.clone(), &capture).unwrap();
+        let invocation: InvocationRef =
+            validate_reference_context(decoded.clone(), &capture).unwrap();
+        let checkpoint: CheckpointRef =
+            validate_reference_context(decoded.clone(), &capture).unwrap();
+        let failure: FailureRef = validate_reference_context(decoded.clone(), &capture).unwrap();
+        assert_eq!(function.as_row_ref(), invocation.as_row_ref());
+        assert_eq!(checkpoint.as_row_ref(), failure.as_row_ref());
+
+        let wrong_database =
+            CwdCapture::new(Snapshot::cwd([9; 16], [2; 16], 3.into()).unwrap(), [4; 32]).unwrap();
+        assert_eq!(
+            validate_reference_context::<FunctionKind>(reference, &wrong_database),
+            Err(SystemReferenceError::DatabaseMismatch)
+        );
+
+        let wrong_snapshot =
+            CwdCapture::new(Snapshot::cwd([1; 16], [2; 16], 4.into()).unwrap(), [4; 32]).unwrap();
+        assert_eq!(
+            validate_reference_context::<InvocationKind>(decoded, &wrong_snapshot),
+            Err(SystemReferenceError::SnapshotMismatch)
+        );
     }
     #[test]
     fn diagnostic_json_evidence_is_safe_lossless_and_not_the_ovb_codec() {
