@@ -317,6 +317,58 @@ pub(super) enum SealedInvocationPreparedOutcome {
         authorisation: AuthorisedInvocation,
     },
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SealedInvocationLifecycleTerminal {
+    Failed(SealedInvocationFailureClass),
+    Cancelled,
+}
+
+impl SealedInvocationLifecycleTerminal {
+    pub(super) fn fields(self) -> (&'static str, Option<i16>, Option<i16>) {
+        match self {
+            // These are the bounded, redacted categories already exposed by
+            // sealed invocation failure events.  They deliberately do not
+            // encode user source, binding values, or database errors.
+            Self::Failed(SealedInvocationFailureClass::Bind) => ("failed", Some(1), Some(1)),
+            Self::Failed(SealedInvocationFailureClass::Target) => ("failed", Some(2), Some(2)),
+            Self::Failed(SealedInvocationFailureClass::Internal) => ("failed", Some(3), Some(2)),
+            Self::Cancelled => ("cancelled", Some(4), Some(3)),
+        }
+    }
+}
+
+async fn transition_sealed_invocation_lifecycle(
+    transaction: &Transaction<'_>,
+    invocation: InvocationId,
+    terminal: SealedInvocationLifecycleTerminal,
+) -> Result<(), PostgresKernelError> {
+    let (status, diagnostic_code, diagnostic_class) = terminal.fields();
+    let record = invocation.canonical();
+    let invocation = invocation.to_bytes().to_vec();
+    let changed = transaction
+        .execute(
+            "UPDATE _orna_kernel.sealed_invocation_lifecycle
+                SET status = $2,
+                    ended_at = transaction_timestamp(),
+                    diagnostic_code = $3,
+                    diagnostic_class = $4
+              WHERE invocation_id = $1
+                AND status IN ('queued', 'running')",
+            &[&invocation, &status, &diagnostic_code, &diagnostic_class],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if changed == 1 {
+        return Ok(());
+    }
+    Err(PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.sealed_invocation_lifecycle",
+        record,
+        rule: "sealed invocation terminal transition requires one active lifecycle row",
+    })
+}
+
 impl SealedInvocationPreparedOutcome {
     pub(super) fn unsupported_security_definer_target(
         &self,
@@ -679,6 +731,56 @@ impl SealedInvocationContinuation {
 }
 
 impl SealedInvocationOperation {
+    /// Persists the private lifecycle admission in the same transaction as
+    /// the protected prepared-audit evidence.  Only prepared outcomes with a
+    /// resolved authority can enter this relation: its target foreign key is
+    /// deliberately non-null.
+    async fn append_prepared_audit_lifecycle(
+        &self,
+        transaction: &Transaction<'_>,
+    ) -> Result<(), PostgresKernelError> {
+        let (target, failure) = match &self.outcome {
+            SealedInvocationPreparedOutcome::Allowed {
+                security_target, ..
+            } => (*security_target, None),
+            SealedInvocationPreparedOutcome::BindFailure {
+                security_target, ..
+            } => (*security_target, Some(SealedInvocationFailureClass::Bind)),
+            SealedInvocationPreparedOutcome::TargetDenied {
+                security_target: Some(target),
+                ..
+            } => (*target, Some(SealedInvocationFailureClass::Target)),
+            SealedInvocationPreparedOutcome::TargetDenied {
+                security_target: None,
+                ..
+            } => return Ok(()),
+        };
+        let invocation = self.invocation.to_bytes().to_vec();
+        let source = target.revision().source().to_bytes().to_vec();
+        let catalogue = target.revision().catalogue().to_bytes().to_vec();
+        let function = target.function().to_bytes().to_vec();
+        let owner = self.authenticated_session.principal().to_bytes().to_vec();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.sealed_invocation_lifecycle (\
+                    invocation_id, source_revision_id, catalogue_revision_id, function_id, \
+                    owner_principal_id, status\
+                 ) VALUES ($1, $2, $3, $4, $5, 'running')",
+                &[&invocation, &source, &catalogue, &function, &owner],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if let Some(failure) = failure {
+            transition_sealed_invocation_lifecycle(
+                transaction,
+                self.invocation,
+                SealedInvocationLifecycleTerminal::Failed(failure),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn append_prepared_audit(&self) -> Result<(), PostgresKernelError> {
         #[cfg(test)]
         if let Some(hooks) = self.test_hooks.as_ref() {
@@ -772,11 +874,38 @@ impl SealedInvocationOperation {
                     });
                 }
             }
+            self.append_prepared_audit_lifecycle(&transaction).await?;
             transaction
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
             Ok(())
+        }
+        .await;
+        finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
+    }
+
+    async fn record_pre_execution_cancellation(&self) -> Result<(), PostgresKernelError> {
+        let mut database_session = self.kernel.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            transition_sealed_invocation_lifecycle(
+                &transaction,
+                self.invocation,
+                SealedInvocationLifecycleTerminal::Cancelled,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)
         }
         .await;
         finish_authenticated_dispatch_session(operation, database_session.shutdown().await)
@@ -806,11 +935,6 @@ impl SealedInvocationOperation {
 
         self.consumed = true;
         self.append_prepared_audit().await?;
-        if cancellation.is_requested() {
-            return Ok(SealedInvocationExecution::Cancelled {
-                invocation: self.invocation,
-            });
-        }
         let bind_failure = matches!(
             &self.outcome,
             SealedInvocationPreparedOutcome::BindFailure { .. }
@@ -831,6 +955,12 @@ impl SealedInvocationOperation {
                     invocation: self.invocation,
                 },
             ));
+        }
+        if cancellation.is_requested() {
+            self.record_pre_execution_cancellation().await?;
+            return Ok(SealedInvocationExecution::Cancelled {
+                invocation: self.invocation,
+            });
         }
         #[cfg(test)]
         if let Some(hooks) = self.test_hooks.as_ref() {
