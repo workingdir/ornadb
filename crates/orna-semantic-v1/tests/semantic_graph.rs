@@ -2102,6 +2102,38 @@ fn direct_and_piped_calls_share_argument_validation() {
 }
 
 #[test]
+fn logical_operators_require_boolean_operands_without_losing_effects() {
+    for expression in [
+        "true && false",
+        "!false",
+        "sys.snapshot(\"HEAD\") == sys.snapshot(\"HEAD\") && true",
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "logical-operators.orna",
+            format!("fn logical() = {expression};"),
+        )]);
+        assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
+        if expression.contains("snapshot") {
+            let symbol = &result.modules.values().next().expect("module").symbols["logical"];
+            assert!(symbol.effects.effects.contains("database read"));
+            assert!(symbol.effects.may_fail);
+        }
+    }
+
+    for expression in ["1 && true", "!1"] {
+        let result = analyze(&[ModuleInput::new(
+            "logical-operators.orna",
+            format!("fn logical() = {expression};"),
+        )]);
+        assert!(
+            has(&result, DIAG_TYPE),
+            "{expression}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn generic_and_table_pipeline_stages_remain_fail_closed() {
     let result = analyze(&[ModuleInput::new(
         "unsupported.orna",
