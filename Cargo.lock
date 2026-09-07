@@ -1532,6 +1532,7 @@ dependencies = [
  "orna-compiler",
  "orna-core",
  "orna-protocol",
+ "orna-protocol-v1",
  "orna-runtime-tty",
  "orna-standard",
  "serde_json",
@@ -1596,8 +1597,12 @@ dependencies = [
  "num-integer",
  "num-traits",
  "orna-foundation-v1",
+ "orna-project-v1",
+ "orna-repository-v1",
+ "orna-semantic-v1",
  "orna-syntax-v1",
  "orna-value-v1",
+ "tempfile",
 ]
 
 [[package]]
@@ -1771,8 +1776,11 @@ dependencies = [
  "orna-client",
  "orna-compiler",
  "orna-core",
+ "orna-evaluator-v1",
+ "orna-foundation-v1",
  "orna-live-v1",
  "orna-postgres",
+ "orna-project-v1",
  "orna-protocol",
  "orna-protocol-v1",
  "orna-repository-v1",
