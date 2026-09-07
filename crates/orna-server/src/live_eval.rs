@@ -3,9 +3,9 @@
 //! The live transport owns request identity, response validation, replay, and
 //! the wire-level watch registry. This module owns the semantic/evaluator
 //! state that is shared by the local REPL boundary and the executable host.
-//! Every session is initialized from one loaded repository project and one
-//! runtime CWD capture; a disconnect therefore does not discard a legitimate
-//! resumable session, while deletion or expiry removes all application state.
+//! Each Eval/Watch captures its requested durable CWD at admission. The first
+//! admitted operation initializes the resumable session overlay for that pin;
+//! deletion or expiry removes all application state.
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -22,6 +22,7 @@ use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext, ResultStatus,
 };
 use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_security_v1::SessionId;
 
 /// The HTTP authority and the application share this expiry index. Keeping
@@ -38,26 +39,61 @@ struct WatchState {
 
 struct SessionState {
     repl: AdmittedReplSession,
-    presentation: PresentationContext,
+    snapshot: CanonicalSnapshot,
     watches: BTreeMap<[u8; 16], WatchState>,
+    terminal: BTreeMap<[u8; 16], ([u8; 32], Envelope)>,
 }
 
-/// The context established when the executable host is bound.
-///
-/// The runtime capture and project source set are admitted together once.
-/// Evaluation receives only this immutable bundle and never reads a later
-/// worktree or CWD fallback.
+/// The immutable durable CWD pin captured for one admitted operation.
 struct OperationAdmission {
-    repl: AdmittedReplSession,
     snapshot: CanonicalSnapshot,
-    presentation: PresentationContext,
+}
+
+/// Server-owned source for the durable CWD pin and immutable project inputs.
+///
+/// The live transport has already made the request reservation when this is
+/// called. Keeping this seam here makes the remaining synchronous application
+/// callback obtain its context at operation admission, rather than comparing
+/// with a capture made when the listener was bound.
+trait OperationAdmissionSource {
+    fn capture(&self) -> std::result::Result<CwdCapture, &'static str>;
+    fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str>;
+}
+
+struct RepositoryAdmissionSource {
+    repository: Repository,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+}
+
+impl OperationAdmissionSource for RepositoryAdmissionSource {
+    fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
+        let state = futures::executor::block_on(RuntimeState::open(
+            &self.repository,
+            self.identity,
+            self.initial_digest,
+        ))
+        .map_err(|_| "wire.invalid_message")?;
+        futures::executor::block_on(state.capture()).map_err(|_| "wire.invalid_message")
+    }
+
+    fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
+        let project = ProjectLoader::default()
+            .load_with_standard_profile(&self.repository, Some(reference_standard_profile()))
+            .map_err(|_| "wire.invalid_message")?;
+        AdmittedReplSession::from_loaded_project(
+            &project,
+            reference_standard_sources(),
+            Limits::default(),
+        )
+        .map_err(|_| "wire.invalid_message")
+    }
 }
 
 /// The server's pure Eval/Watch implementation.
 pub(crate) struct PureEvalApplication {
-    template: AdmittedReplSession,
     database_id: [u8; 16],
-    pinned_capture: CwdCapture,
+    admissions: Box<dyn OperationAdmissionSource>,
     expiries: SessionExpiries,
     sessions: BTreeMap<SessionId, SessionState>,
 }
@@ -67,25 +103,20 @@ impl PureEvalApplication {
     pub(crate) fn from_repository(
         repository: &Repository,
         database_id: [u8; 16],
-        capture: CwdCapture,
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
         expiries: SessionExpiries,
     ) -> std::result::Result<Self, ()> {
-        if capture.database_id() != database_id {
+        if identity.database_id != database_id {
             return Err(());
         }
-        let project = ProjectLoader::default()
-            .load_with_standard_profile(repository, Some(reference_standard_profile()))
-            .map_err(|_| ())?;
-        let template = AdmittedReplSession::from_loaded_project(
-            &project,
-            reference_standard_sources(),
-            Limits::default(),
-        )
-        .map_err(|_| ())?;
         Ok(Self {
-            template,
             database_id,
-            pinned_capture: capture,
+            admissions: Box::new(RepositoryAdmissionSource {
+                repository: repository.clone(),
+                identity,
+                initial_digest,
+            }),
             expiries,
             sessions: BTreeMap::new(),
         })
@@ -120,22 +151,28 @@ impl PureEvalApplication {
     fn admit(
         &self,
         database: &DatabaseContext,
-        presentation: &PresentationContext,
+        _presentation: &PresentationContext,
     ) -> std::result::Result<OperationAdmission, &'static str> {
         if database.database != self.database_id {
+            return Err("wire.invalid_message");
+        }
+        // REQUEST-1 step 3: capture the current durable CWD only after the
+        // transport has reserved this operation. The resulting capture is
+        // retained by the session state and cannot be changed by later CWD
+        // or repository movement.
+        let capture = self.admissions.capture()?;
+        if capture.database_id() != self.database_id {
             return Err("wire.invalid_message");
         }
         if database
             .snapshot
             .as_ref()
-            .is_some_and(|requested| requested != self.pinned_capture.snapshot())
+            .is_some_and(|requested| requested != capture.snapshot())
         {
             return Err("wire.snapshot_expired");
         }
         Ok(OperationAdmission {
-            repl: self.template.clone(),
-            snapshot: self.pinned_capture.snapshot().clone(),
-            presentation: presentation.clone(),
+            snapshot: capture.snapshot().clone(),
         })
     }
 
@@ -149,26 +186,65 @@ impl PureEvalApplication {
         if !self.expiries.borrow().contains_key(&session) {
             return Err("wire.session_expired");
         }
-        let OperationAdmission {
-            repl,
-            snapshot,
-            presentation,
-        } = self.admit(database, presentation)?;
-        if let std::collections::btree_map::Entry::Vacant(entry) = self.sessions.entry(session) {
-            entry.insert(SessionState {
-                repl,
-                presentation: presentation.clone(),
-                watches: BTreeMap::new(),
-            });
+        let OperationAdmission { snapshot } = self.admit(database, presentation)?;
+        if !self.sessions.contains_key(&session) {
+            // The evaluator is constructed only after the durable capture is
+            // accepted, then remains the session overlay for that exact pin.
+            let repl = self.admissions.repl()?;
+            if self.admissions.capture()?.snapshot() != &snapshot {
+                // Do not bind loaded source to a CWD that moved while the
+                // immutable evaluator was being built. A later repository
+                // change cannot affect `repl`, which owns the loaded source.
+                return Err("wire.snapshot_expired");
+            }
+            self.sessions.insert(
+                session,
+                SessionState {
+                    repl,
+                    snapshot: snapshot.clone(),
+                    watches: BTreeMap::new(),
+                    terminal: BTreeMap::new(),
+                },
+            );
         }
         let state = self
             .sessions
             .get_mut(&session)
             .expect("session was inserted");
-        if state.presentation != presentation {
-            return Err("wire.invalid_message");
+        if state.snapshot != snapshot {
+            // A resumable REPL overlay cannot be safely transplanted onto a
+            // different CWD generation. The next operation was still fully
+            // admitted against the durable current capture, but it must not
+            // mutate the overlay pinned by an earlier operation.
+            return Err("wire.snapshot_expired");
         }
         Ok((state, snapshot))
+    }
+
+    fn replay(
+        &self,
+        session: SessionId,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+    ) -> Option<Envelope> {
+        self.sessions
+            .get(&session)
+            .and_then(|state| state.terminal.get(&request))
+            .and_then(|(stored, response)| (*stored == fingerprint).then_some(response.clone()))
+    }
+
+    fn retain_terminal(
+        &mut self,
+        session: SessionId,
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        response: &Envelope,
+    ) {
+        if let Some(state) = self.sessions.get_mut(&session) {
+            state
+                .terminal
+                .insert(request, (fingerprint, response.clone()));
+        }
     }
 
     fn failure(&self, request: [u8; 16], fingerprint: [u8; 32], code: &str) -> Result<Envelope> {
@@ -217,6 +293,14 @@ impl LiveApplication for PureEvalApplication {
         else {
             return Err(Error::InvalidMessage);
         };
+        let session_id = SessionId::new(session);
+        if let Some(response) = self.replay(session_id, request, *fingerprint) {
+            // The durable transport normally returns a terminal outcome
+            // before reaching this callback. This local fence covers a
+            // duplicate callback during the same retained session without
+            // re-admitting or re-executing its source.
+            return Ok(response);
+        }
         let result = {
             let (state, _) = match self.session(session, database, presentation) {
                 Ok(state) => state,
@@ -224,7 +308,7 @@ impl LiveApplication for PureEvalApplication {
             };
             state.repl.submit(source)
         };
-        match result {
+        let response = match result {
             Ok(Some(value)) => Ok(Envelope {
                 request: Some(request),
                 watch: None,
@@ -250,7 +334,9 @@ impl LiveApplication for PureEvalApplication {
             Err(error) => {
                 self.failure_diagnostic(request, *fingerprint, error.diagnostic().clone())
             }
-        }
+        }?;
+        self.retain_terminal(session_id, request, *fingerprint, &response);
+        Ok(response)
     }
 
     fn watch(
@@ -453,6 +539,23 @@ fn decode_envelope(raw: OvbRaw) -> Result<Envelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    struct TestAdmissionSource {
+        capture: Rc<RefCell<CwdCapture>>,
+        repl_admissions: Rc<Cell<usize>>,
+    }
+
+    impl OperationAdmissionSource for TestAdmissionSource {
+        fn capture(&self) -> std::result::Result<CwdCapture, &'static str> {
+            Ok(self.capture.borrow().clone())
+        }
+
+        fn repl(&self) -> std::result::Result<AdmittedReplSession, &'static str> {
+            self.repl_admissions.set(self.repl_admissions.get() + 1);
+            Ok(AdmittedReplSession::new(Limits::default()))
+        }
+    }
 
     fn presentation() -> PresentationContext {
         PresentationContext {
@@ -471,22 +574,35 @@ mod tests {
         }
     }
 
-    fn application() -> (PureEvalApplication, SessionExpiries, [u8; 16]) {
-        let database_id = [1; 16];
-        let capture = CwdCapture::new(
-            CanonicalSnapshot::cwd(database_id, [2; 16], 0.into()).unwrap(),
+    fn capture(database_id: [u8; 16], generation: i64) -> CwdCapture {
+        CwdCapture::new(
+            CanonicalSnapshot::cwd(database_id, [2; 16], generation.into()).unwrap(),
             [3; 32],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn application() -> (
+        PureEvalApplication,
+        SessionExpiries,
+        [u8; 16],
+        Rc<RefCell<CwdCapture>>,
+        Rc<Cell<usize>>,
+    ) {
+        let database_id = [1; 16];
+        let capture = Rc::new(RefCell::new(capture(database_id, 0)));
+        let repl_admissions = Rc::new(Cell::new(0));
         let expiries = Rc::new(RefCell::new(BTreeMap::new()));
         let application = PureEvalApplication {
-            template: AdmittedReplSession::new(Limits::default()),
             database_id,
-            pinned_capture: capture,
+            admissions: Box::new(TestAdmissionSource {
+                capture: Rc::clone(&capture),
+                repl_admissions: Rc::clone(&repl_admissions),
+            }),
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
         };
-        (application, expiries, database_id)
+        (application, expiries, database_id, capture, repl_admissions)
     }
 
     fn eval_message(database_id: [u8; 16], source: &str, fingerprint: [u8; 32]) -> Message {
@@ -498,7 +614,7 @@ mod tests {
         }
     }
 
-    fn raw_field<'a>(raw: &'a OvbRaw, key: u8) -> &'a OvbRaw {
+    fn raw_field(raw: &OvbRaw, key: u8) -> &OvbRaw {
         let OvbRaw::Map(fields) = raw else {
             panic!("expected an OVB map");
         };
@@ -520,7 +636,7 @@ mod tests {
 
     #[test]
     fn eval_failure_is_a_correlated_structured_diagnostic() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, _, _) = application();
         let session = [3; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let request = [4; 16];
@@ -551,7 +667,7 @@ mod tests {
 
     #[test]
     fn watch_is_read_only_and_resync_advances_its_revision() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, _, _) = application();
         let session = [6; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let watch_request = [7; 16];
@@ -603,7 +719,7 @@ mod tests {
 
     #[test]
     fn watch_with_refresh_floor_is_rejected_without_a_scheduler() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, _, _) = application();
         let session = [27; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let result = application.watch(
@@ -626,7 +742,7 @@ mod tests {
 
     #[test]
     fn sessions_are_isolated_and_context_remains_pinned() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, _, _) = application();
         let first = [17; 16];
         let second = [18; 16];
         expiries.borrow_mut().insert(SessionId::new(first), 100);
@@ -682,17 +798,101 @@ mod tests {
         assert!(matches!(
             presentation_change.message,
             Message::Result {
-                status: ResultStatus::Failure,
-                value: None,
-                diagnostic: Some(_),
+                status: ResultStatus::Success,
                 ..
             }
         ));
     }
 
     #[test]
+    fn null_context_is_captured_at_operation_admission() {
+        let (mut application, expiries, database_id, current_capture, repl_admissions) =
+            application();
+        let session = [39; 16];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        *current_capture.borrow_mut() = capture(database_id, 7);
+
+        let response = application
+            .eval(
+                session,
+                [40; 16],
+                &eval_message(database_id, "let answer: Int = 40;", [41; 32]),
+            )
+            .unwrap();
+        assert!(matches!(
+            response.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                ..
+            }
+        ));
+        assert_eq!(
+            application.sessions[&SessionId::new(session)].snapshot,
+            current_capture.borrow().snapshot().clone()
+        );
+        assert_eq!(repl_admissions.get(), 1);
+    }
+
+    #[test]
+    fn explicit_stale_context_is_rejected_without_overlay_mutation() {
+        let (mut application, expiries, database_id, current_capture, repl_admissions) =
+            application();
+        let session = [42; 16];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        *current_capture.borrow_mut() = capture(database_id, 3);
+        let mut stale = eval_message(database_id, "let hidden: Int = 1;", [43; 32]);
+        let Message::Eval { database, .. } = &mut stale else {
+            unreachable!();
+        };
+        database.snapshot = Some(capture(database_id, 2).snapshot().clone());
+
+        let response = application.eval(session, [44; 16], &stale).unwrap();
+        assert!(matches!(
+            response.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+        assert!(application.sessions.is_empty());
+        assert_eq!(repl_admissions.get(), 0);
+    }
+
+    #[test]
+    fn matching_terminal_replay_does_not_readmit_or_reexecute() {
+        let (mut application, expiries, database_id, _, repl_admissions) = application();
+        let session = [45; 16];
+        let request = [46; 16];
+        let message = eval_message(database_id, "let answer: Int = 40;", [47; 32]);
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+
+        let first = application.eval(session, request, &message).unwrap();
+        let replay = application.eval(session, request, &message).unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(repl_admissions.get(), 1);
+
+        let value = application
+            .eval(
+                session,
+                [48; 16],
+                &eval_message(database_id, "answer + 2", [49; 32]),
+            )
+            .unwrap();
+        assert!(matches!(
+            value.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(repl_admissions.get(), 1);
+    }
+
+    #[test]
     fn eval_requires_the_pinned_cwd_snapshot() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, current_capture, _) = application();
         let session = [30; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let mut current = eval_message(database_id, "1 + 1", [35; 32]);
@@ -700,7 +900,7 @@ mod tests {
             let Message::Eval { database, .. } = &mut current else {
                 unreachable!();
             };
-            database.snapshot = Some(application.pinned_capture.snapshot().clone());
+            database.snapshot = Some(current_capture.borrow().snapshot().clone());
         }
         let admitted = application.eval(session, [36; 16], &current).unwrap();
         assert!(matches!(
@@ -729,7 +929,7 @@ mod tests {
 
     #[test]
     fn deletion_and_expiry_remove_state_but_ordinary_resume_keeps_it() {
-        let (mut application, expiries, database_id) = application();
+        let (mut application, expiries, database_id, _, _) = application();
         let session = [9; 16];
         let session_id = SessionId::new(session);
         expiries.borrow_mut().insert(session_id, 100);
