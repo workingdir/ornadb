@@ -1323,7 +1323,13 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if math_name(callee).is_none() {
+        // A verified standard-source function takes precedence over the
+        // legacy bounded math fallback. This keeps admitted REPL calls on
+        // ordinary import/resolution and executes their pinned source body,
+        // including its declared argument names. The fallback remains only
+        // for the standalone evaluator surface, which has no admitted module
+        // environment.
+        if math_name(callee).is_none() || self.resolve_function_name(callee, scope).is_some() {
             if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
                 self.items(arguments.len() + usize::from(input.is_some()))?;
                 let mut values = input.clone().into_iter().collect::<Vec<_>>();
