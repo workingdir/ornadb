@@ -181,6 +181,84 @@ pub const SYS_STREAM_TABLE_ID: [u8; 16] = [
     0x7c, 0x10, 0x5b, 0xa9, 0x63, 0x2e, 0x43, 0x8c, 0x88, 0x19, 0x56, 0xd0, 0x47, 0xaf, 0x20, 0x02,
 ];
 
+/// Constructs a checked `sys.InvocationRef` from the durable observation
+/// coordinates. This validates only the canonical reference shape and that
+/// the supplied snapshot belongs to `database_id`; it does not prove that the
+/// row exists, is retained, or is observable by the caller.
+pub fn invocation_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    id: [u8; 16],
+) -> Result<InvocationRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_INVOCATION_TABLE_ID,
+        key: uuid(id),
+        snapshot,
+    }))
+}
+
+/// Constructs a checked `sys.InvocationArgumentRef` from the durable
+/// observation coordinates. `position` is the nonnegative, `u64`-bounded
+/// natural-key component required by the public relation. As with
+/// [`invocation_reference`], this only constructs coordinates: it never
+/// establishes row existence, retention, or authorization to read the
+/// argument observation.
+pub fn invocation_argument_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    invocation_id: [u8; 16],
+    position: BigInt,
+) -> Result<InvocationArgumentRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    if position.sign() == Sign::Minus || position > BigInt::from(u64::MAX) {
+        return Err(SystemReferenceError::InvalidInvocationArgumentKey);
+    }
+    let invocation = RowRef {
+        database_id,
+        table_id: SYS_INVOCATION_TABLE_ID,
+        key: uuid(invocation_id),
+        snapshot: snapshot.clone(),
+    };
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_INVOCATION_ARGUMENT_TABLE_ID,
+        key: OvbRaw::Array(vec![row_ref_raw(&invocation), OvbRaw::Int(position)]),
+        snapshot,
+    }))
+}
+
+/// Closed 1.0.0 vocabulary for `sys.Invocation.status`. Its JSON form is the
+/// exact lower-case vocabulary from `api/sys.json`; callers cannot construct
+/// an extension status through this type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvocationStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Orphaned,
+}
+impl InvocationStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Orphaned => "orphaned",
+        }
+    }
+}
+impl Serialize for InvocationStatus {
+    fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Checks a candidate `sys.InvocationRef` against a supplied CWD context,
 /// fixed `sys.Invocation` relation identity, and the declared `id` key. This
 /// is reference-coordinate validation only; it does not establish
@@ -276,6 +354,21 @@ fn validate_coordinates(
     }
     if reference.table_id != expected_table {
         return Err(SystemReferenceError::RelationMismatch);
+    }
+    Ok(())
+}
+
+fn ensure_snapshot_database(
+    database_id: [u8; 16],
+    snapshot: &CanonicalSnapshot,
+) -> Result<(), SystemReferenceError> {
+    let snapshot_database = match snapshot {
+        CanonicalSnapshot::Cwd { database, .. } | CanonicalSnapshot::Commit { database, .. } => {
+            *database
+        }
+    };
+    if snapshot_database != database_id {
+        return Err(SystemReferenceError::DatabaseMismatch);
     }
     Ok(())
 }
@@ -1008,6 +1101,17 @@ fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, FoundationError> {
         uuid_bytes(table_id)?,
         key.clone(),
         Snapshot::decode(snapshot).map_err(FoundationError::Value)?,
+    )
+}
+fn row_ref_raw(reference: &RowRef) -> OvbRaw {
+    OvbRaw::Tag(
+        60010,
+        Box::new(OvbRaw::Array(vec![
+            uuid(reference.database_id),
+            uuid(reference.table_id),
+            reference.key.clone(),
+            reference.snapshot.raw(),
+        ])),
     )
 }
 fn is_run_id_key(raw: &OvbRaw) -> bool {
