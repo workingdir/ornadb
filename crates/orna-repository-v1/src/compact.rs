@@ -13,7 +13,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use orna_syntax_v1::{Expr, LiteralKind, parse_row};
+use orna_syntax_v1::{parse_row, Expr, LiteralKind};
 use parquet::{
     basic::{Compression, PageType},
     file::reader::{FileReader, SerializedFileReader},
@@ -1026,6 +1026,7 @@ impl Repository {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
         for shard in &header.shards {
             let shard_bytes = self
                 .committed_file_bytes(commit, &shard.file)?
@@ -1042,6 +1043,7 @@ impl Repository {
             {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
         let manifest = CompactManifest {
@@ -1051,6 +1053,7 @@ impl Repository {
             entries,
         };
         manifest.validate(Some(self.native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path)?;
         self.verify_manifest_at_commit(commit, &manifest)?;
         Ok(Some(manifest))
     }
@@ -1400,6 +1403,7 @@ impl Repository {
     ) -> Result<CompactManifest, RepositoryError> {
         let header = parse_manifest_header(manifest_bytes)?;
         let mut entries = Vec::new();
+        let mut shard_bytes_by_path = Vec::new();
         for shard in &header.shards {
             let shard_bytes = self
                 .candidate_file_bytes(candidate, &shard.file)?
@@ -1416,6 +1420,7 @@ impl Repository {
             {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
+            shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
         let manifest = CompactManifest {
@@ -1425,8 +1430,35 @@ impl Repository {
             entries,
         };
         manifest.validate(Some(self.native_object_id_length()?))?;
+        verify_canonical_manifest_files(&manifest, manifest_bytes, &shard_bytes_by_path)?;
         Ok(manifest)
     }
+}
+
+/// Reject committed compact records which decode correctly but do not use the
+/// single canonical manifest/shard serialization.  A shard hash proves only
+/// that a manifest names the bytes it carries; canonical reconstruction also
+/// proves that those bytes are the required representation of their content.
+fn verify_canonical_manifest_files(
+    manifest: &CompactManifest,
+    manifest_bytes: &[u8],
+    shard_bytes_by_path: &[(ManagedPath, Vec<u8>)],
+) -> Result<(), RepositoryError> {
+    for expected in manifest.canonical_files()? {
+        let actual = if expected.path() == &manifest.manifest_path() {
+            manifest_bytes
+        } else {
+            shard_bytes_by_path
+                .iter()
+                .find(|(path, _)| path == expected.path())
+                .map(|(_, bytes)| bytes.as_slice())
+                .ok_or(RepositoryError::InvalidCompactManifest)?
+        };
+        if expected.bytes() != Some(actual) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+    }
+    Ok(())
 }
 
 fn parse_tree_entry(
