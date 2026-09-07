@@ -3107,6 +3107,35 @@ fn sealed_failure_events_are_redacted_and_closed() {
     assert!(failure.details().is_none());
     assert_eq!(failure.retryability(), InvocationRetryability::Unknown);
 }
+
+#[test]
+fn sealed_invocation_lifecycle_terminal_categories_are_closed_and_distinct() {
+    assert_eq!(
+        super::sealed_invocation::SealedInvocationLifecycleTerminal::Failed(
+            SealedInvocationFailureClass::Bind,
+        )
+        .fields(),
+        ("failed", Some(1), Some(1))
+    );
+    assert_eq!(
+        super::sealed_invocation::SealedInvocationLifecycleTerminal::Failed(
+            SealedInvocationFailureClass::Target,
+        )
+        .fields(),
+        ("failed", Some(2), Some(2))
+    );
+    assert_eq!(
+        super::sealed_invocation::SealedInvocationLifecycleTerminal::Failed(
+            SealedInvocationFailureClass::Internal,
+        )
+        .fields(),
+        ("failed", Some(3), Some(2))
+    );
+    assert_eq!(
+        super::sealed_invocation::SealedInvocationLifecycleTerminal::Cancelled.fields(),
+        ("cancelled", Some(4), Some(3))
+    );
+}
 #[test]
 fn resource_targets_resolve_and_authorize_with_closed_class_pins() {
     use orna_core::{
