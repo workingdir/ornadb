@@ -20,8 +20,9 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ListStreamSource, NoFault, RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler,
-    StreamHandlerResult, StreamItem, StreamRunOutcome, StreamTableMutationBatch, TableMutation,
+    ListStreamSource, NoFault, RequestIdentity, RequestStatus, RunObservationRegistration,
+    RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamRunOutcome, StreamTableMutationBatch, TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
@@ -1131,6 +1132,155 @@ impl DurableTransactionalEvaluator {
         Ok(StageOutcome::Passed)
     }
 
+    /// Executes an admitted source activation as one durable REQUEST-1
+    /// activation. A successful nonempty table batch, its capture, and the
+    /// canonical terminal result commit together under the request owner.
+    ///
+    /// Admission precedes writer acquisition: a matching terminal request
+    /// replays without contending for a new writer lease. A matching
+    /// nonterminal request never permits source execution. If writer
+    /// acquisition, owner-fenced terminalization, or durable storage itself
+    /// fails, the reservation is deliberately left for runtime recovery; a
+    /// retry sees that nonterminal record and remains fenced rather than
+    /// executing source a second time. This boundary has no cancellation
+    /// input, so it never translates a failure into cancellation.
+    ///
+    /// This is intentionally separate from [`Self::execute_source`]: callers
+    /// that do not carry a protocol request identity retain the established
+    /// request-free activation API.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_source_request(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        unit: &SourceUnit,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        let state = RuntimeState::open(repository, identity, initial_digest).await?;
+        let registration = RunObservationRegistration {
+            request,
+            consumer_identity: request_consumer_identity(),
+            function: self.entry.clone(),
+            source_identity: Some(unit.source_id.clone()),
+            // A request identity names this invocation before any evaluator
+            // work. The runtime stores it atomically with admission and its
+            // pinned capture.
+            invocation_id: request.request_id,
+        };
+
+        if let Some(status) = state.request_status(request, fingerprint).await? {
+            return replay_or_fence_request(status);
+        }
+        let lease = match state.acquire_lease(owner_id).await {
+            Ok(lease) => lease,
+            // A terminal may have been inserted after the read above and
+            // before lease acquisition. Re-read before reporting contention
+            // so a completed request still replays without source execution.
+            Err(RuntimeError::LeaseHeld) => match state.request_status(request, fingerprint).await?
+            {
+                Some(status) => return replay_or_fence_request(status),
+                None => return Err(RuntimeError::LeaseHeld),
+            },
+            Err(error) => return Err(error),
+        };
+        let start = state
+            .begin_observed_request(registration, fingerprint, lease)
+            .await?;
+        if !start.admitted {
+            return replay_or_fence_request(start.request);
+        }
+
+        let (functions, key_fields, table_assertions, module_assertions) =
+            match admit_transaction_source(unit, self.limits, &self.entry) {
+                Ok(value) => value,
+                Err(outcome) => {
+                    let outcome = *outcome;
+                    return terminalize_observed_outcome(
+                        &state,
+                        request,
+                        fingerprint,
+                        lease,
+                        outcome,
+                    )
+                    .await;
+                }
+            };
+        if functions
+            .get(&self.entry)
+            .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
+        {
+            let outcome = StageOutcome::Skipped {
+                reason: "request-bound table execution does not admit stream roots".into(),
+            };
+            return terminalize_observed_outcome(&state, request, fingerprint, lease, outcome)
+                .await;
+        }
+
+        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let snapshot = match state.begin_table_activation(&tables).await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return fail_observed_request_runtime(&state, request, fingerprint, lease).await;
+            }
+        };
+        let context = snapshot.context();
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        for (table, rows) in snapshot.table_rows() {
+            for (key, row) in rows {
+                let row = match Value::decode(row) {
+                    Ok(row) => row,
+                    Err(_) => {
+                        return fail_observed_request_runtime(&state, request, fingerprint, lease)
+                            .await;
+                    }
+                };
+                if evaluator
+                    .seed_committed(table.clone(), key.clone(), row)
+                    .is_err()
+                {
+                    return fail_observed_request_runtime(&state, request, fingerprint, lease)
+                        .await;
+                }
+            }
+        }
+        let mutations = match evaluator.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
+            Ok(mutations) => mutations,
+            Err(diagnostic) => {
+                let outcome = StageOutcome::Failed(*diagnostic);
+                return fail_observed_request_outcome(&state, request, fingerprint, lease, outcome)
+                    .await;
+            }
+        };
+        if mutations.is_empty() {
+            let outcome = StageOutcome::Passed;
+            return terminalize_observed_outcome(&state, request, fingerprint, lease, outcome)
+                .await;
+        }
+        let next_digest =
+            durable_activation_digest(context.capture().generation_digest(), &mutations);
+        state
+            .commit_table_request_activation(
+                lease,
+                request,
+                fingerprint,
+                context,
+                &mutations,
+                next_digest,
+                request_terminal(&StageOutcome::Passed)?,
+                &NoFault,
+            )
+            .await?;
+        Ok(StageOutcome::Passed)
+    }
+
     /// Admits distinct project modules and executes one namespace-qualified
     /// root function through the durable activation lifecycle.  Module source
     /// is parsed and retained independently; this boundary never constructs a
@@ -1298,6 +1448,162 @@ impl DurableTransactionalEvaluator {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(published)
     }
+}
+
+const REQUEST_TERMINAL_PREFIX: &[u8] = b"orna-conformance/request-terminal/v1/";
+
+/// Encodes the conformance entrypoint's retained terminal result without
+/// defining a second protocol. Runtime terminal outcomes are opaque bounded
+/// bytes; this local envelope is only used to prevent a duplicate request
+/// from executing source again.
+fn request_terminal(outcome: &StageOutcome<Diagnostic>) -> Result<TerminalOutcome, RuntimeError> {
+    let mut bytes = Vec::from(REQUEST_TERMINAL_PREFIX);
+    match outcome {
+        StageOutcome::Passed => bytes.extend_from_slice(b"passed"),
+        StageOutcome::Failed(diagnostic) => {
+            bytes.extend_from_slice(b"failed/");
+            bytes.extend(
+                diagnostic
+                    .encode_ovb()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            );
+        }
+        StageOutcome::Skipped { reason } => {
+            bytes.extend_from_slice(b"skipped/");
+            bytes.extend_from_slice(reason.as_bytes());
+        }
+    }
+    TerminalOutcome::new(bytes)
+}
+
+fn replay_request_terminal(bytes: &[u8]) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    let body = bytes
+        .strip_prefix(REQUEST_TERMINAL_PREFIX)
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    if body == b"passed" {
+        return Ok(StageOutcome::Passed);
+    }
+    if let Some(reason) = body.strip_prefix(b"skipped/") {
+        return Ok(StageOutcome::Skipped {
+            reason: std::str::from_utf8(reason)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                .into(),
+        });
+    }
+    let diagnostic = body
+        .strip_prefix(b"failed/")
+        .ok_or(RuntimeError::RecoveryInvalid)
+        .and_then(|bytes| {
+            Diagnostic::decode_ovb(bytes).map_err(|_| RuntimeError::RecoveryInvalid)
+        })?;
+    Ok(StageOutcome::Failed(diagnostic))
+}
+
+fn replay_or_fence_request(
+    status: RequestStatus,
+) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    match status.terminal_outcome {
+        Some(outcome) => replay_request_terminal(outcome.as_bytes()),
+        None => Err(RuntimeError::RequestStateConflict),
+    }
+}
+
+fn request_consumer_identity() -> ConsumerIdentity {
+    ConsumerIdentity {
+        principal: Component::new("orna").expect("static consumer component"),
+        root: Component::new("conformance").expect("static consumer component"),
+        function: Component::new("request").expect("static consumer component"),
+        binding: Component::new("durable").expect("static consumer component"),
+    }
+}
+
+async fn terminalize_observed_outcome(
+    state: &RuntimeState,
+    request: RequestIdentity,
+    fingerprint: [u8; 32],
+    lease: WriterLease,
+    outcome: StageOutcome<Diagnostic>,
+) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    let terminal = request_terminal(&outcome)?;
+    match outcome {
+        StageOutcome::Failed(_) => {
+            state
+                .fail_observed_request_with_owner(
+                    request,
+                    fingerprint,
+                    lease,
+                    terminal,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::ExecutionRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                )
+                .await?;
+        }
+        StageOutcome::Passed | StageOutcome::Skipped { .. } => {
+            state
+                .complete_observed_request_with_owner(request, fingerprint, lease, terminal)
+                .await?;
+        }
+    }
+    Ok(outcome)
+}
+
+async fn fail_observed_request_outcome(
+    state: &RuntimeState,
+    request: RequestIdentity,
+    fingerprint: [u8; 32],
+    lease: WriterLease,
+    outcome: StageOutcome<Diagnostic>,
+) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    let terminal = request_terminal(&outcome)?;
+    state
+        .fail_observed_request_with_owner(
+            request,
+            fingerprint,
+            lease,
+            terminal,
+            SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            },
+        )
+        .await?;
+    Ok(outcome)
+}
+
+async fn fail_observed_request_runtime(
+    state: &RuntimeState,
+    request: RequestIdentity,
+    fingerprint: [u8; 32],
+    lease: WriterLease,
+) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+    let outcome = StageOutcome::Failed(request_runtime_failure_diagnostic());
+    let terminal = request_terminal(&outcome)?;
+    state
+        .fail_observed_request_with_owner(
+            request,
+            fingerprint,
+            lease,
+            terminal,
+            SafeDiagnostic {
+                code: DiagnosticCode::Internal,
+                class: DiagnosticClass::Transient,
+            },
+        )
+        .await?;
+    Ok(outcome)
+}
+
+fn request_runtime_failure_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-RUNTIME-REQUEST").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("request-bound durable activation could not be completed")
+            .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
 }
 
 impl Default for DurableTransactionalEvaluator {
@@ -3691,12 +3997,19 @@ mod bounded_tests {
 
 #[cfg(test)]
 mod durable_tests {
-    use super::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
+    use super::{
+        DurableTransactionalEvaluator, SourceUnit, StageOutcome, replay_request_terminal,
+        request_terminal,
+    };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
     use orna_foundation_v1::Value;
     use orna_repository_v1::Repository;
-    use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+    use orna_runtime_v1::{
+        RequestIdentity, RequestState, RunObservationStatus, RuntimeError, RuntimeIdentity,
+        RuntimeState,
+    };
+    use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -3853,6 +4166,231 @@ mod durable_tests {
                     && value
                         == &orna_foundation_v1::OvbRaw::Text("changed".into()))
         ));
+    }
+
+    #[tokio::test]
+    async fn request_source_activation_commits_row_and_terminal_together() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [61; 16],
+            repository_id: [62; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [63; 16],
+            request_id: [64; 16],
+        };
+        let fingerprint = [65; 32];
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_source_request(
+                    &repository,
+                    identity,
+                    [66; 16],
+                    [67; 32],
+                    request,
+                    fingerprint,
+                    &source(r#"Note.insert({ id: 7, text: "request" });"#),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+        let state = RuntimeState::open(&repository, identity, [67; 32])
+            .await
+            .expect("reopened runtime");
+        let status = state
+            .request_status_for_identity(request)
+            .await
+            .expect("request status")
+            .expect("completed request");
+        assert_eq!(status.state, RequestState::Completed);
+        assert_eq!(
+            status
+                .terminal_outcome
+                .as_ref()
+                .expect("terminal outcome")
+                .as_bytes(),
+            b"orna-conformance/request-terminal/v1/passed"
+        );
+        let runs = state.run_observations().await.expect("run observations");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].request, request);
+        assert_eq!(runs[0].invocation_id, request.request_id);
+        assert_eq!(runs[0].status, RunObservationStatus::Completed);
+        assert!(!runs[0].live);
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(7.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        drop(state);
+
+        assert!(matches!(
+            evaluator
+                .execute_source_request(
+                    &repository,
+                    identity,
+                    // The original writer lease remains held by owner 66.
+                    // Terminal replay must precede lease acquisition.
+                    [68; 16],
+                    [67; 32],
+                    request,
+                    fingerprint,
+                    &source("unknown()"),
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_source_failure_replays_without_executing_new_source() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [71; 16],
+            repository_id: [72; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [73; 16],
+            request_id: [74; 16],
+        };
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let first = evaluator
+            .execute_source_request(
+                &repository,
+                identity,
+                [75; 16],
+                [76; 32],
+                request,
+                [77; 32],
+                &source("unknown()"),
+            )
+            .await
+            .expect("terminal failure");
+        let StageOutcome::Failed(first_diagnostic) = first else {
+            panic!("unknown source must fail");
+        };
+        let state = RuntimeState::open(&repository, identity, [76; 32])
+            .await
+            .expect("reopened runtime");
+        let runs = state.run_observations().await.expect("run observations");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].request, request);
+        assert_eq!(runs[0].invocation_id, request.request_id);
+        assert_eq!(runs[0].status, RunObservationStatus::Failed);
+        assert_eq!(
+            runs[0].diagnostic,
+            Some(SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Permanent,
+            })
+        );
+        drop(state);
+
+        let replay = evaluator
+            .execute_source_request(
+                &repository,
+                identity,
+                [78; 16],
+                [76; 32],
+                request,
+                [77; 32],
+                &source(r#"Note.insert({ id: 9, text: "must not run" });"#),
+            )
+            .await
+            .expect("failed terminal replay");
+        assert!(matches!(
+            replay,
+            StageOutcome::Failed(ref diagnostic) if diagnostic == &first_diagnostic
+        ));
+        let state = RuntimeState::open(&repository, identity, [76; 32])
+            .await
+            .expect("reopened runtime");
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(9.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_source_never_executes_an_existing_nonterminal_reservation() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [81; 16],
+            repository_id: [82; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [83; 16],
+            request_id: [84; 16],
+        };
+        let state = RuntimeState::open(&repository, identity, [85; 32])
+            .await
+            .expect("runtime");
+        state
+            .reserve_request_with_admission(request, [86; 32])
+            .await
+            .expect("reservation");
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        assert!(matches!(
+            evaluator
+                .execute_source_request(
+                    &repository,
+                    identity,
+                    [87; 16],
+                    [85; 32],
+                    request,
+                    [86; 32],
+                    &source(r#"Note.insert({ id: 10, text: "must not run" });"#),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        ));
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(10.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn request_terminal_replays_the_exact_skip_reason() {
+        let outcome = StageOutcome::Skipped {
+            reason: "exact retained skip reason".into(),
+        };
+        let terminal = request_terminal(&outcome).expect("bounded terminal");
+        assert_eq!(
+            replay_request_terminal(terminal.as_bytes()).expect("replayable terminal"),
+            outcome
+        );
     }
 
     #[tokio::test]
