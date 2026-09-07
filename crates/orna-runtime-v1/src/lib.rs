@@ -13529,6 +13529,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn populated_pre_rollback_receipt_ledger_migrates_and_reopens_uncertain() {
+        let (_temp, repo) = repository();
+        repo.runtime_paths().ensure_exists().unwrap();
+        let database = Builder::new_local(repo.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let owner = WriterLease {
+            owner_id: id(4),
+            epoch: 1,
+        };
+        let marker = controlled_transaction_marker(identity, fingerprint, owner);
+        connection
+            .execute_batch(
+                "CREATE TABLE request_ledger (
+                     session_id BLOB NOT NULL,
+                     request_id BLOB NOT NULL,
+                     fingerprint BLOB NOT NULL,
+                     state INTEGER NOT NULL,
+                     terminal_outcome BLOB,
+                     owner_id BLOB,
+                     owner_epoch INTEGER,
+                     effect_evidence INTEGER NOT NULL DEFAULT 0,
+                     recovery_disposition INTEGER NOT NULL DEFAULT 0,
+                     controlled_transaction_proof BLOB,
+                     PRIMARY KEY (session_id, request_id)
+                 );",
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_ledger
+                     (session_id, request_id, fingerprint, state, terminal_outcome,
+                      owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                      controlled_transaction_proof)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 1, 0, ?7)",
+                params![
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).unwrap(),
+                    marker.to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let state = open_state(&repo).await;
+        assert_eq!(
+            state
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            None
+        );
+        let active = state.acquire_lease(owner.owner_id).await.unwrap();
+        assert_eq!(active, owner);
+        let recovery_owner = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let rollback_proven = outcome(8);
+        let external_effects_uncertain = outcome(9);
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                recovery_owner,
+                rollback_proven,
+                external_effects_uncertain.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(
+            recovered.status.terminal_outcome,
+            Some(external_effects_uncertain)
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_outcome,
+            Some(outcome(9))
+        );
+    }
+
+    #[tokio::test]
     async fn migrated_ledger_retains_controlled_rollback_recovery_after_reopen() {
         let (_temp, repo) = repository();
         repo.runtime_paths().ensure_exists().unwrap();
