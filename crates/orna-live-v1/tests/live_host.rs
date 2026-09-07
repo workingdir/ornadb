@@ -1681,6 +1681,311 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
 }
 
 #[test]
+fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut deletion = Delete(true);
+    let first = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let first_token = token(&first);
+    let second = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(3)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let second_token = token(&second);
+
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [5; 16], 1)
+        .unwrap();
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(active, 1))
+            .unwrap()
+            .status,
+        101
+    );
+
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [6; 16], 2)
+        .unwrap();
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [7; 16], 2)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert_eq!(
+        block_on(transport.handle(
+            wire(
+                "POST",
+                "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+                &format!(r#"{{"resume_token":"{first_token}","protocol":"orna.present.v1"}}"#),
+            ),
+            2,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ))
+        .status,
+        503
+    );
+    assert_eq!(
+        block_on(transport.handle(
+            wire(
+                "POST",
+                "/orna/session/02020202-0202-0202-0202-020202020202/resume",
+                &format!(r#"{{"resume_token":"{second_token}","protocol":"orna.present.v1"}}"#),
+            ),
+            2,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+        ))
+        .status,
+        200
+    );
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(pending, 2))
+            .unwrap()
+            .status,
+        101
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+}
+
+#[test]
+fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let mut malformed = websocket_upgrade(1, &credential);
+    malformed
+        .headers
+        .retain(|(name, _)| name != "sec-websocket-protocol");
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&malformed, [5; 16], 1)
+            .unwrap_err()
+            .status,
+        400
+    );
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
+        .unwrap();
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(active, 1))
+            .unwrap()
+            .status,
+        101
+    );
+
+    let aborted = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
+        .unwrap();
+    assert!(transport.abort_websocket_upgrade(&aborted));
+    assert!(!transport.abort_websocket_upgrade(&aborted));
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(aborted, 3)),
+        Err(Error::Closed)
+    );
+
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [7; 16], 3)).status,
+        101
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+}
+
+#[test]
+fn websocket_upgrade_expiry_releases_candidate_without_replacing_attachment() {
+    let limits = TransportLimits {
+        lease_ms: 10,
+        request_retention_ms: 10,
+        ..TransportLimits::default()
+    };
+    let mut transport = LiveTransport::new(host(), limits).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
+        .unwrap();
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(active, 1))
+            .unwrap()
+            .status,
+        101
+    );
+
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
+        .unwrap();
+    transport.expire_pending_websocket_upgrades(12);
+    assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(pending, 12)),
+        Err(Error::Closed)
+    );
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [7; 16], 13)).status,
+        101
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+}
+
+#[test]
+fn delete_retires_active_and_pending_websocket_candidates() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
+        .unwrap();
+    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
+        .unwrap();
+    let mut request = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    request
+        .headers
+        .push(("authorization".into(), format!("Bearer {credential}")));
+    assert_eq!(
+        block_on(transport.handle(request, 3, &mut authority, &mut issuer, &mut deletion,)).status,
+        204
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16], [6; 16]]);
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(pending, 3)),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
+fn rejected_delete_preserves_pending_websocket_admission() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 1)
+        .unwrap();
+    let mut request = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    request.headers[0].1 = "https://other.example".into();
+    request
+        .headers
+        .push(("authorization".into(), format!("Bearer {credential}")));
+    assert_eq!(
+        block_on(transport.handle(request, 2, &mut authority, &mut issuer, &mut deletion,)).status,
+        403
+    );
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [7; 16], 2)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.abort_websocket_upgrade(&pending));
+}
+
+#[test]
 fn http_contract_has_stable_status_headers_and_redacted_errors() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
@@ -2632,6 +2937,21 @@ fn token(response: &orna_live_v1::WireResponse) -> String {
         .next()
         .unwrap()
         .into()
+}
+fn websocket_upgrade(session: u8, credential: &str) -> WireRequest {
+    let mut request = wire("GET", &format!("/orna/live/{}", uuid(session)), "");
+    request.headers.extend([
+        ("connection".into(), "Upgrade".into()),
+        ("upgrade".into(), "websocket".into()),
+        ("sec-websocket-version".into(), "13".into()),
+        (
+            "sec-websocket-key".into(),
+            "dGhlIHNhbXBsZSBub25jZQ==".into(),
+        ),
+        ("sec-websocket-protocol".into(), SUBPROTOCOL.into()),
+        ("cookie".into(), format!("orna_session={credential}")),
+    ]);
+    request
 }
 fn masked(fin: bool, opcode: u8, body: &[u8]) -> Vec<u8> {
     assert!(body.len() < 126);
