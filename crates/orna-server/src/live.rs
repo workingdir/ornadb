@@ -99,7 +99,8 @@ impl LiveOnceHost {
             PureEvalApplication::from_repository(
                 repository,
                 database_id,
-                capture.clone(),
+                identity,
+                initial_digest,
                 Rc::clone(&expiries),
             )
             .map_err(|_| LiveHostError::Repository)?,
