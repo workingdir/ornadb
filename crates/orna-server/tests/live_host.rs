@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::{FutureExt, executor::block_on};
 use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext,
-    canonical_request_fingerprint,
+    ResultStatus, canonical_request_fingerprint,
 };
 use orna_repository_v1::initialize_repository;
 use orna_runtime_v1::{RequestIdentity, RequestState, RuntimeIdentity, RuntimeState};
@@ -46,6 +46,13 @@ fn request(address: std::net::SocketAddr, database: &str) -> String {
         "POST /orna/session HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         address.port(),
         body.len()
+    )
+}
+
+fn delete_request(address: std::net::SocketAddr, session: &str, token: &str) -> String {
+    format!(
+        "DELETE /orna/session/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n",
+        address.port()
     )
 }
 
@@ -105,16 +112,45 @@ fn uuid_bytes(value: &str) -> [u8; 16] {
     bytes
 }
 
-fn eval_payload(session: [u8; 16], request: [u8; 16]) -> Vec<u8> {
+fn stored_runtime_identity(database_id: [u8; 16]) -> (RuntimeIdentity, [u8; 32]) {
+    let mut repository_id = database_id;
+    for (index, byte) in repository_id.iter_mut().enumerate() {
+        let rotation = u32::try_from(index % 7 + 1).unwrap();
+        let salt = u8::try_from(index).unwrap();
+        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
+    }
+    if repository_id == [0; 16] {
+        repository_id[0] = 1;
+    }
+    let mut digest = [0; 32];
+    digest[..16].copy_from_slice(&database_id);
+    digest[16..].copy_from_slice(&repository_id);
+    (
+        RuntimeIdentity {
+            database_id,
+            repository_id,
+        },
+        digest,
+    )
+}
+
+fn eval_payload(session: [u8; 16], request: [u8; 16], database: [u8; 16], source: &str) -> Vec<u8> {
+    eval_payload_at(session, request, database, None, source)
+}
+
+fn eval_payload_at(
+    session: [u8; 16],
+    request: [u8; 16],
+    database: [u8; 16],
+    snapshot: Option<orna_foundation_v1::CanonicalSnapshot>,
+    source: &str,
+) -> Vec<u8> {
     let mut envelope = Envelope {
         request: Some(request),
         watch: None,
         message: Message::Eval {
-            source: "0".into(),
-            database: DatabaseContext {
-                database: [2; 16],
-                snapshot: None,
-            },
+            source: source.into(),
+            database: DatabaseContext { database, snapshot },
             presentation: PresentationContext {
                 locale: "en-GB".into(),
                 timezone: None,
@@ -135,6 +171,176 @@ fn eval_payload(session: [u8; 16], request: [u8; 16]) -> Vec<u8> {
         *sent = fingerprint;
     }
     envelope.encode(ProtocolLimits::default()).unwrap()
+}
+
+fn watch_payload(request: [u8; 16], database: [u8; 16], source: &str) -> Vec<u8> {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Watch {
+            source: source.into(),
+            database: DatabaseContext {
+                database,
+                snapshot: None,
+            },
+            presentation: PresentationContext {
+                locale: "en-GB".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/dark".into(),
+                supported_kinds: vec![],
+            },
+            refresh_floor: None,
+        },
+        extensions: std::collections::BTreeMap::new(),
+    }
+    .encode(ProtocolLimits::default())
+    .unwrap()
+}
+
+fn websocket_result(response: &[u8]) -> Envelope {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    assert!(
+        response.len() > header_end,
+        "WebSocket closed before a binary response: {}",
+        String::from_utf8_lossy(response)
+    );
+    assert_eq!(response[header_end], 0x82);
+    let (length, offset) = match response[header_end + 1] {
+        length @ 0..=125 => (usize::from(length), header_end + 2),
+        126 => (
+            usize::from(u16::from_be_bytes([
+                response[header_end + 2],
+                response[header_end + 3],
+            ])),
+            header_end + 4,
+        ),
+        _ => panic!("unexpected WebSocket result length"),
+    };
+    Envelope::decode(
+        &response[offset..offset + length],
+        ProtocolLimits::default(),
+    )
+    .unwrap()
+}
+
+fn websocket_frame(stream: &mut TcpStream) -> Envelope {
+    let mut header = [0; 2];
+    stream.read_exact(&mut header).unwrap();
+    assert_eq!(header[0], 0x82);
+    assert_eq!(header[1] & 0x80, 0);
+    let length = match header[1] {
+        length @ 0..=125 => usize::from(length),
+        126 => {
+            let mut bytes = [0; 2];
+            stream.read_exact(&mut bytes).unwrap();
+            usize::from(u16::from_be_bytes(bytes))
+        }
+        127 => {
+            let mut bytes = [0; 8];
+            stream.read_exact(&mut bytes).unwrap();
+            usize::try_from(u64::from_be_bytes(bytes)).unwrap()
+        }
+        _ => unreachable!(),
+    };
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).unwrap();
+    Envelope::decode(&body, ProtocolLimits::default()).unwrap()
+}
+
+fn websocket_upgrade(address: std::net::SocketAddr, session: &str, token: &str) -> TcpStream {
+    let mut websocket = TcpStream::connect(address).unwrap();
+    let handshake = format!(
+        "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token}\r\n\r\n",
+        address.port()
+    );
+    websocket.write_all(handshake.as_bytes()).unwrap();
+    let mut response = Vec::new();
+    let mut byte = [0; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        websocket.read_exact(&mut byte).unwrap();
+        response.extend_from_slice(&byte);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    websocket
+}
+
+fn websocket_eval(
+    address: std::net::SocketAddr,
+    session: &str,
+    token: &str,
+    database: &str,
+    request: [u8; 16],
+    source: &str,
+) -> Envelope {
+    websocket_eval_at(address, session, token, database, request, None, source)
+}
+
+fn websocket_eval_at(
+    address: std::net::SocketAddr,
+    session: &str,
+    token: &str,
+    database: &str,
+    request: [u8; 16],
+    snapshot: Option<orna_foundation_v1::CanonicalSnapshot>,
+    source: &str,
+) -> Envelope {
+    let mut websocket = TcpStream::connect(address).unwrap();
+    let handshake = format!(
+        "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token}\r\n\r\n",
+        address.port()
+    );
+    let mut input = handshake.into_bytes();
+    input.extend(masked(
+        true,
+        2,
+        &eval_payload_at(
+            uuid_bytes(session),
+            request,
+            uuid_bytes(database),
+            snapshot,
+            source,
+        ),
+    ));
+    input.extend(masked(true, 8, b""));
+    websocket.write_all(&input).unwrap();
+    websocket.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    websocket.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    websocket_result(&response)
+}
+
+fn websocket_watch(
+    address: std::net::SocketAddr,
+    session: &str,
+    token: &str,
+    database: &str,
+    request: [u8; 16],
+    source: &str,
+) -> Envelope {
+    let mut websocket = TcpStream::connect(address).unwrap();
+    let handshake = format!(
+        "GET /orna/live/{session} HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={token}\r\n\r\n",
+        address.port()
+    );
+    let mut input = handshake.into_bytes();
+    input.extend(masked(
+        true,
+        2,
+        &watch_payload(request, uuid_bytes(database), source),
+    ));
+    input.extend(masked(true, 8, b""));
+    websocket.write_all(&input).unwrap();
+    websocket.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    websocket.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+    websocket_result(&response)
 }
 
 #[test]
@@ -464,6 +670,83 @@ fn loopback_host_retires_an_open_websocket_before_resume_completes() {
 }
 
 #[test]
+fn loopback_host_joins_an_active_application_socket_before_delete_succeeds() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        websocket
+            .write_all(&masked(
+                true,
+                2,
+                &eval_payload(
+                    uuid_bytes(&session),
+                    [61; 16],
+                    uuid_bytes(&database),
+                    "let value: Int = 1;",
+                ),
+            ))
+            .unwrap();
+        let evaluated = websocket_frame(&mut websocket);
+        assert!(matches!(
+            evaluated.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                ..
+            }
+        ));
+
+        let (retired_sender, retired_receiver) = std::sync::mpsc::channel();
+        let retired_reader = std::thread::spawn(move || {
+            websocket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut retired = Vec::new();
+            websocket.read_to_end(&mut retired).unwrap();
+            retired_sender.send(()).unwrap();
+        });
+
+        let mut delete = TcpStream::connect(address).unwrap();
+        delete
+            .write_all(delete_request(address, &session, &token).as_bytes())
+            .unwrap();
+        retired_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the active socket worker must retire before DELETE replies");
+        let deleted = read_response(&mut delete);
+        assert!(
+            deleted.starts_with("HTTP/1.1 204 No Content\r\n"),
+            "{deleted}"
+        );
+        retired_reader.join().unwrap();
+
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
 fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
@@ -494,7 +777,12 @@ fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
         input.extend(masked(
             true,
             2,
-            &eval_payload(uuid_bytes(&session), request_id),
+            &eval_payload(
+                uuid_bytes(&session),
+                request_id,
+                uuid_bytes(&request_database),
+                "0",
+            ),
         ));
         input.extend(masked(true, 8, b""));
         websocket.write_all(&input).unwrap();
@@ -512,14 +800,8 @@ fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
     );
     let (session, runtime) = client.join().unwrap();
     let database_id = uuid_bytes(&database);
-    let repository_id = uuid_bytes(&runtime);
-    let identity = RuntimeIdentity {
-        database_id,
-        repository_id,
-    };
-    let mut digest = [0; 32];
-    digest[..16].copy_from_slice(&database_id);
-    digest[16..].copy_from_slice(&repository_id);
+    assert_ne!(uuid_bytes(&runtime), [0; 16]);
+    let (identity, digest) = stored_runtime_identity(database_id);
     let state = block_on(RuntimeState::open(
         initialized.repository(),
         identity,
@@ -534,5 +816,284 @@ fn loopback_host_retains_a_terminal_request_after_websocket_teardown() {
     .unwrap();
     assert_eq!(status.state, RequestState::Completed);
     assert!(status.terminal_outcome.is_some());
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    std::fs::write(temporary.path().join("main.orna"), "use library;\n").unwrap();
+    let library = temporary.path().join("library.orna");
+    std::fs::write(&library, "pub fn seeded(): Int = 40;\n").unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let imported = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [9; 16],
+            "use library;",
+        );
+        assert!(matches!(
+            imported.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                ..
+            }
+        ));
+
+        let standard_import = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [16; 16],
+            "use std.math;",
+        );
+        assert!(matches!(
+            standard_import.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                ..
+            }
+        ));
+        let standard_value = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [17; 16],
+            "math.increment(41)",
+        );
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(standard_value),
+            ..
+        } = standard_value.message
+        else {
+            panic!("remote evaluation must use the verified standard module graph");
+        };
+        assert_eq!(standard_value.encode().unwrap(), vec![0x18, 42]);
+
+        // The executable host admitted the repository project at bind time;
+        // a later worktree edit must not alter this session's source graph.
+        std::fs::write(&library, "pub fn seeded(): Int = 41;\n").unwrap();
+
+        let seeded = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [10; 16],
+            "library.seeded() + 2",
+        );
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(seeded_value),
+            ..
+        } = seeded.message
+        else {
+            panic!("{seeded:?}");
+        };
+        assert_eq!(seeded_value.encode().unwrap(), vec![0x18, 42]);
+
+        let declared = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [11; 16],
+            "let answer: Int = 40;",
+        );
+        assert!(matches!(
+            declared.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                ..
+            }
+        ));
+        let forty_two =
+            websocket_eval(address, &session, &token, &database, [12; 16], "answer + 2");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(forty_two),
+            ..
+        } = forty_two.message
+        else {
+            panic!("pure evaluation must return a typed result");
+        };
+        let forty_two = forty_two.encode().unwrap();
+
+        let forty_three = websocket_eval(address, &session, &token, &database, [13; 16], "$_ + 1");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(forty_three),
+            ..
+        } = forty_three.message
+        else {
+            panic!("successful stateful evaluation must return a typed result");
+        };
+        let forty_three = forty_three.encode().unwrap();
+        assert_ne!(forty_two, forty_three);
+
+        let rejected = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [14; 16],
+            "std.net.http.get(\"https://example.com\")",
+        );
+        assert!(matches!(
+            rejected.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+
+        let replayed = websocket_eval(address, &session, &token, &database, [13; 16], "$_ + 1");
+        let current = websocket_eval(address, &session, &token, &database, [15; 16], "$_");
+        for response in [replayed, current] {
+            let Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } = response.message
+            else {
+                panic!("terminal Eval must replay a successful typed result");
+            };
+            assert_eq!(value.encode().unwrap(), forty_three);
+        }
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_serves_a_permitted_read_only_watch_snapshot() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let response = websocket_watch(address, &session, &token, &database, [21; 16], "1 + 1");
+        assert!(matches!(
+            response.message,
+            Message::Snapshot { revision: 0, .. }
+        ));
+        let watch_id = response.watch.expect("server-issued watch id");
+        assert_ne!(watch_id, [0; 16]);
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
+    let _released = TcpListener::bind(address).unwrap();
+}
+
+#[test]
+fn loopback_host_resyncs_a_permitted_read_only_watch() {
+    let temporary = TemporaryRepository::new();
+    let initialized = initialize_repository(temporary.path()).unwrap();
+    let database = initialized.metadata().database_id().to_string();
+    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
+    let address = host.address();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let mut create = TcpStream::connect(address).unwrap();
+        create
+            .write_all(request(address, &database).as_bytes())
+            .unwrap();
+        let created = read_response(&mut create);
+        let session = json_field(&created, "session");
+        let token = json_field(&created, "resume_token");
+        create.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        create.read_to_end(&mut ignored).unwrap();
+
+        let mut websocket = websocket_upgrade(address, &session, &token);
+        websocket
+            .write_all(&masked(
+                true,
+                2,
+                &watch_payload([22; 16], uuid_bytes(&database), "1 + 1"),
+            ))
+            .unwrap();
+        let initial = websocket_frame(&mut websocket);
+        let Message::Snapshot { revision: 0, .. } = initial.message else {
+            panic!("watch must establish a complete initial snapshot");
+        };
+        let watch = initial.watch.expect("host-issued watch identity");
+        let resync = Envelope {
+            request: Some([23; 16]),
+            watch: Some(watch),
+            message: Message::Resync,
+            extensions: std::collections::BTreeMap::new(),
+        }
+        .encode(ProtocolLimits::default())
+        .unwrap();
+        websocket.write_all(&masked(true, 2, &resync)).unwrap();
+        let refreshed = websocket_frame(&mut websocket);
+        assert_eq!(refreshed.watch, Some(watch));
+        assert!(matches!(
+            refreshed.message,
+            Message::Snapshot { revision: 1, .. }
+        ));
+        websocket.write_all(&masked(true, 8, b"")).unwrap();
+        websocket.shutdown(Shutdown::Write).unwrap();
+        let mut ignored = Vec::new();
+        websocket.read_to_end(&mut ignored).unwrap();
+        sender.send(()).unwrap();
+    });
+
+    assert_eq!(
+        host.serve_until_cancellation(receiver.map(|_| ())),
+        Err(LiveHostError::Cancelled)
+    );
+    client.join().unwrap();
     let _released = TcpListener::bind(address).unwrap();
 }
