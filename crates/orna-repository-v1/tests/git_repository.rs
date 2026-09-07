@@ -6,10 +6,24 @@ use std::{
 
 use fs2::FileExt;
 use orna_repository_v1::{
-    CheckoutExecutionError, CheckoutTarget, GitObjectKind, GitObjectState, GitRepositoryMode,
-    IndexGeneration, ManagedPath, Repository, RuntimeGeneration, WorktreeState,
+    CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactSegment, CompactSegmentRole,
+    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedPath, Repository,
+    RuntimeGeneration, WorktreeState,
 };
+use parquet::{
+    basic::{Compression, PageType},
+    data_type::Int64Type,
+    file::{
+        metadata::{KeyValue, ParquetMetaDataWriter},
+        properties::{WriterProperties, WriterVersion},
+        reader::{FileReader, SerializedFileReader},
+        writer::SerializedFileWriter,
+    },
+    schema::parser::parse_message_type,
+};
+use std::sync::Arc;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -84,6 +98,328 @@ fn with_partial_clone(root: &Path) {
         root,
         &["config", "remote.origin.partialclonefilter", "blob:none"],
     );
+}
+
+fn compact_segment(table: Uuid, ordinal: u64, bytes: Vec<u8>) -> CompactSegment {
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
+    let path = ManagedPath::new(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ))
+    .unwrap();
+    let columns = vec![0x80];
+    let bytes = compact_parquet(table, ordinal, &columns, bytes);
+    CompactSegment::new(
+        segment_id,
+        CompactSegmentRole::Data,
+        [7; 32],
+        "test-encoder-v1",
+        path,
+        bytes,
+        ordinal.to_be_bytes().to_vec(),
+        ordinal.to_be_bytes().to_vec(),
+        1,
+        columns,
+        true,
+        false,
+    )
+    .unwrap()
+}
+
+fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) -> Vec<u8> {
+    assert_eq!(columns, &[0x80]);
+    let schema =
+        Arc::new(parse_message_type("message schema { REQUIRED INT64 f_value; }").unwrap());
+    let metadata = vec![
+        KeyValue::new(
+            "orna.profile".to_owned(),
+            Some("compact-storage-v1".to_owned()),
+        ),
+        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+        KeyValue::new(
+            "orna.schema.sha256".to_owned(),
+            Some("0707070707070707070707070707070707070707070707070707070707070707".to_owned()),
+        ),
+        KeyValue::new("orna.schema.ovb".to_owned(), Some("AA==".to_owned())),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some("gA==".to_owned())),
+        KeyValue::new(
+            "orna.encoder".to_owned(),
+            Some("test-encoder-v1".to_owned()),
+        ),
+        KeyValue::new(
+            "orna.test.payload".to_owned(),
+            Some(String::from_utf8_lossy(&payload).into_owned()),
+        ),
+    ];
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(false)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata))
+            .build(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    let mut column = row_group.next_column().unwrap().unwrap();
+    column
+        .typed::<Int64Type>()
+        .write_batch(&[i64::try_from(ordinal).unwrap()], None, None)
+        .unwrap();
+    column.close().unwrap();
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    // parquet-rs uses its writer-version setting for FileMetaData.version.
+    // The Orna profile requires V2 pages while retaining FileMetaData.version 1.
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - footer_length;
+    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+    bytes[footer + 1] = 0x02;
+    with_page_checksums(bytes)
+}
+
+fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
+    let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.clone())).unwrap();
+    let metadata = reader.metadata().clone();
+    assert_eq!(metadata.num_row_groups(), 1);
+    assert_eq!(metadata.row_group(0).num_columns(), 1);
+    let column = metadata.row_group(0).column(0);
+    let start = usize::try_from(column.data_page_offset()).unwrap();
+    let length = usize::try_from(column.compressed_size()).unwrap();
+    let header = compact_page_header(&bytes[start..start + length]);
+    assert!(!header.has_checksum);
+    let body_start = start + header.encoded_len;
+    let body_end = body_start + header.compressed_len;
+    let checksum = crc32(&bytes[body_start..body_end]) as i32;
+    let checksum_bytes = compact_crc_field(header.checksum_predecessor, checksum);
+
+    let mut data = bytes[..footer_start(&bytes)].to_vec();
+    let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
+    let checksum_len = checksum_bytes.len();
+    data.splice(insertion..insertion, checksum_bytes);
+    if let Some(next) = header.next_field_offset {
+        let position = start + next + checksum_len;
+        let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
+        assert!((1..=15).contains(&delta));
+        data[position] = (data[position] & 0x0f) | (delta << 4);
+    }
+
+    let mut metadata = metadata.into_builder();
+    let mut row_groups = metadata.take_row_groups();
+    let row_group = row_groups.pop().unwrap();
+    let mut row_group = row_group.into_builder();
+    let mut columns = row_group.take_columns();
+    let column = columns.pop().unwrap();
+    let compressed_size = column.compressed_size();
+    columns.push(
+        column
+            .into_builder()
+            .set_total_compressed_size(
+                compressed_size + i64::try_from(data.len() - footer_start(&bytes)).unwrap(),
+            )
+            .build()
+            .unwrap(),
+    );
+    let row_group = row_group.set_column_metadata(columns).build().unwrap();
+    let metadata = metadata.add_row_group(row_group).build();
+    let mut footer = Vec::new();
+    ParquetMetaDataWriter::new(&mut footer, &metadata)
+        .finish()
+        .unwrap();
+    data.extend(footer);
+    let reader = SerializedFileReader::new(bytes::Bytes::from(data.clone())).unwrap();
+    assert_eq!(reader.metadata().file_metadata().version(), 1);
+    let group = reader.get_row_group(0).unwrap();
+    let mut pages = group.get_column_page_reader(0).unwrap();
+    let page = pages.next().unwrap().unwrap();
+    assert!(page.is_data_page());
+    assert_eq!(page.page_type(), PageType::DATA_PAGE_V2);
+    assert!(pages.next().is_none());
+    data
+}
+
+fn footer_start(bytes: &[u8]) -> usize {
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    bytes.len() - 8 - footer_length
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut value = !0_u32;
+    for byte in bytes {
+        value ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(value & 1);
+            value = (value >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !value
+}
+
+struct CompactPageHeaderFixture {
+    encoded_len: usize,
+    compressed_len: usize,
+    checksum_predecessor: u8,
+    next_field_offset: Option<usize>,
+    next_field_id: Option<u8>,
+    stop_offset: usize,
+    has_checksum: bool,
+}
+
+fn compact_page_header(bytes: &[u8]) -> CompactPageHeaderFixture {
+    let mut cursor = 0;
+    let mut previous = 0_u8;
+    let mut compressed_len = None;
+    let mut next_field_offset = None;
+    let mut next_field_id = None;
+    let mut checksum_predecessor = None;
+    let mut has_checksum = false;
+    loop {
+        let field_offset = cursor;
+        let tag = compact_byte(bytes, &mut cursor);
+        let kind = tag & 0x0f;
+        if kind == 0 {
+            return CompactPageHeaderFixture {
+                encoded_len: cursor,
+                compressed_len: compressed_len.unwrap(),
+                checksum_predecessor: checksum_predecessor.unwrap_or(previous),
+                next_field_offset,
+                next_field_id,
+                stop_offset: field_offset,
+                has_checksum,
+            };
+        }
+        let delta = tag >> 4;
+        let field = if delta == 0 {
+            compact_i16(bytes, &mut cursor) as u8
+        } else {
+            previous.checked_add(delta).unwrap()
+        };
+        if field > 4 && next_field_offset.is_none() {
+            next_field_offset = Some(field_offset);
+            next_field_id = Some(field);
+            checksum_predecessor = Some(previous);
+        }
+        if field == 3 && kind == 5 {
+            compressed_len = Some(usize::try_from(compact_i32(bytes, &mut cursor)).unwrap());
+        } else {
+            if field == 4 && kind == 5 {
+                has_checksum = true;
+            }
+            compact_skip(bytes, &mut cursor, kind);
+        }
+        previous = field;
+    }
+}
+
+fn compact_crc_field(previous_field: u8, checksum: i32) -> Vec<u8> {
+    assert_eq!(previous_field, 3);
+    let mut bytes = vec![0x15];
+    compact_varint(
+        ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
+        &mut bytes,
+    );
+    bytes
+}
+
+fn compact_byte(bytes: &[u8], cursor: &mut usize) -> u8 {
+    let value = bytes[*cursor];
+    *cursor += 1;
+    value
+}
+
+fn compact_varint(mut value: u64, output: &mut Vec<u8>) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+fn compact_read_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let byte = compact_byte(bytes, cursor);
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+    }
+    panic!("invalid compact fixture varint");
+}
+
+fn compact_i16(bytes: &[u8], cursor: &mut usize) -> i16 {
+    let value = compact_read_varint(bytes, cursor) as i64;
+    ((value >> 1) ^ -(value & 1)).try_into().unwrap()
+}
+
+fn compact_i32(bytes: &[u8], cursor: &mut usize) -> i32 {
+    let value = compact_read_varint(bytes, cursor) as i64;
+    ((value >> 1) ^ -(value & 1)).try_into().unwrap()
+}
+
+fn compact_skip(bytes: &[u8], cursor: &mut usize, kind: u8) {
+    match kind {
+        1 | 2 => {}
+        3 => *cursor += 1,
+        4..=6 => {
+            let _ = compact_read_varint(bytes, cursor);
+        }
+        7 => *cursor += 8,
+        8 => {
+            let length = usize::try_from(compact_read_varint(bytes, cursor)).unwrap();
+            *cursor += length;
+        }
+        9 | 10 => {
+            let size_and_kind = compact_byte(bytes, cursor);
+            let size = if size_and_kind >> 4 == 15 {
+                usize::try_from(compact_read_varint(bytes, cursor)).unwrap()
+            } else {
+                usize::from(size_and_kind >> 4)
+            };
+            for _ in 0..size {
+                compact_skip(bytes, cursor, size_and_kind & 0x0f);
+            }
+        }
+        12 => loop {
+            let tag = compact_byte(bytes, cursor);
+            if tag & 0x0f == 0 {
+                break;
+            }
+            if tag >> 4 == 0 {
+                let _ = compact_i16(bytes, cursor);
+            }
+            compact_skip(bytes, cursor, tag & 0x0f);
+        },
+        _ => panic!("unsupported compact fixture field"),
+    }
+}
+
+fn compact_plan(
+    repository: &Repository,
+    table: Uuid,
+    intent: [u8; 16],
+    segments: &[CompactSegment],
+) -> orna_repository_v1::CompactPublicationPlan {
+    let head = repository.head().unwrap().unwrap();
+    let base = repository
+        .read_compact_manifest(&head, table)
+        .unwrap()
+        .unwrap_or_else(|| CompactManifest::empty(table, [7; 32]));
+    repository
+        .prepare_compact_publication(
+            &head,
+            repository.index_generation().unwrap(),
+            base,
+            intent,
+            [intent[0]; 32],
+            segments,
+            "orna: publish compact runtime data",
+        )
+        .unwrap()
 }
 
 /// Builds a real filtered clone when the installed Git supports file-protocol
@@ -1750,4 +2086,221 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     let mut journal = repo.read_publication_journal().unwrap().unwrap();
     repo.mark_runtime_complete([3; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+#[test]
+fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_state() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+
+    let segments = (0..257)
+        .map(|ordinal| compact_segment(table, ordinal, format!("segment-{ordinal}\n").into_bytes()))
+        .collect::<Vec<_>>();
+    let mut plan = compact_plan(&repo, table, [41; 16], &segments);
+    plan.publish(&repo).unwrap();
+
+    let head = repo.head().unwrap().unwrap();
+    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    assert_eq!(manifest.entries().len(), 257);
+    assert_eq!(manifest.next_generation(), 2);
+    assert!(
+        manifest
+            .entries()
+            .iter()
+            .all(|entry| entry.generation() == 1)
+    );
+    let manifest_text = git(
+        root.path(),
+        &[
+            "show",
+            &format!("{}:.orna/storage/{table}/manifest.orna", head),
+        ],
+    );
+    assert_eq!(manifest_text.matches("entries: 256").count(), 1);
+    assert_eq!(manifest_text.matches("entries: 1").count(), 1);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged ordinary\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+}
+
+#[test]
+fn compact_publication_refuses_missing_or_corrupt_referenced_objects_before_ref_advance() {
+    for corrupt in [false, true] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let table = Uuid::new_v4();
+        let segment = compact_segment(table, 1, b"compact object\n".to_vec());
+        let mut plan = compact_plan(
+            &repo,
+            table,
+            if corrupt { [43; 16] } else { [42; 16] },
+            &[segment],
+        );
+        let head = repo.head().unwrap().unwrap();
+        let object = plan.manifest().entries()[0].git_object_id();
+        let object_path = root
+            .path()
+            .join(".git/objects")
+            .join(&object[..2])
+            .join(&object[2..]);
+        assert!(object_path.is_file());
+        #[cfg(unix)]
+        fs::set_permissions(
+            &object_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        if corrupt {
+            fs::write(&object_path, b"corrupt").unwrap();
+        } else {
+            fs::remove_file(&object_path).unwrap();
+        }
+        assert!(matches!(
+            plan.publish(&repo),
+            Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+        ));
+        assert_eq!(repo.head().unwrap(), Some(head));
+        assert_eq!(repo.read_publication_journal().unwrap(), None);
+    }
+}
+
+#[test]
+fn compact_manifest_journal_recovery_proves_candidate_before_reconciling() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+
+    let plan = compact_plan(
+        &repo,
+        table,
+        [44; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let head = repo.head().unwrap().unwrap();
+    repo.write_publication_journal(plan.journal()).unwrap();
+    repo.advance_current_ref(&head, plan.candidate()).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged ordinary\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+    let persisted = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(persisted.compact_manifest().unwrap().object_count(), 1);
+    assert_eq!(persisted.compact_manifest().unwrap().generation(), 1);
+}
+
+#[test]
+fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_post_ref_boundaries() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let plan = compact_plan(
+        &repo,
+        table,
+        [48; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let head = repo.head().unwrap().unwrap();
+    repo.write_publication_journal(plan.journal()).unwrap();
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::PublicationPending)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(
+        repo.read_publication_journal().unwrap(),
+        Some(plan.journal().clone())
+    );
+
+    repo.advance_current_ref(&head, plan.candidate()).unwrap();
+    let manifest_path = format!(
+        "{}:.orna/storage/{table}/manifest.orna",
+        plan.candidate().commit()
+    );
+    let manifest_object = git(root.path(), &["rev-parse", &manifest_path]);
+    let object_path = root
+        .path()
+        .join(".git/objects")
+        .join(&manifest_object[..2])
+        .join(&manifest_object[2..]);
+    #[cfg(unix)]
+    fs::set_permissions(
+        &object_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    fs::remove_file(&object_path).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
+    ));
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(plan.candidate().commit().clone())
+    );
+    assert_eq!(
+        repo.read_publication_journal().unwrap(),
+        Some(plan.journal().clone())
+    );
+}
+
+#[test]
+fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let stale_segment = compact_segment(table, 1, b"stale candidate\n".to_vec());
+    let mut stale = compact_plan(&repo, table, [45; 16], &[stale_segment]);
+
+    let mut winner = compact_plan(
+        &repo,
+        table,
+        [46; 16],
+        &[compact_segment(table, 2, b"winner\n".to_vec())],
+    );
+    winner.publish(&repo).unwrap();
+    let mut completed = winner.journal().clone();
+    repo.mark_compact_runtime_complete([46; 16], [46; 32], &mut completed)
+        .unwrap();
+
+    stale.publish(&repo).unwrap();
+    assert_eq!(stale.manifest().next_generation(), 3);
+    assert!(
+        stale
+            .manifest()
+            .entries()
+            .iter()
+            .any(|entry| entry.generation() == 2)
+    );
 }
