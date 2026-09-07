@@ -5,6 +5,7 @@ use std::{
 };
 
 use fs2::FileExt;
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactSegment, CompactSegmentRole,
     GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedPath, Repository,
@@ -102,14 +103,23 @@ fn with_partial_clone(root: &Path) {
 }
 
 fn compact_segment(table: Uuid, ordinal: u64, bytes: Vec<u8>) -> CompactSegment {
+    compact_segment_with_manifest_columns(table, ordinal, bytes, compact_columns())
+}
+
+fn compact_segment_with_manifest_columns(
+    table: Uuid,
+    ordinal: u64,
+    payload: Vec<u8>,
+    columns: Vec<u8>,
+) -> CompactSegment {
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
         ".orna/storage/{table}/data/{}/{segment_id}.parquet",
         &segment_id.to_string()[..2]
     ))
     .unwrap();
-    let columns = vec![0x80];
-    let bytes = compact_parquet(table, ordinal, &columns, bytes);
+    let physical_columns = compact_columns();
+    let bytes = compact_parquet(table, ordinal, &physical_columns, payload);
     CompactSegment::new(
         segment_id,
         CompactSegmentRole::Data,
@@ -128,7 +138,6 @@ fn compact_segment(table: Uuid, ordinal: u64, bytes: Vec<u8>) -> CompactSegment 
 }
 
 fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) -> Vec<u8> {
-    assert_eq!(columns, &[0x80]);
     let schema =
         Arc::new(parse_message_type("message schema { REQUIRED INT64 f_value; }").unwrap());
     let metadata = vec![
@@ -142,7 +151,7 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
             Some("0707070707070707070707070707070707070707070707070707070707070707".to_owned()),
         ),
         KeyValue::new("orna.schema.ovb".to_owned(), Some("AA==".to_owned())),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some("gA==".to_owned())),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -180,6 +189,42 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
     assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
     bytes[footer + 1] = 0x02;
     with_page_checksums(bytes)
+}
+
+fn compact_columns() -> Vec<u8> {
+    CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+        OvbRaw::Array(vec![OvbRaw::Text("field-id".to_owned())]),
+        OvbRaw::Array(vec![OvbRaw::Text("f_value".to_owned())]),
+        OvbRaw::Text("test-logical-type".to_owned()),
+        OvbRaw::Text("int64".to_owned()),
+        OvbRaw::Array(Vec::new()),
+    ])]))
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let word = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(ALPHABET[((word >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((word >> 12) & 0x3f) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((word >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(word & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
@@ -2087,6 +2132,30 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     let mut journal = repo.read_publication_journal().unwrap().unwrap();
     repo.mark_runtime_complete([3; 16], &mut journal).unwrap();
     assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+#[test]
+fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let head = repo.head().unwrap().unwrap();
+    let segment =
+        compact_segment_with_manifest_columns(table, 1, b"compact object\n".to_vec(), vec![0x80]);
+
+    assert!(matches!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, [7; 32]),
+            [39; 16],
+            [39; 32],
+            &[segment],
+            "orna: publish compact runtime data",
+        ),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
 }
 
 #[test]
