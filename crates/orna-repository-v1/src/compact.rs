@@ -14,9 +14,9 @@ use std::{
 
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
-use orna_syntax_v1::{Expr, LiteralKind, parse_row};
+use orna_syntax_v1::{parse_row, Expr, LiteralKind};
 use parquet::{
-    basic::{Compression, PageType},
+    basic::{Compression, PageType, Type},
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
@@ -395,11 +395,11 @@ fn verify_physical_metadata(
     Ok(())
 }
 
-/// Verifies the portion of the compact column descriptor that publication can
-/// prove without decoding logical rows: descriptors are canonical OVB arrays
-/// and their declared physical leaf paths exactly match the Parquet schema.
-/// This keeps a manifest from authorizing a file through metadata that names a
-/// different physical layout.
+/// Verifies the compact scalar descriptor mapping supported by this publication
+/// witness.  The stable field identity must derive the physical leaf name, and
+/// the logical type, encoding, parameters, and Parquet primitive must agree.
+/// This keeps a manifest from authorizing a file through arbitrary same-shape
+/// metadata that names the right leaf but a different logical field.
 fn verify_physical_columns(
     columns: &[u8],
     schema: &parquet::schema::types::SchemaDescriptor,
@@ -420,6 +420,17 @@ fn verify_physical_columns(
         if fields.len() != 5 {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        let OvbRaw::Array(field_id_path) = &fields[0] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Tag(37, field_id)] = field_id_path.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Bytes(field_id) = field_id.as_ref() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let field_id =
+            Uuid::from_slice(field_id).map_err(|_| RepositoryError::InvalidCompactManifest)?;
         let OvbRaw::Array(path) = &fields[1] else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
@@ -438,6 +449,27 @@ fn verify_physical_columns(
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        if path.len() != 1 || path[0] != format!("f_{}", field_id.simple()) {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let OvbRaw::Array(logical_type) = &fields[2] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let [OvbRaw::Int(type_code), OvbRaw::Text(type_name)] = logical_type.as_slice() else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let OvbRaw::Text(encoding) = &fields[3] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if type_code.to_string() != "0"
+            || type_name != "Int"
+            || encoding != "int64"
+            || !matches!(&fields[4], OvbRaw::Array(parameters) if parameters.is_empty())
+            || column.physical_type() != Type::INT64
+            || column.logical_type_ref().is_some()
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
