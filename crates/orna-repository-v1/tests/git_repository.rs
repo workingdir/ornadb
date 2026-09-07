@@ -1,8 +1,13 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use fs2::FileExt;
 use orna_repository_v1::{
-    CheckoutExecutionError, CheckoutTarget, ManagedPath, Repository, RuntimeGeneration,
+    CheckoutExecutionError, CheckoutTarget, GitObjectKind, GitObjectState, GitRepositoryMode,
+    IndexGeneration, ManagedPath, Repository, RuntimeGeneration, WorktreeState,
 };
 use tempfile::TempDir;
 
@@ -28,6 +33,7 @@ fn repository() -> TempDir {
         &["config", "user.email", "test@example.invalid"],
     );
     git(temp.path(), &["config", "user.name", "Repository test"]);
+    git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
@@ -35,6 +41,104 @@ fn repository() -> TempDir {
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
+}
+
+fn git_state(
+    repository: &Repository,
+    root: &Path,
+) -> (
+    Option<orna_repository_v1::GitCommitRef>,
+    IndexGeneration,
+    WorktreeState,
+    String,
+    String,
+) {
+    (
+        repository.head().unwrap(),
+        repository.index_generation().unwrap(),
+        repository.worktree_state().unwrap(),
+        git(root, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+        git(root, &["config", "--local", "--null", "--list"]),
+    )
+}
+
+fn with_remote(root: &Path) {
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://account:secret@example.invalid/private.git",
+        ],
+    );
+    let head = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/origin/main", &head]);
+}
+
+fn with_partial_clone(root: &Path) {
+    with_remote(root);
+    git(root, &["config", "extensions.partialClone", "origin"]);
+    git(root, &["config", "remote.origin.promisor", "true"]);
+    git(
+        root,
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+}
+
+/// Builds a real filtered clone when the installed Git supports file-protocol
+/// filtering. `None` means the platform cannot provide the fixture; callers
+/// must then assert the conservative unavailable boundary rather than claim a
+/// promised object from configuration alone.
+fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
+    let fixture = TempDir::new().ok()?;
+    let origin = fixture.path().join("origin.git");
+    let seed = fixture.path().join("seed");
+    let clone = fixture.path().join("partial");
+    git(fixture.path(), &["init", "--bare", "origin.git"]);
+    git(fixture.path(), &["clone", "origin.git", "seed"]);
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    git(&seed, &["config", "user.name", "Repository test"]);
+    git(&seed, &["config", "commit.gpgsign", "false"]);
+    fs::write(seed.join("visible.txt"), "visible\n").ok()?;
+    fs::write(seed.join("promised.txt"), "promised\n").ok()?;
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-m", "initial"]);
+    git(&seed, &["push", "origin", "HEAD"]);
+    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    let origin_url = format!("file://{}", origin.display());
+    let output = Command::new("git")
+        .current_dir(fixture.path())
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            &origin_url,
+            "partial",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success()
+        || git(
+            &clone,
+            &["config", "--local", "--get", "remote.origin.promisor"],
+        ) != "true"
+    {
+        return None;
+    }
+    let promised = git(&seed, &["rev-parse", "HEAD:promised.txt"]);
+    let missing = Command::new("git")
+        .current_dir(&clone)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["cat-file", "-e", &promised])
+        .output()
+        .ok()?;
+    if missing.status.success() {
+        return None;
+    }
+    Some((fixture, clone, promised))
 }
 
 #[test]
@@ -851,6 +955,183 @@ fn explicit_snapshot_branch_and_remote_preserve_cwd() {
         ],
     );
     assert_eq!(repo.remote_names().unwrap(), vec!["origin"]);
+}
+
+#[test]
+fn observes_an_ordinary_repository_and_materialized_head_without_mutation() {
+    let root = repository();
+    with_remote(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+
+    let capabilities = repo.observe_git_capabilities().unwrap();
+    assert_eq!(capabilities.mode(), GitRepositoryMode::Ordinary);
+    assert!(!capabilities.sparse_checkout());
+    assert!(!capabilities.partial_clone());
+    assert!(capabilities.promisor_remotes().is_empty());
+    assert!(format!("{capabilities:?}").contains("Ordinary"));
+    assert!(!format!("{capabilities:?}").contains("example.invalid"));
+    assert!(!format!("{capabilities:?}").contains("account"));
+    assert!(!format!("{capabilities:?}").contains("secret"));
+    assert!(!format!("{capabilities:?}").contains(&root.path().display().to_string()));
+
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    assert!(matches!(
+        repo.observe_git_object(&head).unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Commit,
+            size: 1..
+        }
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn distinguishes_sparse_checkout_from_partial_clone() {
+    let root = repository();
+    git(root.path(), &["sparse-checkout", "init", "--no-cone"]);
+    git(
+        root.path(),
+        &["sparse-checkout", "set", "main.orna", "ordinary.txt"],
+    );
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+    let capabilities = repo.observe_git_capabilities().unwrap();
+
+    assert_eq!(capabilities.mode(), GitRepositoryMode::SparseCheckout);
+    assert!(capabilities.sparse_checkout());
+    assert!(!capabilities.partial_clone());
+    assert!(capabilities.promisor_remotes().is_empty());
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn observes_a_partial_clone_and_a_promised_object_without_hydrating() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        // A configuration-only repository never authorizes a Promised result.
+        let root = repository();
+        with_partial_clone(root.path());
+        let repo = Repository::discover(root.path()).unwrap();
+        assert_eq!(
+            repo.observe_git_object("0000000000000000000000000000000000000000")
+                .unwrap(),
+            GitObjectState::Unavailable
+        );
+        return;
+    };
+    let repo = Repository::discover(&clone).unwrap();
+    let before = git_state(&repo, &clone);
+    let capabilities = repo.observe_git_capabilities().unwrap();
+
+    assert_eq!(capabilities.mode(), GitRepositoryMode::PartialClone);
+    assert!(!capabilities.sparse_checkout());
+    assert!(capabilities.partial_clone());
+    assert_eq!(capabilities.promisor_remotes(), &["origin".to_owned()]);
+    assert_eq!(
+        repo.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    assert_eq!(git_state(&repo, &clone), before);
+    drop(fixture);
+}
+
+#[test]
+fn observes_combined_sparse_and_partial_capabilities() {
+    let root = repository();
+    with_partial_clone(root.path());
+    git(root.path(), &["config", "core.sparseCheckout", "true"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+
+    let capabilities = repo.observe_git_capabilities().unwrap();
+    assert_eq!(capabilities.mode(), GitRepositoryMode::Combined);
+    assert!(capabilities.sparse_checkout());
+    assert!(capabilities.partial_clone());
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn reports_malformed_configuration_and_object_ids_without_leaking_state() {
+    let root = repository();
+    with_remote(root.path());
+    git(
+        root.path(),
+        &["config", "extensions.partialClone", "missing-remote"],
+    );
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_git_capabilities().unwrap().mode(),
+        GitRepositoryMode::Malformed
+    );
+    assert_eq!(
+        repo.observe_git_object("not-a-native-object-id").unwrap(),
+        GitObjectState::Malformed
+    );
+    assert_eq!(
+        repo.observe_git_object("0000000000000000000000000000000000000000")
+            .unwrap(),
+        GitObjectState::Malformed
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn reports_an_unavailable_object_distinct_from_a_promised_object() {
+    let root = repository();
+    with_partial_clone(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+
+    // Valid promisor configuration alone is not proof that an arbitrary
+    // object is promised by a reachable local commit or tree.
+    assert_eq!(
+        repo.observe_git_object("0000000000000000000000000000000000000000")
+            .unwrap(),
+        GitObjectState::Unavailable
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn observes_materialized_tree_blob_and_tag_without_mutation() {
+    let root = repository();
+    git(root.path(), &["tag", "-a", "release", "-m", "release"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+    let tree = git(root.path(), &["rev-parse", "HEAD^{tree}"]);
+    let blob = git(root.path(), &["rev-parse", "HEAD:ordinary.txt"]);
+    let tag = git(root.path(), &["rev-parse", "release^{tag}"]);
+
+    for (object, kind) in [
+        (tree, GitObjectKind::Tree),
+        (blob, GitObjectKind::Blob),
+        (tag, GitObjectKind::Tag),
+    ] {
+        assert!(matches!(
+            repo.observe_git_object(&object).unwrap(),
+            GitObjectState::Materialized { kind: observed, .. } if observed == kind
+        ));
+    }
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn reports_a_corrupt_local_object_as_malformed_without_mutation() {
+    let root = repository();
+    let object = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let object_directory = root.path().join(".git").join("objects").join("aa");
+    fs::create_dir_all(&object_directory).unwrap();
+    fs::write(object_directory.join(&object[2..]), b"not a Git object").unwrap();
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_git_object(object).unwrap(),
+        GitObjectState::Malformed
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
 }
 
 #[test]

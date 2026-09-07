@@ -711,6 +711,76 @@ impl ManagedPath {
     }
 }
 
+/// Git materialisation mode observed from local configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitRepositoryMode {
+    /// No sparse-checkout or partial/promisor configuration was observed.
+    Ordinary,
+    /// Git's working-tree sparsity is enabled without partial/promisor state.
+    SparseCheckout,
+    /// Git's object store is configured for partial/promisor operation without
+    /// sparse-checkout state.
+    PartialClone,
+    /// Both working-tree sparsity and partial/promisor state are enabled.
+    Combined,
+    /// The relevant local Git configuration could not be interpreted safely.
+    Malformed,
+}
+
+/// A redacted, read-only observation of a repository's Git materialisation
+/// capabilities. Remote URLs and filesystem paths are intentionally absent;
+/// only configured remote names are retained.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRepositoryCapabilities {
+    mode: GitRepositoryMode,
+    sparse_checkout: bool,
+    partial_clone: bool,
+    promisor_remotes: Vec<String>,
+}
+
+impl GitRepositoryCapabilities {
+    /// The combined sparse/partial classification.
+    pub const fn mode(&self) -> GitRepositoryMode {
+        self.mode
+    }
+
+    /// Whether Git has enabled sparse worktree materialisation.
+    pub const fn sparse_checkout(&self) -> bool {
+        self.sparse_checkout
+    }
+
+    /// Whether partial/promisor object configuration was observed.
+    pub const fn partial_clone(&self) -> bool {
+        self.partial_clone
+    }
+
+    /// Configured promisor remote names. URLs and credentials are never
+    /// returned by this observation.
+    pub fn promisor_remotes(&self) -> &[String] {
+        &self.promisor_remotes
+    }
+}
+
+/// The fixed Git object kinds accepted by the capability observer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitObjectKind {
+    Commit,
+    Tree,
+    Blob,
+    Tag,
+}
+
+/// Safe local availability information for one complete native Git object ID.
+/// A promised object is known only when a local promisor walk proves that the
+/// missing ID is reachable; no fetch or lazy hydration is attempted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitObjectState {
+    Materialized { kind: GitObjectKind, size: u64 },
+    Promised,
+    Unavailable,
+    Malformed,
+}
+
 /// A normal Git repository and its selected worktree.
 #[derive(Clone, Debug)]
 pub struct Repository {
@@ -1840,6 +1910,270 @@ impl Repository {
             .collect())
     }
 
+    /// Observes sparse-checkout and partial/promisor configuration without
+    /// changing Git configuration, refs, the index, or the worktree.
+    ///
+    /// This is the repository-local half of ORNA-GIT-004: sparse checkout is
+    /// a working-tree property, while partial clone is an object-materiality
+    /// property. The observation does not fetch, hydrate, or infer allocator
+    /// or transport semantics.
+    pub fn observe_git_capabilities(&self) -> Result<GitRepositoryCapabilities, RepositoryError> {
+        let remotes = match self.observer_remote_names() {
+            Ok(remotes) => remotes,
+            Err(RepositoryError::GitUnavailable) => {
+                return Err(RepositoryError::GitUnavailable);
+            }
+            Err(_) => {
+                return Ok(GitRepositoryCapabilities {
+                    mode: GitRepositoryMode::Malformed,
+                    sparse_checkout: false,
+                    partial_clone: false,
+                    promisor_remotes: Vec::new(),
+                });
+            }
+        };
+        if remotes.iter().any(|remote| !valid_remote_name(remote)) {
+            return Ok(GitRepositoryCapabilities {
+                mode: GitRepositoryMode::Malformed,
+                sparse_checkout: false,
+                partial_clone: false,
+                promisor_remotes: Vec::new(),
+            });
+        }
+
+        let mut malformed = false;
+        let sparse_checkout = match self.worktree_or_local_config_value("core.sparseCheckout")? {
+            ConfigValue::Missing => false,
+            ConfigValue::Value(value) => match parse_git_bool(&value) {
+                Some(value) => value,
+                None => {
+                    malformed = true;
+                    false
+                }
+            },
+            ConfigValue::Malformed => {
+                malformed = true;
+                false
+            }
+        };
+
+        let mut promisor_remotes = Vec::new();
+        for remote in &remotes {
+            let key = format!("remote.{remote}.promisor");
+            match self.local_config_value(&key)? {
+                ConfigValue::Missing => {}
+                ConfigValue::Value(value) => match parse_git_bool(&value) {
+                    Some(true) => promisor_remotes.push(remote.clone()),
+                    Some(false) => {}
+                    None => malformed = true,
+                },
+                ConfigValue::Malformed => malformed = true,
+            }
+        }
+
+        let partial_clone_remote = match self.local_config_value("extensions.partialClone")? {
+            ConfigValue::Missing => None,
+            ConfigValue::Value(value)
+                if valid_remote_name(&value) && remotes.iter().any(|remote| remote == &value) =>
+            {
+                Some(value)
+            }
+            ConfigValue::Value(_) | ConfigValue::Malformed => {
+                malformed = true;
+                None
+            }
+        };
+        if let Some(remote) = &partial_clone_remote
+            && !promisor_remotes.iter().any(|candidate| candidate == remote)
+        {
+            malformed = true;
+        }
+
+        let partial_clone = partial_clone_remote.is_some() || !promisor_remotes.is_empty();
+        let mode = if malformed {
+            GitRepositoryMode::Malformed
+        } else {
+            match (sparse_checkout, partial_clone) {
+                (false, false) => GitRepositoryMode::Ordinary,
+                (true, false) => GitRepositoryMode::SparseCheckout,
+                (false, true) => GitRepositoryMode::PartialClone,
+                (true, true) => GitRepositoryMode::Combined,
+            }
+        };
+        Ok(GitRepositoryCapabilities {
+            mode,
+            sparse_checkout,
+            partial_clone,
+            promisor_remotes,
+        })
+    }
+
+    /// Observes one complete native Git object ID without invoking Git's
+    /// fetch or filter machinery. Missing objects are classified as promised
+    /// only when valid local promisor configuration and reachability evidence
+    /// support that interpretation; otherwise they remain unavailable.
+    pub fn observe_git_object(&self, object_id: &str) -> Result<GitObjectState, RepositoryError> {
+        let object_id_length = self.observer_native_object_id_length()?;
+        if object_id.len() != object_id_length
+            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(GitObjectState::Malformed);
+        }
+
+        let capabilities = self.observe_git_capabilities()?;
+        let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1");
+        command
+            .args([
+                "cat-file",
+                "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?
+            .write_all(format!("{object_id}\n").as_bytes())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !output.status.success() {
+            // `cat-file` reports corrupt loose/packed objects through its
+            // exit status.  Keep the observation redacted while preserving
+            // the materialisation distinction for callers.
+            return Ok(GitObjectState::Malformed);
+        }
+        let line = trim_output(&output.stdout);
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() == 2 && fields[0] == object_id && fields[1] == "missing" {
+            if git_stderr_indicates_malformed_object(&output.stderr) {
+                return Ok(GitObjectState::Malformed);
+            }
+            return Ok(if capabilities.mode == GitRepositoryMode::Malformed {
+                GitObjectState::Malformed
+            } else if capabilities.partial_clone {
+                match self.promisor_reachability(object_id)? {
+                    PromisorReachability::Proven => GitObjectState::Promised,
+                    PromisorReachability::NotProven => GitObjectState::Unavailable,
+                    PromisorReachability::Malformed => GitObjectState::Malformed,
+                }
+            } else {
+                GitObjectState::Unavailable
+            });
+        }
+        if fields.len() != 3 || fields[0] != object_id {
+            return Ok(GitObjectState::Malformed);
+        }
+        let kind = match fields[1] {
+            "commit" => GitObjectKind::Commit,
+            "tree" => GitObjectKind::Tree,
+            "blob" => GitObjectKind::Blob,
+            "tag" => GitObjectKind::Tag,
+            _ => return Ok(GitObjectState::Malformed),
+        };
+        let Ok(size) = fields[2].parse::<u64>() else {
+            return Ok(GitObjectState::Malformed);
+        };
+        Ok(GitObjectState::Materialized { kind, size })
+    }
+
+    fn local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
+        self.config_value("--local", key)
+    }
+
+    fn worktree_or_local_config_value(&self, key: &str) -> Result<ConfigValue, RepositoryError> {
+        match self.config_value("--worktree", key)? {
+            ConfigValue::Missing => self.local_config_value(key),
+            value => Ok(value),
+        }
+    }
+
+    fn config_value(&self, scope: &str, key: &str) -> Result<ConfigValue, RepositoryError> {
+        let mut command = self.observer_command();
+        command.args(["config", scope, "--get", key]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            return Ok(ConfigValue::Value(trim_output(&output.stdout)));
+        }
+        if output.status.code() == Some(1) {
+            return Ok(ConfigValue::Missing);
+        }
+        Ok(ConfigValue::Malformed)
+    }
+
+    fn observer_remote_names(&self) -> Result<Vec<String>, RepositoryError> {
+        let mut command = self.observer_command();
+        command.arg("remote");
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(trim_output(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn observer_native_object_id_length(&self) -> Result<usize, RepositoryError> {
+        let mut command = self.observer_command();
+        command.args(["rev-parse", "--show-object-format"]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        match trim_output(&output.stdout).as_str() {
+            "sha1" => Ok(40),
+            "sha256" => Ok(64),
+            _ => Err(RepositoryError::UnsupportedObjectFormat),
+        }
+    }
+
+    fn promisor_reachability(
+        &self,
+        object_id: &str,
+    ) -> Result<PromisorReachability, RepositoryError> {
+        let mut command = self.observer_command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "rev-list",
+            "--objects",
+            "--missing=print",
+            "--no-object-names",
+            "--all",
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            // A local reachability walk cannot safely distinguish an absent
+            // object from a malformed object database when Git rejects it.
+            return Ok(PromisorReachability::Malformed);
+        }
+        let promised = format!("?{object_id}");
+        Ok(
+            if trim_output(&output.stdout)
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case(&promised))
+            {
+                PromisorReachability::Proven
+            } else {
+                PromisorReachability::NotProven
+            },
+        )
+    }
+
     /// Atomically materialises one repository-managed file while preserving
     /// an ordinary editor's later change. The expected bytes are checked both
     /// before and immediately before replacement; `None` removes an existing
@@ -1929,6 +2263,15 @@ impl Repository {
     fn command(&self) -> Command {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
+        command
+    }
+
+    /// Constructs a Git command for a passive observer.  This intentionally
+    /// ignores inherited routing and object-store overrides so every query is
+    /// bound to this repository's selected worktree.
+    fn observer_command(&self) -> Command {
+        let mut command = self.command();
+        scrub_git_routing_environment(&mut command);
         command
     }
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
@@ -2702,6 +3045,55 @@ pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
         command.env_remove(variable);
     }
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConfigValue {
+    Missing,
+    Value(String),
+    Malformed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromisorReachability {
+    Proven,
+    NotProven,
+    Malformed,
+}
+
+fn parse_git_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn git_stderr_indicates_malformed_object(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    [
+        "corrupt",
+        "unable to unpack",
+        "inflate:",
+        "bad object",
+        "invalid object",
+    ]
+    .iter()
+    .any(|marker| stderr.contains(marker))
+}
+
+fn valid_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        && !name.contains("..")
+        && !name.contains('\\')
+        && !name.contains("//")
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+}
+
 fn valid_branch_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
