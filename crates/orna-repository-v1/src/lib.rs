@@ -15,13 +15,15 @@ use std::{
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
+pub use uuid::Uuid;
 
 mod compact;
 mod init;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, CompactManifest, CompactManifestEntry, CompactManifestWitness,
-    CompactPublicationPlan, CompactSegment, CompactSegmentRole,
+    CompactPublicationError, CompactPublicationPending, CompactPublicationPlan,
+    CompactRuntimeOperation, CompactSegment, CompactSegmentRole,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
@@ -1156,8 +1158,15 @@ impl Repository {
         &self,
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
-        let encoded = journal.encode()?;
         let _lock = self.acquire_coordination_lock()?;
+        self.write_publication_journal_locked(journal)
+    }
+
+    pub(crate) fn write_publication_journal_locked(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let encoded = journal.encode()?;
         self.runtime.ensure_exists()?;
         let path = self.runtime.root().join("publication-journal.bin");
         if let Ok(metadata) = fs::symlink_metadata(&path)
@@ -1197,6 +1206,12 @@ impl Repository {
     /// Reads the last atomically persisted publication journal, if present.
     pub fn read_publication_journal(&self) -> Result<Option<PublicationJournal>, RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.read_publication_journal_locked()
+    }
+
+    pub(crate) fn read_publication_journal_locked(
+        &self,
+    ) -> Result<Option<PublicationJournal>, RepositoryError> {
         let path = self.runtime.root().join("publication-journal.bin");
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -1217,6 +1232,10 @@ impl Repository {
     /// containing private runtime directory.
     pub fn clear_publication_journal(&self) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.clear_publication_journal_locked()
+    }
+
+    pub(crate) fn clear_publication_journal_locked(&self) -> Result<(), RepositoryError> {
         let path = self.runtime.root().join("publication-journal.bin");
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -1243,6 +1262,19 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
+        self.publish_candidate_impl(expected_index, candidate, journal, false)
+    }
+
+    /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
+    /// admitted only from the opaque compact operation, which owns the
+    /// witnessed runtime-completion transition.
+    pub(crate) fn publish_candidate_impl(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        permit_compact: bool,
+    ) -> Result<IndexGeneration, RepositoryError> {
         if journal.stage() != PublicationJournalStage::Prepared
             || journal.runtime_intent_id().is_none()
             || expected_index.head() != Some(journal.old_head())
@@ -1252,6 +1284,9 @@ impl Repository {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         if journal.compact_manifest().is_some() {
+            if !permit_compact {
+                return Err(RepositoryError::RuntimeCompletionRequired);
+            }
             self.verify_compact_publication_binding(journal, candidate)?;
         }
         let paths = journal
@@ -1321,37 +1356,6 @@ impl Repository {
         // before the separately durable runtime completion.  Do not discard
         // the journal in that state: PUB-1 recovery must retain it to
         // reconcile the newer ref rather than treating cleanup as complete.
-        if self.head()?.as_ref() != Some(journal.new_head()) {
-            return Err(RepositoryError::StaleHead);
-        }
-        journal.advance(PublicationJournalStage::RuntimeCompleted)?;
-        self.write_publication_journal(journal)?;
-        journal.advance(PublicationJournalStage::Complete)?;
-        self.write_publication_journal(journal)?;
-        self.clear_publication_journal()
-    }
-
-    /// Marks the compact runtime owner's frozen range complete only after the
-    /// journal's persisted watermark, base manifest, selected ref, and
-    /// candidate identity still verify. The repository records no runtime
-    /// mutations and does not consume the range itself.
-    pub fn mark_compact_runtime_complete(
-        &self,
-        runtime_intent_id: [u8; 16],
-        cleanup_watermark: [u8; 32],
-        journal: &mut PublicationJournal,
-    ) -> Result<(), RepositoryError> {
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if witness.cleanup_watermark() != cleanup_watermark
-            || journal.stage() != PublicationJournalStage::WorktreeReconciled
-            || journal.runtime_intent_id() != Some(runtime_intent_id)
-        {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        let candidate = self.candidate_from_journal(journal)?;
-        self.verify_compact_publication_binding(journal, &candidate)?;
         if self.head()?.as_ref() != Some(journal.new_head()) {
             return Err(RepositoryError::StaleHead);
         }
@@ -1433,6 +1437,15 @@ impl Repository {
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
             return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        if journal.compact_manifest().is_some()
+            && matches!(
+                journal.stage(),
+                PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
+            )
+            && self.head()?.as_ref() != Some(journal.new_head())
+        {
+            return Err(RepositoryError::StaleHead);
         }
         if journal.stage() == PublicationJournalStage::RuntimeCompleted {
             journal.advance(PublicationJournalStage::Complete)?;
