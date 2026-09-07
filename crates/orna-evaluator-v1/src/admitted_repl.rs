@@ -62,6 +62,28 @@ impl ReplError {
     pub fn diagnostic(&self) -> &FoundationDiagnostic {
         self.diagnostic.as_ref()
     }
+
+    fn status_value(&self) -> CanonicalValue {
+        CanonicalValue::new(orna_foundation_v1::OvbRaw::Map(vec![
+            (
+                orna_foundation_v1::OvbRaw::Text("code".into()),
+                orna_foundation_v1::OvbRaw::Text(self.code().into()),
+            ),
+            (
+                orna_foundation_v1::OvbRaw::Text("message".into()),
+                orna_foundation_v1::OvbRaw::Text("<redacted>".into()),
+            ),
+            (
+                orna_foundation_v1::OvbRaw::Text("redacted".into()),
+                orna_foundation_v1::OvbRaw::Bool(true),
+            ),
+            (
+                orna_foundation_v1::OvbRaw::Text("severity".into()),
+                orna_foundation_v1::OvbRaw::Text("error".into()),
+            ),
+        ]))
+        .expect("redacted status record is canonical")
+    }
 }
 
 /// An isolated, typed session against one admitted project snapshot.
@@ -129,21 +151,33 @@ impl AdmittedReplSession {
     }
 
     /// Typechecks and executes one source input, retaining only a complete
-    /// paired semantic/runtime success. Declarations yield no value.
+    /// paired semantic/runtime success. Declarations yield no value. Every
+    /// completed submission updates `$?`: successful submissions publish
+    /// `null`; rejected submissions publish their redacted diagnostic.
     pub fn submit(&mut self, source: &str) -> Result<Option<CanonicalValue>, ReplError> {
-        let input = self.parse(source)?;
-        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        let input = match self.parse(source) {
+            Ok(input) => input,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
+        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+            Ok(admission) => admission,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
         if !admission.effects.effects.is_empty() {
-            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-EFFECT")));
         }
         let mut runtime = self.runtime.clone();
-        let value = runtime
-            .submit_admitted(&input)
-            .map_err(ReplError::runtime)?;
+        let value = match runtime.submit_admitted(&input).map_err(ReplError::runtime) {
+            Ok(value) => value,
+            Err(error) => return Err(self.publish_failure(error)),
+        };
         let mut semantic = self.semantic.clone();
-        semantic
-            .commit(admission)
-            .map_err(|_| ReplError::fixed("ORNA-REPL-COMMIT"))?;
+        if semantic.commit(admission).is_err() {
+            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
+        }
+        runtime.set_last_status(
+            CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+        );
         self.runtime = runtime;
         self.semantic = semantic;
         Ok(value)
@@ -168,6 +202,11 @@ impl AdmittedReplSession {
 
     fn parse(&self, source: &str) -> Result<ReplInput, ReplError> {
         parse_admitted_repl(source, self.limits).map_err(ReplError::runtime)
+    }
+
+    fn publish_failure(&mut self, error: ReplError) -> ReplError {
+        self.runtime.set_last_status(error.status_value());
+        error
     }
 }
 
@@ -562,6 +601,82 @@ mod tests {
             !encoded
                 .windows(b"secret_name".len())
                 .any(|window| window == b"secret_name")
+        );
+    }
+
+    #[test]
+    fn last_status_tracks_redacted_failures_and_successes_without_preview_mutation() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        assert_eq!(
+            session.preview("$?"),
+            Ok(CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).unwrap())
+        );
+        let error = session
+            .submit("let secret_name: Int = \"private\";")
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-S021-TYPE");
+        let status = session.preview("$?").expect("status value");
+        assert_eq!(
+            status.raw(),
+            &orna_foundation_v1::OvbRaw::Map(vec![
+                (
+                    orna_foundation_v1::OvbRaw::Text("code".into()),
+                    orna_foundation_v1::OvbRaw::Text("ORNA-S021-TYPE".into()),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("message".into()),
+                    orna_foundation_v1::OvbRaw::Text("<redacted>".into()),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("redacted".into()),
+                    orna_foundation_v1::OvbRaw::Bool(true),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("severity".into()),
+                    orna_foundation_v1::OvbRaw::Text("error".into()),
+                ),
+            ])
+        );
+
+        assert_eq!(session.preview("1 + 1"), Ok(Value::int(2.into())));
+        let status = session.preview("$?").expect("status value");
+        assert_eq!(
+            status.raw(),
+            &orna_foundation_v1::OvbRaw::Map(vec![
+                (
+                    orna_foundation_v1::OvbRaw::Text("code".into()),
+                    orna_foundation_v1::OvbRaw::Text("ORNA-S021-TYPE".into()),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("message".into()),
+                    orna_foundation_v1::OvbRaw::Text("<redacted>".into()),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("redacted".into()),
+                    orna_foundation_v1::OvbRaw::Bool(true),
+                ),
+                (
+                    orna_foundation_v1::OvbRaw::Text("severity".into()),
+                    orna_foundation_v1::OvbRaw::Text("error".into()),
+                ),
+            ])
+        );
+
+        assert_eq!(session.submit("40 + 2"), Ok(Some(Value::int(42.into()))));
+        assert_eq!(
+            session.preview("$?"),
+            Ok(CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).unwrap())
+        );
+    }
+
+    #[test]
+    fn module_source_cannot_admit_the_session_local_status_binding() {
+        let (_directory, project) = loaded_project(&[("main.orna", "pub fn status() = $?;")], None);
+        assert_eq!(
+            AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+                .unwrap_err()
+                .code(),
+            "ORNA-S012-UNRESOLVED"
         );
     }
 
