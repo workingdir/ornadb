@@ -12,11 +12,13 @@ use std::{
 
 use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
 use orna_repository_v1::{
-    CompactPublicationError, CompactPublicationPlan, GitCommitRef, IndexGeneration,
+    CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef, IndexGeneration,
     ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal, PublicationJournalEntry,
     Repository, RepositoryError,
 };
-use orna_runtime_v1::{PublicationCommitId, PublicationFreeze, RuntimeState, TableMutation};
+use orna_runtime_v1::{
+    PublicationCommitId, PublicationFreeze, RuntimeError, RuntimeState, TableMutation,
+};
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
 };
@@ -378,24 +380,20 @@ impl RuntimePublicationCoordinator {
         freeze: &PublicationFreeze,
         plan: CompactPublicationPlan,
     ) -> Result<IndexGeneration, Error> {
-        let (index, ()) = repository
-            .publish_and_complete_compact(plan, |operation| async move {
-                if operation.runtime_intent_id() != freeze.intent_id
-                    || operation.cleanup_watermark() != freeze.checkpoint.digest
-                {
-                    return Err(Error::InvalidTransition);
-                }
-                let commit =
-                    PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
-                        .map_err(|_| Error::InvalidObjectId)?;
-                runtime
-                    .complete_publication(freeze, &commit)
-                    .await
-                    .map_err(|_| Error::RuntimeUnavailable)
-            })
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .map_err(map_publication_repository_error)?;
+        runtime
+            .bind_compact_publication(&pending, freeze)
             .await
-            .map_err(map_compact_publication_error)?;
-        Ok(index)
+            .map_err(map_compact_runtime_error)?;
+        let receipt = runtime
+            .complete_compact_publication(&pending, freeze)
+            .await
+            .map_err(map_compact_runtime_error)?;
+        repository
+            .finish_compact_with_receipt(&receipt)
+            .map_err(map_publication_repository_error)
     }
 
     /// Reads the exact typed prefix named by `freeze`, then prepares its
@@ -547,31 +545,40 @@ impl RuntimePublicationCoordinator {
             return Ok(None);
         };
         if journal.compact_manifest().is_some() {
-            let intent_id = journal
-                .runtime_intent_id()
-                .ok_or(Error::InvalidTransition)?;
+            let recovery = repository
+                .recover_compact_publication_boundary()
+                .map_err(map_publication_repository_error)?;
+            let pending = match recovery {
+                None => {
+                    return repository
+                        .index_generation()
+                        .map(Some)
+                        .map_err(map_publication_repository_error);
+                }
+                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => pending,
+                Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
+                    // The repository retained both the journal and any
+                    // post-freeze runtime tail. Do not turn a stale candidate
+                    // into a new cleanup request.
+                    return Err(Error::RefConflict);
+                }
+            };
             let freeze = runtime
-                .publication_freeze(intent_id)
+                .publication_freeze(pending.runtime_intent_id())
                 .await
-                .map_err(|_| Error::RuntimeUnavailable)?;
+                .map_err(map_compact_runtime_error)?;
+            runtime
+                .bind_compact_publication(&pending, &freeze)
+                .await
+                .map_err(map_compact_runtime_error)?;
+            let receipt = runtime
+                .complete_compact_publication(&pending, &freeze)
+                .await
+                .map_err(map_compact_runtime_error)?;
             return repository
-                .recover_and_complete_compact(|operation| async move {
-                    if operation.runtime_intent_id() != freeze.intent_id
-                        || operation.cleanup_watermark() != freeze.checkpoint.digest
-                    {
-                        return Err(Error::InvalidTransition);
-                    }
-                    let commit =
-                        PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
-                            .map_err(|_| Error::InvalidObjectId)?;
-                    runtime
-                        .complete_publication(&freeze, &commit)
-                        .await
-                        .map_err(|_| Error::RuntimeUnavailable)
-                })
-                .await
-                .map_err(map_compact_publication_error)
-                .map(|result| result.map(|(index, ())| index));
+                .finish_compact_with_receipt(&receipt)
+                .map(Some)
+                .map_err(map_publication_repository_error);
         }
         let intent_id = journal
             .runtime_intent_id()
@@ -654,13 +661,6 @@ pub async fn complete_verified_compact_runtime_prefix(
         .map(|_| ())
 }
 
-fn map_compact_publication_error(error: CompactPublicationError<Error>) -> Error {
-    match error {
-        CompactPublicationError::Repository(error) => map_publication_repository_error(error),
-        CompactPublicationError::Runtime(error) => error,
-    }
-}
-
 fn map_publication_repository_error(error: RepositoryError) -> Error {
     match error {
         RepositoryError::InvalidPublicationJournal | RepositoryError::InvalidCompactManifest => {
@@ -672,6 +672,41 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
         RepositoryError::PublicationPending => Error::PublicationPending,
         RepositoryError::RuntimeCompletionRequired => Error::InvalidTransition,
         _ => Error::RepositoryUnavailable,
+    }
+}
+
+/// Translates only the runtime outcomes reachable from the compact receipt
+/// boundary. Invariant and receipt-binding failures are a caller-visible
+/// storage transition failure; only durable runtime availability is reported
+/// as unavailable.
+fn map_compact_runtime_error(error: RuntimeError) -> Error {
+    match error {
+        RuntimeError::StorageUnavailable => Error::RuntimeUnavailable,
+        RuntimeError::InvalidIdentity
+        | RuntimeError::InvalidDigest
+        | RuntimeError::ConflictingPublicationIntent
+        | RuntimeError::ConflictingPublicationCommit
+        | RuntimeError::InvalidPublicationCommit
+        | RuntimeError::CompactPublicationRequired
+        | RuntimeError::CompactReceiptKeyMismatch
+        | RuntimeError::InvalidCompactReceipt
+        | RuntimeError::RecoveryInvalid => Error::InvalidTransition,
+        RuntimeError::StreamIdentityMismatch
+        | RuntimeError::StreamCheckpointStale
+        | RuntimeError::LeaseHeld
+        | RuntimeError::OwnerLost
+        | RuntimeError::StaleCapture { .. }
+        | RuntimeError::InvalidCapture
+        | RuntimeError::EmptyMutationBatch
+        | RuntimeError::InvalidTableMutation
+        | RuntimeError::RequestUnknown
+        | RuntimeError::RequestFingerprintMismatch
+        | RuntimeError::RequestOwnerConflict
+        | RuntimeError::RequestStateConflict
+        | RuntimeError::SessionClosed
+        | RuntimeError::SessionWorkActive
+        | RuntimeError::TerminalOutcomeTooLarge
+        | RuntimeError::FaultInjected(_) => Error::RuntimeUnavailable,
     }
 }
 
@@ -1275,30 +1310,23 @@ mod tests {
     #[tokio::test]
     async fn compact_ref_drift_after_runtime_commit_preserves_journal_and_tail() {
         let (temp, repository, runtime, freeze, plan) = compact_runtime_unpublished_fixture().await;
-        let runtime_ref = &runtime;
-        let freeze_ref = &freeze;
-        let temp_ref = &temp;
-        let result = repository
-            .publish_and_complete_compact(plan, |operation| async move {
-                let commit =
-                    PublicationCommitId::new(operation.commit().as_str().as_bytes().to_vec())
-                        .map_err(|_| Error::InvalidObjectId)?;
-                runtime_ref
-                    .complete_publication(freeze_ref, &commit)
-                    .await
-                    .map_err(|_| Error::RuntimeUnavailable)?;
-                fs::write(temp_ref.path().join("ordinary.txt"), "native writer\n").unwrap();
-                git(temp_ref.path(), &["add", "ordinary.txt"]);
-                git(temp_ref.path(), &["commit", "-m", "native writer"]);
-                Ok::<(), Error>(())
-            })
-            .await;
-        assert!(matches!(
-            result,
-            Err(CompactPublicationError::Repository(
-                orna_repository_v1::RepositoryError::StaleHead
-            ))
-        ));
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        runtime
+            .bind_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+        runtime
+            .complete_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+        fs::write(temp.path().join("ordinary.txt"), "native writer\n").unwrap();
+        git(temp.path(), &["add", "ordinary.txt"]);
+        git(temp.path(), &["commit", "-m", "native writer"]);
+
+        let result = RuntimePublicationCoordinator::recover(&repository, &runtime).await;
+        assert_eq!(result, Err(Error::RefConflict));
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert!(repository.read_publication_journal().unwrap().is_some());
     }
