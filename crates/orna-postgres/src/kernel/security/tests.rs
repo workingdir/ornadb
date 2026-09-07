@@ -4,17 +4,28 @@ use super::resource::MAX_RESOURCE_CREDIT;
 use super::resource_producer::ResourceProducerStartGuard;
 use super::sealed_dispatch::{
     CheckedStandardArtifactExecutor, execute_checked_standard_artifact,
-    select_checked_standard_artifact_executor,
+    recheck_verified_standard_client_target, select_checked_standard_artifact_executor,
 };
 use super::*;
 use orna_core::{
-    CatalogueRevisionId, FieldId, ObjectId, ParameterId, TypeId,
+    CatalogueRevisionId, FieldId, ObjectId, ParameterId, SourceBundleId, SourceUnitId, TypeId,
+    canonical_hash::{
+        catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest,
+    },
     catalogue::{
         CatalogueSnapshot, EnumTypeDefinition, FunctionTransaction, FunctionVolatility,
         QualifiedSemanticName, SchemaDefinition,
     },
-    revision::{ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord},
-    security::PrivilegeDecision,
+    revision::{
+        ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext,
+        ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord, StoredSourceRevision,
+        StoredSourceUnit,
+    },
+    security::{
+        ExecuteGrant, Principal, PrincipalKind, PrincipalStatus, PrivilegeDecision,
+        SecurityFunctionTarget,
+    },
     system::{SYS_SECURITY_CREATE_PRINCIPAL_FUNCTION_ID, SYS_SECURITY_GRANT_PRIVILEGE_FUNCTION_ID},
     value::{EnumValue, ResultColumn, ResultRow, ResultRows, RuntimeFloat},
 };
@@ -696,6 +707,51 @@ fn sealed_test_active_revision(pair: RevisionPair) -> ActiveDatabaseRevision {
     )
     .expect("sealed invocation test active revision")
 }
+
+fn sealed_standard_active_revision(
+    pair: RevisionPair,
+    standard: orna_core::revision::VerifiedStandardLibrarySnapshot,
+) -> ActiveDatabaseRevision {
+    let content = "sealed verified-standard CLIENT dispatch";
+    let source_unit = SourceUnitId::from_bytes([0xd9; 16]);
+    let unit = StoredSourceUnit::new(
+        source_unit,
+        0,
+        "sealed_client.orna",
+        content,
+        source_unit_content_digest(content).expect("sealed standard source digest"),
+    )
+    .expect("sealed standard source unit");
+    let units = vec![unit];
+    let bundle_hash = source_bundle_digest(&units).expect("sealed standard bundle digest");
+    let bundle = SourceBundleId::from_bytes([0xda; 16]);
+    let source = StoredSourceRevision::new(
+        bundle,
+        pair.source(),
+        None,
+        units,
+        bundle_hash,
+        source_revision_record_digest(bundle, None, bundle_hash)
+            .expect("sealed standard source revision digest"),
+    )
+    .expect("sealed standard source revision");
+    let catalogue = CatalogueSnapshot::new(pair.catalogue(), Vec::new(), Vec::new())
+        .expect("sealed standard application catalogue");
+    let context = CatalogueHashContext::version_two(standard);
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[])
+        .expect("sealed standard catalogue digest");
+    ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            pair,
+            source,
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        ),
+        context,
+    )
+    .expect("sealed standard active revision")
+}
 fn sealed_test_request(function: FunctionId) -> orna_core::invocation::InvokeRequest {
     use orna_core::invocation::{
         InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
@@ -905,6 +961,41 @@ fn sealed_standard_dispatch_rejects_unsupported_artifact_before_execution() {
             orna_artifact::server_parameter_echo::FORMAT_IDENTITY,
             artifact.version() + 1,
         ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::STATE_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::CAPABILITY_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::RESOURCE_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::PROCEDURAL_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::ACTION_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::INSPECT_FORMAT_VERSION,
+        ),
+        (
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        ),
     ] {
         let unsupported = ExecutableArtifact::new(
             kind,
@@ -966,6 +1057,418 @@ fn sealed_standard_dispatch_selects_the_canonical_cli_client_plan() {
             .expect("the canonical CLI artifact must be admitted"),
         CheckedStandardArtifactExecutor::ClientExpression
     );
+}
+
+#[test]
+fn sealed_verified_standard_client_rechecks_active_identity_before_evaluation() {
+    let standard = orna_standard::verify_standard_library_v11_snapshot(
+        orna_standard::retained_standard_library_v11_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let pair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xdb; 16]),
+        CatalogueRevisionId::from_bytes([0xdc; 16]),
+    );
+    let active = sealed_standard_active_revision(pair, standard.clone());
+    let definition = standard
+        .catalogue()
+        .function_by_name(
+            &QualifiedSemanticName::new(["std", "cli", "repl"])
+                .expect("canonical standard CLIENT name"),
+        )
+        .expect("canonical standard CLIENT definition");
+    let executable = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == definition.id())
+        .expect("canonical standard CLIENT executable");
+    let math_definition = standard
+        .catalogue()
+        .function_by_name(
+            &QualifiedSemanticName::new(["std", "math", "increment"])
+                .expect("standard math CLIENT name"),
+        )
+        .expect("standard math CLIENT definition");
+    let math_executable = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == math_definition.id())
+        .expect("standard math CLIENT executable");
+    let principal = PrincipalId::from_bytes([0xdd; 16]);
+    let target = InvocationTarget::verified_standard(
+        definition.id(),
+        pair,
+        standard.revision(),
+        executable.revision().id(),
+    );
+    let security = SecuritySnapshot::new_with_function_targets(
+        pair,
+        vec![
+            SecurityFunctionTarget::verified_standard(
+                definition.id(),
+                standard.revision(),
+                executable.revision().id(),
+            ),
+            SecurityFunctionTarget::verified_standard(
+                math_definition.id(),
+                standard.revision(),
+                math_executable.revision().id(),
+            ),
+        ],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![
+            ExecuteGrant::new(principal, definition.id()),
+            ExecuteGrant::new(principal, math_definition.id()),
+        ],
+    )
+    .expect("standard CLIENT security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("standard CLIENT session");
+    let ExecuteDecision::Allowed(prepared_authorisation) =
+        security.authorise_execute(&session, target)
+    else {
+        panic!("exact verified standard CLIENT target must be authorised");
+    };
+
+    let authorisation = recheck_verified_standard_client_target(
+        &active,
+        &security,
+        &session,
+        definition,
+        executable,
+        target,
+        &prepared_authorisation,
+    )
+    .expect("active verified standard CLIENT target must re-authorise");
+    assert_eq!(authorisation.target(), target);
+    let math_target = InvocationTarget::verified_standard(
+        math_definition.id(),
+        pair,
+        standard.revision(),
+        math_executable.revision().id(),
+    );
+    let ExecuteDecision::Allowed(math_authorisation) =
+        security.authorise_execute(&session, math_target)
+    else {
+        panic!("standard math CLIENT target must be authorised");
+    };
+    assert_eq!(
+        math_executable.revision().artifact().version(),
+        orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
+    );
+    assert!(matches!(
+        select_checked_standard_artifact_executor(&active, math_executable.revision()),
+        Err(PostgresKernelError::DurableInvariant {
+            rule: "verified standard executable artifact is unsupported",
+            ..
+        })
+    ));
+    let result = evaluate_authorised_client_function_with_arguments(
+        &active,
+        &math_authorisation,
+        &[FunctionArgument::new(
+            math_definition.parameters()[0].id(),
+            RuntimeValue::Integer(41),
+        )
+        .expect("standard CLIENT argument")],
+        &[],
+        &orna_client::capability::LocalCapabilityGrantSet::new(),
+    )
+    .expect("the full CLIENT evaluator must retain standard math evidence");
+    assert_eq!(result.value(), &RuntimeValue::Integer(42));
+    assert_eq!(result.context().function(), math_definition.id());
+    assert_eq!(result.context().pair(), pair);
+
+    let altered_revision = sealed_standard_revision_with_artifact(
+        definition.id(),
+        ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
+            executable.revision().artifact().payload().to_vec(),
+            executable.revision().artifact().content_hash(),
+        )
+        .expect("altered CLIENT artifact"),
+    );
+    let altered_executable = orna_core::revision::StandardExecutable::new(
+        definition.id(),
+        altered_revision,
+        executable.references().to_vec(),
+    )
+    .expect("altered CLIENT executable");
+    assert!(matches!(
+        recheck_verified_standard_client_target(
+            &active,
+            &security,
+            &session,
+            definition,
+            &altered_executable,
+            target,
+            &prepared_authorisation,
+        ),
+        Err(PostgresKernelError::DurableInvariant {
+            rule: "verified standard CLIENT target must retain its active executable identity",
+            ..
+        })
+    ));
+
+    let unsupported_executable = orna_core::revision::StandardExecutable::new(
+        definition.id(),
+        sealed_standard_revision_with_artifact(
+            definition.id(),
+            ExecutableArtifact::new(
+                ExecutableArtifactKind::Client,
+                orna_artifact::client_plan::FORMAT_IDENTITY,
+                orna_artifact::client_plan::STATE_FORMAT_VERSION,
+                executable.revision().artifact().payload().to_vec(),
+                executable.revision().artifact().content_hash(),
+            )
+            .expect("unsupported CLIENT artifact"),
+        ),
+        executable.references().to_vec(),
+    )
+    .expect("unsupported CLIENT executable");
+    assert!(matches!(
+        recheck_verified_standard_client_target(
+            &active,
+            &security,
+            &session,
+            definition,
+            &unsupported_executable,
+            target,
+            &prepared_authorisation,
+        ),
+        Err(PostgresKernelError::DurableInvariant {
+            rule: "verified standard executable artifact is unsupported",
+            ..
+        })
+    ));
+
+    let ordinary_target = InvocationTarget::new(definition.id(), pair);
+    assert!(matches!(
+        recheck_verified_standard_client_target(
+            &active,
+            &security,
+            &session,
+            definition,
+            executable,
+            ordinary_target,
+            &prepared_authorisation,
+        ),
+        Err(PostgresKernelError::DurableInvariant {
+            rule: "verified standard CLIENT target must retain its exact authorised identity",
+            ..
+        })
+    ));
+
+    let ordinary_grant_security = SecuritySnapshot::new_with_function_targets(
+        pair,
+        vec![SecurityFunctionTarget::application(definition.id())],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![ExecuteGrant::new(principal, definition.id())],
+    )
+    .expect("ordinary application grant security snapshot");
+    let denied_session = ordinary_grant_security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("ordinary application grant session");
+    assert!(matches!(
+        ordinary_grant_security.authorise_execute(
+            &denied_session,
+            InvocationTarget::new(definition.id(), pair)
+        ),
+        ExecuteDecision::Allowed(_)
+    ));
+    assert!(matches!(
+        recheck_verified_standard_client_target(
+            &active,
+            &ordinary_grant_security,
+            &denied_session,
+            definition,
+            executable,
+            target,
+            &prepared_authorisation,
+        ),
+        Err(PostgresKernelError::DurableInvariant {
+            rule: "verified standard CLIENT target must remain authorised at execution",
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn sealed_verified_standard_client_operation_rechecks_the_checked_expression_path() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let standard = orna_standard::verify_standard_library_v11_snapshot(
+        orna_standard::retained_standard_library_v11_snapshot().expect("standard fixture"),
+    )
+    .expect("verified standard fixture");
+    let pair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0xde; 16]),
+        CatalogueRevisionId::from_bytes([0xdf; 16]),
+    );
+    let active = sealed_standard_active_revision(pair, standard.clone());
+    let definition = standard
+        .catalogue()
+        .function_by_name(
+            &QualifiedSemanticName::new(["std", "cli", "repl"])
+                .expect("canonical standard CLIENT name"),
+        )
+        .expect("canonical standard CLIENT definition")
+        .clone();
+    let executable = standard
+        .executables()
+        .iter()
+        .find(|executable| executable.function() == definition.id())
+        .expect("canonical standard CLIENT executable")
+        .clone();
+    let principal = PrincipalId::from_bytes([0xe0; 16]);
+    let target = InvocationTarget::verified_standard(
+        definition.id(),
+        pair,
+        standard.revision(),
+        executable.revision().id(),
+    );
+    let security = SecuritySnapshot::new_with_function_targets(
+        pair,
+        vec![SecurityFunctionTarget::verified_standard(
+            definition.id(),
+            standard.revision(),
+            executable.revision().id(),
+        )],
+        vec![Principal::new(
+            principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        Vec::new(),
+        vec![ExecuteGrant::new(principal, definition.id())],
+    )
+    .expect("standard CLIENT security snapshot");
+    let session = security
+        .bind_authenticated_session(principal, Vec::new())
+        .expect("standard CLIENT session");
+    let ExecuteDecision::Allowed(authorisation) = security.authorise_execute(&session, target)
+    else {
+        panic!("exact verified standard CLIENT target must be authorised");
+    };
+    let invocation = InvocationId::from_bytes([0xe1; 16]);
+    let audited = Arc::new(AtomicUsize::new(0));
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let audit_count = Arc::clone(&audited);
+    let dispatch_count = Arc::clone(&dispatched);
+    let active_for_dispatch = active.clone();
+    let security_for_dispatch = security.clone();
+    let session_for_dispatch = session.clone();
+    let expected_definition = definition.clone();
+    let expected_executable = executable.clone();
+    let mut operation = sealed_test_operation(
+        &active,
+        &security,
+        &session,
+        &sealed_test_registry(),
+        definition.id(),
+        invocation,
+        SealedInvocationPreparedOutcome::Allowed {
+            target: PreparedSealedTarget::VerifiedStandard {
+                definition,
+                executable,
+            },
+            security_target: target,
+            authorisation,
+        },
+    )
+    .with_test_hooks(
+        move |outcome| {
+            audit_count.fetch_add(1, Ordering::SeqCst);
+            assert!(matches!(
+                outcome,
+                SealedInvocationPreparedOutcome::Allowed {
+                    target: PreparedSealedTarget::VerifiedStandard { definition, executable },
+                    security_target,
+                    authorisation,
+                } if definition.id() == expected_definition.id()
+                    && executable.revision() == expected_executable.revision()
+                    && *security_target == target
+                    && authorisation.target() == target
+            ));
+            Ok(())
+        },
+        move |outcome| {
+            assert_eq!(audited.load(Ordering::SeqCst), 1);
+            dispatch_count.fetch_add(1, Ordering::SeqCst);
+            let SealedInvocationPreparedOutcome::Allowed {
+                target:
+                    PreparedSealedTarget::VerifiedStandard {
+                        definition,
+                        executable,
+                    },
+                security_target,
+                authorisation,
+            } = outcome
+            else {
+                panic!("sealed operation must retain an allowed verified-standard target");
+            };
+            assert_eq!(authorisation.target(), *security_target);
+            recheck_verified_standard_client_target(
+                &active_for_dispatch,
+                &security_for_dispatch,
+                &session_for_dispatch,
+                definition,
+                executable,
+                *security_target,
+                authorisation,
+            )?;
+            Ok(SealedInvocationExecution::Result(
+                SealedInvocationResult::Completed {
+                    invocation,
+                    events: sealed_completed_events(
+                        principal,
+                        invocation,
+                        RuntimeValue::Integer(42),
+                    )?,
+                },
+            ))
+        },
+    );
+
+    let execution = operation
+        .execute_after_started(
+            None,
+            &mut ClientStateStore::new(),
+            &mut false,
+            &ResourceCancellation::new(),
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .expect("sealed operation must complete through its checked CLIENT recheck hook");
+    let SealedInvocationExecution::Result(SealedInvocationResult::Completed {
+        invocation: observed_invocation,
+        events,
+    }) = execution
+    else {
+        panic!("sealed operation must retain a completed result");
+    };
+    assert_eq!(observed_invocation, invocation);
+    let InvocationEventBody::ValueBatch { values, .. } = events.records()[1].event().body() else {
+        panic!("sealed operation hook must retain its completed value batch");
+    };
+    assert_eq!(values[0].value(), &RuntimeValue::Integer(42));
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
 }
 
 #[test]
