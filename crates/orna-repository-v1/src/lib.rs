@@ -16,8 +16,13 @@ use std::{
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
+mod compact;
 mod init;
 
+pub use compact::{
+    COMPACT_MANIFEST_SHARD_LIMIT, CompactManifest, CompactManifestEntry, CompactManifestWitness,
+    CompactPublicationPlan, CompactSegment, CompactSegmentRole,
+};
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
@@ -177,6 +182,7 @@ pub struct PublicationJournal {
     new_head: GitCommitRef,
     base_index_tree: Option<IndexTreeRef>,
     runtime_intent_id: Option<[u8; 16]>,
+    compact_manifest: Option<CompactManifestWitness>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
 }
@@ -235,6 +241,7 @@ impl PublicationJournal {
             new_head,
             base_index_tree,
             runtime_intent_id: None,
+            compact_manifest: None,
             entries,
             stage: PublicationJournalStage::Prepared,
         })
@@ -260,6 +267,22 @@ impl PublicationJournal {
         self.runtime_intent_id
     }
 
+    /// Binds a compact manifest identity and all referenced immutable objects
+    /// into this restart record.  Publication/recovery verifies the binding
+    /// before exposing or consuming the corresponding runtime prefix.
+    pub fn with_compact_manifest(
+        mut self,
+        witness: CompactManifestWitness,
+    ) -> Result<Self, RepositoryError> {
+        witness.validate(None)?;
+        self.compact_manifest = Some(witness);
+        Ok(self)
+    }
+
+    pub fn compact_manifest(&self) -> Option<&CompactManifestWitness> {
+        self.compact_manifest.as_ref()
+    }
+
     pub const fn stage(&self) -> PublicationJournalStage {
         self.stage
     }
@@ -275,7 +298,7 @@ impl PublicationJournal {
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(JOURNAL_MAGIC);
-        bytes.push(2);
+        bytes.push(4);
         put_string(&mut bytes, self.old_head.as_str())?;
         put_string(&mut bytes, self.new_head.as_str())?;
         put_optional_string(
@@ -286,6 +309,13 @@ impl PublicationJournal {
             Some(intent_id) => {
                 bytes.push(1);
                 bytes.extend_from_slice(&intent_id);
+            }
+            None => bytes.push(0),
+        }
+        match &self.compact_manifest {
+            Some(witness) => {
+                bytes.push(1);
+                witness.encode(&mut bytes)?;
             }
             None => bytes.push(0),
         }
@@ -312,7 +342,8 @@ impl PublicationJournal {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let mut cursor = JOURNAL_MAGIC.len();
-        if take_byte(bytes, &mut cursor)? != 2 {
+        let version = take_byte(bytes, &mut cursor)?;
+        if version != 2 && version != 3 && version != 4 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -326,6 +357,24 @@ impl PublicationJournal {
             0 => None,
             1 => Some(take_fixed_array::<16>(bytes, &mut cursor)?),
             _ => return Err(RepositoryError::InvalidPublicationJournal),
+        };
+        let compact_manifest = if version == 4 {
+            match take_byte(bytes, &mut cursor)? {
+                0 => None,
+                1 => Some(CompactManifestWitness::decode(
+                    bytes,
+                    &mut cursor,
+                    object_id_length,
+                )?),
+                _ => return Err(RepositoryError::InvalidPublicationJournal),
+            }
+        } else if version == 3 {
+            if take_byte(bytes, &mut cursor)? != 0 {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            None
+        } else {
+            None
         };
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
         let count = take_u32(bytes, &mut cursor)? as usize;
@@ -351,6 +400,7 @@ impl PublicationJournal {
             new_head,
             base_index_tree,
             runtime_intent_id,
+            compact_manifest,
             entries,
             stage,
         })
@@ -961,9 +1011,37 @@ impl Repository {
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
         }
+        self.advance_current_ref_bound(expected_head, candidate, None)?;
+        if self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        Ok(())
+    }
+
+    fn symbolic_head_ref(&self) -> Result<String, RepositoryError> {
         let reference = self
             .git(["symbolic-ref", "--quiet", "HEAD"])
             .map_err(|_| RepositoryError::DetachedHead)?;
+        if !reference.starts_with("refs/heads/") {
+            return Err(RepositoryError::DetachedHead);
+        }
+        Ok(reference)
+    }
+
+    fn advance_current_ref_bound(
+        &self,
+        expected_head: &GitCommitRef,
+        candidate: &PrivateCommit,
+        expected_ref: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &actual != expected_head {
+            return Err(RepositoryError::StaleHead);
+        }
+        let reference = self.symbolic_head_ref()?;
+        if expected_ref.is_some_and(|expected| expected != reference) {
+            return Err(RepositoryError::StaleHead);
+        }
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
@@ -1173,6 +1251,9 @@ impl Repository {
         {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
+        if journal.compact_manifest().is_some() {
+            self.verify_compact_publication_binding(journal, candidate)?;
+        }
         let paths = journal
             .entries()
             .iter()
@@ -1186,7 +1267,13 @@ impl Repository {
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
         self.write_publication_journal(journal)?;
-        self.advance_current_ref(journal.old_head(), candidate)?;
+        self.advance_current_ref_bound(
+            journal.old_head(),
+            candidate,
+            journal
+                .compact_manifest()
+                .map(|witness| witness.selected_ref()),
+        )?;
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal(journal)?;
@@ -1224,7 +1311,8 @@ impl Repository {
         runtime_intent_id: [u8; 16],
         journal: &mut PublicationJournal,
     ) -> Result<(), RepositoryError> {
-        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+        if journal.compact_manifest().is_some()
+            || journal.stage() != PublicationJournalStage::WorktreeReconciled
             || journal.runtime_intent_id() != Some(runtime_intent_id)
         {
             return Err(RepositoryError::RuntimeCompletionRequired);
@@ -1233,6 +1321,37 @@ impl Repository {
         // before the separately durable runtime completion.  Do not discard
         // the journal in that state: PUB-1 recovery must retain it to
         // reconcile the newer ref rather than treating cleanup as complete.
+        if self.head()?.as_ref() != Some(journal.new_head()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        journal.advance(PublicationJournalStage::RuntimeCompleted)?;
+        self.write_publication_journal(journal)?;
+        journal.advance(PublicationJournalStage::Complete)?;
+        self.write_publication_journal(journal)?;
+        self.clear_publication_journal()
+    }
+
+    /// Marks the compact runtime owner's frozen range complete only after the
+    /// journal's persisted watermark, base manifest, selected ref, and
+    /// candidate identity still verify. The repository records no runtime
+    /// mutations and does not consume the range itself.
+    pub fn mark_compact_runtime_complete(
+        &self,
+        runtime_intent_id: [u8; 16],
+        cleanup_watermark: [u8; 32],
+        journal: &mut PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
+        if witness.cleanup_watermark() != cleanup_watermark
+            || journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || journal.runtime_intent_id() != Some(runtime_intent_id)
+        {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        let candidate = self.candidate_from_journal(journal)?;
+        self.verify_compact_publication_binding(journal, &candidate)?;
         if self.head()?.as_ref() != Some(journal.new_head()) {
             return Err(RepositoryError::StaleHead);
         }
@@ -1356,6 +1475,9 @@ impl Repository {
         let candidate = PrivateCommit { tree, commit };
         if !self.candidate_entries_match_journal(&candidate, journal.entries())? {
             return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if journal.compact_manifest().is_some() {
+            self.verify_compact_publication_binding(journal, &candidate)?;
         }
         Ok(candidate)
     }
@@ -3123,6 +3245,7 @@ pub enum RepositoryError {
     InvalidCommitMessage,
     DetachedHead,
     InvalidPublicationJournal,
+    InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
     UnbornHead,
@@ -3163,6 +3286,7 @@ impl fmt::Display for RepositoryError {
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
             Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
             Self::InvalidPublicationJournal => f.write_str("invalid publication journal"),
+            Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
@@ -3361,14 +3485,17 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
         return Err(RepositoryError::InvalidObjectId);
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return Err(RepositoryError::InvalidObjectId);
+    };
+    for pair in pairs {
         let high = (pair[0] as char)
             .to_digit(16)
             .ok_or(RepositoryError::InvalidObjectId)?;
         let low = (pair[1] as char)
             .to_digit(16)
             .ok_or(RepositoryError::InvalidObjectId)?;
-        bytes.push(((high << 4) | low) as u8);
+        bytes.push(u8::try_from((high << 4) | low).map_err(|_| RepositoryError::InvalidObjectId)?);
     }
     Ok(bytes)
 }
