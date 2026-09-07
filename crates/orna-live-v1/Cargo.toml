@@ -14,6 +14,7 @@ orna-protocol-v1 = { path = "../orna-protocol-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-serving-v1 = { path = "../orna-serving-v1" }
+orna-stream-v1 = { path = "../orna-stream-v1" }
 
 [lints.rust]
 unsafe_code = "forbid"
