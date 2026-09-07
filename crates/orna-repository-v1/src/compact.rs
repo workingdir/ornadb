@@ -13,6 +13,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
     basic::{Compression, PageType},
@@ -344,6 +345,7 @@ fn verify_physical_metadata(
     {
         return Err(RepositoryError::InvalidCompactManifest);
     }
+    verify_physical_columns(columns, metadata.schema_descr())?;
     if reader.num_row_groups() == 0 {
         return Err(RepositoryError::InvalidCompactManifest);
     }
@@ -389,6 +391,64 @@ fn verify_physical_metadata(
                 return Err(RepositoryError::InvalidCompactManifest);
             }
         }
+    }
+    Ok(())
+}
+
+/// Verifies the portion of the compact column descriptor that publication can
+/// prove without decoding logical rows: descriptors are canonical OVB arrays
+/// and their declared physical leaf paths exactly match the Parquet schema.
+/// This keeps a manifest from authorizing a file through metadata that names a
+/// different physical layout.
+fn verify_physical_columns(
+    columns: &[u8],
+    schema: &parquet::schema::types::SchemaDescriptor,
+) -> Result<(), RepositoryError> {
+    let value =
+        CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    let OvbRaw::Array(descriptors) = value.raw() else {
+        return Err(RepositoryError::InvalidCompactManifest);
+    };
+    if descriptors.len() != schema.num_columns() {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let mut previous = None;
+    for (descriptor, column) in descriptors.iter().zip(schema.columns()) {
+        let OvbRaw::Array(fields) = descriptor else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        if fields.len() != 5 {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let OvbRaw::Array(path) = &fields[1] else {
+            return Err(RepositoryError::InvalidCompactManifest);
+        };
+        let path = path
+            .iter()
+            .map(|part| match part {
+                OvbRaw::Text(part) if !part.is_empty() => Ok(part.as_str()),
+                _ => Err(RepositoryError::InvalidCompactManifest),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if path.is_empty()
+            || path
+                != column
+                    .path()
+                    .parts()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        let path = path.join(".");
+        if previous
+            .as_ref()
+            .is_some_and(|previous: &String| previous >= &path)
+        {
+            return Err(RepositoryError::InvalidCompactManifest);
+        }
+        previous = Some(path);
     }
     Ok(())
 }
