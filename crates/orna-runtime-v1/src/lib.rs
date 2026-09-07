@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS request_ledger (
     CHECK (owner_id IS NULL OR length(owner_id) = 16),
     CHECK (owner_epoch IS NULL OR owner_epoch > 0)
 );
+CREATE TABLE IF NOT EXISTS session_deletion (
+    session_id BLOB PRIMARY KEY CHECK (length(session_id) = 16),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    state INTEGER NOT NULL CHECK (state IN (1, 2))
+);
 CREATE TABLE IF NOT EXISTS stream_checkpoint (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
@@ -194,6 +200,9 @@ CREATE TABLE IF NOT EXISTS stream_pause_pending (
 "#;
 
 pub const MAX_TERMINAL_OUTCOME_BYTES: usize = 16 * 1024 * 1024;
+
+const SESSION_DELETION_CLOSING: i64 = 1;
+const SESSION_DELETION_CLOSED: i64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeIdentity {
@@ -502,6 +511,8 @@ pub enum RuntimeError {
     RequestFingerprintMismatch,
     RequestOwnerConflict,
     RequestStateConflict,
+    SessionClosed,
+    SessionWorkActive,
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
     FaultInjected(FaultPoint),
@@ -528,6 +539,8 @@ impl fmt::Display for RuntimeError {
             Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
             Self::RequestOwnerConflict => "runtime request owner cannot be recovered",
             Self::RequestStateConflict => "runtime request state conflict",
+            Self::SessionClosed => "runtime session is closed",
+            Self::SessionWorkActive => "runtime session still has active work",
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
             Self::FaultInjected(_) => "runtime fault injected",
@@ -539,6 +552,12 @@ impl std::error::Error for RuntimeError {}
 
 pub struct RuntimeState {
     connection: Connection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionDeletionRecord {
+    owner: WriterLease,
+    state: i64,
 }
 
 /// The immutable runtime context captured at activation admission.
@@ -1119,6 +1138,136 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    /// Atomically closes durable admission for one session under the current
+    /// writer lease. Repeating the operation with the same owner is safe;
+    /// another owner cannot close or finalize the session.
+    pub async fn begin_session_deletion(
+        &self,
+        session_id: [u8; 16],
+        owner: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        validate_id(session_id)?;
+        validate_writer_lease(owner)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, owner).await?;
+        match session_deletion_record(&transaction, session_id).await? {
+            Some(record) if record.owner != owner => return Err(RuntimeError::OwnerLost),
+            Some(record)
+                if !matches!(
+                    record.state,
+                    SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED
+                ) =>
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            Some(_) => {}
+            None => {
+                transaction
+                    .execute(
+                        "INSERT INTO session_deletion (session_id, owner_id, owner_epoch, state)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            session_id.to_vec(),
+                            owner.owner_id.to_vec(),
+                            i64::try_from(owner.epoch)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                            SESSION_DELETION_CLOSING,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Finalizes a session deletion only after the writer-owned marker still
+    /// matches and no Reserved or Running durable request remains. The marker
+    /// is retained in its terminal state so future reservations stay closed.
+    pub async fn finish_session_deletion(
+        &self,
+        session_id: [u8; 16],
+        owner: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        validate_id(session_id)?;
+        validate_writer_lease(owner)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, owner).await?;
+        let Some(record) = session_deletion_record(&transaction, session_id).await? else {
+            return Err(RuntimeError::RecoveryInvalid);
+        };
+        if record.owner != owner {
+            return Err(RuntimeError::OwnerLost);
+        }
+        if !matches!(
+            record.state,
+            SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED
+        ) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut active = transaction
+            .query(
+                "SELECT 1 FROM request_ledger
+                 WHERE session_id = ?1 AND state IN (?2, ?3)
+                 LIMIT 1",
+                params![
+                    session_id.to_vec(),
+                    RequestState::Reserved.code(),
+                    RequestState::Running.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if active
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::SessionWorkActive);
+        }
+        if record.state == SESSION_DELETION_CLOSED {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE session_deletion SET state = ?1
+                 WHERE session_id = ?2 AND owner_id = ?3 AND owner_epoch = ?4
+                   AND state = ?5",
+                params![
+                    SESSION_DELETION_CLOSED,
+                    session_id.to_vec(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    SESSION_DELETION_CLOSING,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
     /// Applies a writer-fenced durable pause transition for one resolved
@@ -3049,6 +3198,7 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        ensure_session_admission_open(&tx, identity.session_id).await?;
         if let Some(status) = request_status_tx(&tx, identity).await? {
             require_fingerprint(&status, fingerprint)?;
             tx.commit()
@@ -3942,6 +4092,7 @@ impl RuntimeState {
         self.validate_stream_controls().await?;
         self.validate_stream_provider_failures().await?;
         self.validate_stream_failure_payloads().await?;
+        self.validate_session_deletions().await?;
         let mut request_rows = self
             .connection
             .query(
@@ -3961,6 +4112,38 @@ impl RuntimeState {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
+        }
+        Ok(())
+    }
+
+    async fn validate_session_deletions(&self) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT session_id, owner_id, owner_epoch, state FROM session_deletion",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            validate_id(fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)?;
+            validate_id(fixed(
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?)?;
+            let epoch: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if epoch <= 0 {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let state: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if !matches!(state, SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -5690,6 +5873,57 @@ async fn request_status_tx(
         .transpose()
 }
 
+async fn session_deletion_record(
+    connection: &Connection,
+    session_id: [u8; 16],
+) -> Result<Option<SessionDeletionRecord>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT owner_id, owner_epoch, state
+             FROM session_deletion WHERE session_id = ?1",
+            params![session_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let owner_epoch = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let state = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if !matches!(state, SESSION_DELETION_CLOSING | SESSION_DELETION_CLOSED) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(Some(SessionDeletionRecord {
+        owner: WriterLease {
+            owner_id,
+            epoch: owner_epoch,
+        },
+        state,
+    }))
+}
+
+async fn ensure_session_admission_open(
+    connection: &Connection,
+    session_id: [u8; 16],
+) -> Result<(), RuntimeError> {
+    if session_deletion_record(connection, session_id)
+        .await?
+        .is_some()
+    {
+        return Err(RuntimeError::SessionClosed);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EffectEvidence {
     ControlledTransaction,
@@ -6161,6 +6395,13 @@ fn validate_identity(value: RuntimeIdentity) -> Result<(), RuntimeError> {
 fn validate_request_identity(value: RequestIdentity) -> Result<(), RuntimeError> {
     validate_id(value.session_id)?;
     validate_id(value.request_id)
+}
+fn validate_writer_lease(value: WriterLease) -> Result<(), RuntimeError> {
+    validate_id(value.owner_id)?;
+    if value.epoch == 0 {
+        return Err(RuntimeError::InvalidIdentity);
+    }
+    Ok(())
 }
 fn controlled_transaction_marker(
     identity: RequestIdentity,
@@ -10779,6 +11020,63 @@ mod tests {
             Some(first)
         );
     }
+
+    #[tokio::test]
+    async fn session_deletion_fence_blocks_external_reservation_until_terminal() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let external = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let active = request(5, 6);
+        let active_fingerprint = digest(7);
+        state
+            .reserve_request(active, active_fingerprint)
+            .await
+            .unwrap();
+
+        state.begin_session_deletion(id(5), owner).await.unwrap();
+        state.begin_session_deletion(id(5), owner).await.unwrap();
+        assert_eq!(
+            external.reserve_request(request(5, 8), digest(9)).await,
+            Err(RuntimeError::SessionClosed)
+        );
+        assert_eq!(
+            state.finish_session_deletion(id(5), owner).await,
+            Err(RuntimeError::SessionWorkActive)
+        );
+        assert_eq!(
+            state
+                .finish_session_deletion(
+                    id(5),
+                    WriterLease {
+                        owner_id: id(9),
+                        epoch: owner.epoch,
+                    },
+                )
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+
+        state
+            .cancel_request_with_owner(active, active_fingerprint, owner, outcome(10))
+            .await
+            .unwrap();
+        state.finish_session_deletion(id(5), owner).await.unwrap();
+        state.finish_session_deletion(id(5), owner).await.unwrap();
+        assert_eq!(
+            external.reserve_request(request(5, 11), digest(12)).await,
+            Err(RuntimeError::SessionClosed)
+        );
+
+        drop(external);
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.reserve_request(request(5, 13), digest(14)).await,
+            Err(RuntimeError::SessionClosed)
+        );
+    }
+
     #[tokio::test]
     async fn request_fingerprint_mismatch_is_stable() {
         let (_temp, repo) = repository();
