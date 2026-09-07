@@ -642,25 +642,6 @@ impl FaultInjector for NoFault {
     }
 }
 
-/// Application-owned work that must succeed immediately before a prepared
-/// request activation can claim its terminal outcome. The runtime invokes it
-/// while it still owns the activation transaction, so a failure can be
-/// explicitly rolled back and durably distinguished from an unknown commit
-/// outcome.
-pub trait RequestActivationPrecommit: Send + Sync {
-    fn check(&self) -> Result<(), RuntimeError>;
-}
-
-/// The default pre-commit operation for callers that have no additional
-/// prepared work to validate.
-#[derive(Debug, Default)]
-pub struct NoRequestActivationPrecommit;
-impl RequestActivationPrecommit for NoRequestActivationPrecommit {
-    fn check(&self) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RuntimeError {
     InvalidIdentity,
@@ -687,7 +668,6 @@ pub enum RuntimeError {
     SessionWorkActive,
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
-    PreCommitOperationFailed,
     FaultInjected(FaultPoint),
     StorageUnavailable,
 }
@@ -723,7 +703,6 @@ impl fmt::Display for RuntimeError {
             Self::SessionWorkActive => "runtime session still has active work",
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
-            Self::PreCommitOperationFailed => "runtime pre-commit operation failed",
             Self::FaultInjected(_) => "runtime fault injected",
             Self::StorageUnavailable => "runtime state unavailable",
         })
@@ -1829,43 +1808,6 @@ impl RuntimeState {
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
     ) -> Result<RequestActivationCommit, RuntimeError> {
-        let precommit = NoRequestActivationPrecommit;
-        self.commit_table_request_activation_with_precommit(
-            lease,
-            identity,
-            fingerprint,
-            context,
-            mutations,
-            next_digest,
-            outcome,
-            &precommit,
-            faults,
-        )
-        .await
-    }
-
-    /// Atomically finalizes one prepared table activation after a
-    /// caller-supplied pre-commit operation has succeeded.
-    ///
-    /// Unlike a failed or unknown transaction commit, a pre-commit failure is
-    /// observed while this runtime still owns the transaction. The runtime
-    /// explicitly rolls that transaction back before recording a fenced
-    /// rollback receipt. Callers with possible effects outside this boundary
-    /// must record those effects first, which conservatively suppresses the
-    /// receipt.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn commit_table_request_activation_with_precommit(
-        &self,
-        lease: WriterLease,
-        identity: RequestIdentity,
-        fingerprint: [u8; 32],
-        context: &RuntimeActivationContext,
-        mutations: &[TableMutation],
-        next_digest: [u8; 32],
-        outcome: TerminalOutcome,
-        precommit: &dyn RequestActivationPrecommit,
-        faults: &dyn FaultInjector,
-    ) -> Result<RequestActivationCommit, RuntimeError> {
         match self
             .commit_table_request_activation_tx(
                 lease,
@@ -1875,7 +1817,6 @@ impl RuntimeState {
                 mutations,
                 next_digest,
                 outcome,
-                precommit,
                 faults,
             )
             .await
@@ -1915,7 +1856,6 @@ impl RuntimeState {
         mutations: &[TableMutation],
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
-        precommit: &dyn RequestActivationPrecommit,
         faults: &dyn FaultInjector,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
@@ -1993,9 +1933,6 @@ impl RuntimeState {
             Ok(capture) => capture,
             Err(error) => return Err(request_activation_rollback(transaction, error).await?),
         };
-        if let Err(error) = precommit.check() {
-            return Err(request_activation_rollback(transaction, error).await?);
-        }
         if let Err(error) = faults.check(FaultPoint::BeforeTerminalClaim) {
             return Err(request_activation_rollback(transaction, error).await?);
         }
@@ -8285,12 +8222,6 @@ mod tests {
         }
     }
 
-    struct FailPrecommit;
-    impl RequestActivationPrecommit for FailPrecommit {
-        fn check(&self) -> Result<(), RuntimeError> {
-            Err(RuntimeError::PreCommitOperationFailed)
-        }
-    }
     fn id(value: u8) -> [u8; 16] {
         [value; 16]
     }
@@ -12044,7 +11975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn precommit_failure_rolls_back_and_recovers_as_proven_after_reopen() {
+    async fn runtime_owned_activation_failure_rolls_back_and_recovers_as_proven_after_reopen() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let owner = state.acquire_lease(id(4)).await.unwrap();
@@ -12059,7 +11990,7 @@ mod tests {
 
         assert_eq!(
             state
-                .commit_table_request_activation_with_precommit(
+                .commit_table_request_activation(
                     owner,
                     identity,
                     fingerprint,
@@ -12067,11 +11998,10 @@ mod tests {
                     &[table_mutation(8, 1, Some(9))],
                     digest(10),
                     outcome(11),
-                    &FailPrecommit,
-                    &NoFault,
+                    &Fail(FaultPoint::BeforeTerminalClaim),
                 )
                 .await,
-            Err(RuntimeError::PreCommitOperationFailed)
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTerminalClaim))
         );
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
