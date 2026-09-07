@@ -17,8 +17,8 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, TerminalOutcome,
+    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RunObservationStatus, RuntimeError,
+    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -2564,6 +2564,11 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     ))
     .unwrap();
     assert_eq!(first_application.calls, 1);
+    let observations = block_on(open_durable_state(&repository).run_observations()).unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].invocation_id, [23; 16]);
+    assert_eq!(observations[0].status, RunObservationStatus::Completed);
+    assert!(!observations[0].live);
     drop(first_host);
 
     let mut second_host = durable_host(open_durable_state(&repository));
@@ -2598,6 +2603,39 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
         Err(Error::RequestMismatch)
     );
     drop(second_host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_live_rejection_marks_its_observed_run_failed() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication {
+        reject: true,
+        ..UnitApplication::default()
+    };
+    let request = eval([1; 16], [24; 16], "1");
+    assert_eq!(
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(request), &mut application)),
+        Err(Error::ApplicationRejected)
+    );
+    let observations = block_on(open_durable_state(&repository).run_observations()).unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].invocation_id, [24; 16]);
+    assert_eq!(observations[0].status, RunObservationStatus::Failed);
+    assert!(observations[0].diagnostic.is_some());
+    assert!(!observations[0].live);
+    drop(host);
     remove_test_repository(&root);
 }
 
