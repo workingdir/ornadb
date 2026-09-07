@@ -138,8 +138,13 @@ fn compact_segment_with_manifest_columns(
 }
 
 fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) -> Vec<u8> {
-    let schema =
-        Arc::new(parse_message_type("message schema { REQUIRED INT64 f_value; }").unwrap());
+    let schema = Arc::new(
+        parse_message_type(&format!(
+            "message schema {{ REQUIRED INT64 f_{}; }}",
+            compact_field_id().simple()
+        ))
+        .unwrap(),
+    );
     let metadata = vec![
         KeyValue::new(
             "orna.profile".to_owned(),
@@ -192,10 +197,21 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
 }
 
 fn compact_columns() -> Vec<u8> {
+    compact_columns_for_field(compact_field_id())
+}
+
+fn compact_field_id() -> Uuid {
+    Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001)
+}
+
+fn compact_columns_for_field(field_id: Uuid) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
-        OvbRaw::Array(vec![OvbRaw::Text("field-id".to_owned())]),
-        OvbRaw::Array(vec![OvbRaw::Text("f_value".to_owned())]),
-        OvbRaw::Text("test-logical-type".to_owned()),
+        OvbRaw::Array(vec![OvbRaw::Tag(
+            37,
+            Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec())),
+        )]),
+        OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field_id.simple()))]),
+        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
         OvbRaw::Text("int64".to_owned()),
         OvbRaw::Array(Vec::new()),
     ])]))
@@ -2140,8 +2156,12 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
     let repo = Repository::discover(root.path()).unwrap();
     let table = Uuid::new_v4();
     let head = repo.head().unwrap().unwrap();
-    let segment =
-        compact_segment_with_manifest_columns(table, 1, b"compact object\n".to_vec(), vec![0x80]);
+    let segment = compact_segment_with_manifest_columns(
+        table,
+        1,
+        b"compact object\n".to_vec(),
+        compact_columns_for_field(Uuid::from_u64_pair(7, 39)),
+    );
 
     assert!(matches!(
         repo.prepare_compact_publication(
@@ -2156,6 +2176,72 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
         Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
     ));
     assert_eq!(repo.head().unwrap(), Some(head));
+}
+
+#[test]
+fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_identity() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let plan = compact_plan(
+        &repo,
+        table,
+        [40; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let head = repo.head().unwrap().unwrap();
+    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+    let shard_path =
+        ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
+    let manifest = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate().commit(),
+                manifest_path.as_path().display()
+            ),
+        ],
+    );
+    let shard = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!(
+                "{}:{}",
+                plan.candidate().commit(),
+                shard_path.as_path().display()
+            ),
+        ],
+    );
+    let expected_columns = base64(&compact_columns());
+    let malformed_columns = base64(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
+    let malformed_shard = String::from_utf8(shard)
+        .unwrap()
+        .replacen(&expected_columns, &malformed_columns, 1)
+        .into_bytes();
+    let expected_hash = manifest_hash_for(&manifest, "shards/00000000.orna");
+    let malformed_manifest = String::from_utf8(manifest)
+        .unwrap()
+        .replacen(&expected_hash, &hex_digest(&Sha256::digest(&malformed_shard)), 1)
+        .into_bytes();
+    let malformed = repo
+        .build_private_commit(
+            &head,
+            &[
+                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(malformed_manifest)),
+                orna_repository_v1::ManagedFileChange::new(shard_path, Some(malformed_shard)),
+            ],
+            "test: commit malformed compact descriptor",
+        )
+        .unwrap();
+    repo.advance_current_ref(&head, &malformed).unwrap();
+
+    assert!(matches!(
+        repo.read_compact_manifest(malformed.commit(), table),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
 }
 
 #[test]
