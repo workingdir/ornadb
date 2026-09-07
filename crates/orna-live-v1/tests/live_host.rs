@@ -16,7 +16,9 @@ use orna_protocol_v1::{
     canonical_request_fingerprint,
 };
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RequestIdentity, RuntimeIdentity, RuntimeState, TerminalOutcome};
+use orna_runtime_v1::{
+    RequestIdentity, RequestOwner, RuntimeError, RuntimeIdentity, RuntimeState, TerminalOutcome,
+};
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
     SessionDeletionAdapter,
@@ -324,6 +326,19 @@ impl LiveApplication for UnitApplication {
         Err(Error::UnsupportedOperation)
     }
 
+    fn event(
+        &mut self,
+        _: [u8; 16],
+        request: [u8; 16],
+        message: &Message,
+    ) -> Result<Envelope, Error> {
+        let Message::Event { fingerprint, .. } = message else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.calls += 1;
+        Ok(unit_result(request, *fingerprint))
+    }
+
     fn cancel(
         &mut self,
         _: [u8; 16],
@@ -372,6 +387,35 @@ fn durable_host(runtime: RuntimeState) -> LiveHost {
         boundary,
         Serving::new(ServingLimits::default()).unwrap(),
         runtime,
+    )
+    .unwrap()
+}
+
+fn durable_host_with_owner(runtime: RuntimeState, owner: [u8; 16]) -> LiveHost {
+    let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
+    LiveHost::with_runtime_state_and_owner(
+        Limits::default(),
+        boundary,
+        Serving::new(ServingLimits::default()).unwrap(),
+        runtime,
+        owner,
+    )
+    .unwrap()
+}
+
+fn durable_host_after_takeover(
+    runtime: RuntimeState,
+    owner: [u8; 16],
+    lost_owner: RequestOwner,
+) -> LiveHost {
+    let boundary = SessionBoundary::new(OriginPolicy::new([origin()], []), 10);
+    LiveHost::with_runtime_state_after_takeover(
+        Limits::default(),
+        boundary,
+        Serving::new(ServingLimits::default()).unwrap(),
+        runtime,
+        owner,
+        lost_owner,
     )
     .unwrap()
 }
@@ -1463,6 +1507,29 @@ fn resync() -> Vec<u8> {
     .unwrap()
 }
 
+fn event(session: [u8; 16], request: [u8; 16], watch: [u8; 16]) -> Vec<u8> {
+    let mut envelope = Envelope {
+        request: Some(request),
+        watch: Some(watch),
+        message: Message::Event {
+            revision: 0,
+            action: [13; 16],
+            value: CanonicalValue::unit(),
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    };
+    let fingerprint =
+        canonical_request_fingerprint(session, &envelope, Limits::default().protocol).unwrap();
+    if let Message::Event {
+        fingerprint: sent, ..
+    } = &mut envelope.message
+    {
+        *sent = fingerprint;
+    }
+    envelope.encode(Limits::default().protocol).unwrap()
+}
+
 fn unsubscribe() -> Vec<u8> {
     Envelope {
         request: Some([12; 16]),
@@ -2250,6 +2317,83 @@ fn rejected_non_durable_cancellation_callback_does_not_cancel_the_target() {
 }
 
 #[test]
+fn durable_public_request_helpers_reject_without_serving_mutation() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [69; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [11; 16],
+        now: 1,
+    }))
+    .unwrap();
+    assert_eq!(
+        host.reserve_request([1; 16], [68; 16]),
+        Err(Error::UnsupportedOperation)
+    );
+    assert_eq!(
+        host.start_request([1; 16], [68; 16]),
+        Err(Error::UnsupportedOperation)
+    );
+
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame(
+            [11; 16],
+            2,
+            Frame::Binary(eval([1; 16], [68; 16], "1")),
+            &mut application,
+        ))
+        .map(|outcome| outcome.outcome),
+        Ok(FrameOutcome::Accepted)
+    );
+    assert_eq!(application.calls, 1);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_stale_event_is_rejected_before_request_admission() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [70; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [12; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = [71; 16];
+    let frame = event([1; 16], request, [72; 16]);
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([12; 16], 2, Frame::Binary(frame), &mut application,)),
+        Err(Error::Denied)
+    );
+    assert_eq!(application.calls, 0);
+    assert!(
+        block_on(
+            open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [1; 16],
+                request_id: request,
+            })
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn dispatch_computes_fingerprints_and_replays_terminal_results() {
     let mut host = host();
     let mut issuer = Issuer(1, None);
@@ -2390,6 +2534,7 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -2418,14 +2563,22 @@ fn durable_request_status_recovers_states_and_enforces_target_fingerprint() {
                 block_on(runtime.cancel_request(identity, fingerprint, terminal)).unwrap();
             }
             35 => {
-                block_on(runtime.orphan_request(identity, fingerprint, terminal)).unwrap();
+                let old = block_on(runtime.acquire_lease([91; 16])).unwrap();
+                let fence = block_on(runtime.recover_abandoned(old.owner_id, [92; 16])).unwrap();
+                block_on(runtime.recover_legacy_running_request(
+                    identity,
+                    fingerprint,
+                    fence,
+                    terminal,
+                ))
+                .unwrap();
             }
             _ => {}
         }
     }
     drop(runtime);
 
-    let mut host = durable_host(open_durable_state(&repository));
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [92; 16]);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -2571,7 +2724,7 @@ fn durable_runtime_does_not_replay_a_reserved_request_after_host_reconstruction(
 }
 
 #[test]
-fn durable_runtime_cancels_a_recovered_running_request_and_replays_cancellation() {
+fn durable_runtime_recovery_does_not_cancel_or_replay_a_running_request() {
     let (root, repository) = durable_repository();
     let target = eval([1; 16], [25; 16], "1");
     let target_fingerprint = request_fingerprint(&target, [1; 16]);
@@ -2582,9 +2735,11 @@ fn durable_runtime_cancels_a_recovered_running_request_and_replays_cancellation(
     };
     block_on(runtime.reserve_request(target_identity, target_fingerprint)).unwrap();
     block_on(runtime.start_request(target_identity, target_fingerprint)).unwrap();
+    let old = block_on(runtime.acquire_lease([71; 16])).unwrap();
+    block_on(runtime.recover_abandoned(old.owner_id, [72; 16])).unwrap();
     drop(runtime);
 
-    let mut host = durable_host(open_durable_state(&repository));
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [72; 16]);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -2612,14 +2767,14 @@ fn durable_runtime_cancels_a_recovered_running_request_and_replays_cancellation(
             .map(|outcome| outcome.outcome),
         Ok(FrameOutcome::Cancelled)
     );
-    assert_eq!(application.calls, 1);
+    assert_eq!(application.calls, 0);
     assert!(matches!(
         block_on(host.dispatch_frame([8; 16], 3, Frame::Binary(target), &mut application,))
             .unwrap()
             .outcome,
-        FrameOutcome::Cancelled
+        FrameOutcome::Accepted
     ));
-    assert_eq!(application.calls, 1);
+    assert_eq!(application.calls, 0);
     drop(host);
     remove_test_repository(&root);
 }
@@ -2636,9 +2791,11 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
     let runtime = open_durable_state(&repository);
     block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
     block_on(runtime.start_request(identity, fingerprint)).unwrap();
+    let old = block_on(runtime.acquire_lease([81; 16])).unwrap();
+    block_on(runtime.recover_abandoned(old.owner_id, [82; 16])).unwrap();
     drop(runtime);
 
-    let mut host = durable_host(open_durable_state(&repository));
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [82; 16]);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -2700,6 +2857,177 @@ fn durable_runtime_orphans_a_running_eval_after_host_reconstruction() {
     );
     assert_eq!(application.calls, 0);
     drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [76; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [76; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let old = block_on(runtime.acquire_lease([73; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    block_on(runtime.recover_abandoned(old.owner_id, [74; 16])).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_after_takeover(
+        open_durable_state(&repository),
+        [74; 16],
+        RequestOwner::from(old),
+    );
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [9; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let recovered =
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
+    assert!(matches!(
+        recovered.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 0);
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 3, Frame::Binary(request), &mut application)),
+        Ok(recovered)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_rejects_a_current_owner_without_reexecution() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [77; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [77; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, owner)).unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [76; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [10; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([10; 16], 2, Frame::Binary(request), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_dispatch_rejects_a_fenced_owner_before_cancellation_callback() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [66; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [12; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let mut application = UnitApplication::default();
+    block_on(host.dispatch_frame(
+        [12; 16],
+        2,
+        Frame::Binary(eval([1; 16], [67; 16], "warm")),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(application.calls, 1);
+
+    let target = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [65; 16],
+    };
+    let target_fingerprint = request_fingerprint(&eval([1; 16], [65; 16], "target"), [1; 16]);
+    let target_runtime = open_durable_state(&repository);
+    let old = block_on(target_runtime.acquire_lease([66; 16])).unwrap();
+    block_on(target_runtime.reserve_request(target, target_fingerprint)).unwrap();
+    block_on(target_runtime.start_request_with_owner(target, target_fingerprint, old)).unwrap();
+    block_on(target_runtime.recover_abandoned(old.owner_id, [68; 16])).unwrap();
+    drop(target_runtime);
+
+    let cancellation = cancel_request([64; 16], [65; 16]);
+    assert_eq!(
+        block_on(host.dispatch_frame([12; 16], 3, Frame::Binary(cancellation), &mut application,)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 1);
+
+    let status =
+        block_on(open_durable_state(&repository).request_status(target, target_fingerprint))
+            .unwrap()
+            .unwrap();
+    assert_eq!(status.state, orna_runtime_v1::RequestState::Running);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_rejects_a_stale_terminal_owner_transition() {
+    let (root, repository) = durable_repository();
+    let runtime = open_durable_state(&repository);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [78; 16],
+    };
+    let fingerprint = [78; 32];
+    let old = block_on(runtime.acquire_lease([77; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    block_on(runtime.recover_abandoned(old.owner_id, [78; 16])).unwrap();
+    assert_eq!(
+        block_on(runtime.complete_request_with_owner(
+            identity,
+            fingerprint,
+            old,
+            TerminalOutcome::new(Vec::new()).unwrap(),
+        )),
+        Err(RuntimeError::OwnerLost)
+    );
+    assert!(matches!(
+        block_on(runtime.request_status(identity, fingerprint)).unwrap(),
+        Some(status) if status.state == orna_runtime_v1::RequestState::Running
+    ));
+    drop(runtime);
     remove_test_repository(&root);
 }
 

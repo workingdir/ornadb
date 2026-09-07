@@ -24,8 +24,9 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    RequestIdentity, RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RuntimeError, RuntimeState, TerminalOutcome,
+    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState as DurableRequestState,
+    RequestStatus as DurableRequestStatus, RuntimeError, RuntimeState, TerminalOutcome,
+    WriterLease,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -299,6 +300,9 @@ pub struct LiveHost {
     requests: BTreeMap<([u8; 16], [u8; 16]), RequestRecord>,
     watches: BTreeSet<([u8; 16], [u8; 16])>,
     runtime: Option<RuntimeState>,
+    runtime_owner: Option<[u8; 16]>,
+    writer_lease: Option<WriterLease>,
+    recovered_owner: Option<RequestOwner>,
 }
 
 enum DurableAdmission {
@@ -319,11 +323,15 @@ impl LiveHost {
     ///
     /// Returns [`Error::Limit`] when any configured protocol bound is zero.
     pub fn new(limits: Limits, security: SessionBoundary, serving: Serving) -> Result<Self> {
-        Self::build(limits, security, serving, None)
+        Self::build(limits, security, serving, None, None, None)
     }
 
     /// Creates a bounded live host whose request authority is the supplied
-    /// durable runtime state.
+    /// durable runtime state. Its fresh owner identity is for fresh/no-owned-
+    /// Running state; it is not a takeover or liveness proof. A trusted
+    /// executable must perform the runtime owner+epoch CAS takeover before
+    /// recovering an owned Running row and use
+    /// [`Self::with_runtime_state_after_takeover`] for that recovery.
     ///
     /// # Errors
     ///
@@ -334,7 +342,73 @@ impl LiveHost {
         serving: Serving,
         runtime: RuntimeState,
     ) -> Result<Self> {
-        Self::build(limits, security, serving, Some(runtime))
+        let mut owner = [0; 16];
+        getrandom::fill(&mut owner).map_err(|_| Error::RuntimeUnavailable)?;
+        Self::with_runtime_state_and_owner(limits, security, serving, runtime, owner)
+    }
+
+    /// Creates a durable host with the runtime-owner identity supplied by the
+    /// trusted executable. The identity is never derived from wire input. A
+    /// fresh owner is for fresh/no-owned-Running state. It does not assert
+    /// liveness or transaction/join evidence. Before recovering an owned
+    /// Running row, the trusted executable must perform the runtime
+    /// owner+epoch CAS takeover and use
+    /// [`Self::with_runtime_state_after_takeover`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Limit`] when any configured protocol bound is zero.
+    pub fn with_runtime_state_and_owner(
+        limits: Limits,
+        security: SessionBoundary,
+        serving: Serving,
+        runtime: RuntimeState,
+        runtime_owner: [u8; 16],
+    ) -> Result<Self> {
+        if runtime_owner == [0; 16] {
+            return Err(Error::RuntimeUnavailable);
+        }
+        Self::build(
+            limits,
+            security,
+            serving,
+            Some(runtime),
+            Some(runtime_owner),
+            None,
+        )
+    }
+
+    /// Creates a durable host after the trusted executable has replaced a
+    /// known writer lease with the runtime owner+epoch CAS takeover. The
+    /// runtime still fences this prior owner before any recovered Running
+    /// record can become terminal. This constructor does not manufacture
+    /// liveness or transaction/join evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Limit`] when any configured protocol bound is zero.
+    pub fn with_runtime_state_after_takeover(
+        limits: Limits,
+        security: SessionBoundary,
+        serving: Serving,
+        runtime: RuntimeState,
+        runtime_owner: [u8; 16],
+        recovered_owner: RequestOwner,
+    ) -> Result<Self> {
+        if runtime_owner == [0; 16]
+            || recovered_owner.owner_id == [0; 16]
+            || recovered_owner.epoch == 0
+        {
+            return Err(Error::RuntimeUnavailable);
+        }
+        Self::build(
+            limits,
+            security,
+            serving,
+            Some(runtime),
+            Some(runtime_owner),
+            Some(recovered_owner),
+        )
     }
 
     fn build(
@@ -342,6 +416,8 @@ impl LiveHost {
         security: SessionBoundary,
         serving: Serving,
         runtime: Option<RuntimeState>,
+        runtime_owner: Option<[u8; 16]>,
+        recovered_owner: Option<RequestOwner>,
     ) -> Result<Self> {
         Ok(Self {
             limits: limits.validate()?,
@@ -351,6 +427,9 @@ impl LiveHost {
             requests: BTreeMap::new(),
             watches: BTreeSet::new(),
             runtime,
+            runtime_owner,
+            writer_lease: None,
+            recovered_owner,
         })
     }
 
@@ -715,6 +794,16 @@ impl LiveHost {
                 {
                     return Err(Error::RequestMismatch);
                 }
+                // Validate every existing watch target before durable request
+                // admission. A rejected Event or Resync must not create a
+                // reservation that could later be mistaken for executable
+                // work after a restart.
+                if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
+                    let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+                    if !self.watches.contains(&(session, watch)) {
+                        return Err(Error::Denied);
+                    }
+                }
                 if self.runtime.is_some() {
                     match self
                         .admit_durable_request(session, request, fingerprint, &envelope)
@@ -753,12 +842,6 @@ impl LiveHost {
                         outcome: FrameOutcome::Accepted,
                         response: None,
                     }));
-                }
-                if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
-                    let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                    if !self.watches.contains(&(session, watch)) {
-                        return Err(Error::Denied);
-                    }
                 }
                 if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
                     self.retain_failure(session, request, fingerprint).await?;
@@ -1042,18 +1125,20 @@ impl LiveHost {
     }
 
     async fn admit_durable_request(
-        &self,
+        &mut self,
         session: [u8; 16],
         request: [u8; 16],
         fingerprint: [u8; 32],
         envelope: &Envelope,
     ) -> Result<DurableAdmission> {
-        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         let identity = RequestIdentity {
             session_id: session,
             request_id: request,
         };
-        let (reserved, inserted) = runtime
+        let (reserved, inserted) = self
+            .runtime
+            .as_ref()
+            .ok_or(Error::RuntimeUnavailable)?
             .reserve_request_with_admission(identity, fingerprint)
             .await
             .map_err(|error| map_runtime(&error))?;
@@ -1066,24 +1151,27 @@ impl LiveHost {
             }
             if reserved.state == DurableRequestState::Running {
                 return self
-                    .admit_running_request(
-                        runtime,
-                        identity,
-                        session,
-                        request,
-                        fingerprint,
-                        envelope,
-                    )
+                    .admit_running_request(identity, session, request, fingerprint, envelope)
                     .await;
             }
             return self.durable_admission(reserved, envelope);
         }
         match reserved.state {
             DurableRequestState::Reserved => {
-                match runtime.start_request(identity, fingerprint).await {
+                let lease = self.writer_lease().await?;
+                match self
+                    .runtime
+                    .as_ref()
+                    .ok_or(Error::RuntimeUnavailable)?
+                    .start_request_with_owner(identity, fingerprint, lease)
+                    .await
+                {
                     Ok(_) => Ok(DurableAdmission::Execute),
                     Err(RuntimeError::RequestStateConflict) => {
-                        let current = runtime
+                        let current = self
+                            .runtime
+                            .as_ref()
+                            .ok_or(Error::RuntimeUnavailable)?
                             .request_status_for_identity(identity)
                             .await
                             .map_err(|error| map_runtime(&error))?
@@ -1094,15 +1182,8 @@ impl LiveHost {
                 }
             }
             DurableRequestState::Running => {
-                self.admit_running_request(
-                    runtime,
-                    identity,
-                    session,
-                    request,
-                    fingerprint,
-                    envelope,
-                )
-                .await
+                self.admit_running_request(identity, session, request, fingerprint, envelope)
+                    .await
             }
             DurableRequestState::Completed
             | DurableRequestState::Cancelled
@@ -1111,8 +1192,7 @@ impl LiveHost {
     }
 
     async fn admit_running_request(
-        &self,
-        runtime: &RuntimeState,
+        &mut self,
         identity: RequestIdentity,
         session: [u8; 16],
         request: [u8; 16],
@@ -1126,12 +1206,28 @@ impl LiveHost {
         {
             return Ok(DurableAdmission::Active);
         }
-        let outcome = retained_without_value_outcome(request, fingerprint);
-        match runtime
-            .orphan_request(identity, fingerprint, self.terminal_outcome(&outcome)?)
-            .await
-        {
-            Ok(status) => self.durable_admission(status, envelope),
+        let lease = self.writer_lease().await?;
+        let outcome = recovery_outcome(
+            request,
+            fingerprint,
+            RecoveryDisposition::ExternalEffectsUncertain,
+        );
+        let terminal = self.terminal_outcome(&outcome)?;
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        let recovered = match self.recovered_owner {
+            Some(lost_owner) => {
+                runtime
+                    .recover_running_request(identity, fingerprint, lost_owner, lease, terminal)
+                    .await
+            }
+            None => {
+                runtime
+                    .recover_legacy_running_request(identity, fingerprint, lease, terminal)
+                    .await
+            }
+        };
+        match recovered {
+            Ok(recovered) => self.durable_admission(recovered.status, envelope),
             Err(RuntimeError::RequestStateConflict) => {
                 let current = runtime
                     .request_status_for_identity(identity)
@@ -1142,6 +1238,20 @@ impl LiveHost {
             }
             Err(error) => Err(map_runtime(&error)),
         }
+    }
+
+    async fn writer_lease(&mut self) -> Result<WriterLease> {
+        if let Some(lease) = self.writer_lease {
+            return Ok(lease);
+        }
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        let owner = self.runtime_owner.ok_or(Error::RuntimeUnavailable)?;
+        let lease = runtime
+            .acquire_lease(owner)
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        self.writer_lease = Some(lease);
+        Ok(lease)
     }
 
     async fn request_target_active(&self, session: [u8; 16], request: [u8; 16]) -> Result<bool> {
@@ -1297,15 +1407,18 @@ impl LiveHost {
         request: [u8; 16],
         outcome: DispatchOutcome,
     ) -> Result<DispatchOutcome> {
-        if let Some(runtime) = &self.runtime {
+        if self.runtime.is_some() {
+            let lease = self.writer_lease().await?;
             let terminal = self.terminal_outcome(&outcome)?;
+            let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             runtime
-                .complete_request(
+                .complete_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
                     },
                     self.request_fingerprint(session, request)?,
+                    lease,
                     terminal,
                 )
                 .await
@@ -1341,14 +1454,17 @@ impl LiveHost {
                 extensions: BTreeMap::new(),
             }),
         };
-        if let Some(runtime) = &self.runtime {
+        if self.runtime.is_some() {
+            let lease = self.writer_lease().await?;
+            let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             runtime
-                .complete_request(
+                .complete_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
                     },
                     fingerprint,
+                    lease,
                     self.terminal_outcome(&failure)?,
                 )
                 .await
@@ -1365,6 +1481,7 @@ impl LiveHost {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn cancel_target_request(
         &mut self,
         session: [u8; 16],
@@ -1405,14 +1522,17 @@ impl LiveHost {
                 extensions: BTreeMap::new(),
             }),
         };
-        if let Some(runtime) = &self.runtime {
+        if self.runtime.is_some() {
+            let lease = self.writer_lease().await?;
+            let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
             match runtime
-                .cancel_request(
+                .cancel_request_with_owner(
                     RequestIdentity {
                         session_id: session,
                         request_id: request,
                     },
                     fingerprint,
+                    lease,
                     self.terminal_outcome(&outcome)?,
                 )
                 .await
@@ -1431,6 +1551,45 @@ impl LiveHost {
                         return Ok(false);
                     }
                     return Err(Error::RuntimeUnavailable);
+                }
+                Err(RuntimeError::RequestOwnerConflict) => {
+                    let recovery = recovery_outcome(
+                        request,
+                        fingerprint,
+                        RecoveryDisposition::ExternalEffectsUncertain,
+                    );
+                    let terminal = self.terminal_outcome(&recovery)?;
+                    let recovered = match self.recovered_owner {
+                        Some(lost_owner) => {
+                            runtime
+                                .recover_running_request(
+                                    RequestIdentity {
+                                        session_id: session,
+                                        request_id: request,
+                                    },
+                                    fingerprint,
+                                    lost_owner,
+                                    lease,
+                                    terminal,
+                                )
+                                .await
+                        }
+                        None => {
+                            runtime
+                                .recover_legacy_running_request(
+                                    RequestIdentity {
+                                        session_id: session,
+                                        request_id: request,
+                                    },
+                                    fingerprint,
+                                    lease,
+                                    terminal,
+                                )
+                                .await
+                        }
+                    };
+                    recovered.map_err(|error| map_runtime(&error))?;
+                    return Ok(false);
                 }
                 Err(error) => return Err(map_runtime(&error)),
             }
@@ -1490,13 +1649,19 @@ impl LiveHost {
 
     /// The execution host calls these around work it has accepted from a
     /// canonical request. Network cancellation then remains protocol-bound.
-    /// Reserves one request identity for the attached session.
+    /// Reserves one request identity for the attached session. Durable hosts
+    /// must use canonical frame admission so the runtime can own the
+    /// fingerprint and writer fence; this helper is serving-only there.
     ///
     /// # Errors
     ///
     /// Returns a redacted serving error when the session or request state is
-    /// not admissible.
+    /// not admissible, or [`Error::UnsupportedOperation`] when durable
+    /// runtime admission would otherwise be bypassed.
     pub fn reserve_request(&mut self, session: [u8; 16], request: [u8; 16]) -> Result<()> {
+        if self.runtime.is_some() {
+            return Err(Error::UnsupportedOperation);
+        }
         self.serving
             .reserve_request(session, request)
             .map_err(map_serving)
@@ -1507,8 +1672,14 @@ impl LiveHost {
     /// # Errors
     ///
     /// Returns a redacted serving error when the reservation is absent or
-    /// terminal.
+    /// terminal, or [`Error::UnsupportedOperation`] for a durable host.
+    /// Durable hosts must use canonical frame admission so the
+    /// runtime owner fence cannot be bypassed; this helper is serving-only
+    /// there.
     pub fn start_request(&mut self, session: [u8; 16], request: [u8; 16]) -> Result<()> {
+        if self.runtime.is_some() {
+            return Err(Error::UnsupportedOperation);
+        }
         self.serving
             .start_request(session, request)
             .map_err(map_serving)
@@ -1529,6 +1700,35 @@ fn retained_without_value_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> D
             },
             extensions: BTreeMap::new(),
         }),
+    }
+}
+
+fn recovery_outcome(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    disposition: RecoveryDisposition,
+) -> DispatchOutcome {
+    match disposition {
+        // A future runtime rollback receipt can safely use the existing
+        // redacted failure result. It remains protocol state 4 (orphaned)
+        // until a later protocol version defines a distinct terminal state.
+        RecoveryDisposition::RollbackProven => DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Failure,
+                    value: None,
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            }),
+        },
+        RecoveryDisposition::ExternalEffectsUncertain => {
+            retained_without_value_outcome(request, fingerprint)
+        }
     }
 }
 
@@ -4165,6 +4365,24 @@ mod tests {
         let token = issuer.issue_credential().unwrap();
         assert_ne!(token, [0; 32]);
         assert_eq!(issuer.last_issued(), Some(token));
+    }
+
+    #[test]
+    fn recovery_disposition_uses_existing_redacted_result_semantics() {
+        for (disposition, status) in [
+            (RecoveryDisposition::RollbackProven, ResultStatus::Failure),
+            (
+                RecoveryDisposition::ExternalEffectsUncertain,
+                ResultStatus::RetainedWithoutValue,
+            ),
+        ] {
+            let outcome = recovery_outcome([1; 16], [2; 32], disposition);
+            assert!(matches!(
+                outcome.response.unwrap().message,
+                Message::Result { status: returned, value: None, diagnostic: None, .. }
+                    if returned == status
+            ));
+        }
     }
 
     #[test]
