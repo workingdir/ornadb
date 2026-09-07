@@ -1052,6 +1052,25 @@ pub struct RuntimeStreamBackend<'a> {
     lease: WriterLease,
 }
 
+/// The durable outcome of one stream-administration transition.
+///
+/// This is deliberately narrower than the public `sys.admin` result: a
+/// pending pause has stopped new delivery admission, but its active delivery
+/// has not reached the transaction boundary that publishes `Paused` yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamAdministrationOutcome {
+    /// The stream is durably paused; `changed` is false for an existing pause.
+    Paused { changed: bool },
+    /// A pause is durably pending the active delivery boundary.
+    PausePending { changed: bool },
+    /// The stream is durably running; `changed` is false for an existing run.
+    Running { changed: bool },
+    /// A live delivery lease prevents the requested transition.
+    Busy,
+    /// A blocking delivery failure prevents resume.
+    BlockingFailure,
+}
+
 impl RuntimeState {
     /// Opens the `state.db` path resolved by Git for this exact worktree.
     pub async fn open(
@@ -1100,6 +1119,54 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    /// Applies a writer-fenced durable pause transition for one resolved
+    /// stream. A caller that needs the public administration result must wait
+    /// for `PausePending` to publish `Paused` at the delivery boundary.
+    pub async fn pause_stream(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        match apply_stream_intent(self, lease, CommitIntent::Pause { key }).await? {
+            CommitResult::StreamStatusChanged { state, changed }
+                if state.status == StreamStatus::Paused =>
+            {
+                Ok(StreamAdministrationOutcome::Paused { changed })
+            }
+            CommitResult::PausePending { changed, .. } => {
+                Ok(StreamAdministrationOutcome::PausePending { changed })
+            }
+            CommitResult::Rejected(RejectReason::StreamBusy) => {
+                Ok(StreamAdministrationOutcome::Busy)
+            }
+            _ => Err(RuntimeError::RecoveryInvalid),
+        }
+    }
+
+    /// Applies a writer-fenced durable resume transition for one resolved
+    /// stream. Source availability and public stream-reference resolution are
+    /// owned by the host above this runtime boundary.
+    pub async fn resume_stream(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        match apply_stream_intent(self, lease, CommitIntent::Resume { key }).await? {
+            CommitResult::StreamStatusChanged { state, changed }
+                if state.status == StreamStatus::Running =>
+            {
+                Ok(StreamAdministrationOutcome::Running { changed })
+            }
+            CommitResult::Rejected(RejectReason::StreamBusy) => {
+                Ok(StreamAdministrationOutcome::Busy)
+            }
+            CommitResult::Rejected(RejectReason::BlockingFailure) => {
+                Ok(StreamAdministrationOutcome::BlockingFailure)
+            }
+            _ => Err(RuntimeError::RecoveryInvalid),
+        }
     }
 
     /// Captures the fixed CWD and activation time for one root activation.
