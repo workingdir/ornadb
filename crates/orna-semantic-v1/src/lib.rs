@@ -2833,7 +2833,22 @@ fn infer(
                 }
             }
         }
-        Expr::Unary { rhs, .. } => infer(rhs, scope, local, diagnostics),
+        Expr::Unary { op, rhs, .. } => {
+            let inferred = infer(rhs, scope, local, diagnostics);
+            if op == "!" {
+                require_same(&Type::Bool, &inferred.ty, diagnostics);
+                Inferred {
+                    ty: if inferred.ty == Type::Bool {
+                        Type::Bool
+                    } else {
+                        Type::Error
+                    },
+                    effects: inferred.effects,
+                }
+            } else {
+                inferred
+            }
+        }
         Expr::Binary { lhs, op, rhs, .. } => {
             if op == "|" {
                 return infer_success_pipeline(lhs, rhs, scope, local, diagnostics);
@@ -2895,6 +2910,18 @@ fn infer(
                     }
                 };
                 return Inferred { ty, effects };
+            }
+            if matches!(op.as_str(), "&&" | "||") {
+                require_same(&Type::Bool, &left.ty, diagnostics);
+                require_same(&Type::Bool, &right.ty, diagnostics);
+                return Inferred {
+                    ty: if left.ty == Type::Bool && right.ty == Type::Bool {
+                        Type::Bool
+                    } else {
+                        Type::Error
+                    },
+                    effects,
+                };
             }
             if op == "-"
                 && left.ty == Type::Instant
@@ -2958,10 +2985,7 @@ fn infer(
                     effects,
                 };
             }
-            let ty = if matches!(
-                op.as_str(),
-                "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"
-            ) {
+            let ty = if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") {
                 Type::Bool
             } else {
                 require_same(&left.ty, &right.ty, diagnostics);
