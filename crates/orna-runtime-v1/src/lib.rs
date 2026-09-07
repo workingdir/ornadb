@@ -13466,6 +13466,92 @@ mod tests {
             Some(RecoveryDisposition::ExternalEffectsUncertain)
         );
     }
+
+    #[tokio::test]
+    async fn migrated_ledger_retains_controlled_rollback_recovery_after_reopen() {
+        let (_temp, repo) = repository();
+        repo.runtime_paths().ensure_exists().unwrap();
+        let database = Builder::new_local(repo.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE request_ledger (
+                     session_id BLOB NOT NULL,
+                     request_id BLOB NOT NULL,
+                     fingerprint BLOB NOT NULL,
+                     state INTEGER NOT NULL,
+                     terminal_outcome BLOB,
+                     PRIMARY KEY (session_id, request_id)
+                 );",
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::AfterTerminalClaim),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
+        );
+        let recovery_owner = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                recovery_owner,
+                outcome(12),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.disposition, RecoveryDisposition::RollbackProven);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::RollbackProven)
+        );
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened
+                .reserve_request(identity, fingerprint)
+                .await
+                .unwrap(),
+            recovered.status
+        );
+    }
+
     #[tokio::test]
     async fn recovery_enforces_the_request_metadata_state_matrix() {
         let (_temp, repo) = repository();
