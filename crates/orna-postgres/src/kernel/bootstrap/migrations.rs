@@ -317,6 +317,12 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../../migrations/0049_sealed_invocation_lifecycle.sql"),
         data_step: None,
     },
+    Migration {
+        version: 50,
+        name: "sealed invocation unresolved target",
+        sql: include_str!("../../../migrations/0050_sealed_invocation_unresolved_target.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
