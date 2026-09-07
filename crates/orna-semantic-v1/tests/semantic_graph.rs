@@ -1697,7 +1697,7 @@ fn authoritative_fixture_resolves_attached_tables_connectors_and_modules() {
                 r#"
                     pub fn compare_old_and_current() {
                         let old = sys.database.as_of(sys.snapshot("HEAD~10"));
-                        { old: old.energy.daily(), current: energy.daily(energy.Reading.as_of(sys.snapshot("HEAD~10"))) }
+                        { old: old.cwd, current: sys.database.cwd }
                     }
                 "#,
             ),
@@ -1904,6 +1904,79 @@ fn runtime_root_and_info_function_use_the_current_sys_names() {
             .iter()
             .any(|diagnostic| { diagnostic.message() == "`sys.runtime` was renamed to `sys.rt`" })
     );
+}
+
+#[test]
+fn json_described_read_only_sys_views_resolve_without_fabricating_other_members() {
+    for source in [
+        "fn coordinates() = sys.database.cwd;",
+        "fn coordinates() = sys.current.snapshot;",
+        "fn coordinates() = sys.rt.id;",
+        "fn coordinates() = sys.repl.width;",
+        "fn coordinates() = sys.rt.info();",
+        "fn relation() = sys.Database;",
+    ] {
+        let supported = analyze(&[ModuleInput::new("read-only-sys.orna", source)]);
+        assert!(supported.is_ok(), "{source}: {:#?}", supported.diagnostics);
+    }
+
+    let shadowed = analyze(&[ModuleInput::new(
+        "shadowed-sys.orna",
+        "fn coordinates(sys: Int) = sys.rt.id;",
+    )]);
+    assert!(has(&shadowed, DIAG_RESERVED), "{:#?}", shadowed.diagnostics);
+
+    for source in [
+        "fn sys() = 1;",
+        "type sys = Int;",
+        "table sys { value: Int, }",
+        "fn local() { let sys = 1; }",
+        "fn callback() = [1] | map(sys => sys);",
+        "table Record(id: Uuid) { value: Int, assert every(sys => sys.value >= 0); }",
+    ] {
+        let rejected = analyze(&[ModuleInput::new("reserved-sys.orna", source)]);
+        assert!(
+            has(&rejected, DIAG_RESERVED),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+    }
+
+    let alias = analyze(&[
+        ModuleInput::new("helper.orna", "pub fn value() = 1;"),
+        ModuleInput::new(
+            "alias-sys.orna",
+            "use helper as sys; fn coordinates() = sys.rt.id;",
+        ),
+    ]);
+    assert!(has(&alias, DIAG_RESERVED), "{:#?}", alias.diagnostics);
+    assert!(
+        !has(&alias, DIAG_UNRESOLVED),
+        "the built-in root must remain available: {:#?}",
+        alias.diagnostics
+    );
+
+    let unsupported = analyze(&[ModuleInput::new(
+        "unsupported-sys.orna",
+        "fn metadata() = sys.meta(1);",
+    )]);
+    assert!(
+        has(&unsupported, DIAG_UNSUPPORTED),
+        "{:#?}",
+        unsupported.diagnostics
+    );
+
+    for source in [
+        "fn absent_on_view() = sys.database.legacy_member;",
+        "fn absent_on_row(failure: sys.Failure) = failure.legacy_member;",
+    ] {
+        let rejected = analyze(&[ModuleInput::new("unsupported-sys.orna", source)]);
+        assert!(
+            has(&rejected, DIAG_UNSUPPORTED),
+            "{source}: {:#?}",
+            rejected.diagnostics
+        );
+    }
 }
 
 #[test]
