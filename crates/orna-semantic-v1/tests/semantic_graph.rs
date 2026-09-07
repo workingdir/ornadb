@@ -1929,7 +1929,6 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     for source in [
         "fn sys() = 1;",
         "type sys = Int;",
-        "table sys { value: Int, }",
         "fn local() { let sys = 1; }",
         "fn callback() = [1] | map(sys => sys);",
         "table Record(id: Uuid) { value: Int, assert every(sys => sys.value >= 0); }",
@@ -1941,6 +1940,23 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
             rejected.diagnostics
         );
     }
+
+    let reserved_table = analyze(&[ModuleInput::new(
+        "reserved-sys.orna",
+        "table sys { value: Int, }",
+    )]);
+    assert!(
+        reserved_table.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+        }),
+        "{:#?}",
+        reserved_table.diagnostics
+    );
+    assert!(
+        !has(&reserved_table, DIAG_RESERVED),
+        "table-name validation belongs to typechecking: {:#?}",
+        reserved_table.diagnostics
+    );
 
     let alias = analyze(&[
         ModuleInput::new("helper.orna", "pub fn value() = 1;"),
