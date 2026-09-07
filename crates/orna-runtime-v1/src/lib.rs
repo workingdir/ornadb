@@ -7,20 +7,23 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    fs::{self, OpenOptions},
     future::{Future, Ready, ready},
-    path::Path,
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
-use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot};
-use orna_repository_v1::Repository;
+use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot, Value};
+use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
 pub use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
     ConsumerIdentity, StreamFailurePayload,
@@ -43,7 +46,9 @@ CREATE TABLE IF NOT EXISTS runtime_meta (
     repository_id BLOB NOT NULL CHECK (length(repository_id) = 16),
     runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
     generation INTEGER NOT NULL CHECK (generation >= 0),
-    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    compact_receipt_seed BLOB CHECK (compact_receipt_seed IS NULL OR length(compact_receipt_seed) = 32),
+    compact_receipt_public_key BLOB CHECK (compact_receipt_public_key IS NULL OR length(compact_receipt_public_key) = 32)
 );
 CREATE TABLE IF NOT EXISTS runtime_schema_migration (
     migration TEXT PRIMARY KEY CHECK (length(migration) > 0)
@@ -77,11 +82,19 @@ CREATE TABLE IF NOT EXISTS publication_freeze (
     checkpoint_generation INTEGER NOT NULL,
     checkpoint_mutation_sequence INTEGER NOT NULL,
     checkpoint_digest BLOB NOT NULL CHECK (length(checkpoint_digest) = 32),
-    frozen INTEGER NOT NULL CHECK (frozen = 1)
+    compact_watermark BLOB CHECK (compact_watermark IS NULL OR length(compact_watermark) = 32),
+    compact_commit_id BLOB CHECK (compact_commit_id IS NULL OR length(compact_commit_id) IN (40, 64)),
+    compact_journal_verifier BLOB CHECK (compact_journal_verifier IS NULL OR length(compact_journal_verifier) = 32),
+    frozen INTEGER NOT NULL CHECK (frozen = 1),
+    CHECK (
+        (compact_watermark IS NULL AND compact_commit_id IS NULL AND compact_journal_verifier IS NULL)
+        OR (compact_watermark IS NOT NULL AND compact_commit_id IS NOT NULL AND compact_journal_verifier IS NOT NULL)
+    )
 );
 CREATE TABLE IF NOT EXISTS publication_commit (
     intent_id BLOB PRIMARY KEY REFERENCES publication_freeze(intent_id),
-    commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64))
+    commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64)),
+    compact_receipt BLOB
 );
 CREATE TABLE IF NOT EXISTS request_ledger (
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
@@ -196,6 +209,47 @@ CREATE TABLE IF NOT EXISTS stream_control (
 );
 CREATE TABLE IF NOT EXISTS stream_pause_pending (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0)
+);
+CREATE TABLE IF NOT EXISTS sys_run_observation (
+    run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16),
+    session_id BLOB NOT NULL CHECK (length(session_id) = 16),
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    consumer_identity TEXT NOT NULL CHECK (length(consumer_identity) > 0),
+    function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+    source_identity TEXT,
+    invocation_id BLOB NOT NULL CHECK (length(invocation_id) = 16),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 0),
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    checkpoint_count INTEGER NOT NULL DEFAULT 0 CHECK (checkpoint_count >= 0),
+    diagnostic_code INTEGER,
+    diagnostic_class INTEGER,
+    CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
+);
+CREATE TABLE IF NOT EXISTS sys_stream_observation (
+    stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
+    run_id BLOB NOT NULL REFERENCES sys_run_observation(run_id),
+    checkpoint_key_id TEXT NOT NULL UNIQUE CHECK (length(checkpoint_key_id) > 0),
+    producer TEXT NOT NULL CHECK (length(producer) > 0),
+    consumer_name TEXT,
+    consumer_identity TEXT NOT NULL CHECK (length(consumer_identity) > 0),
+    source_identity TEXT NOT NULL CHECK (length(source_identity) > 0),
+    partition TEXT,
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 8),
+    items_seen INTEGER NOT NULL DEFAULT 0 CHECK (items_seen >= 0),
+    items_committed INTEGER NOT NULL DEFAULT 0 CHECK (items_committed >= 0),
+    items_failed INTEGER NOT NULL DEFAULT 0 CHECK (items_failed >= 0),
+    checkpoint_version INTEGER,
+    last_item_ms INTEGER,
+    diagnostic_code INTEGER,
+    diagnostic_class INTEGER,
+    observed_ms INTEGER NOT NULL,
+    UNIQUE(run_id, source_identity, partition),
+    CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
 );
 "#;
 
@@ -453,6 +507,100 @@ pub struct RequestStatus {
     pub terminal_outcome: Option<TerminalOutcome>,
 }
 
+/// Runtime-owned identity for one durable `sys.Run` observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RunObservationId([u8; 16]);
+
+impl RunObservationId {
+    pub fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// Runtime-owned identity for one durable `sys.Stream` observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct StreamObservationId([u8; 16]);
+
+impl StreamObservationId {
+    pub fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunObservationStatus {
+    Starting,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Orphaned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamObservationStatus {
+    Starting,
+    Running,
+    Paused,
+    BackingOff,
+    Completed,
+    Failed,
+    Cancelled,
+    Orphaned,
+}
+
+/// All caller-supplied metadata required before an activation may execute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunObservationRegistration {
+    pub request: RequestIdentity,
+    pub consumer_identity: ConsumerIdentity,
+    pub function: String,
+    pub source_identity: Option<String>,
+    pub invocation_id: [u8; 16],
+}
+
+/// All caller-supplied metadata required before a stream may consume an item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamObservationRegistration {
+    pub run: RunObservationId,
+    pub producer: String,
+    pub consumer: Option<String>,
+    pub checkpoint: CheckpointKey,
+}
+
+/// Durable `sys.Run` projection. `live` is derived at read time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunObservation {
+    pub id: RunObservationId,
+    pub request: RequestIdentity,
+    pub consumer_identity: ConsumerIdentity,
+    pub function: String,
+    pub source_identity: Option<String>,
+    pub snapshot: CwdCapture,
+    pub runtime_id: [u8; 16],
+    pub invocation_id: [u8; 16],
+    pub status: RunObservationStatus,
+    pub checkpoint_count: u64,
+    pub diagnostic: Option<SafeDiagnostic>,
+    pub live: bool,
+}
+
+/// Durable `sys.Stream` projection. `live` is derived from its parent run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamObservation {
+    pub id: StreamObservationId,
+    pub run: RunObservationId,
+    pub producer: String,
+    pub consumer: Option<String>,
+    pub checkpoint: CheckpointKey,
+    pub status: StreamObservationStatus,
+    pub items_seen: u64,
+    pub items_committed: u64,
+    pub items_failed: u64,
+    pub diagnostic: Option<SafeDiagnostic>,
+    pub live: bool,
+}
+
 /// The durable result of finalizing one owner-fenced table activation.
 ///
 /// `capture` and `request` are returned from the same committed transaction;
@@ -507,6 +655,9 @@ pub enum RuntimeError {
     ConflictingPublicationIntent,
     ConflictingPublicationCommit,
     InvalidPublicationCommit,
+    CompactPublicationRequired,
+    CompactReceiptKeyMismatch,
+    InvalidCompactReceipt,
     RequestUnknown,
     RequestFingerprintMismatch,
     RequestOwnerConflict,
@@ -535,6 +686,13 @@ impl fmt::Display for RuntimeError {
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::ConflictingPublicationCommit => "conflicting publication commit",
             Self::InvalidPublicationCommit => "invalid publication commit",
+            Self::CompactPublicationRequired => {
+                "compact-bound publication requires a runtime receipt"
+            }
+            Self::CompactReceiptKeyMismatch => {
+                "runtime compact receipt key does not match initialization"
+            }
+            Self::InvalidCompactReceipt => "invalid compact runtime receipt",
             Self::RequestUnknown => "runtime request is unknown",
             Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
             Self::RequestOwnerConflict => "runtime request owner cannot be recovered",
@@ -552,6 +710,7 @@ impl std::error::Error for RuntimeError {}
 
 pub struct RuntimeState {
     connection: Connection,
+    compact_receipt_signing_key: SigningKey,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1105,6 +1264,11 @@ impl RuntimeState {
             &repository.runtime_paths().state_db(),
             identity,
             initial_digest,
+            Some(
+                repository
+                    .runtime_paths()
+                    .compact_runtime_receipt_public_key(),
+            ),
         )
         .await
     }
@@ -1113,6 +1277,7 @@ impl RuntimeState {
         path: &Path,
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
+        public_key_path: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -1127,8 +1292,17 @@ impl RuntimeState {
             .execute_batch(SCHEMA)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let state = Self { connection };
-        state.initialize(identity, initial_digest).await?;
+        Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
+        migrate_compact_receipt_schema(&connection).await?;
+        let (compact_receipt_signing_key, compact_receipt_public_key) =
+            initialize_compact_receipt_key(&connection).await?;
+        if let Some(path) = public_key_path {
+            initialize_compact_receipt_public_key(&path, compact_receipt_public_key)?;
+        }
+        let state = Self {
+            connection,
+            compact_receipt_signing_key,
+        };
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
         state.validate_recovery().await?;
@@ -1138,6 +1312,141 @@ impl RuntimeState {
     /// Creates a stream backend whose mutations are fenced by this writer lease.
     pub fn stream_backend(&self, lease: WriterLease) -> RuntimeStreamBackend<'_> {
         RuntimeStreamBackend { state: self, lease }
+    }
+
+    /// Registers a durable `sys.Run` observation before user code is allowed
+    /// to execute. Registration is bound to an already-admitted request and
+    /// the exact CWD capture observed in the same transaction.
+    pub async fn register_run_observation(
+        &self,
+        registration: RunObservationRegistration,
+    ) -> Result<RunObservation, RuntimeError> {
+        validate_request_identity(registration.request)?;
+        validate_id(registration.invocation_id)?;
+        validate_observation_text(&registration.function)?;
+        if let Some(source) = &registration.source_identity {
+            validate_observation_text(source)?;
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let request = request_status_tx(&tx, registration.request)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        if request.state != RequestState::Reserved {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let capture = capture_tx(&tx).await?;
+        let id = RunObservationId(*Uuid::new_v4().as_bytes());
+        tx.execute(
+            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 0, NULL, NULL)",
+            params![
+                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
+                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
+                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Starting),
+            ],
+        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.run_observation(id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)
+    }
+
+    /// Registers exactly one durable `sys.Stream` observation for a runtime
+    /// checkpoint key. The unique checkpoint binding prevents a stream row
+    /// from being paired with a different consumer/source/partition later.
+    pub async fn register_stream_observation(
+        &self,
+        registration: StreamObservationRegistration,
+    ) -> Result<StreamObservation, RuntimeError> {
+        validate_observation_text(&registration.producer)?;
+        if let Some(consumer) = &registration.consumer {
+            validate_observation_text(consumer)?;
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let capture = capture_tx(&tx).await?;
+        let run = load_run_observation_tx(&tx, registration.run, &capture)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        if run.status.is_terminal() || run.runtime_id != capture.runtime_id() {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        ensure_stream_checkpoint(&tx, &registration.checkpoint).await?;
+        let id = StreamObservationId(*Uuid::new_v4().as_bytes());
+        let key_id = stream_key_id(&registration.checkpoint);
+        let partition = registration.checkpoint.partition.as_str().to_owned();
+        tx.execute(
+            "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, ?10)",
+            params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
+                registration.checkpoint.consumer.canonical(), registration.checkpoint.source.as_str().to_owned(), partition,
+                stream_observation_status_code(StreamObservationStatus::Starting), now_ms()?],
+        ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.stream_observation(id)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)
+    }
+
+    /// Reads retained `sys.Run` observations. This method never starts,
+    /// resumes, recovers, or otherwise mutates an activation.
+    pub async fn run_observations(&self) -> Result<Vec<RunObservation>, RuntimeError> {
+        let capture = self.capture().await?;
+        load_run_observations(&self.connection, &capture).await
+    }
+
+    /// Reads the current-generation live subset for `sys.rt.runs`.
+    pub async fn runtime_run_observations(&self) -> Result<Vec<RunObservation>, RuntimeError> {
+        Ok(self
+            .run_observations()
+            .await?
+            .into_iter()
+            .filter(|row| row.live)
+            .collect())
+    }
+
+    /// Reads retained `sys.Stream` observations without mutating checkpoint or lease state.
+    pub async fn stream_observations(&self) -> Result<Vec<StreamObservation>, RuntimeError> {
+        let capture = self.capture().await?;
+        load_stream_observations(&self.connection, &capture).await
+    }
+
+    /// Reads the current-generation live subset for `sys.rt.streams`.
+    pub async fn runtime_stream_observations(
+        &self,
+    ) -> Result<Vec<StreamObservation>, RuntimeError> {
+        Ok(self
+            .stream_observations()
+            .await?
+            .into_iter()
+            .filter(|row| row.live)
+            .collect())
+    }
+
+    pub async fn run_observation(
+        &self,
+        id: RunObservationId,
+    ) -> Result<Option<RunObservation>, RuntimeError> {
+        let capture = self.capture().await?;
+        load_run_observation_tx(&self.connection, id, &capture).await
+    }
+
+    pub async fn stream_observation(
+        &self,
+        id: StreamObservationId,
+    ) -> Result<Option<StreamObservation>, RuntimeError> {
+        let capture = self.capture().await?;
+        load_stream_observation_tx(&self.connection, id, &capture).await
     }
 
     /// Atomically closes durable admission for one session under the current
@@ -1742,6 +2051,13 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        sync_stream_observation_event_tx(
+            &transaction,
+            &expected.key,
+            StreamObservationStatus::BackingOff,
+            Some(diagnostic),
+        )
+        .await?;
         transaction
             .commit()
             .await
@@ -1771,6 +2087,32 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records a terminal runner outcome that has no delivery lease (for
+    /// example finite exhaustion or cancellation before admission). The
+    /// observation update is still writer-fenced and committed atomically.
+    async fn complete_stream_observation(
+        &self,
+        writer: WriterLease,
+        key: &CheckpointKey,
+        status: StreamObservationStatus,
+    ) -> Result<(), RuntimeError> {
+        debug_assert!(matches!(
+            status,
+            StreamObservationStatus::Completed | StreamObservationStatus::Cancelled
+        ));
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, writer).await?;
+        sync_stream_observation_event_tx(&transaction, key, status, None).await?;
         transaction
             .commit()
             .await
@@ -1817,6 +2159,7 @@ impl RuntimeState {
         let result =
             apply_stream_intent_tx(&transaction, CommitIntent::Fail { lease, diagnostic }).await?;
         if let CommitResult::Failed { failure } = &result {
+            sync_stream_observation_tx(&transaction, &result).await?;
             faults.check(FaultPoint::AfterFailureRecord)?;
             transaction
                 .execute(
@@ -1906,6 +2249,13 @@ impl RuntimeState {
             Ok(poll) => poll,
             Err(diagnostic) => {
                 if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
+                    self.complete_stream_observation(
+                        writer,
+                        key,
+                        StreamObservationStatus::Cancelled,
+                    )
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
                     return Ok(StreamStep::Cancelled { checkpoint });
                 }
                 self.record_stream_provider_failure(writer, &checkpoint, diagnostic)
@@ -1915,6 +2265,13 @@ impl RuntimeState {
                     self.clear_stream_provider_failure(writer, key)
                         .await
                         .map_err(StreamStepError::Runtime)?;
+                    self.complete_stream_observation(
+                        writer,
+                        key,
+                        StreamObservationStatus::Cancelled,
+                    )
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
                     return Ok(StreamStep::Cancelled { checkpoint });
                 }
                 return Err(StreamStepError::Provider(diagnostic));
@@ -1933,11 +2290,17 @@ impl RuntimeState {
             ));
         }
         if control.cancelled() {
+            self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                .await
+                .map_err(StreamStepError::Runtime)?;
             return Ok(StreamStep::Cancelled { checkpoint });
         }
         let expected = CheckpointPrecondition::from(&checkpoint);
         let lease = {
             if !control.acquire_admission() {
+                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
                 return Ok(StreamStep::Cancelled { checkpoint });
             }
             let _permit = AdmissionPermit(control);
@@ -2104,6 +2467,9 @@ impl RuntimeState {
         let mut delivered = 0;
         loop {
             if control.cancelled() {
+                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
                 return Ok(StreamRunOutcome::Cancelled {
                     delivered,
                     checkpoint,
@@ -2116,6 +2482,13 @@ impl RuntimeState {
                 StreamStep::Waiting => {
                     if let Err(diagnostic) = source.wait(control as &dyn StreamRunControl).await {
                         if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
+                            self.complete_stream_observation(
+                                writer,
+                                key,
+                                StreamObservationStatus::Cancelled,
+                            )
+                            .await
+                            .map_err(StreamStepError::Runtime)?;
                             return Ok(StreamRunOutcome::Cancelled {
                                 delivered,
                                 checkpoint,
@@ -2128,6 +2501,13 @@ impl RuntimeState {
                             self.clear_stream_provider_failure(writer, key)
                                 .await
                                 .map_err(StreamStepError::Runtime)?;
+                            self.complete_stream_observation(
+                                writer,
+                                key,
+                                StreamObservationStatus::Cancelled,
+                            )
+                            .await
+                            .map_err(StreamStepError::Runtime)?;
                             return Ok(StreamRunOutcome::Cancelled {
                                 delivered,
                                 checkpoint,
@@ -2137,6 +2517,13 @@ impl RuntimeState {
                     }
                 }
                 StreamStep::Exhausted => {
+                    self.complete_stream_observation(
+                        writer,
+                        key,
+                        StreamObservationStatus::Completed,
+                    )
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
                     return Ok(match source_descriptor.kind {
                         StreamSourceKind::Finite => StreamRunOutcome::Exhausted {
                             delivered,
@@ -2176,17 +2563,33 @@ impl RuntimeState {
         }
     }
 
-    async fn initialize(
-        &self,
+    async fn initialize_runtime_meta(
+        connection: &Connection,
         identity: RuntimeIdentity,
         digest: [u8; 32],
     ) -> Result<(), RuntimeError> {
         let runtime_id = *Uuid::new_v4().as_bytes();
-        self.connection.execute(
-            "INSERT INTO runtime_meta VALUES (1, ?1, ?2, ?3, 0, ?4) ON CONFLICT(singleton) DO NOTHING",
+        connection.execute(
+            "INSERT INTO runtime_meta (singleton, database_id, repository_id, runtime_id, generation, generation_digest)
+             VALUES (1, ?1, ?2, ?3, 0, ?4) ON CONFLICT(singleton) DO NOTHING",
             params![identity.database_id.to_vec(), identity.repository_id.to_vec(), runtime_id.to_vec(), digest.to_vec()],
         ).await.map_err(|_| RuntimeError::StorageUnavailable)?;
-        let stored = self.identity().await?;
+        let mut rows = connection
+            .query(
+                "SELECT database_id, repository_id FROM runtime_meta WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let stored = RuntimeIdentity {
+            database_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            repository_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        };
         if stored != identity {
             return Err(RuntimeError::InvalidIdentity);
         }
@@ -2687,6 +3090,7 @@ impl RuntimeState {
             },
         )
         .await?;
+        sync_stream_observation_tx(&tx, &result).await?;
         if matches!(result, CommitResult::Rejected(_)) {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
@@ -2753,6 +3157,7 @@ impl RuntimeState {
             },
         )
         .await?;
+        sync_stream_observation_tx(&tx, &result).await?;
         if matches!(result, CommitResult::Rejected(_)) {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
@@ -2803,6 +3208,7 @@ impl RuntimeState {
             },
         )
         .await?;
+        sync_stream_observation_tx(&tx, &result).await?;
         if matches!(result, CommitResult::ReplayFailed { .. }) {
             faults.check(FaultPoint::AfterReplayFailureRecord)?;
         }
@@ -3125,7 +3531,22 @@ impl RuntimeState {
         if self.latest_checkpoint().await?.as_ref() != Some(checkpoint) {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        self.connection.execute("INSERT INTO publication_freeze VALUES (?1, ?2, ?3, ?4, 1) ON CONFLICT(intent_id) DO NOTHING", params![intent_id.to_vec(), i64::try_from(checkpoint.generation).map_err(|_| RuntimeError::RecoveryInvalid)?, i64::try_from(checkpoint.mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?, checkpoint.digest.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.connection
+            .execute(
+                "INSERT INTO publication_freeze \
+                 (intent_id, checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest, frozen) \
+                 VALUES (?1, ?2, ?3, ?4, 1) ON CONFLICT(intent_id) DO NOTHING",
+                params![
+                    intent_id.to_vec(),
+                    i64::try_from(checkpoint.generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    i64::try_from(checkpoint.mutation_sequence)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    checkpoint.digest.to_vec(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         let stored = self
             .frozen_intent(intent_id)
             .await?
@@ -3139,7 +3560,200 @@ impl RuntimeState {
         })
     }
 
-    /// Records a verified publication and consumes only the frozen pending
+    /// Durably binds a freeze to one compact candidate before receipt
+    /// completion. Once bound, [`Self::complete_publication`] rejects the
+    /// freeze; only signed compact receipt completion may consume its prefix.
+    /// Repeating the exact binding is safe after restart.
+    pub async fn bind_compact_publication(
+        &self,
+        pending: &CompactPublicationPending,
+        freeze: &PublicationFreeze,
+    ) -> Result<(), RuntimeError> {
+        validate_id(freeze.intent_id)?;
+        validate_digest(freeze.checkpoint.digest)?;
+        if pending.runtime_intent_id() != freeze.intent_id
+            || pending.cleanup_watermark() != freeze.checkpoint.digest
+        {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query(
+                "SELECT checkpoint_generation, checkpoint_mutation_sequence, checkpoint_digest, \
+                 compact_watermark, compact_commit_id, compact_journal_verifier \
+                 FROM publication_freeze WHERE intent_id = ?1",
+                params![freeze.intent_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let stored = Checkpoint {
+            generation: u64::try_from(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            mutation_sequence: u64::try_from(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        };
+        if stored != freeze.checkpoint {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let commit: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        match (watermark, commit, verifier) {
+            (None, None, None) => {
+                transaction
+                    .execute(
+                        "UPDATE publication_freeze SET compact_watermark = ?1, \
+                         compact_commit_id = ?2, compact_journal_verifier = ?3 \
+                         WHERE intent_id = ?4",
+                        params![
+                            pending.cleanup_watermark().to_vec(),
+                            pending.commit().as_str().as_bytes().to_vec(),
+                            pending.journal_verifier().to_vec(),
+                            freeze.intent_id.to_vec(),
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
+            (Some(watermark), Some(commit), Some(verifier)) => {
+                if fixed::<32>(watermark)? != pending.cleanup_watermark()
+                    || commit != pending.commit().as_str().as_bytes()
+                    || fixed::<32>(verifier)? != pending.journal_verifier()
+                {
+                    return Err(RuntimeError::ConflictingPublicationIntent);
+                }
+            }
+            _ => return Err(RuntimeError::ConflictingPublicationIntent),
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Atomically signs and persists a compact publication receipt with the
+    /// candidate commit and deletion of only the frozen pending prefix.
+    ///
+    /// The returned receipt is stable across restart for one intent and
+    /// candidate. The signing key is runtime-owned durable state; callers
+    /// cannot supply signing or verification material.
+    pub async fn complete_compact_publication(
+        &self,
+        pending: &CompactPublicationPending,
+        freeze: &PublicationFreeze,
+    ) -> Result<CompactRuntimeReceipt, RuntimeError> {
+        validate_id(freeze.intent_id)?;
+        validate_digest(freeze.checkpoint.digest)?;
+        if pending.runtime_intent_id() != freeze.intent_id
+            || pending.cleanup_watermark() != freeze.checkpoint.digest
+        {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        self.bind_compact_publication(pending, freeze).await?;
+        let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let signing_bytes = CompactRuntimeReceipt::signing_bytes(
+            pending.runtime_intent_id(),
+            pending.cleanup_watermark(),
+            pending.commit(),
+            pending.journal_verifier(),
+        )
+        .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+        let signature = self
+            .compact_receipt_signing_key
+            .sign(&signing_bytes)
+            .to_bytes();
+        let receipt = CompactRuntimeReceipt::new(
+            pending.runtime_intent_id(),
+            pending.cleanup_watermark(),
+            pending.commit().clone(),
+            pending.journal_verifier(),
+            signature,
+        )
+        .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+        let encoded = receipt
+            .encode()
+            .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = tx
+            .query(
+                "SELECT commit_id, compact_receipt FROM publication_commit WHERE intent_id = ?1",
+                params![freeze.intent_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let commit: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if commit != pending.commit().as_str().as_bytes() {
+                return Err(RuntimeError::ConflictingPublicationCommit);
+            }
+            let encoded: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let existing = CompactRuntimeReceipt::decode(
+                encoded
+                    .as_deref()
+                    .ok_or(RuntimeError::InvalidCompactReceipt)?,
+            )
+            .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+            self.verify_compact_receipt(&existing)?;
+            if existing != receipt {
+                return Err(RuntimeError::ConflictingPublicationIntent);
+            }
+            tx.commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(existing);
+        }
+        tx.execute(
+            "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
+             VALUES (?1, ?2, ?3)",
+            params![
+                freeze.intent_id.to_vec(),
+                pending.commit().as_str().as_bytes().to_vec(),
+                encoded,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.execute(
+            "DELETE FROM pending_mutation WHERE sequence <= ?1",
+            params![upper],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(receipt)
+    }
+
+    /// Records a verified ordinary publication and consumes only the frozen
+    /// pending prefix. Compact publication must use
+    /// [`Self::complete_compact_publication`] so its signed receipt is
+    /// persisted in the same transaction.
     /// prefix. Repeating the same intent and commit is safe after restart;
     /// another commit for that intent is rejected.
     pub async fn complete_publication(
@@ -3155,6 +3769,28 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?;
         if stored != freeze.checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let mut binding = self
+            .connection
+            .query(
+                "SELECT compact_watermark, compact_commit_id, compact_journal_verifier \
+                 FROM publication_freeze WHERE intent_id = ?1",
+                params![freeze.intent_id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let binding = binding
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let watermark: Option<Vec<u8>> =
+            binding.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let commit: Option<Vec<u8>> = binding.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let verifier: Option<Vec<u8>> =
+            binding.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if watermark.is_some() || commit.is_some() || verifier.is_some() {
+            return Err(RuntimeError::CompactPublicationRequired);
         }
         let upper = i64::try_from(freeze.checkpoint.mutation_sequence)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -3329,6 +3965,7 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Running).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -3631,6 +4268,7 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
+        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -3705,6 +4343,7 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
+        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -3930,6 +4569,14 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        let observation_status = match next {
+            RequestState::Running => RunObservationStatus::Running,
+            RequestState::Completed => RunObservationStatus::Completed,
+            RequestState::Cancelled => RunObservationStatus::Cancelled,
+            RequestState::Orphaned => RunObservationStatus::Orphaned,
+            RequestState::Reserved => return Err(RuntimeError::RecoveryInvalid),
+        };
+        sync_run_request_state_tx(&tx, identity, observation_status).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4023,6 +4670,12 @@ impl RuntimeState {
         if changed != 1 {
             return Err(RuntimeError::RequestOwnerConflict);
         }
+        let observation_status = match next {
+            RequestState::Completed => RunObservationStatus::Completed,
+            RequestState::Cancelled => RunObservationStatus::Cancelled,
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        sync_run_request_state_tx(&tx, identity, observation_status).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4069,6 +4722,21 @@ impl RuntimeState {
             intent_id,
             checkpoint,
         })
+    }
+
+    fn verify_compact_receipt(&self, receipt: &CompactRuntimeReceipt) -> Result<(), RuntimeError> {
+        let payload = CompactRuntimeReceipt::signing_bytes(
+            receipt.runtime_intent_id(),
+            receipt.cleanup_watermark(),
+            receipt.commit(),
+            receipt.journal_verifier(),
+        )
+        .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+        let key =
+            VerifyingKey::from_bytes(&self.compact_receipt_signing_key.verifying_key().to_bytes())
+                .map_err(|_| RuntimeError::CompactReceiptKeyMismatch)?;
+        key.verify(&payload, &Signature::from_bytes(receipt.signature()))
+            .map_err(|_| RuntimeError::InvalidCompactReceipt)
     }
 
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
@@ -4232,7 +4900,9 @@ impl RuntimeState {
             .query(
                 "SELECT publication_freeze.intent_id, publication_freeze.checkpoint_generation, \
                  publication_freeze.checkpoint_mutation_sequence, publication_freeze.checkpoint_digest, \
-                 publication_freeze.frozen, checkpoint.generation \
+                 publication_freeze.frozen, checkpoint.generation, \
+                 publication_freeze.compact_watermark, publication_freeze.compact_commit_id, \
+                 publication_freeze.compact_journal_verifier \
                  FROM publication_freeze LEFT JOIN checkpoint ON checkpoint.generation = publication_freeze.checkpoint_generation \
                  AND checkpoint.mutation_sequence = publication_freeze.checkpoint_mutation_sequence \
                  AND checkpoint.digest = publication_freeze.checkpoint_digest",
@@ -4265,15 +4935,35 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let frozen: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let referenced: Option<i64> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let watermark: Option<Vec<u8>> =
+                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let commit: Option<Vec<u8>> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let verifier: Option<Vec<u8>> =
+                row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if generation == 0 || sequence == 0 || frozen != 1 || referenced.is_none() {
                 return Err(RuntimeError::RecoveryInvalid);
+            }
+            match (watermark, commit, verifier) {
+                (None, None, None) => {}
+                (Some(watermark), Some(commit), Some(verifier)) => {
+                    if fixed::<32>(watermark)?
+                        != fixed::<32>(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?
+                        || PublicationCommitId::new(commit).is_err()
+                        || fixed::<32>(verifier).is_err()
+                    {
+                        return Err(RuntimeError::RecoveryInvalid);
+                    }
+                }
+                _ => return Err(RuntimeError::RecoveryInvalid),
             }
         }
 
         let mut publications = self
             .connection
             .query(
-                "SELECT publication_commit.intent_id, publication_commit.commit_id, publication_freeze.intent_id \
+                "SELECT publication_commit.intent_id, publication_commit.commit_id, publication_commit.compact_receipt, publication_freeze.intent_id, \
+                 publication_freeze.compact_watermark, publication_freeze.compact_commit_id, \
+                 publication_freeze.compact_journal_verifier, publication_freeze.checkpoint_digest \
                  FROM publication_commit LEFT JOIN publication_freeze \
                  ON publication_freeze.intent_id = publication_commit.intent_id",
                 (),
@@ -4285,17 +4975,43 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            validate_id(fixed(
-                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )?)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            PublicationCommitId::new(
+            let intent_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            validate_id(intent_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let commit = PublicationCommitId::new(
                 row.get::<Vec<u8>>(1)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let receipt: Option<Vec<u8>> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let watermark: Option<Vec<u8>> =
+                row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let bound_commit: Option<Vec<u8>> =
+                row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let verifier: Option<Vec<u8>> =
+                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let freeze_digest: [u8; 32] =
+                fixed(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            match (receipt, watermark, bound_commit, verifier) {
+                (Some(receipt), Some(watermark), Some(bound_commit), Some(verifier)) => {
+                    let receipt = CompactRuntimeReceipt::decode(&receipt)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+                    if receipt.runtime_intent_id() != intent_id
+                        || receipt.commit().as_str().as_bytes() != commit.as_bytes()
+                        || receipt.cleanup_watermark() != fixed::<32>(watermark)?
+                        || receipt.cleanup_watermark() != freeze_digest
+                        || receipt.commit().as_str().as_bytes() != bound_commit
+                        || receipt.journal_verifier() != fixed::<32>(verifier)?
+                    {
+                        return Err(RuntimeError::RecoveryInvalid);
+                    }
+                    self.verify_compact_receipt(&receipt)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+                }
+                (None, None, None, None) => {}
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            }
             validate_id(fixed(
-                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
         }
@@ -4659,6 +5375,496 @@ fn stream_key_id(key: &CheckpointKey) -> String {
 
 fn stream_identity_id(identity: &FailureIdentity) -> String {
     identity.0.canonical()
+}
+
+impl RunObservationStatus {
+    const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Orphaned
+        )
+    }
+}
+
+const fn run_status_code(status: RunObservationStatus) -> i64 {
+    match status {
+        RunObservationStatus::Starting => 1,
+        RunObservationStatus::Running => 2,
+        RunObservationStatus::Completed => 3,
+        RunObservationStatus::Failed => 4,
+        RunObservationStatus::Cancelled => 5,
+        RunObservationStatus::Orphaned => 6,
+    }
+}
+
+fn decode_run_status(value: i64) -> Result<RunObservationStatus, RuntimeError> {
+    match value {
+        1 => Ok(RunObservationStatus::Starting),
+        2 => Ok(RunObservationStatus::Running),
+        3 => Ok(RunObservationStatus::Completed),
+        4 => Ok(RunObservationStatus::Failed),
+        5 => Ok(RunObservationStatus::Cancelled),
+        6 => Ok(RunObservationStatus::Orphaned),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+const fn stream_observation_status_code(status: StreamObservationStatus) -> i64 {
+    match status {
+        StreamObservationStatus::Starting => 1,
+        StreamObservationStatus::Running => 2,
+        StreamObservationStatus::Paused => 3,
+        StreamObservationStatus::BackingOff => 4,
+        StreamObservationStatus::Completed => 5,
+        StreamObservationStatus::Failed => 6,
+        StreamObservationStatus::Cancelled => 7,
+        StreamObservationStatus::Orphaned => 8,
+    }
+}
+
+fn decode_stream_observation_status(value: i64) -> Result<StreamObservationStatus, RuntimeError> {
+    match value {
+        1 => Ok(StreamObservationStatus::Starting),
+        2 => Ok(StreamObservationStatus::Running),
+        3 => Ok(StreamObservationStatus::Paused),
+        4 => Ok(StreamObservationStatus::BackingOff),
+        5 => Ok(StreamObservationStatus::Completed),
+        6 => Ok(StreamObservationStatus::Failed),
+        7 => Ok(StreamObservationStatus::Cancelled),
+        8 => Ok(StreamObservationStatus::Orphaned),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn validate_observation_text(value: &str) -> Result<(), RuntimeError> {
+    if value.is_empty() || value.len() > 16 * 1024 || value.bytes().any(|byte| byte == 0) {
+        return Err(RuntimeError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn now_ms() -> Result<i64, RuntimeError> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .as_millis(),
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn bigint_to_i64(value: &BigInt) -> Result<i64, RuntimeError> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn encode_capture(capture: &CwdCapture) -> Result<Vec<u8>, RuntimeError> {
+    Value::new(capture.snapshot().raw())
+        .and_then(|value| value.encode())
+        .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_capture(bytes: Vec<u8>, digest: [u8; 32]) -> Result<CwdCapture, RuntimeError> {
+    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot = Snapshot::decode(value.raw()).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn decode_consumer_identity(value: &str) -> Result<ConsumerIdentity, RuntimeError> {
+    let parts = value.split('|').collect::<Vec<_>>();
+    if parts.len() != 5 || parts[0] != "consumer/v1" {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(ConsumerIdentity {
+        principal: decode_component(parts[1].to_owned())?,
+        root: decode_component(parts[2].to_owned())?,
+        function: decode_component(parts[3].to_owned())?,
+        binding: decode_component(parts[4].to_owned())?,
+    })
+}
+
+async fn load_run_observations(
+    connection: &Connection,
+    capture: &CwdCapture,
+) -> Result<Vec<RunObservation>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT run_id FROM sys_run_observation ORDER BY started_ms, run_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut observations = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let id = RunObservationId(fixed(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?);
+        observations.push(
+            load_run_observation_tx(connection, id, capture)
+                .await?
+                .ok_or(RuntimeError::RecoveryInvalid)?,
+        );
+    }
+    Ok(observations)
+}
+
+async fn load_run_observation_tx(
+    connection: &Connection,
+    id: RunObservationId,
+    capture: &CwdCapture,
+) -> Result<Option<RunObservation>, RuntimeError> {
+    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let snapshot_bytes: Vec<u8> = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot_digest = fixed(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation = row
+        .get::<i64>(9)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot = decode_capture(snapshot_bytes, snapshot_digest)?;
+    if snapshot.runtime_id() != runtime_id || bigint_to_i64(snapshot.generation())? != generation {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let code: Option<i64> = row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let class: Option<i64> = row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let diagnostic = match (code, class) {
+        (Some(code), Some(class)) => Some(SafeDiagnostic {
+            code: decode_code(code)?,
+            class: decode_class(class)?,
+        }),
+        (None, None) => None,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let status = decode_run_status(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    Ok(Some(RunObservation {
+        id,
+        request: RequestIdentity {
+            session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            request_id: fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        },
+        consumer_identity: decode_consumer_identity(&row_text(&row, 2)?)?,
+        function: row_text(&row, 3)?,
+        source_identity: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        snapshot,
+        runtime_id,
+        invocation_id: fixed(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        status,
+        checkpoint_count: decode_u64(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        diagnostic,
+        live: runtime_id == capture.runtime_id()
+            && generation == bigint_to_i64(capture.generation())?
+            && !status.is_terminal(),
+    }))
+}
+
+async fn load_stream_observations(
+    connection: &Connection,
+    capture: &CwdCapture,
+) -> Result<Vec<StreamObservation>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT stream_id FROM sys_stream_observation ORDER BY observed_ms, stream_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut observations = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let id = StreamObservationId(fixed(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?);
+        observations.push(
+            load_stream_observation_tx(connection, id, capture)
+                .await?
+                .ok_or(RuntimeError::RecoveryInvalid)?,
+        );
+    }
+    Ok(observations)
+}
+
+async fn load_stream_observation_tx(
+    connection: &Connection,
+    id: StreamObservationId,
+    capture: &CwdCapture,
+) -> Result<Option<StreamObservation>, RuntimeError> {
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = CheckpointKey {
+        consumer: ConsumerIdentity {
+            principal: decode_component(row_text(&row, 9)?)?,
+            root: decode_component(row_text(&row, 10)?)?,
+            function: decode_component(row_text(&row, 11)?)?,
+            binding: decode_component(row_text(&row, 12)?)?,
+        },
+        source_format: decode_component(row_text(&row, 13)?)?,
+        source: decode_component(row_text(&row, 14)?)?,
+        partition_format: decode_component(row_text(&row, 15)?)?,
+        partition: decode_component(row_text(&row, 16)?)?,
+        position_format: decode_component(row_text(&row, 17)?)?,
+    };
+    let code: Option<i64> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let class: Option<i64> = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let diagnostic = match (code, class) {
+        (Some(code), Some(class)) => Some(SafeDiagnostic {
+            code: decode_code(code)?,
+            class: decode_class(class)?,
+        }),
+        (None, None) => None,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let status =
+        decode_stream_observation_status(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let run_status = decode_run_status(row.get(20).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(18).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation: i64 = row.get(19).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    Ok(Some(StreamObservation {
+        id,
+        run: RunObservationId(fixed(
+            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?),
+        producer: row_text(&row, 1)?,
+        consumer: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        checkpoint,
+        status,
+        items_seen: decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        items_committed: decode_u64(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        items_failed: decode_u64(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        diagnostic,
+        live: runtime_id == capture.runtime_id()
+            && generation == bigint_to_i64(capture.generation())?
+            && !run_status.is_terminal()
+            && !matches!(
+                status,
+                StreamObservationStatus::Completed
+                    | StreamObservationStatus::Failed
+                    | StreamObservationStatus::Cancelled
+                    | StreamObservationStatus::Orphaned
+            ),
+    }))
+}
+
+async fn sync_stream_observation_tx(
+    connection: &Connection,
+    result: &CommitResult,
+) -> Result<(), RuntimeError> {
+    let (key, status, seen, committed, failed, diagnostic, checkpoint, advances_checkpoint) =
+        match result {
+            CommitResult::Acquired { lease } => (
+                lease.delivery.checkpoint_key(),
+                Some(StreamObservationStatus::Running),
+                1_i64,
+                0,
+                0,
+                None,
+                None,
+                false,
+            ),
+            CommitResult::CheckpointAdvanced { checkpoint } => (
+                checkpoint.key.clone(),
+                Some(StreamObservationStatus::Running),
+                0,
+                1,
+                0,
+                None,
+                Some(checkpoint.version),
+                true,
+            ),
+            CommitResult::Failed { failure } => (
+                failure.identity.0.checkpoint_key(),
+                Some(StreamObservationStatus::Failed),
+                0,
+                0,
+                1,
+                Some(failure.diagnostic),
+                None,
+                false,
+            ),
+            CommitResult::RetryScheduled { failure } => (
+                failure.identity.0.checkpoint_key(),
+                Some(StreamObservationStatus::BackingOff),
+                0,
+                0,
+                0,
+                Some(failure.diagnostic),
+                None,
+                false,
+            ),
+            CommitResult::ReplayGranted { grant } => (
+                grant.failure.0.checkpoint_key(),
+                Some(StreamObservationStatus::BackingOff),
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+            ),
+            CommitResult::ReplayCompleted { failure } | CommitResult::Resolved { failure } => (
+                failure.identity.0.checkpoint_key(),
+                Some(StreamObservationStatus::Running),
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+            ),
+            CommitResult::ReplayFailed { failure } => (
+                failure.identity.0.checkpoint_key(),
+                Some(StreamObservationStatus::Failed),
+                0,
+                0,
+                0,
+                Some(failure.diagnostic),
+                None,
+                false,
+            ),
+            CommitResult::Cancelled { checkpoint, .. } => (
+                checkpoint.key.clone(),
+                Some(StreamObservationStatus::Cancelled),
+                0,
+                0,
+                0,
+                None,
+                Some(checkpoint.version),
+                false,
+            ),
+            CommitResult::CheckpointReset { checkpoint } => (
+                checkpoint.key.clone(),
+                Some(StreamObservationStatus::Running),
+                0,
+                0,
+                0,
+                None,
+                Some(checkpoint.version),
+                false,
+            ),
+            CommitResult::StreamStatusChanged { state, .. } => (
+                state.key.clone(),
+                Some(match state.status {
+                    StreamStatus::Running => StreamObservationStatus::Running,
+                    StreamStatus::Paused => StreamObservationStatus::Paused,
+                }),
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+            ),
+            CommitResult::PausePending { state, .. } => (
+                state.key.clone(),
+                Some(StreamObservationStatus::Running),
+                0,
+                0,
+                0,
+                None,
+                None,
+                false,
+            ),
+            _ => return Ok(()),
+        };
+    let changed = sync_stream_observation_update_tx(
+        connection,
+        &key,
+        StreamObservationUpdate {
+            status,
+            seen,
+            committed,
+            failed,
+            diagnostic,
+            checkpoint,
+        },
+    )
+    .await?;
+    if advances_checkpoint && changed != 0 {
+        connection
+            .execute(
+                "UPDATE sys_run_observation SET checkpoint_count = checkpoint_count + 1
+                 WHERE run_id = (SELECT run_id FROM sys_stream_observation WHERE checkpoint_key_id = ?1)",
+                params![stream_key_id(&key)],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    Ok(())
+}
+
+async fn sync_stream_observation_event_tx(
+    connection: &Connection,
+    key: &CheckpointKey,
+    status: StreamObservationStatus,
+    diagnostic: Option<SafeDiagnostic>,
+) -> Result<(), RuntimeError> {
+    sync_stream_observation_update_tx(
+        connection,
+        key,
+        StreamObservationUpdate {
+            status: Some(status),
+            seen: 0,
+            committed: 0,
+            failed: 0,
+            diagnostic,
+            checkpoint: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+struct StreamObservationUpdate {
+    status: Option<StreamObservationStatus>,
+    seen: i64,
+    committed: i64,
+    failed: i64,
+    diagnostic: Option<SafeDiagnostic>,
+    checkpoint: Option<u64>,
+}
+
+async fn sync_stream_observation_update_tx(
+    connection: &Connection,
+    key: &CheckpointKey,
+    update: StreamObservationUpdate,
+) -> Result<u64, RuntimeError> {
+    let code = update.diagnostic.map(|value| encode_code(value.code));
+    let class = update.diagnostic.map(|value| encode_class(value.class));
+    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?7 ELSE last_item_ms END, diagnostic_code = COALESCE(?8, diagnostic_code), diagnostic_class = COALESCE(?9, diagnostic_class), observed_ms = ?7 WHERE checkpoint_key_id = ?1", params![stream_key_id(key), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, now_ms()?, code, class]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(changed)
+}
+
+async fn sync_run_request_state_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+    status: RunObservationStatus,
+) -> Result<(), RuntimeError> {
+    let now = now_ms()?;
+    connection.execute("UPDATE sys_run_observation SET status = ?1, ended_ms = CASE WHEN ?2 THEN ?3 ELSE ended_ms END WHERE session_id = ?4 AND request_id = ?5 AND status IN (?6, ?7)", params![run_status_code(status), status.is_terminal(), now, identity.session_id.to_vec(), identity.request_id.to_vec(), run_status_code(RunObservationStatus::Starting), run_status_code(RunObservationStatus::Running)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    if status.is_terminal() {
+        connection.execute("UPDATE sys_stream_observation SET status = ?1, observed_ms = ?2 WHERE run_id IN (SELECT run_id FROM sys_run_observation WHERE session_id = ?3 AND request_id = ?4) AND status IN (?5, ?6, ?7, ?8)", params![stream_observation_status_code(StreamObservationStatus::Orphaned), now, identity.session_id.to_vec(), identity.request_id.to_vec(), stream_observation_status_code(StreamObservationStatus::Starting), stream_observation_status_code(StreamObservationStatus::Running), stream_observation_status_code(StreamObservationStatus::Paused), stream_observation_status_code(StreamObservationStatus::BackingOff)]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    Ok(())
 }
 
 async fn load_stream_provider_failure(
@@ -5212,6 +6418,7 @@ async fn apply_stream_intent(
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
+            sync_stream_observation_tx(&transaction, &result).await?;
             transaction
                 .commit()
                 .await
@@ -6413,6 +7620,218 @@ async fn append_mutations_tx(
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     faults.check(FaultPoint::AfterCapture)?;
     capture_tx(connection).await
+}
+
+async fn migrate_compact_receipt_schema(connection: &Connection) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = transaction
+        .query("PRAGMA table_info(runtime_meta)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut runtime_meta_columns = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        runtime_meta_columns.insert(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            (),
+        );
+    }
+    for (column, statement) in [
+        (
+            "compact_receipt_seed",
+            "ALTER TABLE runtime_meta ADD COLUMN compact_receipt_seed BLOB",
+        ),
+        (
+            "compact_receipt_public_key",
+            "ALTER TABLE runtime_meta ADD COLUMN compact_receipt_public_key BLOB",
+        ),
+    ] {
+        if !runtime_meta_columns.contains_key(column) {
+            transaction
+                .execute(statement, ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+    }
+    let mut rows = transaction
+        .query("PRAGMA table_info(publication_commit)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut publication_columns = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        publication_columns.insert(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            (),
+        );
+    }
+    if !publication_columns.contains_key("compact_receipt") {
+        transaction
+            .execute(
+                "ALTER TABLE publication_commit ADD COLUMN compact_receipt BLOB",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    let mut rows = transaction
+        .query("PRAGMA table_info(publication_freeze)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut freeze_columns = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        freeze_columns.insert(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            (),
+        );
+    }
+    for (column, statement) in [
+        (
+            "compact_watermark",
+            "ALTER TABLE publication_freeze ADD COLUMN compact_watermark BLOB",
+        ),
+        (
+            "compact_commit_id",
+            "ALTER TABLE publication_freeze ADD COLUMN compact_commit_id BLOB",
+        ),
+        (
+            "compact_journal_verifier",
+            "ALTER TABLE publication_freeze ADD COLUMN compact_journal_verifier BLOB",
+        ),
+    ] {
+        if !freeze_columns.contains_key(column) {
+            transaction
+                .execute(statement, ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+    }
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+             VALUES ('compact-runtime-receipt-v1')",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
+async fn initialize_compact_receipt_key(
+    connection: &Connection,
+) -> Result<(SigningKey, [u8; 32]), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = transaction
+        .query(
+            "SELECT compact_receipt_seed, compact_receipt_public_key
+             FROM runtime_meta WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let seed: Option<Vec<u8>> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let public_key: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let (key, public_key) = match (seed, public_key) {
+        (Some(seed), Some(public_key)) => {
+            let seed = fixed(seed)?;
+            let public_key = fixed(public_key)?;
+            let key = SigningKey::from_bytes(&seed);
+            if key.verifying_key().to_bytes() != public_key {
+                return Err(RuntimeError::CompactReceiptKeyMismatch);
+            }
+            (key, public_key)
+        }
+        (None, None) => {
+            let seed = compact_receipt_seed();
+            let key = SigningKey::from_bytes(&seed);
+            let public_key = key.verifying_key().to_bytes();
+            let changed = transaction
+                .execute(
+                    "UPDATE runtime_meta
+                     SET compact_receipt_seed = ?1, compact_receipt_public_key = ?2
+                     WHERE singleton = 1
+                       AND compact_receipt_seed IS NULL
+                       AND compact_receipt_public_key IS NULL",
+                    params![seed.to_vec(), public_key.to_vec()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            if changed != 1 {
+                return Err(RuntimeError::CompactReceiptKeyMismatch);
+            }
+            (key, public_key)
+        }
+        _ => return Err(RuntimeError::CompactReceiptKeyMismatch),
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok((key, public_key))
+}
+
+fn compact_receipt_seed() -> [u8; 32] {
+    let mut seed = [0_u8; 32];
+    seed[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    seed[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    seed
+}
+
+fn initialize_compact_receipt_public_key(
+    path: &Path,
+    expected: [u8; 32],
+) -> Result<(), RuntimeError> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(&expected)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|_| RuntimeError::StorageUnavailable)?;
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() != 32
+            {
+                return Err(RuntimeError::CompactReceiptKeyMismatch);
+            }
+            let actual = fs::read(path).map_err(|_| RuntimeError::StorageUnavailable)?;
+            if actual.as_slice() != expected {
+                return Err(RuntimeError::CompactReceiptKeyMismatch);
+            }
+            Ok(())
+        }
+        Err(_) => Err(RuntimeError::StorageUnavailable),
+    }
 }
 
 fn fixed<const N: usize>(value: Vec<u8>) -> Result<[u8; N], RuntimeError> {
@@ -10974,6 +12393,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_receipt_key_is_create_once_and_rejects_replacement() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let path = repo.runtime_paths().compact_runtime_receipt_public_key();
+        let first = fs::read(&path).unwrap();
+        assert_eq!(first.len(), 32);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(fs::read(&path).unwrap(), first);
+        drop(reopened);
+
+        fs::write(&path, [9_u8; 32]).unwrap();
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::CompactReceiptKeyMismatch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn compact_receipt_encoding_round_trips_the_runtime_signature() {
+        let (_temp, repo) = repository();
+        git(repo.worktree(), &["commit", "--allow-empty", "-m", "root"]);
+        let state = open_state(&repo).await;
+        let commit = repo.head().unwrap().unwrap();
+        let signing_bytes =
+            CompactRuntimeReceipt::signing_bytes(id(7), digest(8), &commit, digest(9)).unwrap();
+        let receipt = CompactRuntimeReceipt::new(
+            id(7),
+            digest(8),
+            commit,
+            digest(9),
+            state
+                .compact_receipt_signing_key
+                .sign(&signing_bytes)
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            CompactRuntimeReceipt::decode(&receipt.encode().unwrap()).unwrap(),
+            receipt
+        );
+    }
+
+    #[tokio::test]
     async fn publication_completion_consumes_only_the_frozen_pending_prefix() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -11030,6 +12502,135 @@ mod tests {
         let reopened = open_state(&repo).await;
         reopened.validate_recovery().await.unwrap();
         assert_eq!(reopened.pending().await.unwrap(), vec![mutation(8)]);
+    }
+
+    #[tokio::test]
+    async fn ordinary_completion_rejects_a_compact_bound_freeze_without_consuming_its_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let first_capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &first_capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        let freeze = state
+            .freeze(
+                id(7),
+                &Checkpoint {
+                    generation: 1,
+                    digest: digest(6),
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let second_capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &second_capture, &mutation(8), digest(9), &NoFault)
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE publication_freeze SET compact_watermark = ?1, compact_commit_id = ?2, \
+                 compact_journal_verifier = ?3 WHERE intent_id = ?4",
+                params![
+                    freeze.checkpoint.digest.to_vec(),
+                    vec![b'a'; 40],
+                    digest(10).to_vec(),
+                    freeze.intent_id.to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap(),)
+                .await,
+            Err(RuntimeError::CompactPublicationRequired)
+        );
+        assert_eq!(
+            state.pending().await.unwrap(),
+            vec![mutation(5), mutation(8)]
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_malformed_or_incorrectly_signed_compact_receipts() {
+        let (_temp, repo) = repository();
+        git(repo.worktree(), &["commit", "--allow-empty", "-m", "root"]);
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &capture, &mutation(5), digest(6), &NoFault)
+            .await
+            .unwrap();
+        let freeze = state
+            .freeze(
+                id(7),
+                &Checkpoint {
+                    generation: 1,
+                    digest: digest(6),
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let commit = repo.head().unwrap().unwrap();
+        let receipt = CompactRuntimeReceipt::new(
+            freeze.intent_id,
+            freeze.checkpoint.digest,
+            commit.clone(),
+            digest(8),
+            [0; 64],
+        )
+        .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE publication_freeze SET compact_watermark = ?1, compact_commit_id = ?2, \
+                 compact_journal_verifier = ?3 WHERE intent_id = ?4",
+                params![
+                    freeze.checkpoint.digest.to_vec(),
+                    commit.as_str().as_bytes().to_vec(),
+                    digest(8).to_vec(),
+                    freeze.intent_id.to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt) \
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    freeze.intent_id.to_vec(),
+                    commit.as_str().as_bytes().to_vec(),
+                    receipt.encode().unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE publication_commit SET compact_receipt = ?1 WHERE intent_id = ?2",
+                params![vec![0_u8], freeze.intent_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.validate_recovery().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
     }
     #[tokio::test]
     async fn duplicate_request_reservation_is_idempotent() {
@@ -11924,5 +13525,359 @@ mod tests {
             first.capture().await.unwrap().runtime_id(),
             second.capture().await.unwrap().runtime_id()
         );
+    }
+
+    #[tokio::test]
+    async fn run_observation_reopens_with_its_pinned_snapshot_and_identity() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(31, 32);
+        state.reserve_request(request, digest(33)).await.unwrap();
+        let consumer = stream_delivery("one", "two").consumer;
+        let registered = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: consumer,
+                function: "pkg.main".into(),
+                source_identity: Some("source-a".into()),
+                invocation_id: id(34),
+            })
+            .await
+            .unwrap();
+        let id = registered.id;
+        let pin = registered.snapshot.clone();
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let restored = reopened.run_observation(id).await.unwrap().unwrap();
+        assert_eq!(restored.id, id);
+        assert_eq!(restored.snapshot, pin);
+        assert_eq!(restored.status, RunObservationStatus::Starting);
+        assert!(restored.live);
+    }
+
+    #[tokio::test]
+    async fn stream_observation_rejects_cross_run_checkpoint_rebinding_and_projection_is_read_only()
+    {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let key = stream_delivery("one", "two").checkpoint_key();
+        let mut runs = Vec::new();
+        for (session, request_id, invocation) in [(35, 36, 37), (38, 39, 40)] {
+            let request = request(session, request_id);
+            state
+                .reserve_request(request, digest(request_id))
+                .await
+                .unwrap();
+            runs.push(
+                state
+                    .register_run_observation(RunObservationRegistration {
+                        request,
+                        consumer_identity: key.consumer.clone(),
+                        function: "pkg.consume".into(),
+                        source_identity: None,
+                        invocation_id: id(invocation),
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        let first = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: runs[0].id,
+                producer: "source-object".into(),
+                consumer: Some("pkg.consume".into()),
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            state
+                .register_stream_observation(StreamObservationRegistration {
+                    run: runs[1].id,
+                    producer: "source-object".into(),
+                    consumer: Some("pkg.consume".into()),
+                    checkpoint: key.clone(),
+                })
+                .await,
+            Err(RuntimeError::StorageUnavailable)
+        ));
+        let before = state.stream_checkpoint(&key).await.unwrap();
+        assert_eq!(
+            state
+                .stream_observation(first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .items_seen,
+            0
+        );
+        assert_eq!(state.runtime_stream_observations().await.unwrap().len(), 1);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn old_generation_run_is_retained_but_not_live() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(48, 49);
+        state.reserve_request(request, digest(50)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: stream_delivery("one", "two").consumer,
+                function: "pkg.main".into(),
+                source_identity: None,
+                invocation_id: id(51),
+            })
+            .await
+            .unwrap();
+        let lease = state.acquire_lease(id(52)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(lease, &capture, &mutation(53), digest(54), &NoFault)
+            .await
+            .unwrap();
+        let retained = state.run_observation(run.id).await.unwrap().unwrap();
+        assert!(!retained.live);
+        assert_eq!(state.run_observations().await.unwrap().len(), 1);
+        assert!(state.runtime_run_observations().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn observation_counters_follow_checkpoint_and_owner_loss_orphans_the_run() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(41, 42);
+        let fingerprint = digest(43);
+        state.reserve_request(request, fingerprint).await.unwrap();
+        let key = stream_delivery("one", "two").checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(44),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let owner = state.acquire_lease(id(45)).await.unwrap();
+        state
+            .start_request_with_owner(request, fingerprint, owner)
+            .await
+            .unwrap();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut backend = state.stream_backend(owner);
+        let lease = match backend
+            .apply_async(CommitIntent::Acquire {
+                delivery: stream_delivery("one", "two"),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert!(matches!(
+            backend
+                .apply_async(CommitIntent::Complete { lease, expected })
+                .await
+                .unwrap(),
+            CommitResult::CheckpointAdvanced { .. }
+        ));
+        let observed = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                observed.items_seen,
+                observed.items_committed,
+                observed.items_failed
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            state
+                .run_observation(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_count,
+            1
+        );
+        let fence = state.recover_abandoned(id(45), id(46)).await.unwrap();
+        state
+            .recover_running_request(
+                request,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(47),
+            )
+            .await
+            .unwrap();
+        let orphaned = state.run_observation(run.id).await.unwrap().unwrap();
+        assert_eq!(orphaned.status, RunObservationStatus::Orphaned);
+        assert!(!orphaned.live);
+        assert_eq!(state.runtime_run_observations().await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn observation_checkpoint_counter_rolls_back_and_cancellation_is_not_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(61)).await.unwrap();
+        let request = request(62, 63);
+        state.reserve_request(request, digest(64)).await.unwrap();
+        let key =
+            stream_delivery("observation-fault:one", "observation-fault:two").checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(65),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let delivery = stream_delivery("observation-fault:one", "observation-fault:two");
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected acquisition: {other:?}"),
+        };
+        let capture = state.capture().await.unwrap();
+        assert_eq!(
+            state
+                .commit_stream_delivery(StreamDeliveryCommit {
+                    writer,
+                    expected_capture: &capture,
+                    mutations: &[mutation(66)],
+                    next_digest: digest(67),
+                    delivery: lease.clone(),
+                    expected_stream: expected,
+                    faults: &Fail(FaultPoint::AfterCheckpoint),
+                })
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterCheckpoint))
+        );
+        let after_fault = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(
+            (after_fault.items_seen, after_fault.items_committed),
+            (1, 0)
+        );
+        assert_eq!(
+            state
+                .run_observation(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_count,
+            0
+        );
+
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Cancel { lease })
+                .await
+                .unwrap(),
+            CommitResult::Cancelled { .. }
+        ));
+        let cancelled = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, StreamObservationStatus::Cancelled);
+        assert_eq!(cancelled.items_failed, 0);
+        assert_eq!(cancelled.diagnostic, None);
+    }
+
+    #[tokio::test]
+    async fn finite_stream_exhaustion_completes_its_durable_observation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(71)).await.unwrap();
+        let request = request(72, 73);
+        state.reserve_request(request, digest(74)).await.unwrap();
+        let key =
+            stream_delivery("observation-finite:one", "observation-finite:two").checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(75),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let mut source = SequenceSource {
+            key,
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Exhausted]),
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(
+                    writer,
+                    &source.key.clone(),
+                    &mut source,
+                    &mut handler,
+                    &NeverCancelled
+                )
+                .await
+                .unwrap(),
+            StreamRunOutcome::Exhausted { delivered: 0, .. }
+        ));
+        let completed = state.stream_observation(stream.id).await.unwrap().unwrap();
+        assert_eq!(completed.status, StreamObservationStatus::Completed);
+        assert!(!completed.live);
     }
 }
