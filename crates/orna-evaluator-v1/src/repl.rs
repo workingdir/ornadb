@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::CanonicalValue;
-use orna_syntax_v1::{Declaration, Expr, Pattern, ReplInput, UseTail, parse_repl};
+use orna_syntax_v1::{
+    AssignmentTarget, Declaration, Expr, Pattern, ReplInput, Statement, UseTail, parse_repl,
+};
 use orna_value_v1::Raw;
 
 use crate::{
@@ -22,6 +24,8 @@ pub struct ReplSession {
     environment: Environment,
     functions: Functions,
     aliases: BTreeMap<String, String>,
+    wildcard_bindings: BTreeMap<String, String>,
+    wildcard_ambiguities: BTreeMap<String, BTreeSet<String>>,
     session_functions: BTreeSet<String>,
     namespace_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
@@ -49,6 +53,8 @@ impl ReplSession {
             environment: Environment::new(),
             functions: Functions::new(),
             aliases: BTreeMap::new(),
+            wildcard_bindings: BTreeMap::new(),
+            wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
             last_success: None,
@@ -82,6 +88,8 @@ impl ReplSession {
             environment,
             functions,
             aliases: BTreeMap::new(),
+            wildcard_bindings: BTreeMap::new(),
+            wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
             last_success: None,
@@ -165,6 +173,7 @@ impl ReplSession {
     }
 
     fn evaluate(&self, expression: &Expr) -> Result<CanonicalValue, EvaluationError> {
+        self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
             environment.insert("$_".into(), value.clone());
@@ -235,9 +244,15 @@ impl ReplSession {
                 if !signature.generics.is_empty() {
                     return Err(error("ORNA-EVAL-UNSUPPORTED"));
                 }
+                self.remove_wildcard_binding(&signature.name);
                 if self.binding_taken(&signature.name) {
                     return Err(error("ORNA-EVAL-NAME"));
                 }
+                let mut shadowed = BTreeSet::new();
+                for parameter in &signature.parameters {
+                    shadowed.extend(pattern_names(&parameter.pattern));
+                }
+                self.reject_ambiguous_expression_with_scope(body, &shadowed)?;
                 let name = signature.name.clone();
                 let mut environment = self.environment.clone();
                 if let Some(last_success) = &self.last_success {
@@ -263,6 +278,7 @@ impl ReplSession {
     }
 
     fn let_binding(&mut self, pattern: &Pattern, expression: &Expr) -> Result<(), EvaluationError> {
+        self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
             environment.insert("$_".into(), value.clone());
@@ -282,11 +298,15 @@ impl ReplSession {
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
-        if !bind(pattern, value, &mut scope, &context, 1)? {
+        let names = pattern_names(pattern);
+        let matched = bind(pattern, value, &mut scope, &context, 1)?;
+        drop(context);
+        if !matched {
             return Err(error("ORNA-EVAL-TYPE"));
         }
         scope.0.remove("$_");
-        for name in pattern_names(pattern) {
+        for name in names {
+            self.release_wildcard_for_local(&name);
             self.namespace_bindings.remove(&name);
         }
         self.environment = scope
@@ -318,6 +338,7 @@ impl ReplSession {
     }
 
     fn import_alias(&mut self, canonical: &str, alias: &str) -> Result<(), EvaluationError> {
+        self.remove_wildcard_binding(alias);
         if self.functions.contains_key(canonical) {
             if self.binding_taken(alias) {
                 return Err(error("ORNA-EVAL-NAME"));
@@ -406,15 +427,74 @@ impl ReplSession {
             return Err(error("ORNA-EVAL-NAME"));
         }
         for (alias, canonical) in functions {
-            self.import_alias(&canonical, &alias)?;
+            self.import_wildcard_alias(path, &canonical, &alias)?;
         }
         for (alias, value) in values {
-            if self.binding_taken(&alias) {
-                return Err(error("ORNA-EVAL-NAME"));
-            }
-            self.environment.insert(alias, value);
+            self.import_wildcard_value(path, alias, value)?;
         }
         self.check_retained()
+    }
+
+    fn import_wildcard_alias(
+        &mut self,
+        path: &str,
+        canonical: &str,
+        alias: &str,
+    ) -> Result<(), EvaluationError> {
+        if !self.prepare_wildcard_binding(path, alias) {
+            return Ok(());
+        }
+        self.aliases.insert(alias.into(), canonical.into());
+        self.wildcard_bindings.insert(alias.into(), path.into());
+        Ok(())
+    }
+
+    fn import_wildcard_value(
+        &mut self,
+        path: &str,
+        alias: String,
+        value: CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        if !self.prepare_wildcard_binding(path, &alias) {
+            return Ok(());
+        }
+        self.environment.insert(alias.clone(), value);
+        self.wildcard_bindings.insert(alias, path.into());
+        Ok(())
+    }
+
+    fn prepare_wildcard_binding(&mut self, path: &str, alias: &str) -> bool {
+        if let Some(candidates) = self.wildcard_ambiguities.get_mut(alias) {
+            candidates.insert(path.into());
+            return false;
+        }
+        if let Some(existing_path) = self.wildcard_bindings.get(alias).cloned() {
+            if existing_path == path {
+                return false;
+            }
+            self.wildcard_bindings.remove(alias);
+            self.aliases.remove(alias);
+            self.environment.remove(alias);
+            self.wildcard_ambiguities
+                .insert(alias.into(), BTreeSet::from([existing_path, path.into()]));
+            return false;
+        }
+        !self.binding_taken(alias)
+    }
+
+    fn remove_wildcard_binding(&mut self, name: &str) {
+        if self.wildcard_bindings.remove(name).is_some() {
+            self.aliases.remove(name);
+            self.environment.remove(name);
+        }
+        self.wildcard_ambiguities.remove(name);
+    }
+
+    fn release_wildcard_for_local(&mut self, name: &str) {
+        if self.wildcard_bindings.remove(name).is_some() {
+            self.aliases.remove(name);
+        }
+        self.wildcard_ambiguities.remove(name);
     }
 
     fn binding_taken(&self, name: &str) -> bool {
@@ -437,8 +517,172 @@ impl ReplSession {
             .len()
             .checked_add(self.functions.len())
             .and_then(|count| count.checked_add(self.aliases.len()))
+            .and_then(|count| {
+                self.wildcard_ambiguities
+                    .values()
+                    .try_fold(count, |count, candidates| {
+                        count.checked_add(candidates.len())
+                    })
+            })
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         self.limits.check_items(count)
+    }
+
+    fn reject_ambiguous_expression(&self, expression: &Expr) -> Result<(), EvaluationError> {
+        self.reject_ambiguous_expression_with_scope(expression, &BTreeSet::new())
+    }
+
+    fn reject_ambiguous_expression_with_scope(
+        &self,
+        expression: &Expr,
+        shadowed: &BTreeSet<String>,
+    ) -> Result<(), EvaluationError> {
+        if ambiguous_expr(expression, &self.wildcard_ambiguities, shadowed) {
+            Err(error("ORNA-EVAL-AMBIGUOUS"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn ambiguous_expr(
+    expression: &Expr,
+    ambiguities: &BTreeMap<String, BTreeSet<String>>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    match expression {
+        Expr::Name { text, .. } => ambiguities.contains_key(text) && !shadowed.contains(text),
+        Expr::Literal { .. } | Expr::ReplBinding { .. } => false,
+        Expr::InterpolatedString { segments, .. } => segments.iter().any(|segment| {
+            matches!(segment, orna_syntax_v1::StringSegment::Expression { value, .. }
+                if ambiguous_expr(value, ambiguities, shadowed))
+        }),
+        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+            ambiguous_expr(rhs, ambiguities, shadowed)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            ambiguous_expr(lhs, ambiguities, shadowed) || ambiguous_expr(rhs, ambiguities, shadowed)
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            ambiguous_expr(callee, ambiguities, shadowed)
+                || arguments
+                    .iter()
+                    .any(|argument| ambiguous_expr(&argument.value, ambiguities, shadowed))
+        }
+        Expr::Index { base, index, .. } => {
+            ambiguous_expr(base, ambiguities, shadowed)
+                || ambiguous_expr(index, ambiguities, shadowed)
+        }
+        Expr::Field { base, .. } => ambiguous_expr(base, ambiguities, shadowed),
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
+            .iter()
+            .any(|element| ambiguous_expr(element, ambiguities, shadowed)),
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
+            .iter()
+            .any(|field| ambiguous_expr(&field.value, ambiguities, shadowed)),
+        Expr::Lambda {
+            parameters, body, ..
+        } => {
+            let mut nested = shadowed.clone();
+            for parameter in parameters {
+                nested.extend(pattern_names(&parameter.pattern));
+            }
+            ambiguous_expr(body, ambiguities, &nested)
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            let mut nested = shadowed.clone();
+            for statement in statements {
+                if ambiguous_statement(statement, ambiguities, &nested) {
+                    return true;
+                }
+                if let Statement::Let { pattern, .. } = statement {
+                    nested.extend(pattern_names(pattern));
+                }
+            }
+            tail.as_deref()
+                .is_some_and(|tail| ambiguous_expr(tail, ambiguities, &nested))
+        }
+        Expr::Control {
+            kind,
+            binding,
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            if condition
+                .as_deref()
+                .is_some_and(|value| ambiguous_expr(value, ambiguities, shadowed))
+                || alternate
+                    .as_deref()
+                    .is_some_and(|value| ambiguous_expr(value, ambiguities, shadowed))
+            {
+                return true;
+            }
+            let mut body_scope = shadowed.clone();
+            if *kind == orna_syntax_v1::ControlKind::For
+                && let Some(binding) = binding
+            {
+                body_scope.extend(pattern_names(binding));
+            }
+            if body
+                .as_deref()
+                .is_some_and(|value| ambiguous_expr(value, ambiguities, &body_scope))
+            {
+                return true;
+            }
+            arms.iter().any(|arm| {
+                let mut arm_scope = shadowed.clone();
+                arm_scope.extend(pattern_names(&arm.pattern));
+                arm.guard
+                    .as_ref()
+                    .is_some_and(|guard| ambiguous_expr(guard, ambiguities, &arm_scope))
+                    || ambiguous_expr(&arm.body, ambiguities, &arm_scope)
+            })
+        }
+    }
+}
+
+fn ambiguous_statement(
+    statement: &Statement,
+    ambiguities: &BTreeMap<String, BTreeSet<String>>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => ambiguous_expr(value, ambiguities, shadowed),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => value
+            .as_ref()
+            .is_some_and(|value| ambiguous_expr(value, ambiguities, shadowed)),
+        Statement::Continue { .. } => false,
+        Statement::Assignment { target, value, .. } => {
+            ambiguous_target(target, ambiguities, shadowed)
+                || ambiguous_expr(value, ambiguities, shadowed)
+        }
+    }
+}
+
+fn ambiguous_target(
+    target: &AssignmentTarget,
+    ambiguities: &BTreeMap<String, BTreeSet<String>>,
+    shadowed: &BTreeSet<String>,
+) -> bool {
+    match target {
+        AssignmentTarget::Name { name, .. } => {
+            ambiguities.contains_key(name) && !shadowed.contains(name)
+        }
+        AssignmentTarget::Field { base, .. } => ambiguous_target(base, ambiguities, shadowed),
+        AssignmentTarget::Index { base, index, .. } => {
+            ambiguous_target(base, ambiguities, shadowed)
+                || ambiguous_expr(index, ambiguities, shadowed)
+        }
     }
 }
 
@@ -575,6 +819,102 @@ mod tests {
         assert_eq!(session.submit("use library;").unwrap(), None);
         assert_eq!(
             session.submit("library.twice(21)").unwrap(),
+            Some(Value::int(42.into()))
+        );
+    }
+
+    #[test]
+    fn wildcard_import_collisions_are_ambiguous_and_transactional() {
+        let mut library_first =
+            ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
+                .expect("admitted library");
+        assert_eq!(library_first.submit("use library.*;").unwrap(), None);
+        assert_eq!(library_first.submit("use other.*;").unwrap(), None);
+        assert_eq!(
+            library_first.submit("add(1, 2)").unwrap_err().code(),
+            "ORNA-EVAL-AMBIGUOUS"
+        );
+        assert_eq!(
+            library_first.submit("twice(21)").unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(library_first.submit("use library.add;").unwrap(), None);
+        assert_eq!(
+            library_first.submit("add(1, 2)").unwrap(),
+            Some(Value::int(3.into()))
+        );
+
+        let mut other_first =
+            ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
+                .expect("admitted library");
+        assert_eq!(other_first.submit("use other.*;").unwrap(), None);
+        assert_eq!(other_first.submit("use library.*;").unwrap(), None);
+        assert_eq!(
+            other_first.submit("add(1, 2)").unwrap_err().code(),
+            "ORNA-EVAL-AMBIGUOUS"
+        );
+        assert_eq!(
+            other_first.submit("twice(21)").unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(other_first.submit("use other.add;").unwrap(), None);
+        assert_eq!(
+            other_first.submit("add(1, 2)").unwrap(),
+            Some(Value::int(103.into()))
+        );
+    }
+
+    #[test]
+    fn local_and_explicit_bindings_take_precedence_over_wildcard_imports() {
+        let mut local =
+            ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
+                .expect("admitted library");
+        assert_eq!(local.submit("let add = 42;").unwrap(), None);
+        assert_eq!(local.submit("use library.*;").unwrap(), None);
+        assert_eq!(local.submit("use other.*;").unwrap(), None);
+        assert_eq!(local.submit("add").unwrap(), Some(Value::int(42.into())));
+
+        let mut explicit =
+            ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
+                .expect("admitted library");
+        assert_eq!(explicit.submit("use library.*;").unwrap(), None);
+        assert_eq!(explicit.submit("use other.add;").unwrap(), None);
+        assert_eq!(explicit.submit("use library.*;").unwrap(), None);
+        assert_eq!(
+            explicit.submit("add(1, 2)").unwrap(),
+            Some(Value::int(103.into()))
+        );
+    }
+
+    #[test]
+    fn ambiguous_let_initializers_fail_before_deferred_evaluation() {
+        let mut session =
+            ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
+                .expect("admitted library");
+        assert_eq!(session.submit("use library.*;").unwrap(), None);
+        assert_eq!(session.submit("use other.*;").unwrap(), None);
+
+        for source in [
+            "let value = add(1, 2);",
+            "let f = () => add(1, 2);",
+            "let f = () => { let nested = () => add(1, 2); nested() };",
+        ] {
+            assert_eq!(
+                session.submit(source).unwrap_err().code(),
+                "ORNA-EVAL-AMBIGUOUS",
+                "{source}"
+            );
+        }
+        assert_eq!(
+            session.submit("twice(21)").unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(
+            session.submit("let value = (add => add + 1)(41);").unwrap(),
+            None
+        );
+        assert_eq!(
+            session.submit("value").unwrap(),
             Some(Value::int(42.into()))
         );
     }
