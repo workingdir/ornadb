@@ -3,7 +3,11 @@
 //! parser, or Git representation.
 
 use orna_conformance_v1::StageOutcome;
-use orna_foundation_v1::{CanonicalSnapshot, Diagnostic, FileRef, OvbRaw, RowRef, SourceSpan};
+use orna_foundation_v1::{
+    CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, OvbRaw, RowRef, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, validate_run_reference,
+    validate_stream_reference,
+};
 use orna_repository_v1::Repository;
 use orna_syntax_v1::parse_expression_with_file;
 
@@ -24,6 +28,51 @@ fn file() -> FileRef {
 fn harness_can_carry_shared_diagnostic(_: StageOutcome<Diagnostic>) {}
 fn repository_can_be_adapted_later(_: Option<&Repository>) {}
 
+fn cwd() -> CwdCapture {
+    CwdCapture::new(
+        CanonicalSnapshot::cwd([1; 16], [9; 16], 7.into()).unwrap(),
+        [8; 32],
+    )
+    .unwrap()
+}
+
+fn run(capture: &CwdCapture) -> RowRef {
+    RowRef::new(
+        capture.database_id(),
+        SYS_RUN_TABLE_ID,
+        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![4; 16]))),
+        capture.snapshot().clone(),
+    )
+    .unwrap()
+}
+
+fn encoded_run(run: &RowRef) -> OvbRaw {
+    OvbRaw::Tag(
+        60_010,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(run.database_id.to_vec()))),
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(run.table_id.to_vec()))),
+            run.key.clone(),
+            run.snapshot.raw(),
+        ])),
+    )
+}
+
+fn stream(capture: &CwdCapture) -> RowRef {
+    let run = run(capture);
+    RowRef::new(
+        capture.database_id(),
+        SYS_STREAM_TABLE_ID,
+        OvbRaw::Array(vec![
+            encoded_run(&run),
+            OvbRaw::Text("source".into()),
+            OvbRaw::Null,
+        ]),
+        capture.snapshot().clone(),
+    )
+    .unwrap()
+}
+
 #[test]
 fn harness_syntax_and_repository_compile_against_one_foundation_abi() {
     let parsed = parse_expression_with_file("alpha", "src/main.orna");
@@ -35,4 +84,145 @@ fn harness_syntax_and_repository_compile_against_one_foundation_abi() {
         reason: "fixture".into(),
     });
     repository_can_be_adapted_later(None);
+}
+
+#[test]
+fn runtime_reference_validation_requires_exact_coordinates_and_key_shapes() {
+    let capture = cwd();
+    let valid_run = run(&capture);
+    let valid_stream = stream(&capture);
+    assert_eq!(
+        validate_run_reference(valid_run.clone(), &capture)
+            .unwrap()
+            .as_row_ref(),
+        &valid_run
+    );
+    assert_eq!(
+        validate_stream_reference(valid_stream.clone(), &capture)
+            .unwrap()
+            .as_row_ref(),
+        &valid_stream
+    );
+
+    let wrong_relation = RowRef::new(
+        capture.database_id(),
+        SYS_STREAM_TABLE_ID,
+        valid_run.key.clone(),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_run_reference(wrong_relation, &capture),
+        Err(SystemReferenceError::RelationMismatch)
+    );
+
+    let wrong_database = RowRef::new(
+        [2; 16],
+        SYS_RUN_TABLE_ID,
+        valid_run.key.clone(),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_run_reference(wrong_database, &capture),
+        Err(SystemReferenceError::DatabaseMismatch)
+    );
+
+    let wrong_snapshot = RowRef::new(
+        capture.database_id(),
+        SYS_RUN_TABLE_ID,
+        valid_run.key.clone(),
+        CanonicalSnapshot::cwd([1; 16], [9; 16], 8.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_run_reference(wrong_snapshot, &capture),
+        Err(SystemReferenceError::SnapshotMismatch)
+    );
+
+    let invalid_run_key = RowRef::new(
+        capture.database_id(),
+        SYS_RUN_TABLE_ID,
+        OvbRaw::Array(vec![]),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_run_reference(invalid_run_key, &capture),
+        Err(SystemReferenceError::InvalidRunKey)
+    );
+
+    let invalid_stream_key = RowRef::new(
+        capture.database_id(),
+        SYS_STREAM_TABLE_ID,
+        OvbRaw::Array(vec![OvbRaw::Text("not-a-run-reference".into())]),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_stream_reference(invalid_stream_key, &capture),
+        Err(SystemReferenceError::InvalidStreamKey)
+    );
+
+    for invalid_id in [
+        OvbRaw::Text("run-id-is-not-a-uuid".into()),
+        OvbRaw::Tag(
+            60_000,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int(1.into()),
+                OvbRaw::Int(0.into()),
+            ])),
+        ),
+    ] {
+        let invalid_run = RowRef::new(
+            capture.database_id(),
+            SYS_RUN_TABLE_ID,
+            invalid_id,
+            capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_run_reference(invalid_run, &capture),
+            Err(SystemReferenceError::InvalidRunKey)
+        );
+    }
+
+    let wrong_embedded_relation = RowRef::new(
+        capture.database_id(),
+        SYS_STREAM_TABLE_ID,
+        OvbRaw::Array(vec![
+            encoded_run(
+                &RowRef::new(
+                    capture.database_id(),
+                    SYS_STREAM_TABLE_ID,
+                    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(vec![4; 16]))),
+                    capture.snapshot().clone(),
+                )
+                .unwrap(),
+            ),
+            OvbRaw::Text("source".into()),
+            OvbRaw::Null,
+        ]),
+        capture.snapshot().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_stream_reference(wrong_embedded_relation, &capture),
+        Err(SystemReferenceError::InvalidStreamKey)
+    );
+
+    let malformed_embedded = OvbRaw::Tag(60_010, Box::new(OvbRaw::Array(vec![])));
+    assert!(
+        RowRef::new(
+            capture.database_id(),
+            SYS_STREAM_TABLE_ID,
+            OvbRaw::Array(vec![
+                malformed_embedded,
+                OvbRaw::Text("source".into()),
+                OvbRaw::Null,
+            ]),
+            capture.snapshot().clone(),
+        )
+        .is_err()
+    );
 }
