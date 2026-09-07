@@ -118,12 +118,16 @@ fn ending_owner_fences_new_child_admission() {
 
     assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
     assert!(coordinator.spawn_child(owner).is_err());
-    assert!(coordinator
-        .try_activate(ActivationId::new(2).unwrap())
-        .is_err());
-    assert!(coordinator
-        .replace_stale(owner, ActivationId::new(2).unwrap())
-        .is_err());
+    assert!(
+        coordinator
+            .try_activate(ActivationId::new(2).unwrap())
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .replace_stale(owner, ActivationId::new(2).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
