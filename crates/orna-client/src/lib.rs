@@ -145,6 +145,7 @@ pub mod connection;
 pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
+pub mod live_presentation;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod session;
@@ -178,6 +179,10 @@ pub use inspect_lifecycle::{
 };
 pub use inspect_session::{
     ClientInspectLifecycleCompletion, ClientInspectLifecycleRequest, ClientInspectLifecycleSession,
+};
+pub use live_presentation::{
+    LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
+    WatchPresentation,
 };
 
 /// The active revision, function revision, and root invocation selected for
