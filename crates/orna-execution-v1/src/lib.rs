@@ -176,9 +176,28 @@ pub struct CommitReceipt {
     pub sequence: u64,
 }
 
+/// The live owner-fence view that a store validates atomically with publication.
+///
+/// A durable implementation must resolve this against its durable lease or
+/// transaction-generation authority, rather than treating an earlier
+/// coordinator-side check as sufficient. This keeps a revoked or superseded
+/// child from publishing through a store after it has lost its owner.
+pub trait OwnerFence {
+    fn permits(&self, owner: OwnerLease) -> bool;
+}
+
 /// The only persistence capability held by the coordinator.
+///
+/// `commit` MUST validate `owner_fence.permits(request.owner)` in the same
+/// atomic operation that makes the write and checkpoint visible. Implementors
+/// must reject the request when that validation fails; a prior caller-side
+/// validation is not a substitute.
 pub trait AtomicCommitStore {
-    fn commit(&mut self, request: CommitRequest) -> Result<CommitReceipt, StoreError>;
+    fn commit(
+        &mut self,
+        request: CommitRequest,
+        owner_fence: &dyn OwnerFence,
+    ) -> Result<CommitReceipt, StoreError>;
 }
 
 /// Provider execution has no access to the durability capability.
@@ -213,6 +232,7 @@ pub enum ProviderError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
     Rejected,
+    OwnerFenceRejected,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoordinationError {
@@ -406,7 +426,7 @@ impl ActivationCoordinator {
         faults: &mut F,
         children: &mut C,
     ) -> Outcome {
-        if self.require_live(owner).is_err() {
+        if self.require_live(owner).is_err() && !self.retrying_normal_completion(owner) {
             return self.rollback_for(owner);
         }
         self.ending = true;
@@ -452,11 +472,14 @@ impl ActivationCoordinator {
         if self.require_committable(owner).is_err() {
             return self.rollback_for(owner);
         }
-        match store.commit(CommitRequest {
-            owner,
-            write,
-            checkpoint,
-        }) {
+        match store.commit(
+            CommitRequest {
+                owner,
+                write,
+                checkpoint,
+            },
+            self,
+        ) {
             Ok(receipt) => {
                 self.phase = TransactionPhase::Committed;
                 Outcome::Committed { receipt }
@@ -516,6 +539,15 @@ impl ActivationCoordinator {
             Err(CoordinationError::Cancelled)
         }
     }
+    /// A transient join failure keeps a still-live owner in
+    /// `ChildrenJoining`. Retrying normal completion may only resume that
+    /// recorded drain; it cannot admit work or bypass the child set.
+    fn retrying_normal_completion(&self, owner: OwnerLease) -> bool {
+        self.owner == Some(owner)
+            && owner.cancellation_epoch == 0
+            && self.ending
+            && self.phase == TransactionPhase::ChildrenJoining
+    }
     fn rollback(&mut self, reason: RollbackReason) -> Outcome {
         self.phase = TransactionPhase::RolledBack;
         Outcome::RolledBack { reason }
@@ -541,6 +573,12 @@ impl ActivationCoordinator {
     }
 }
 
+impl OwnerFence for ActivationCoordinator {
+    fn permits(&self, owner: OwnerLease) -> bool {
+        self.require_committable(owner).is_ok()
+    }
+}
+
 /// Test/reference store: publication appends a write and checkpoint together.
 #[derive(Default)]
 pub struct InMemoryAtomicStore {
@@ -557,9 +595,16 @@ impl InMemoryAtomicStore {
     }
 }
 impl AtomicCommitStore for InMemoryAtomicStore {
-    fn commit(&mut self, request: CommitRequest) -> Result<CommitReceipt, StoreError> {
+    fn commit(
+        &mut self,
+        request: CommitRequest,
+        owner_fence: &dyn OwnerFence,
+    ) -> Result<CommitReceipt, StoreError> {
         if self.reject {
             return Err(StoreError::Rejected);
+        }
+        if !owner_fence.permits(request.owner) {
+            return Err(StoreError::OwnerFenceRejected);
         }
         self.next_sequence += 1;
         self.visible.push((request.write, request.checkpoint));
