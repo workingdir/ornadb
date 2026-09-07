@@ -3899,7 +3899,9 @@ impl LiveTransport {
 
     /// Idempotently aborts a pending WebSocket admission reservation.
     ///
-    /// Aborting never changes a current attachment. It is safe to call after a
+    /// Aborting never changes a current attachment. It retires the candidate
+    /// identity so the executable owner can cancel and join the connection
+    /// worker before reporting the failed handoff. It is safe to call after a
     /// prior abort or after commit has consumed the reservation.
     pub fn abort_websocket_upgrade(&mut self, upgrade: &WebSocketUpgrade) -> bool {
         let Some(session) = self.pending_upgrades.iter().find_map(|(session, pending)| {
@@ -3907,7 +3909,11 @@ impl LiveTransport {
         }) else {
             return false;
         };
-        self.pending_upgrades.remove(&session).is_some()
+        let Some(pending) = self.pending_upgrades.remove(&session) else {
+            return false;
+        };
+        self.queue_retired_attachment(pending.admission.attachment);
+        true
     }
 
     /// Commits a previously validated handshake after its 101 response was
@@ -3936,7 +3942,17 @@ impl LiveTransport {
         if pending.reservation != upgrade.reservation {
             return Err(Error::Closed);
         }
-        self.commit_upgrade(pending.admission, now).await
+        let attachment = pending.admission.attachment;
+        match self.commit_upgrade(pending.admission, now).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                // A failed commit must fence the candidate just like a failed
+                // handshake write. The caller can only report the failure
+                // after it has observed this retirement.
+                self.queue_retired_attachment(attachment);
+                Err(error)
+            }
+        }
     }
 
     fn allocate_reservation(&mut self) -> Option<u128> {
