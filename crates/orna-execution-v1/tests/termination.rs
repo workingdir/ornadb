@@ -1,8 +1,8 @@
 use orna_execution_v1::{
     ActivationCoordinator, ActivationId, AtomicCommitStore, CheckpointIntent, ChildId,
     ChildSupervisor, ChildTerminationError, CommitReceipt, CommitRequest, NoFault, Outcome,
-    OwnerLease, ProviderError, ProviderExecutor, RollbackReason, StoreError, TransactionPhase,
-    WritePayload,
+    OwnerFence, OwnerLease, ProviderError, ProviderExecutor, RollbackReason, StoreError,
+    TransactionPhase, WritePayload, WriteRecord,
 };
 use orna_stream_v1::{
     CheckpointPrecondition, CommitIntent, Component, ConsumerIdentity, DeliveryIdentity,
@@ -34,7 +34,14 @@ struct Store {
 }
 
 impl AtomicCommitStore for Store {
-    fn commit(&mut self, _: CommitRequest) -> Result<CommitReceipt, StoreError> {
+    fn commit(
+        &mut self,
+        request: CommitRequest,
+        owner_fence: &dyn OwnerFence,
+    ) -> Result<CommitReceipt, StoreError> {
+        if !owner_fence.permits(request.owner) {
+            return Err(StoreError::OwnerFenceRejected);
+        }
         self.commits += 1;
         Ok(CommitReceipt {
             sequence: self.commits as u64,
@@ -45,7 +52,7 @@ impl AtomicCommitStore for Store {
 #[derive(Default)]
 struct Supervisor {
     events: Vec<(char, ChildId)>,
-    fail_join: Option<ChildId>,
+    fail_join_once: Option<ChildId>,
 }
 
 impl ChildSupervisor for Supervisor {
@@ -56,7 +63,8 @@ impl ChildSupervisor for Supervisor {
 
     fn join(&mut self, child: ChildId) -> Result<(), ChildTerminationError> {
         self.events.push(('j', child));
-        if self.fail_join == Some(child) {
+        if self.fail_join_once == Some(child) {
+            self.fail_join_once = None;
             Err(ChildTerminationError::Incomplete)
         } else {
             Ok(())
@@ -164,7 +172,7 @@ fn incomplete_join_keeps_owner_nonterminal_and_prevents_publication() {
     let (mut coordinator, owner) = active();
     let child = coordinator.spawn_child(owner).unwrap();
     let mut supervisor = Supervisor {
-        fail_join: Some(child),
+        fail_join_once: Some(child),
         ..Supervisor::default()
     };
     let mut provider = Provider;
@@ -189,6 +197,61 @@ fn incomplete_join_keeps_owner_nonterminal_and_prevents_publication() {
 }
 
 #[test]
+fn transient_partial_join_failure_retries_normal_completion_without_publication() {
+    let (mut coordinator, owner) = active();
+    let first = coordinator.spawn_child(owner).unwrap();
+    let second = coordinator.spawn_child(owner).unwrap();
+    let mut supervisor = Supervisor {
+        fail_join_once: Some(second),
+        ..Supervisor::default()
+    };
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    assert_eq!(
+        coordinator.execute_with_children(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+            &mut supervisor,
+        ),
+        Outcome::ChildrenJoining {
+            reason: RollbackReason::ChildOutstanding,
+        }
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+    assert_eq!(store.commits, 0);
+
+    assert!(matches!(
+        coordinator.execute_with_children(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+            &mut supervisor,
+        ),
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(
+        supervisor.events,
+        vec![
+            ('c', first),
+            ('j', first),
+            ('c', second),
+            ('j', second),
+            ('c', second),
+            ('j', second),
+        ]
+    );
+    assert_eq!(store.commits, 1);
+    assert_eq!(coordinator.phase(), TransactionPhase::Committed);
+}
+
+#[test]
 fn acknowledged_cancellation_fences_late_publication() {
     let (mut coordinator, owner) = active();
     let child = coordinator.spawn_child(owner).unwrap();
@@ -208,5 +271,42 @@ fn acknowledged_cancellation_fences_late_publication() {
         }
     );
     assert_eq!(supervisor.events, vec![('c', child), ('j', child)]);
+    assert_eq!(store.commits, 0);
+}
+
+fn stale_commit(owner: OwnerLease) -> CommitRequest {
+    CommitRequest {
+        owner,
+        write: WriteRecord {
+            kind: Value::KIND,
+            bytes: vec![9],
+        },
+        checkpoint: checkpoint(),
+    }
+}
+
+#[test]
+fn store_refuses_stale_and_revoked_owner_fences() {
+    let (mut coordinator, owner) = active();
+    let mut store = Store::default();
+
+    coordinator
+        .replace_stale(owner, ActivationId::new(2).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+    assert_eq!(store.commits, 0);
+
+    let (mut coordinator, owner) = active();
+
+    coordinator.cancel(owner).unwrap();
+
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
     assert_eq!(store.commits, 0);
 }
