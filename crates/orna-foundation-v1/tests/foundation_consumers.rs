@@ -4,10 +4,11 @@
 
 use orna_conformance_v1::StageOutcome;
 use orna_foundation_v1::{
-    CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, OvbRaw, RowRef,
+    CanonicalSnapshot, CwdCapture, Diagnostic, FileRef, InvocationStatus, OvbRaw, RowRef,
     SYS_INVOCATION_ARGUMENT_TABLE_ID, SYS_INVOCATION_TABLE_ID, SYS_RUN_TABLE_ID,
-    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, validate_invocation_argument_reference,
-    validate_invocation_reference, validate_run_reference, validate_stream_reference,
+    SYS_STREAM_TABLE_ID, SourceSpan, SystemReferenceError, invocation_argument_reference,
+    invocation_reference, validate_invocation_argument_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 use orna_repository_v1::Repository;
 use orna_syntax_v1::parse_expression_with_file;
@@ -364,6 +365,58 @@ fn invocation_reference_validation_requires_declared_relation_and_natural_keys()
         assert_eq!(
             validate_invocation_argument_reference(reference, &capture),
             Err(SystemReferenceError::InvalidInvocationArgumentKey)
+        );
+    }
+}
+
+#[test]
+fn invocation_reference_constructors_preserve_checked_public_coordinates() {
+    let capture = cwd();
+    let database = capture.database_id();
+    let snapshot = capture.snapshot().clone();
+    let invocation_ref = invocation_reference(database, snapshot.clone(), [5; 16]).unwrap();
+    assert_eq!(invocation_ref.as_row_ref(), &invocation(&capture));
+
+    let argument =
+        invocation_argument_reference(database, snapshot.clone(), [5; 16], 0.into()).unwrap();
+    assert_eq!(argument.as_row_ref(), &invocation_argument(&capture));
+    assert!(validate_invocation_reference(invocation_ref.into_row_ref(), &capture).is_ok());
+    assert!(validate_invocation_argument_reference(argument.into_row_ref(), &capture).is_ok());
+
+    assert_eq!(
+        invocation_reference([2; 16], snapshot.clone(), [5; 16]),
+        Err(SystemReferenceError::DatabaseMismatch)
+    );
+    assert_eq!(
+        invocation_argument_reference(database, snapshot, [5; 16], (-1).into()),
+        Err(SystemReferenceError::InvalidInvocationArgumentKey)
+    );
+    assert_eq!(
+        invocation_argument_reference(
+            database,
+            capture.snapshot().clone(),
+            [5; 16],
+            num_bigint::BigInt::from(u64::MAX) + 1
+        ),
+        Err(SystemReferenceError::InvalidInvocationArgumentKey)
+    );
+}
+
+#[test]
+fn invocation_status_serializes_the_exact_closed_json_vocabulary() {
+    let cases = [
+        (InvocationStatus::Queued, "queued"),
+        (InvocationStatus::Running, "running"),
+        (InvocationStatus::Succeeded, "succeeded"),
+        (InvocationStatus::Failed, "failed"),
+        (InvocationStatus::Cancelled, "cancelled"),
+        (InvocationStatus::Orphaned, "orphaned"),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(status.as_str(), expected);
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            format!("\"{expected}\"")
         );
     }
 }
