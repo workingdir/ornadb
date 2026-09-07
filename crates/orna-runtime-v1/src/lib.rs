@@ -89,12 +89,20 @@ CREATE TABLE IF NOT EXISTS request_ledger (
     fingerprint BLOB NOT NULL CHECK (length(fingerprint) = 32),
     state INTEGER NOT NULL CHECK (state IN (1, 2, 3, 4, 5)),
     terminal_outcome BLOB,
+    owner_id BLOB,
+    owner_epoch INTEGER,
+    effect_evidence INTEGER NOT NULL DEFAULT 0 CHECK (effect_evidence IN (0, 1, 2)),
+    recovery_disposition INTEGER NOT NULL DEFAULT 0 CHECK (recovery_disposition IN (0, 1, 2)),
+    controlled_transaction_proof BLOB,
     PRIMARY KEY (session_id, request_id),
     CHECK (
         (state IN (1, 2) AND terminal_outcome IS NULL)
         OR (state IN (3, 4, 5) AND terminal_outcome IS NOT NULL)
     ),
-    CHECK (terminal_outcome IS NULL OR length(terminal_outcome) <= 16777216)
+    CHECK (terminal_outcome IS NULL OR length(terminal_outcome) <= 16777216),
+    CHECK ((owner_id IS NULL) = (owner_epoch IS NULL)),
+    CHECK (owner_id IS NULL OR length(owner_id) = 16),
+    CHECK (owner_epoch IS NULL OR owner_epoch > 0)
 );
 CREATE TABLE IF NOT EXISTS stream_checkpoint (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
@@ -335,6 +343,50 @@ pub struct RequestIdentity {
     pub request_id: [u8; 16],
 }
 
+/// Durable identity of the activation that owns a running request.
+///
+/// The epoch is a fence: recovery is permitted only after a different writer
+/// lease has replaced this exact owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestOwner {
+    pub owner_id: [u8; 16],
+    pub epoch: u64,
+}
+
+impl From<WriterLease> for RequestOwner {
+    fn from(value: WriterLease) -> Self {
+        Self {
+            owner_id: value.owner_id,
+            epoch: value.epoch,
+        }
+    }
+}
+
+/// The retained meaning of a recovered orphaned request. Protocol state stays
+/// `orphaned`; the serving layer maps this durable distinction to diagnostics.
+/// `RollbackProven` is reserved for a future durable rollback receipt; the
+/// current runtime emits only `ExternalEffectsUncertain` during recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryDisposition {
+    RollbackProven,
+    ExternalEffectsUncertain,
+}
+
+impl RecoveryDisposition {
+    const fn code(self) -> i64 {
+        match self {
+            Self::RollbackProven => 1,
+            Self::ExternalEffectsUncertain => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveredRequest {
+    pub status: RequestStatus,
+    pub disposition: RecoveryDisposition,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestState {
     Reserved,
@@ -430,6 +482,7 @@ pub enum RuntimeError {
     InvalidPublicationCommit,
     RequestUnknown,
     RequestFingerprintMismatch,
+    RequestOwnerConflict,
     RequestStateConflict,
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
@@ -455,6 +508,7 @@ impl fmt::Display for RuntimeError {
             Self::InvalidPublicationCommit => "invalid publication commit",
             Self::RequestUnknown => "runtime request is unknown",
             Self::RequestFingerprintMismatch => "runtime request fingerprint mismatch",
+            Self::RequestOwnerConflict => "runtime request owner cannot be recovered",
             Self::RequestStateConflict => "runtime request state conflict",
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
@@ -1019,6 +1073,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let state = Self { connection };
         state.initialize(identity, initial_digest).await?;
+        state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
         state.validate_recovery().await?;
         Ok(state)
@@ -1783,6 +1838,72 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
+    /// Adds only backward-compatible ledger columns. The migration marker is
+    /// transactional so an interrupted upgrade cannot look complete.
+    async fn migrate_request_recovery_evidence(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let applied = transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('request-recovery-evidence-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if applied == 1 {
+            let mut rows = transaction
+                .query("PRAGMA table_info(request_ledger)", ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let mut columns = BTreeMap::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            {
+                let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                columns.insert(name, ());
+            }
+            for (column, sql) in [
+                (
+                    "owner_id",
+                    "ALTER TABLE request_ledger ADD COLUMN owner_id BLOB",
+                ),
+                (
+                    "owner_epoch",
+                    "ALTER TABLE request_ledger ADD COLUMN owner_epoch INTEGER",
+                ),
+                (
+                    "effect_evidence",
+                    "ALTER TABLE request_ledger ADD COLUMN effect_evidence INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "recovery_disposition",
+                    "ALTER TABLE request_ledger ADD COLUMN recovery_disposition INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "controlled_transaction_proof",
+                    "ALTER TABLE request_ledger ADD COLUMN controlled_transaction_proof BLOB",
+                ),
+            ] {
+                if !columns.contains_key(column) {
+                    transaction
+                        .execute(sql, ())
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                }
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     pub async fn identity(&self) -> Result<RuntimeIdentity, RuntimeError> {
         let mut rows = self
             .connection
@@ -1866,15 +1987,53 @@ impl RuntimeState {
         Ok(WriterLease { owner_id, epoch: 1 })
     }
 
-    /// Explicit abandoned-owner handover. A caller cannot steal an unknown or
-    /// changed lease: the recorded prior owner is part of the operation.
-    pub async fn recover_abandoned(
+    /// Reads the current writer lease without changing runtime state.
+    ///
+    /// This read does not establish that the owner is abandoned. The caller
+    /// must supply that liveness proof to [`Self::takeover_lease`], whose
+    /// owner-and-epoch compare-and-swap closes the race with a concurrent
+    /// takeover.
+    pub async fn current_lease(&self) -> Result<Option<WriterLease>, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Ok(None);
+        };
+        let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_id(owner_id)?;
+        if epoch == 0 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(Some(WriterLease { owner_id, epoch }))
+    }
+
+    /// Atomically replaces exactly the expected abandoned writer lease.
+    ///
+    /// This is a compare-and-swap fence, not an abandonment detector: the
+    /// caller owns the liveness proof. A changed owner or epoch returns
+    /// `OwnerLost`; no blind or arbitrary steal is permitted by this method.
+    pub async fn takeover_lease(
         &self,
-        abandoned: [u8; 16],
+        abandoned: WriterLease,
         replacement: [u8; 16],
     ) -> Result<WriterLease, RuntimeError> {
-        validate_id(abandoned)?;
+        validate_id(abandoned.owner_id)?;
         validate_id(replacement)?;
+        if abandoned.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1884,8 +2043,12 @@ impl RuntimeState {
             .execute(
                 "UPDATE writer_lease
                  SET owner_id = ?1, epoch = epoch + 1
-                 WHERE singleton = 1 AND owner_id = ?2",
-                params![replacement.to_vec(), abandoned.to_vec()],
+                 WHERE singleton = 1 AND owner_id = ?2 AND epoch = ?3",
+                params![
+                    replacement.to_vec(),
+                    abandoned.owner_id.to_vec(),
+                    i64::try_from(abandoned.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -1935,14 +2098,32 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
         transaction
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(WriterLease {
             owner_id: replacement,
-            epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            epoch,
         })
+    }
+
+    /// Compatibility handover for callers that only have the prior owner ID.
+    /// It reads the current lease, then delegates to the owner-and-epoch
+    /// compare-and-swap. The caller still owns the liveness proof.
+    pub async fn recover_abandoned(
+        &self,
+        abandoned: [u8; 16],
+        replacement: [u8; 16],
+    ) -> Result<WriterLease, RuntimeError> {
+        validate_id(abandoned)?;
+        validate_id(replacement)?;
+        let expected = self.current_lease().await?;
+        let Some(expected) = expected.filter(|lease| lease.owner_id == abandoned) else {
+            return Err(RuntimeError::OwnerLost);
+        };
+        self.takeover_lease(expected, replacement).await
     }
 
     pub async fn commit(
@@ -2667,6 +2848,12 @@ impl RuntimeState {
         ))
     }
 
+    /// Starts a legacy request without durable ownership.
+    ///
+    /// This compatibility path is only valid before a writer lease exists;
+    /// live writers must use [`Self::start_request_with_owner`]. A legacy
+    /// Running row that already exists before lease acquisition remains
+    /// recoverable through [`Self::recover_legacy_running_request`].
     pub async fn start_request(
         &self,
         identity: RequestIdentity,
@@ -2678,6 +2865,241 @@ impl RuntimeState {
             &[RequestState::Reserved],
             RequestState::Running,
             None,
+        )
+        .await
+    }
+
+    /// Starts a request with durable ownership. The runtime records effect
+    /// evidence separately at the transaction/effect boundary so restart
+    /// recovery can fence the old activation before changing its record.
+    pub async fn start_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+    ) -> Result<RequestStatus, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(owner.owner_id)?;
+        if owner.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Reserved {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, owner_id = ?2, owner_epoch = ?3,
+                     effect_evidence = 0, recovery_disposition = 0,
+                     controlled_transaction_proof = NULL
+                 WHERE session_id = ?4 AND request_id = ?5 AND fingerprint = ?6 AND state = ?7",
+                params![
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Reserved.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestStatus {
+            identity,
+            fingerprint,
+            state: RequestState::Running,
+            terminal_outcome: None,
+        })
+    }
+
+    /// Durably records that this owner entered a request transaction that the
+    /// runtime expected to be Orna-controlled. The marker is tied to the exact
+    /// request fingerprint and owner, but it is not a rollback receipt: crash
+    /// recovery remains uncertain until a durable transaction-boundary proof
+    /// exists.
+    pub async fn record_controlled_transaction(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(owner.owner_id)?;
+        if owner.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        let marker = controlled_transaction_marker(identity, fingerprint, owner);
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        if evidence.owner != Some(RequestOwner::from(owner)) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        if evidence.effects.is_some() || evidence.controlled_marker.is_some() {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET effect_evidence = 1, controlled_transaction_proof = ?1
+                 WHERE session_id = ?2 AND request_id = ?3 AND fingerprint = ?4
+                   AND state = ?5 AND owner_id = ?6 AND owner_epoch = ?7
+                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
+                params![
+                    marker.to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records that an effect outside Orna's transaction boundary may have
+    /// occurred. This is intentionally one-way and can only make recovery
+    /// more conservative.
+    pub async fn record_external_effect(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+    ) -> Result<(), RuntimeError> {
+        self.record_effect_evidence(identity, fingerprint, owner, 2)
+            .await
+    }
+
+    async fn record_effect_evidence(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        evidence_code: i64,
+    ) -> Result<(), RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(owner.owner_id)?;
+        if owner.epoch == 0 || evidence_code != 2 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        if evidence.owner != Some(RequestOwner::from(owner)) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        match (evidence.effects, evidence.controlled_marker) {
+            (Some(EffectEvidence::ExternalPossible), None) => return Ok(()),
+            (Some(_), _) => return Err(RuntimeError::RequestStateConflict),
+            (None, None) => {}
+            (None, Some(_)) => return Err(RuntimeError::RequestStateConflict),
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger SET effect_evidence = 2
+                 WHERE session_id = ?1 AND request_id = ?2 AND fingerprint = ?3
+                   AND state = ?4 AND owner_id = ?5 AND owner_epoch = ?6
+                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
+                params![
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Completes a request only while the activation still owns its writer
+    /// epoch. A stale activation cannot publish a terminal result.
+    pub async fn complete_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request_with_owner(
+            identity,
+            fingerprint,
+            owner,
+            RequestState::Completed,
+            outcome,
+        )
+        .await
+    }
+
+    /// Cancels a request only while the activation still owns its writer
+    /// epoch. A stale activation cannot publish a terminal cancellation.
+    pub async fn cancel_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        self.transition_request_with_owner(
+            identity,
+            fingerprint,
+            owner,
+            RequestState::Cancelled,
+            outcome,
         )
         .await
     }
@@ -2718,16 +3140,188 @@ impl RuntimeState {
         &self,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
-        outcome: TerminalOutcome,
+        _outcome: TerminalOutcome,
     ) -> Result<RequestStatus, RuntimeError> {
-        self.transition_request(
-            identity,
-            fingerprint,
-            &[RequestState::Running],
-            RequestState::Orphaned,
-            Some(outcome),
-        )
-        .await
+        // This compatibility wrapper has no durable owner fence, so it must
+        // not turn a running reservation into an orphaned recovery outcome.
+        // Callers that have proved owner loss use `recover_running_request`.
+        let status = self.request_status(identity, fingerprint).await?;
+        match status {
+            Some(status) if status.state == RequestState::Running => {
+                Err(RuntimeError::RequestOwnerConflict)
+            }
+            Some(_) => Err(RuntimeError::RequestStateConflict),
+            None => Err(RuntimeError::RequestUnknown),
+        }
+    }
+
+    /// Fences a known-lost activation and retains a non-replayable orphaned
+    /// result. A caller must first replace the old writer lease with `fence`;
+    /// the comparison with `lost_owner` prevents recovery from changing a
+    /// request still owned by a different activation.
+    pub async fn recover_running_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        lost_owner: RequestOwner,
+        fence: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RecoveredRequest, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(lost_owner.owner_id)?;
+        validate_id(fence.owner_id)?;
+        if lost_owner.epoch == 0 || fence.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, fence).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        validate_request_execution_evidence(&current, evidence)?;
+        if evidence.owner != Some(lost_owner) || lost_owner == RequestOwner::from(fence) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        // A durable entry marker does not establish that the transaction
+        // rolled back or that every effect joined it. Keep recovery
+        // conservative until the runtime has a genuine rollback receipt.
+        let disposition = RecoveryDisposition::ExternalEffectsUncertain;
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                     owner_epoch = NULL, effect_evidence = 0,
+                     recovery_disposition = ?3, controlled_transaction_proof = NULL
+                 WHERE session_id = ?4 AND request_id = ?5 AND fingerprint = ?6
+                   AND state = ?7 AND owner_id = ?8 AND owner_epoch = ?9",
+                params![
+                    RequestState::Orphaned.code(),
+                    outcome.as_bytes().to_vec(),
+                    disposition.code(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    lost_owner.owner_id.to_vec(),
+                    i64::try_from(lost_owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RecoveredRequest {
+            status: RequestStatus {
+                identity,
+                fingerprint,
+                state: RequestState::Orphaned,
+                terminal_outcome: Some(outcome),
+            },
+            disposition,
+        })
+    }
+
+    /// Recovers a pre-evidence Running row after a writer-lease takeover.
+    /// Because the old row has no owner or effect proof, the result is always
+    /// retained as externally uncertain. Epoch one is rejected: an initial
+    /// lease is not evidence that the legacy owner was lost.
+    pub async fn recover_legacy_running_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        fence: WriterLease,
+        outcome: TerminalOutcome,
+    ) -> Result<RecoveredRequest, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(fence.owner_id)?;
+        if fence.epoch <= 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, fence).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        validate_request_execution_evidence(&current, evidence)?;
+        if evidence.owner.is_some()
+            || evidence.effects.is_some()
+            || evidence.controlled_marker.is_some()
+            || evidence.disposition.is_some()
+        {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, recovery_disposition = 2
+                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
+                   AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
+                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL
+                   AND recovery_disposition = 0",
+                params![
+                    RequestState::Orphaned.code(),
+                    outcome.as_bytes().to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RecoveredRequest {
+            status: RequestStatus {
+                identity,
+                fingerprint,
+                state: RequestState::Orphaned,
+                terminal_outcome: Some(outcome),
+            },
+            disposition: RecoveryDisposition::ExternalEffectsUncertain,
+        })
+    }
+
+    /// Returns the recovery distinction retained for an orphaned request.
+    /// This is runtime metadata; protocol state remains unchanged until the
+    /// live adapter maps it to its existing diagnostics/result representation.
+    pub async fn request_recovery_disposition(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<Option<RecoveryDisposition>, RuntimeError> {
+        let Some(status) = self.request_status(identity, fingerprint).await? else {
+            return Ok(None);
+        };
+        let evidence = request_execution_evidence_tx(&self.connection, identity).await?;
+        validate_request_execution_evidence(&status, evidence)?;
+        Ok(evidence.disposition)
     }
 
     pub async fn request_status(
@@ -2755,6 +3349,56 @@ impl RuntimeState {
         request_status_tx(&self.connection, identity).await
     }
 
+    /// Enumerates durable Running requests for a recovery worker. This is a
+    /// read-only operation: it never schedules, replays, or changes a
+    /// request. Pair each returned identity with [`Self::request_owner`] and
+    /// one of the fenced recovery methods.
+    pub async fn running_requests(&self) -> Result<Vec<RequestStatus>, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
+                        owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                        controlled_transaction_proof
+                 FROM request_ledger
+                 WHERE state = ?1
+                 ORDER BY session_id, request_id",
+                params![RequestState::Running.code()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut requests = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let evidence = decode_request_execution_evidence(&row, 5)?;
+            validate_request_execution_evidence(&status, evidence)?;
+            requests.push(status);
+        }
+        Ok(requests)
+    }
+
+    /// Returns the active owner recorded for a Running request. `None` means
+    /// a validated legacy Running row or a non-running request; it never
+    /// authorizes recovery by itself.
+    pub async fn request_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<Option<RequestOwner>, RuntimeError> {
+        let Some(status) = self.request_status(identity, fingerprint).await? else {
+            return Ok(None);
+        };
+        let evidence = request_execution_evidence_tx(&self.connection, identity).await?;
+        validate_request_execution_evidence(&status, evidence)?;
+        Ok((status.state == RequestState::Running)
+            .then_some(evidence.owner)
+            .flatten())
+    }
+
     async fn transition_request(
         &self,
         identity: RequestIdentity,
@@ -2774,15 +3418,51 @@ impl RuntimeState {
             .await?
             .ok_or(RuntimeError::RequestUnknown)?;
         require_fingerprint(&current, fingerprint)?;
+        if next.is_terminal()
+            && matches!(
+                current.state,
+                RequestState::Reserved | RequestState::Running
+            )
+        {
+            let evidence = request_execution_evidence_tx(&tx, identity).await?;
+            if evidence.owner.is_some()
+                || tx
+                    .query("SELECT 1 FROM writer_lease WHERE singleton = 1", ())
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .is_some()
+            {
+                return Err(RuntimeError::RequestOwnerConflict);
+            }
+        }
         if !allowed.contains(&current.state) || current.state.is_terminal() {
             return Err(RuntimeError::RequestStateConflict);
+        }
+        if next == RequestState::Running
+            && tx
+                .query("SELECT 1 FROM writer_lease WHERE singleton = 1", ())
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .is_some()
+        {
+            return Err(RuntimeError::RequestOwnerConflict);
         }
         let outcome_bytes = terminal_outcome
             .as_ref()
             .map(|outcome| outcome.as_bytes().to_vec());
         let changed = tx
             .execute(
-                "UPDATE request_ledger SET state = ?1, terminal_outcome = ?2 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5 AND state = ?6",
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                     owner_epoch = NULL, effect_evidence = 0,
+                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5 AND state = ?6",
                 params![
                     next.code(),
                     outcome_bytes,
@@ -2805,6 +3485,99 @@ impl RuntimeState {
             fingerprint,
             state: next,
             terminal_outcome,
+        })
+    }
+
+    async fn transition_request_with_owner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        owner: WriterLease,
+        next: RequestState,
+        terminal_outcome: TerminalOutcome,
+    ) -> Result<RequestStatus, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_id(owner.owner_id)?;
+        if owner.epoch == 0 || !next.is_terminal() {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, owner).await?;
+        let current = request_status_tx(&tx, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        if !matches!(
+            current.state,
+            RequestState::Reserved | RequestState::Running
+        ) {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&tx, identity).await?;
+        validate_request_execution_evidence(&current, evidence)?;
+        let owner_request = match current.state {
+            RequestState::Running if evidence.owner == Some(RequestOwner::from(owner)) => true,
+            RequestState::Reserved if evidence.owner.is_none() => false,
+            _ => return Err(RuntimeError::RequestOwnerConflict),
+        };
+        let changed = if owner_request {
+            tx.execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                     owner_epoch = NULL, effect_evidence = 0,
+                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
+                   AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8",
+                params![
+                    next.code(),
+                    terminal_outcome.as_bytes().to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    owner.owner_id.to_vec(),
+                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        } else {
+            tx.execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                     owner_epoch = NULL, effect_evidence = 0,
+                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
+                   AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
+                   AND effect_evidence = 0 AND recovery_disposition = 0
+                   AND controlled_transaction_proof IS NULL",
+                params![
+                    next.code(),
+                    terminal_outcome.as_bytes().to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Reserved.code(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        };
+        if changed != 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestStatus {
+            identity,
+            fingerprint,
+            state: next,
+            terminal_outcome: Some(terminal_outcome),
         })
     }
 
@@ -2897,7 +3670,10 @@ impl RuntimeState {
         let mut request_rows = self
             .connection
             .query(
-                "SELECT session_id, request_id, fingerprint, state, terminal_outcome FROM request_ledger",
+                "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
+                        owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                        controlled_transaction_proof
+                 FROM request_ledger",
                 (),
             )
             .await
@@ -2907,7 +3683,9 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let evidence = decode_request_execution_evidence(&row, 5)?;
+            validate_request_execution_evidence(&status, evidence)?;
         }
         Ok(())
     }
@@ -4550,6 +5328,186 @@ async fn request_status_tx(
         .transpose()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EffectEvidence {
+    ControlledTransaction,
+    ExternalPossible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RequestExecutionEvidence {
+    owner: Option<RequestOwner>,
+    effects: Option<EffectEvidence>,
+    controlled_marker: Option<[u8; 32]>,
+    disposition: Option<RecoveryDisposition>,
+}
+
+async fn request_execution_evidence_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+) -> Result<RequestExecutionEvidence, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                    controlled_transaction_proof
+             FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
+            params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RequestUnknown)?;
+    decode_request_execution_evidence(&row, 0)
+}
+
+fn decode_request_execution_evidence(
+    row: &libsql::Row,
+    offset: i32,
+) -> Result<RequestExecutionEvidence, RuntimeError> {
+    let owner_id: Option<Vec<u8>> = row.get(offset).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let owner_epoch: Option<i64> = row
+        .get(offset + 1)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let owner = match (owner_id, owner_epoch) {
+        (Some(id), Some(epoch)) => Some(RequestOwner {
+            owner_id: fixed(id)?,
+            epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        }),
+        (None, None) => None,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let effects = match row
+        .get::<i64>(offset + 2)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+    {
+        0 => None,
+        1 => Some(EffectEvidence::ControlledTransaction),
+        2 => Some(EffectEvidence::ExternalPossible),
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let controlled_marker = row
+        .get::<Option<Vec<u8>>>(offset + 4)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(fixed)
+        .transpose()?;
+    let disposition = match row
+        .get::<i64>(offset + 3)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+    {
+        0 => None,
+        1 => Some(RecoveryDisposition::RollbackProven),
+        2 => Some(RecoveryDisposition::ExternalEffectsUncertain),
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    Ok(RequestExecutionEvidence {
+        owner,
+        effects,
+        controlled_marker,
+        disposition,
+    })
+}
+
+fn validate_request_execution_evidence(
+    status: &RequestStatus,
+    evidence: RequestExecutionEvidence,
+) -> Result<(), RuntimeError> {
+    if let Some(owner) = evidence.owner {
+        validate_id(owner.owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if owner.epoch == 0 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+    }
+    let marker_matches_owner = match evidence.controlled_marker {
+        Some(marker) => evidence.owner.is_some_and(|owner| {
+            marker
+                == controlled_transaction_marker(
+                    status.identity,
+                    status.fingerprint,
+                    WriterLease {
+                        owner_id: owner.owner_id,
+                        epoch: owner.epoch,
+                    },
+                )
+        }),
+        None => true,
+    };
+    if !marker_matches_owner {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.controlled_marker.is_some()
+        != (evidence.effects == Some(EffectEvidence::ControlledTransaction))
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.disposition.is_some() && status.state != RequestState::Orphaned {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.disposition == Some(RecoveryDisposition::RollbackProven) {
+        // This runtime has no durable rollback receipt. An entry marker is
+        // intentionally insufficient to admit the proven disposition.
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if evidence.disposition == Some(RecoveryDisposition::ExternalEffectsUncertain)
+        && status.state != RequestState::Orphaned
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let legacy_running = status.state == RequestState::Running
+        && evidence.owner.is_none()
+        && evidence.effects.is_none()
+        && evidence.controlled_marker.is_none()
+        && evidence.disposition.is_none();
+    let owned_running = status.state == RequestState::Running && evidence.owner.is_some();
+    if status.state == RequestState::Reserved
+        && (evidence.owner.is_some()
+            || evidence.effects.is_some()
+            || evidence.controlled_marker.is_some()
+            || evidence.disposition.is_some())
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if owned_running
+        && evidence.effects == Some(EffectEvidence::ControlledTransaction)
+        && evidence.controlled_marker.is_none()
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if owned_running && evidence.disposition.is_some() {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if status.state == RequestState::Running && !legacy_running && !owned_running {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if matches!(
+        status.state,
+        RequestState::Completed | RequestState::Cancelled
+    ) && (evidence.owner.is_some()
+        || evidence.effects.is_some()
+        || evidence.controlled_marker.is_some()
+        || evidence.disposition.is_some())
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    if status.state == RequestState::Orphaned {
+        let documented_legacy = evidence.owner.is_none()
+            && evidence.effects.is_none()
+            && evidence.controlled_marker.is_none()
+            && evidence.disposition.is_none();
+        let recovered_uncertain = evidence.disposition
+            == Some(RecoveryDisposition::ExternalEffectsUncertain)
+            && evidence.owner.is_none()
+            && evidence.effects.is_none()
+            && evidence.controlled_marker.is_none();
+        if !(documented_legacy || recovered_uncertain) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+    }
+    Ok(())
+}
+
 fn decode_request_status(row: &libsql::Row) -> Result<RequestStatus, RuntimeError> {
     let identity = RequestIdentity {
         session_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -4842,6 +5800,20 @@ fn validate_request_identity(value: RequestIdentity) -> Result<(), RuntimeError>
     validate_id(value.session_id)?;
     validate_id(value.request_id)
 }
+fn controlled_transaction_marker(
+    identity: RequestIdentity,
+    fingerprint: [u8; 32],
+    owner: WriterLease,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.runtime.controlled-transaction.v1");
+    digest.update(identity.session_id);
+    digest.update(identity.request_id);
+    digest.update(fingerprint);
+    digest.update(owner.owner_id);
+    digest.update(owner.epoch.to_be_bytes());
+    digest.finalize().into()
+}
 fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
     if value == [0; 32] {
         Err(RuntimeError::InvalidDigest)
@@ -4921,6 +5893,7 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(temp.path(), &["config", "user.name", "test"]);
+        git(temp.path(), &["config", "commit.gpgsign", "false"]);
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
     }
@@ -8831,7 +9804,25 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let old = state.acquire_lease(id(4)).await.unwrap();
-        let new = state.recover_abandoned(id(4), id(5)).await.unwrap();
+        assert_eq!(state.current_lease().await.unwrap(), Some(old));
+        assert_eq!(
+            state
+                .takeover_lease(
+                    WriterLease {
+                        owner_id: old.owner_id,
+                        epoch: old.epoch + 1,
+                    },
+                    id(5),
+                )
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        let new = state.takeover_lease(old, id(5)).await.unwrap();
+        assert_eq!(state.current_lease().await.unwrap(), Some(new));
+        assert_eq!(
+            state.takeover_lease(old, id(6)).await,
+            Err(RuntimeError::OwnerLost)
+        );
         assert!(new.epoch > old.epoch);
         let capture = state.capture().await.unwrap();
         assert_eq!(
@@ -8846,6 +9837,51 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_worker_can_enumerate_owned_and_legacy_requests() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owned = request(4, 5);
+        let legacy = request(4, 6);
+        let fingerprint = digest(8);
+        // This is the deliberate compatibility fixture: the legacy row was
+        // Running before any writer lease existed.
+        state.reserve_request(legacy, fingerprint).await.unwrap();
+        state.start_request(legacy, fingerprint).await.unwrap();
+        let old = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(owned, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(owned, fingerprint, old)
+            .await
+            .unwrap();
+        assert_eq!(state.running_requests().await.unwrap().len(), 2);
+        assert_eq!(
+            state.request_owner(owned, fingerprint).await.unwrap(),
+            Some(RequestOwner::from(old))
+        );
+        assert_eq!(
+            state.request_owner(legacy, fingerprint).await.unwrap(),
+            None
+        );
+
+        let fence = state.takeover_lease(old, id(9)).await.unwrap();
+        state
+            .recover_running_request(
+                owned,
+                fingerprint,
+                RequestOwner::from(old),
+                fence,
+                outcome(10),
+            )
+            .await
+            .unwrap();
+        state
+            .recover_legacy_running_request(legacy, fingerprint, fence, outcome(11))
+            .await
+            .unwrap();
+        assert!(state.running_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -9155,7 +10191,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn only_running_requests_can_be_orphaned() {
+    async fn legacy_orphan_wrapper_fails_closed_without_an_owner_fence() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let identity = request(4, 5);
@@ -9168,13 +10204,549 @@ mod tests {
             Err(RuntimeError::RequestStateConflict)
         );
         state.start_request(identity, fingerprint).await.unwrap();
-
-        let orphaned = state
-            .orphan_request(identity, fingerprint, outcome(7))
+        assert_eq!(
+            state
+                .orphan_request(identity, fingerprint, outcome(7))
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        let fence = state.acquire_lease(id(8)).await.unwrap();
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner {
+                        owner_id: id(9),
+                        epoch: 1,
+                    },
+                    fence,
+                    outcome(10),
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+    #[tokio::test]
+    async fn recovery_does_not_transition_a_request_owned_by_the_active_writer() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let active = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, active)
             .await
             .unwrap();
-        assert_eq!(orphaned.state, RequestState::Orphaned);
-        assert_eq!(orphaned.terminal_outcome, Some(outcome(7)));
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner {
+                        owner_id: id(8),
+                        epoch: 1,
+                    },
+                    active,
+                    outcome(10),
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(active),
+                    active,
+                    outcome(10),
+                )
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+    #[tokio::test]
+    async fn terminal_request_transitions_are_fenced_by_owner_epoch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let old = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        let reserved_identity = request(4, 7);
+        state
+            .reserve_request(reserved_identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, old)
+            .await
+            .unwrap();
+        let current = state.recover_abandoned(id(7), id(8)).await.unwrap();
+        assert_eq!(
+            state
+                .complete_request_with_owner(identity, fingerprint, old, outcome(9))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            state
+                .cancel_request_with_owner(identity, fingerprint, old, outcome(9))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            state
+                .complete_request(identity, fingerprint, outcome(9))
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        let recovered = state
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(old),
+                current,
+                outcome(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            state
+                .complete_request(reserved_identity, fingerprint, outcome(12))
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .cancel_request(reserved_identity, fingerprint, outcome(12))
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .cancel_request_with_owner(reserved_identity, fingerprint, current, outcome(13))
+                .await
+                .unwrap()
+                .state,
+            RequestState::Cancelled
+        );
+
+        let next_identity = request(4, 6);
+        state
+            .reserve_request(next_identity, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner(next_identity, fingerprint, current)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .complete_request_with_owner(next_identity, fingerprint, current, outcome(11))
+                .await
+                .unwrap()
+                .state,
+            RequestState::Completed
+        );
+    }
+    #[tokio::test]
+    async fn request_recovery_evidence_migration_is_idempotent() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        state.migrate_request_recovery_evidence().await.unwrap();
+        state.migrate_request_recovery_evidence().await.unwrap();
+        state.validate_recovery().await.unwrap();
+    }
+    #[tokio::test]
+    async fn pre_evidence_ledger_migrates_and_reopens_as_legacy_uncertain() {
+        let (_temp, repo) = repository();
+        repo.runtime_paths().ensure_exists().unwrap();
+        let database = Builder::new_local(repo.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE request_ledger (
+                     session_id BLOB NOT NULL,
+                     request_id BLOB NOT NULL,
+                     fingerprint BLOB NOT NULL,
+                     state INTEGER NOT NULL,
+                     terminal_outcome BLOB,
+                     PRIMARY KEY (session_id, request_id)
+                 );
+                 INSERT INTO request_ledger
+                     (session_id, request_id, fingerprint, state, terminal_outcome)
+                 VALUES (x'04040404040404040404040404040404',
+                         x'05050505050505050505050505050505',
+                         x'0606060606060606060606060606060606060606060606060606060606060606',
+                         2, NULL);",
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        assert_eq!(
+            state
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            None
+        );
+        let old = state.acquire_lease(id(7)).await.unwrap();
+        assert_eq!(
+            state
+                .recover_legacy_running_request(identity, fingerprint, old, outcome(9),)
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        let fence = state.recover_abandoned(id(7), id(8)).await.unwrap();
+        assert_eq!(old.epoch, 1);
+        let recovered = state
+            .recover_legacy_running_request(identity, fingerprint, fence, outcome(9))
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+    }
+    #[tokio::test]
+    async fn recovery_enforces_the_request_metadata_state_matrix() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        for (invalid, reset) in [
+            (
+                "UPDATE request_ledger SET owner_id = x'07070707070707070707070707070707', owner_epoch = 1",
+                "UPDATE request_ledger SET owner_id = NULL, owner_epoch = NULL",
+            ),
+            (
+                "UPDATE request_ledger SET recovery_disposition = 2",
+                "UPDATE request_ledger SET recovery_disposition = 0",
+            ),
+            (
+                "UPDATE request_ledger SET state = 2, owner_id = x'07070707070707070707070707070707', owner_epoch = 1, effect_evidence = 1",
+                "UPDATE request_ledger SET state = 1, terminal_outcome = NULL, owner_id = NULL, owner_epoch = NULL, effect_evidence = 0",
+            ),
+            (
+                "UPDATE request_ledger SET state = 3, terminal_outcome = x'01', effect_evidence = 2",
+                "UPDATE request_ledger SET state = 1, terminal_outcome = NULL, effect_evidence = 0",
+            ),
+            (
+                "UPDATE request_ledger SET state = 5, terminal_outcome = x'01', effect_evidence = 1, recovery_disposition = 1, controlled_transaction_proof = x'0000000000000000000000000000000000000000000000000000000000000000'",
+                "UPDATE request_ledger SET state = 1, terminal_outcome = NULL, effect_evidence = 0, recovery_disposition = 0, controlled_transaction_proof = NULL",
+            ),
+            (
+                "UPDATE request_ledger SET state = 5, terminal_outcome = x'01', recovery_disposition = 1",
+                "UPDATE request_ledger SET state = 1, terminal_outcome = NULL, recovery_disposition = 0",
+            ),
+        ] {
+            state
+                .connection
+                .execute_batch(&format!(
+                    "PRAGMA ignore_check_constraints = ON; {invalid}; PRAGMA ignore_check_constraints = OFF;"
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.validate_recovery().await,
+                Err(RuntimeError::RecoveryInvalid),
+                "invalid metadata combination was accepted"
+            );
+            state.connection.execute(reset, ()).await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn legacy_running_request_recovers_as_uncertain_after_takeover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        // Preserve the migration path for a legacy row written before the
+        // owner-fenced runtime had acquired a lease.
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state.start_request(identity, fingerprint).await.unwrap();
+        state.acquire_lease(id(7)).await.unwrap();
+        let fence = state.recover_abandoned(id(7), id(8)).await.unwrap();
+        let recovered = state
+            .recover_legacy_running_request(identity, fingerprint, fence, outcome(9))
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+    }
+    #[tokio::test]
+    async fn legacy_start_request_is_fenced_when_a_writer_lease_is_present() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(identity, fingerprint).await.unwrap();
+
+        assert_eq!(
+            state.start_request(identity, fingerprint).await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Reserved
+        );
+        assert_eq!(
+            state
+                .start_request_with_owner(identity, fingerprint, owner)
+                .await
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+    #[tokio::test]
+    async fn recovery_retains_uncertainty_and_clears_old_owner_evidence() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(7)).await.unwrap();
+        let controlled = request(4, 5);
+        let external = request(4, 6);
+        for identity in [controlled, external] {
+            state.reserve_request(identity, digest(8)).await.unwrap();
+            state
+                .start_request_with_owner(identity, digest(8), owner)
+                .await
+                .unwrap();
+        }
+        state
+            .record_controlled_transaction(controlled, digest(8), owner)
+            .await
+            .unwrap();
+        state
+            .record_external_effect(external, digest(8), owner)
+            .await
+            .unwrap();
+        let fence = state.recover_abandoned(id(7), id(9)).await.unwrap();
+        let lost = RequestOwner::from(owner);
+        let recovered = state
+            .recover_running_request(controlled, digest(8), lost, fence, outcome(10))
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(controlled, digest(8))
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT owner_id, owner_epoch, effect_evidence,
+                        recovery_disposition, controlled_transaction_proof
+                 FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
+                params![
+                    controlled.session_id.to_vec(),
+                    controlled.request_id.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert!(row.get::<Option<Vec<u8>>>(0).unwrap().is_none());
+        assert!(row.get::<Option<i64>>(1).unwrap().is_none());
+        assert_eq!(row.get::<i64>(2).unwrap(), 0);
+        assert_eq!(row.get::<i64>(3).unwrap(), 2);
+        assert!(row.get::<Option<Vec<u8>>>(4).unwrap().is_none());
+        let recovered = state
+            .recover_running_request(external, digest(8), lost, fence, outcome(11))
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(external, digest(8))
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT owner_id, owner_epoch, effect_evidence,
+                        recovery_disposition, controlled_transaction_proof
+                 FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
+                params![external.session_id.to_vec(), external.request_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert!(row.get::<Option<Vec<u8>>>(0).unwrap().is_none());
+        assert!(row.get::<Option<i64>>(1).unwrap().is_none());
+        assert_eq!(row.get::<i64>(2).unwrap(), 0);
+        assert_eq!(row.get::<i64>(3).unwrap(), 2);
+        assert!(row.get::<Option<Vec<u8>>>(4).unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn recovery_is_fingerprinted_terminal_and_never_reexecutes() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let fence = state.recover_abandoned(id(7), id(8)).await.unwrap();
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    digest(9),
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(10),
+                )
+                .await,
+            Err(RuntimeError::RequestFingerprintMismatch)
+        );
+        let first = state
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(11),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state.reserve_request(identity, fingerprint).await.unwrap(),
+            first.status
+        );
+        assert_eq!(
+            state.start_request(identity, fingerprint).await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+    }
+    #[tokio::test]
+    async fn recovery_does_not_change_existing_terminal_replay() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let owner = state.acquire_lease(id(7)).await.unwrap();
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        state
+            .record_controlled_transaction(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let completed = state
+            .complete_request_with_owner(identity, fingerprint, owner, outcome(8))
+            .await
+            .unwrap();
+        let fence = state.recover_abandoned(id(7), id(9)).await.unwrap();
+        assert_eq!(
+            state
+                .recover_running_request(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(10),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            state.reserve_request(identity, fingerprint).await.unwrap(),
+            completed
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            None
+        );
     }
     #[tokio::test]
     async fn recovery_rejects_malformed_request_ledger_state() {
