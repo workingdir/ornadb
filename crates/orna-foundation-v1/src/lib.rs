@@ -60,8 +60,12 @@ impl RowRef {
         ))
     }
 }
-/// A noninterchangeable typed `sys.RowRef<T>`. The only conversion into a
-/// typed reference is explicit at the owning catalogue/repository boundary.
+/// A noninterchangeable typed `sys.RowRef<T>`.
+///
+/// This compatibility wrapper is only a type marker: it deliberately does not
+/// validate a relation identity and never grants authority. The generic
+/// conversion must not be treated as proof of `Kind`, row existence, or
+/// authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedRowRef<Kind> {
     raw: RowRef,
@@ -93,6 +97,10 @@ pub enum ObjectKind {}
 pub enum DefinitionKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraceKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamKind {}
 /// Typed portable row references. `SnapshotRef` is a snapshot metadata row
 /// reference, deliberately distinct from `CanonicalSnapshot` pin bytes.
 pub type FileRef = TypedRowRef<FileKind>;
@@ -101,6 +109,106 @@ pub type DiagnosticRef = TypedRowRef<DiagnosticKind>;
 pub type ObjectRef = TypedRowRef<ObjectKind>;
 pub type DefinitionRef = TypedRowRef<DefinitionKind>;
 pub type TraceRef = TypedRowRef<TraceKind>;
+/// Typed `sys.RowRef<sys.Run>` alias. The generic wrapper remains a marker;
+/// use `validate_run_reference` when checked relation/context coordinates are
+/// required.
+pub type RunRef = TypedRowRef<RunKind>;
+/// Typed `sys.RowRef<sys.Stream>` alias. The generic wrapper remains a
+/// marker; use `validate_stream_reference` when checked relation/context
+/// coordinates are required.
+pub type StreamRef = TypedRowRef<StreamKind>;
+
+/// Stable implementation-defined physical identities for the canonical
+/// `sys.Run` and `sys.Stream` relations. The Orna specification names these
+/// relations but does not prescribe their sixteen-byte physical identities.
+/// These constants are therefore versioned implementation compatibility
+/// values, not per-runtime generated identifiers.
+pub const SYS_RUN_TABLE_ID: [u8; 16] = [
+    0x3d, 0x64, 0x87, 0x71, 0x5a, 0x4c, 0x4e, 0x80, 0x9d, 0x2f, 0x11, 0xa4, 0x92, 0x36, 0x70, 0x01,
+];
+pub const SYS_STREAM_TABLE_ID: [u8; 16] = [
+    0x7c, 0x10, 0x5b, 0xa9, 0x63, 0x2e, 0x43, 0x8c, 0x88, 0x19, 0x56, 0xd0, 0x47, 0xaf, 0x20, 0x02,
+];
+
+/// Checks a candidate `sys.RunRef` against a supplied CWD context and the
+/// fixed `sys.Run` relation identity. This is a validation primitive only:
+/// it does not establish provenance, row existence, projection ownership, or
+/// authorization, and it does not create `sys.rt.runs`.
+pub fn validate_run_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<RunRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_RUN_TABLE_ID)?;
+    if !is_run_id_key(&reference.key) {
+        return Err(SystemReferenceError::InvalidRunKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+/// Checks a candidate `sys.StreamRef` against a supplied CWD context, the
+/// fixed `sys.Stream` relation identity, and the declared natural key
+/// (`run + source_identity + partition`). This is a validation primitive
+/// only; it does not establish a durable projection or grant authority.
+pub fn validate_stream_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<StreamRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_STREAM_TABLE_ID)?;
+    let OvbRaw::Array(key) = &reference.key else {
+        return Err(SystemReferenceError::InvalidStreamKey);
+    };
+    let [run, source_identity, partition] = key.as_slice() else {
+        return Err(SystemReferenceError::InvalidStreamKey);
+    };
+    let run = row_ref_from_raw(run).map_err(|_| SystemReferenceError::InvalidStreamKey)?;
+    validate_run_reference(run, capture).map_err(|_| SystemReferenceError::InvalidStreamKey)?;
+    if !matches!(source_identity, OvbRaw::Text(_))
+        || !matches!(partition, OvbRaw::Null | OvbRaw::Text(_))
+    {
+        return Err(SystemReferenceError::InvalidStreamKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+fn validate_coordinates(
+    reference: &RowRef,
+    capture: &CwdCapture,
+    expected_table: [u8; 16],
+) -> Result<(), SystemReferenceError> {
+    if reference.database_id != capture.database_id() {
+        return Err(SystemReferenceError::DatabaseMismatch);
+    }
+    if reference.snapshot != *capture.snapshot() {
+        return Err(SystemReferenceError::SnapshotMismatch);
+    }
+    if reference.table_id != expected_table {
+        return Err(SystemReferenceError::RelationMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemReferenceError {
+    DatabaseMismatch,
+    SnapshotMismatch,
+    RelationMismatch,
+    InvalidRunKey,
+    InvalidStreamKey,
+}
+impl fmt::Display for SystemReferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DatabaseMismatch => f.write_str("system reference database does not match CWD"),
+            Self::SnapshotMismatch => f.write_str("system reference snapshot does not match CWD"),
+            Self::RelationMismatch => {
+                f.write_str("system reference relation identity does not match")
+            }
+            Self::InvalidRunKey => f.write_str("invalid sys.Run natural key"),
+            Self::InvalidStreamKey => f.write_str("invalid sys.Stream natural key"),
+        }
+    }
+}
+impl std::error::Error for SystemReferenceError {}
 
 /// Exact `sys.SourceSpan`. Orna `Int` coordinates can exceed machine integers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -763,6 +871,7 @@ pub enum FoundationError {
     ExpectedCwdSnapshot,
     BareRepositoryHasNoCwd,
     UnsafeDiagnosticText,
+    InvalidSystemReferenceEncoding,
 }
 impl fmt::Display for FoundationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -776,6 +885,9 @@ impl fmt::Display for FoundationError {
             Self::ExpectedCwdSnapshot => f.write_str("expected CWD snapshot"),
             Self::BareRepositoryHasNoCwd => f.write_str("a bare repository has no CWD"),
             Self::UnsafeDiagnosticText => f.write_str("unsafe diagnostic text"),
+            Self::InvalidSystemReferenceEncoding => {
+                f.write_str("invalid canonical system reference encoding")
+            }
         }
     }
 }
@@ -783,6 +895,26 @@ impl std::error::Error for FoundationError {}
 
 fn uuid(value: [u8; 16]) -> OvbRaw {
     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())))
+}
+fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, FoundationError> {
+    let OvbRaw::Tag(60010, body) = raw else {
+        return Err(FoundationError::InvalidSystemReferenceEncoding);
+    };
+    let fields = array(body)?;
+    let [database_id, table_id, key, snapshot] = fields.as_slice() else {
+        return Err(FoundationError::InvalidSystemReferenceEncoding);
+    };
+    RowRef::new(
+        uuid_bytes(database_id)?,
+        uuid_bytes(table_id)?,
+        key.clone(),
+        Snapshot::decode(snapshot).map_err(FoundationError::Value)?,
+    )
+}
+fn is_run_id_key(raw: &OvbRaw) -> bool {
+    // The 1.0.0 sys contract uses the canonical UUID representation for
+    // `sys.RunId`: OVB tag 37 wrapping exactly sixteen bytes.
+    matches!(raw, OvbRaw::Tag(37, value) if matches!(value.as_ref(), OvbRaw::Bytes(bytes) if bytes.len() == 16))
 }
 fn array(raw: &OvbRaw) -> Result<&Vec<OvbRaw>, FoundationError> {
     if let OvbRaw::Array(values) = raw {
