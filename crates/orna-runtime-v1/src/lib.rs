@@ -188,6 +188,9 @@ CREATE TABLE IF NOT EXISTS stream_control (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     status INTEGER NOT NULL CHECK (status IN (1, 2))
 );
+CREATE TABLE IF NOT EXISTS stream_pause_pending (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0)
+);
 "#;
 
 pub const MAX_TERMINAL_OUTCOME_BYTES: usize = 16 * 1024 * 1024;
@@ -2202,6 +2205,27 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         transaction
+            .execute(
+                "UPDATE stream_control
+                 SET status = ?1
+                 WHERE key_id IN (SELECT key_id FROM stream_pause_pending)",
+                params![encode_stream_status(StreamStatus::Paused)],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO stream_control (key_id, status)
+                 SELECT key_id, ?1 FROM stream_pause_pending",
+                params![encode_stream_status(StreamStatus::Paused)],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute("DELETE FROM stream_pause_pending", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
             .execute("DELETE FROM stream_retry_claim", ())
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4032,6 +4056,29 @@ impl RuntimeState {
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?;
         }
+        let mut pending = self
+            .connection
+            .query(
+                "SELECT pause.key_id, checkpoint.key_id
+                 FROM stream_pause_pending AS pause
+                 LEFT JOIN stream_checkpoint AS checkpoint
+                   ON checkpoint.key_id = pause.key_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = pending
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let referenced: Option<String> =
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if key_id.is_empty() || referenced.as_deref() != Some(key_id.as_str()) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
         Ok(())
     }
 
@@ -4619,6 +4666,44 @@ async fn store_stream_status(
     Ok(())
 }
 
+async fn stream_pause_pending(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_pause_pending WHERE key_id = ?1",
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some())
+}
+
+/// Completes a previously admitted pause once its sole delivery lease has
+/// reached a terminal transaction boundary. The pending record and visible
+/// status change share that transaction with the lease release.
+async fn publish_pending_stream_pause(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(), RuntimeError> {
+    let changed = connection
+        .execute(
+            "DELETE FROM stream_pause_pending WHERE key_id = ?1",
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if changed != 0 {
+        store_stream_status(connection, key, StreamStatus::Paused).await?;
+    }
+    Ok(())
+}
+
 async fn has_blocking_stream_failure(
     connection: &Connection,
     key: &CheckpointKey,
@@ -4857,13 +4942,34 @@ async fn apply_stream_intent_tx(
     match intent {
         CommitIntent::Pause { key } => {
             ensure_stream_checkpoint(connection, &key).await?;
+            if load_stream_status(connection, &key).await? == StreamStatus::Paused {
+                return Ok(CommitResult::StreamStatusChanged {
+                    state: StreamState {
+                        key,
+                        status: StreamStatus::Paused,
+                    },
+                    changed: false,
+                });
+            }
             if load_stream_lease(connection, &key).await?.is_some() {
-                return Ok(CommitResult::Rejected(RejectReason::StreamBusy));
+                let changed = connection
+                    .execute(
+                        "INSERT OR IGNORE INTO stream_pause_pending (key_id) VALUES (?1)",
+                        params![stream_key_id(&key)],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    != 0;
+                return Ok(CommitResult::PausePending {
+                    state: StreamState {
+                        key,
+                        status: StreamStatus::Running,
+                    },
+                    changed,
+                });
             }
-            let changed = load_stream_status(connection, &key).await? != StreamStatus::Paused;
-            if changed {
-                store_stream_status(connection, &key, StreamStatus::Paused).await?;
-            }
+            let changed = true;
+            store_stream_status(connection, &key, StreamStatus::Paused).await?;
             Ok(CommitResult::StreamStatusChanged {
                 state: StreamState {
                     key,
@@ -4999,7 +5105,8 @@ async fn apply_stream_intent_tx(
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             }
             if purpose == LeasePurpose::Deliver
-                && load_stream_status(connection, &key).await? == StreamStatus::Paused
+                && (load_stream_status(connection, &key).await? == StreamStatus::Paused
+                    || stream_pause_pending(connection, &key).await?)
                 && failure_status != Some(FailureStatus::Retrying)
             {
                 return Ok(CommitResult::Rejected(RejectReason::StreamPaused));
@@ -5115,6 +5222,7 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            publish_pending_stream_pause(connection, &key).await?;
             Ok(CommitResult::Failed {
                 failure: load_stream_failure(connection, &identity)
                     .await?
@@ -5244,6 +5352,7 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            publish_pending_stream_pause(connection, &key).await?;
             Ok(CommitResult::CheckpointAdvanced {
                 checkpoint: load_stream_checkpoint(connection, &key).await?,
             })
@@ -5310,6 +5419,7 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            publish_pending_stream_pause(connection, &key).await?;
             Ok(CommitResult::CheckpointAdvanced {
                 checkpoint: load_stream_checkpoint(connection, &key).await?,
             })
@@ -5486,6 +5596,7 @@ async fn apply_stream_intent_tx(
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
+            publish_pending_stream_pause(connection, &key).await?;
             Ok(CommitResult::Cancelled {
                 checkpoint: load_stream_checkpoint(connection, &key).await?,
                 classification: CancellationClassification::RollbackShaped,
@@ -7506,6 +7617,114 @@ mod tests {
         assert_eq!(succeeded.identity, failed.identity);
         assert_eq!(succeeded.attempts, retry.attempts);
         assert_eq!(succeeded.status, FailureStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn durable_pause_waits_for_delivery_and_survives_owner_recovery() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let first = stream_delivery("pause-first", "pause-after-first");
+        let key = first.checkpoint_key();
+        let first_checkpoint;
+        {
+            let mut stream = state.stream_backend(writer);
+            first_checkpoint = stream.checkpoint_async(&key).await.unwrap();
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: first.clone(),
+                    expected: CheckpointPrecondition::from(&first_checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Pause { key: key.clone() })
+                    .await
+                    .unwrap(),
+                CommitResult::PausePending {
+                    state: StreamState {
+                        status: StreamStatus::Running,
+                        ..
+                    },
+                    changed: true,
+                }
+            ));
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Complete {
+                        lease,
+                        expected: CheckpointPrecondition::from(&first_checkpoint),
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::CheckpointAdvanced { .. }
+            ));
+            let checkpoint = stream.checkpoint_async(&key).await.unwrap();
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Acquire {
+                        delivery: stream_delivery("pause-second", "pause-after-second"),
+                        expected: CheckpointPrecondition::from(&checkpoint),
+                        purpose: LeasePurpose::Deliver,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StreamPaused)
+            );
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Resume { key: key.clone() })
+                    .await
+                    .unwrap(),
+                CommitResult::StreamStatusChanged { changed: true, .. }
+            ));
+        }
+
+        let active = {
+            let mut stream = state.stream_backend(writer);
+            let checkpoint = stream.checkpoint_async(&key).await.unwrap();
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: stream_delivery("pause-recovery", "pause-after-recovery"),
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            assert!(matches!(
+                stream
+                    .apply_async(CommitIntent::Pause { key: key.clone() })
+                    .await
+                    .unwrap(),
+                CommitResult::PausePending { changed: true, .. }
+            ));
+            lease
+        };
+        let replacement = state.takeover_lease(writer, id(5)).await.unwrap();
+        let mut stream = state.stream_backend(replacement);
+        let checkpoint = stream.checkpoint_async(&key).await.unwrap();
+        assert_eq!(checkpoint.committed, Some(first.successor));
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: active.delivery,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StreamPaused)
+        );
     }
 
     #[tokio::test]
