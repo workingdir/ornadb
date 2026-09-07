@@ -248,6 +248,36 @@ impl SealedInvocationOperation {
 }
 
 #[cfg(test)]
+mod argument_metadata_tests {
+    use super::sealed_invocation_argument_type_metadata;
+    use orna_core::{
+        TypeId,
+        types::{ResolvedType, StandardScalar},
+    };
+
+    #[test]
+    fn argument_metadata_preserves_closed_type_identity_shapes() {
+        assert_eq!(
+            sealed_invocation_argument_type_metadata(ResolvedType::Scalar(StandardScalar::Integer)),
+            ("scalar", Some("integer"), None)
+        );
+        let type_id = TypeId::from_bytes([0x71; 16]);
+        assert_eq!(
+            sealed_invocation_argument_type_metadata(ResolvedType::Named(type_id)),
+            ("named", None, Some(type_id.to_bytes().to_vec()))
+        );
+        assert_eq!(
+            sealed_invocation_argument_type_metadata(ResolvedType::reference(type_id)),
+            ("reference", None, Some(type_id.to_bytes().to_vec()))
+        );
+        assert_eq!(
+            sealed_invocation_argument_type_metadata(ResolvedType::value(type_id)),
+            ("value", None, Some(type_id.to_bytes().to_vec()))
+        );
+    }
+}
+
+#[cfg(test)]
 impl SealedInvocationOperation {
     pub(super) fn new_for_test(
         kernel: PostgresKernel,
@@ -411,6 +441,105 @@ impl SealedInvocationPreparedOutcome {
         };
         Ok(())
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SealedInvocationArgumentMetadata {
+    position: i64,
+    parameter_id: Vec<u8>,
+    name: String,
+    type_kind: &'static str,
+    scalar_type: Option<&'static str>,
+    target_type_id: Option<Vec<u8>>,
+    value_digest: Vec<u8>,
+}
+
+fn sealed_invocation_scalar_name(scalar: orna_core::types::StandardScalar) -> &'static str {
+    match scalar {
+        orna_core::types::StandardScalar::Boolean => "boolean",
+        orna_core::types::StandardScalar::Integer => "integer",
+        orna_core::types::StandardScalar::BigInt => "bigint",
+        orna_core::types::StandardScalar::Float => "float",
+        orna_core::types::StandardScalar::Decimal => "decimal",
+        orna_core::types::StandardScalar::CharacterLargeObject => "character_large_object",
+        orna_core::types::StandardScalar::BinaryLargeObject => "binary_large_object",
+        orna_core::types::StandardScalar::Uuid => "uuid",
+        orna_core::types::StandardScalar::Date => "date",
+        orna_core::types::StandardScalar::Time => "time",
+        orna_core::types::StandardScalar::Timestamp => "timestamp",
+        orna_core::types::StandardScalar::Duration => "duration",
+        orna_core::types::StandardScalar::Void => "void",
+    }
+}
+
+fn sealed_invocation_argument_type_metadata(
+    resolved_type: orna_core::types::ResolvedType,
+) -> (&'static str, Option<&'static str>, Option<Vec<u8>>) {
+    match resolved_type {
+        orna_core::types::ResolvedType::Scalar(scalar) => {
+            ("scalar", Some(sealed_invocation_scalar_name(scalar)), None)
+        }
+        orna_core::types::ResolvedType::Named(type_id) => {
+            ("named", None, Some(type_id.to_bytes().to_vec()))
+        }
+        orna_core::types::ResolvedType::Reference { target } => {
+            ("reference", None, Some(target.to_bytes().to_vec()))
+        }
+        orna_core::types::ResolvedType::Value(type_id) => {
+            ("value", None, Some(type_id.to_bytes().to_vec()))
+        }
+    }
+}
+
+fn sealed_invocation_argument_metadata(
+    active: &ActiveDatabaseRevision,
+    definition: &FunctionDefinition,
+    arguments: &[InvocationArgument],
+) -> Result<Vec<SealedInvocationArgumentMetadata>, PostgresKernelError> {
+    let mut metadata = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let parameter = match argument.selector() {
+            InvocationParameterSelector::ParameterId(id) => definition.parameter_by_id(*id),
+            InvocationParameterSelector::Name(name) => definition.parameter_by_name(name),
+            _ => None,
+        }
+        .ok_or(PostgresKernelError::DurableInvariant {
+            relation: "sealed invocation argument metadata",
+            record: definition.id().canonical(),
+            rule: "admitted invocation argument selector must resolve to its pinned parameter",
+        })?;
+        let position = i64::from(parameter.ordinal());
+        let (type_kind, scalar_type, target_type_id) =
+            sealed_invocation_argument_type_metadata(parameter.resolved_type());
+        let encoded = encode_active_value(active, argument.value().value()).map_err(|_| {
+            PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation argument metadata",
+                record: definition.id().canonical(),
+                rule: "admitted invocation argument must retain a canonical typed encoding",
+            }
+        })?;
+        metadata.push(SealedInvocationArgumentMetadata {
+            position,
+            parameter_id: parameter.id().to_bytes().to_vec(),
+            name: parameter.name().to_owned(),
+            type_kind,
+            scalar_type,
+            target_type_id,
+            value_digest: Sha256::digest(encoded).to_vec(),
+        });
+    }
+    metadata.sort_unstable_by_key(|argument| argument.position);
+    if metadata
+        .windows(2)
+        .any(|pair| pair[0].position == pair[1].position)
+    {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "sealed invocation argument metadata",
+            record: definition.id().canonical(),
+            rule: "admitted invocation arguments must retain distinct declaration positions",
+        });
+    }
+    Ok(metadata)
 }
 
 #[derive(Clone)]
@@ -731,6 +860,38 @@ impl SealedInvocationContinuation {
 }
 
 impl SealedInvocationOperation {
+    async fn append_sealed_invocation_argument_metadata(
+        &self,
+        transaction: &Transaction<'_>,
+        definition: &FunctionDefinition,
+    ) -> Result<(), PostgresKernelError> {
+        let invocation = self.invocation.to_bytes().to_vec();
+        for argument in
+            sealed_invocation_argument_metadata(&self.active, definition, self.decoded.arguments())?
+        {
+            transaction
+                .execute(
+                    "INSERT INTO _orna_kernel.sealed_invocation_argument_metadata (\
+                        invocation_id, position, parameter_id, name, type_kind, scalar_type, \
+                        target_type_id, value_digest, redacted\
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)",
+                    &[
+                        &invocation,
+                        &argument.position,
+                        &argument.parameter_id,
+                        &argument.name,
+                        &argument.type_kind,
+                        &argument.scalar_type,
+                        &argument.target_type_id,
+                        &argument.value_digest,
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+        }
+        Ok(())
+    }
+
     /// Persists the private lifecycle admission in the same transaction as
     /// the protected prepared-audit evidence. An unresolved denial retains no
     /// invented target identity and is terminally failed in that transaction.
@@ -783,6 +944,17 @@ impl SealedInvocationOperation {
                 SealedInvocationLifecycleTerminal::Failed(failure),
             )
             .await?;
+        }
+        if let SealedInvocationPreparedOutcome::Allowed { target, .. } = &self.outcome {
+            let definition = match target {
+                PreparedSealedTarget::Application { definition }
+                | PreparedSealedTarget::VerifiedStandard { definition, .. } => Some(definition),
+                PreparedSealedTarget::System { .. } => None,
+            };
+            if let Some(definition) = definition {
+                self.append_sealed_invocation_argument_metadata(transaction, definition)
+                    .await?;
+            }
         }
         Ok(())
     }
