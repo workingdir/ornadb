@@ -404,6 +404,36 @@ mod tests {
     }
 
     #[test]
+    fn admitted_standard_functions_execute_their_verified_source_bodies() {
+        let standard = "pub fn clamp(value: Int, lower: Int, upper: Int): Int = lower + upper;";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot",
+            [("std/math.orna".into(), standard.into())],
+        )
+        .unwrap();
+        let (_directory, project) = loaded_project(&[("main.orna", "")], Some(profile));
+        let mut session = AdmittedReplSession::from_loaded_project(
+            &project,
+            [("std/math.orna".into(), standard.into())],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(session.submit("use std.math;"), Ok(None));
+        assert_eq!(
+            session.submit("math.clamp(value: 99, lower: 20, upper: 22)"),
+            Ok(Some(Value::int(42.into())))
+        );
+        assert_eq!(
+            session
+                .submit("math.clamp(value: 99, min: 20, max: 22)")
+                .unwrap_err()
+                .code(),
+            "ORNA-S021-TYPE"
+        );
+    }
+
+    #[test]
     fn repl_can_import_verified_standard_modules_absent_from_project_source() {
         let standard = "pub fn increment(value: Int): Int = value + 1;";
         let profile = StandardDependencyProfile::from_sources(
