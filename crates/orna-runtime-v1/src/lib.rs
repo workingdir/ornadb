@@ -441,6 +441,17 @@ pub struct RequestStatus {
     pub terminal_outcome: Option<TerminalOutcome>,
 }
 
+/// The durable result of finalizing one owner-fenced table activation.
+///
+/// `capture` and `request` are returned from the same committed transaction;
+/// a matching terminal replay returns the retained pair without applying the
+/// supplied activation again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestActivationCommit {
+    pub capture: CwdCapture,
+    pub request: RequestStatus,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultPoint {
     AfterMutation,
@@ -449,6 +460,10 @@ pub enum FaultPoint {
     AfterFailureRecord,
     AfterFailurePayload,
     AfterReplayFailureRecord,
+    BeforeTableWrite,
+    AfterTableWrite,
+    BeforeTerminalClaim,
+    AfterTerminalClaim,
 }
 
 /// Deterministic seam for proving transaction rollback. Production callers use
@@ -1198,6 +1213,141 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(next)
+    }
+
+    /// Atomically finalizes one Orna-controlled table activation and its
+    /// durable request claim.
+    ///
+    /// The request must already be `Running` under `lease`; admission and
+    /// owner assignment remain separate durable steps. On a successful first
+    /// call, typed table rows, the mutation/checkpoint capture, and the
+    /// validated bounded terminal outcome commit in one writer-fenced
+    /// transaction. Any validation, cancellation, fault, or owner-loss error
+    /// rolls the complete transaction back. A matching terminal request is
+    /// replayed from durable state without applying `mutations` again.
+    ///
+    /// This is the strongest boundary available while the evaluator owns its
+    /// own execution and cannot borrow this libSQL connection for the whole
+    /// activation. Callers therefore stage canonical mutations in memory and
+    /// must use the existing owner-fenced cancellation/failure APIs when an
+    /// activation does not successfully finalize. External effects remain
+    /// outside this transaction and are never implied reversible.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_table_request_activation(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        context: &RuntimeActivationContext,
+        mutations: &[TableMutation],
+        next_digest: [u8; 32],
+        outcome: TerminalOutcome,
+        faults: &dyn FaultInjector,
+    ) -> Result<RequestActivationCommit, RuntimeError> {
+        validate_request_identity(identity)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current = request_status_tx(&transaction, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&current, fingerprint)?;
+        let evidence = request_execution_evidence_tx(&transaction, identity).await?;
+        validate_request_execution_evidence(&current, evidence)?;
+
+        if current.state.is_terminal() {
+            let capture = capture_tx(&transaction).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return Ok(RequestActivationCommit {
+                capture,
+                request: current,
+            });
+        }
+
+        if current.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        validate_id(lease.owner_id)?;
+        if lease.epoch == 0 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        self.require_owner(&transaction, lease).await?;
+        if evidence.owner != Some(RequestOwner::from(lease)) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        if mutations.is_empty() {
+            return Err(RuntimeError::EmptyMutationBatch);
+        }
+        let encoded = mutations
+            .iter()
+            .map(TableMutation::runtime_mutation)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_mutations(&encoded, next_digest)?;
+        let current_capture = capture_tx(&transaction).await?;
+        if &current_capture != context.capture() {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current_capture),
+            });
+        }
+
+        faults.check(FaultPoint::BeforeTableWrite)?;
+        for mutation in mutations {
+            apply_table_mutation_tx(&transaction, mutation).await?;
+        }
+        faults.check(FaultPoint::AfterTableWrite)?;
+        let capture = append_mutations_tx(
+            &transaction,
+            context.capture(),
+            &encoded,
+            next_digest,
+            faults,
+        )
+        .await?;
+        faults.check(FaultPoint::BeforeTerminalClaim)?;
+        let changed = transaction
+            .execute(
+                "UPDATE request_ledger
+                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                     owner_epoch = NULL, effect_evidence = 0,
+                     recovery_disposition = 0, controlled_transaction_proof = NULL
+                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
+                   AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8
+                   AND terminal_outcome IS NULL",
+                params![
+                    RequestState::Completed.code(),
+                    outcome.as_bytes().to_vec(),
+                    identity.session_id.to_vec(),
+                    identity.request_id.to_vec(),
+                    fingerprint.to_vec(),
+                    RequestState::Running.code(),
+                    lease.owner_id.to_vec(),
+                    i64::try_from(lease.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        faults.check(FaultPoint::AfterTerminalClaim)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RequestActivationCommit {
+            capture,
+            request: RequestStatus {
+                identity,
+                fingerprint,
+                state: RequestState::Completed,
+                terminal_outcome: Some(outcome),
+            },
+        })
     }
 
     /// Reads a committed table row after reopening the durable runtime.
@@ -6124,7 +6274,7 @@ mod tests {
             );
             assert!(state.pending().await.unwrap().is_empty());
             assert_eq!(state.latest_checkpoint().await.unwrap(), None);
-            assert_eq!(state.capture().await.unwrap(), *context.capture());
+            assert_eq!(state.capture().await.unwrap(), context.capture().clone());
         }
     }
 
@@ -9316,6 +9466,254 @@ mod tests {
             assert_eq!(state.latest_checkpoint().await.unwrap(), None);
             assert_eq!(state.capture().await.unwrap(), capture);
         }
+    }
+
+    #[tokio::test]
+    async fn request_activation_faults_roll_back_writes_and_terminal_claim() {
+        for (key, point) in [
+            (1, FaultPoint::BeforeTableWrite),
+            (2, FaultPoint::AfterTableWrite),
+            (3, FaultPoint::AfterMutation),
+            (4, FaultPoint::AfterCheckpoint),
+            (5, FaultPoint::AfterCapture),
+            (6, FaultPoint::BeforeTerminalClaim),
+            (7, FaultPoint::AfterTerminalClaim),
+        ] {
+            let (_temp, repo) = repository();
+            let state = open_state(&repo).await;
+            let owner = state.acquire_lease(id(4)).await.unwrap();
+            let identity = request(4, 5);
+            let fingerprint = digest(6);
+            state.reserve_request(identity, fingerprint).await.unwrap();
+            state
+                .start_request_with_owner(identity, fingerprint, owner)
+                .await
+                .unwrap();
+            let context = state.begin_activation().await.unwrap();
+            let mutation = table_mutation(20 + key, key, Some(9));
+
+            assert_eq!(
+                state
+                    .commit_table_request_activation(
+                        owner,
+                        identity,
+                        fingerprint,
+                        &context,
+                        std::slice::from_ref(&mutation),
+                        digest(10),
+                        outcome(11),
+                        &Fail(point),
+                    )
+                    .await,
+                Err(RuntimeError::FaultInjected(point))
+            );
+            assert_eq!(
+                state.committed_table_row("books", &[key]).await.unwrap(),
+                None
+            );
+            assert!(state.pending().await.unwrap().is_empty());
+            assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+            assert_eq!(state.capture().await.unwrap(), *context.capture());
+            let status = state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.state, RequestState::Running);
+            assert_eq!(status.terminal_outcome, None);
+
+            drop(state);
+            let reopened = open_state(&repo).await;
+            assert_eq!(
+                reopened.committed_table_row("books", &[key]).await.unwrap(),
+                None
+            );
+            assert!(reopened.pending().await.unwrap().is_empty());
+            assert_eq!(reopened.latest_checkpoint().await.unwrap(), None);
+            assert_eq!(reopened.capture().await.unwrap(), context.capture().clone());
+            let reopened_status = reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reopened_status.state, RequestState::Running);
+            assert_eq!(reopened_status.terminal_outcome, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_activation_rejects_a_stale_owner_before_any_write() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let replacement = state.takeover_lease(owner, id(7)).await.unwrap();
+
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.capture().await.unwrap(), context.capture().clone());
+        assert_eq!(state.current_lease().await.unwrap(), Some(replacement));
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn request_activation_replays_an_acknowledged_cancellation_without_writes() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let cancelled = state
+            .cancel_request_with_owner(identity, fingerprint, owner, outcome(7))
+            .await
+            .unwrap();
+
+        let replay = state
+            .commit_table_request_activation(
+                owner,
+                identity,
+                fingerprint,
+                &context,
+                &[table_mutation(8, 1, Some(9))],
+                digest(10),
+                outcome(11),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.request, cancelled);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(cancelled)
+        );
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn request_activation_commits_and_replays_without_reexecution() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        state.reserve_request(identity, fingerprint).await.unwrap();
+        state
+            .start_request_with_owner(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutation = table_mutation(7, 1, Some(9));
+        let committed = state
+            .commit_table_request_activation(
+                owner,
+                identity,
+                fingerprint,
+                &context,
+                std::slice::from_ref(&mutation),
+                digest(10),
+                outcome(11),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.request.state, RequestState::Completed);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            state.pending().await.unwrap(),
+            vec![mutation.runtime_mutation().unwrap()]
+        );
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap().unwrap().digest,
+            digest(10)
+        );
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let replacement = reopened.takeover_lease(owner, id(7)).await.unwrap();
+        let replay_context = reopened.begin_activation().await.unwrap();
+        let replay = reopened
+            .commit_table_request_activation(
+                replacement,
+                identity,
+                fingerprint,
+                &replay_context,
+                &[table_mutation(12, 2, Some(13))],
+                digest(14),
+                outcome(15),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, committed);
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            reopened.committed_table_row("books", &[2]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened.pending().await.unwrap(),
+            vec![mutation.runtime_mutation().unwrap()]
+        );
     }
 
     #[tokio::test]
