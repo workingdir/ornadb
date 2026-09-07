@@ -24,7 +24,7 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState as DurableRequestState,
+    RequestIdentity, RequestOwner, RequestState as DurableRequestState,
     RequestStatus as DurableRequestStatus, RuntimeError, RuntimeState, TerminalOutcome,
     WriterLease,
 };
@@ -1540,22 +1540,27 @@ impl LiveHost {
             return Ok(DurableAdmission::Active);
         }
         let lease = self.writer_lease().await?;
-        let outcome = recovery_outcome(
-            request,
-            fingerprint,
-            RecoveryDisposition::ExternalEffectsUncertain,
-        );
-        let terminal = self.terminal_outcome(&outcome)?;
+        let uncertain =
+            self.terminal_outcome(&retained_without_value_outcome(request, fingerprint))?;
+        let rollback_proven =
+            self.terminal_outcome(&redacted_failure_outcome(request, fingerprint))?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         let recovered = match self.recovered_owner {
             Some(lost_owner) => {
                 runtime
-                    .recover_running_request(identity, fingerprint, lost_owner, lease, terminal)
+                    .recover_running_request_with_outcomes(
+                        identity,
+                        fingerprint,
+                        lost_owner,
+                        lease,
+                        rollback_proven,
+                        uncertain,
+                    )
                     .await
             }
             None => {
                 runtime
-                    .recover_legacy_running_request(identity, fingerprint, lease, terminal)
+                    .recover_legacy_running_request(identity, fingerprint, lease, uncertain)
                     .await
             }
         };
@@ -1621,24 +1626,12 @@ impl LiveHost {
         if !status.state.is_terminal() {
             return Ok(DurableAdmission::Active);
         }
-        let response = if let Some(disposition) = self
-            .recovery_disposition(status.identity, status.fingerprint, status.state)
-            .await?
-        {
-            recovery_outcome(
-                envelope.request.ok_or(Error::RuntimeUnavailable)?,
-                status.fingerprint,
-                disposition,
-            )
-            .response
+        let bytes = status
+            .terminal_outcome
             .ok_or(Error::RuntimeUnavailable)?
-        } else {
-            let bytes = status
-                .terminal_outcome
-                .ok_or(Error::RuntimeUnavailable)?
-                .into_bytes();
-            Envelope::decode(&bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?
-        };
+            .into_bytes();
+        let response = Envelope::decode(&bytes, self.limits.protocol)
+            .map_err(|_| Error::RuntimeUnavailable)?;
         self.validate_retained_response(status.fingerprint, envelope, &response)?;
         let outcome = if matches!(envelope.message, Message::Cancel { .. })
             || matches!(
@@ -1662,49 +1655,16 @@ impl LiveHost {
         })))
     }
 
-    /// Returns the durable meaning of an orphaned recovery. The wire state is
-    /// deliberately unchanged: only its retained redacted result differs.
-    async fn recovery_disposition(
-        &self,
-        identity: RequestIdentity,
-        fingerprint: [u8; 32],
-        state: DurableRequestState,
-    ) -> Result<Option<RecoveryDisposition>> {
-        if state != DurableRequestState::Orphaned {
-            return Ok(None);
-        }
-        self.runtime
-            .as_ref()
-            .ok_or(Error::RuntimeUnavailable)?
-            .request_recovery_disposition(identity, fingerprint)
-            .await
-            .map_err(|error| map_runtime(&error))
-    }
-
     async fn durable_result_body(
         &self,
         request: [u8; 16],
         fingerprint: [u8; 32],
         status: &DurableRequestStatus,
     ) -> Result<Option<ResultBody>> {
-        let outcome = match self
-            .recovery_disposition(status.identity, fingerprint, status.state)
-            .await?
-        {
-            Some(disposition) => recovery_outcome(request, fingerprint, disposition),
-            None => {
-                return Ok(durable_result_body(
-                    request,
-                    fingerprint,
-                    status,
-                    self.limits.protocol,
-                ));
-            }
-        };
-        Ok(retained_result_body(
+        Ok(durable_result_body(
             request,
             fingerprint,
-            Some(&outcome),
+            status,
             self.limits.protocol,
         ))
     }
@@ -1945,16 +1905,14 @@ impl LiveHost {
                     return Err(Error::RuntimeUnavailable);
                 }
                 Err(RuntimeError::RequestOwnerConflict) => {
-                    let recovery = recovery_outcome(
-                        request,
-                        fingerprint,
-                        RecoveryDisposition::ExternalEffectsUncertain,
-                    );
-                    let terminal = self.terminal_outcome(&recovery)?;
+                    let uncertain = self
+                        .terminal_outcome(&retained_without_value_outcome(request, fingerprint))?;
+                    let rollback_proven =
+                        self.terminal_outcome(&redacted_failure_outcome(request, fingerprint))?;
                     let recovered = match self.recovered_owner {
                         Some(lost_owner) => {
                             runtime
-                                .recover_running_request(
+                                .recover_running_request_with_outcomes(
                                     RequestIdentity {
                                         session_id: session,
                                         request_id: request,
@@ -1962,7 +1920,8 @@ impl LiveHost {
                                     fingerprint,
                                     lost_owner,
                                     lease,
-                                    terminal,
+                                    rollback_proven,
+                                    uncertain,
                                 )
                                 .await
                         }
@@ -1975,7 +1934,7 @@ impl LiveHost {
                                     },
                                     fingerprint,
                                     lease,
-                                    terminal,
+                                    uncertain,
                                 )
                                 .await
                         }
@@ -2095,32 +2054,20 @@ fn retained_without_value_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> D
     }
 }
 
-fn recovery_outcome(
-    request: [u8; 16],
-    fingerprint: [u8; 32],
-    disposition: RecoveryDisposition,
-) -> DispatchOutcome {
-    match disposition {
-        // A future runtime rollback receipt can safely use the existing
-        // redacted failure result. It remains protocol state 4 (orphaned)
-        // until a later protocol version defines a distinct terminal state.
-        RecoveryDisposition::RollbackProven => DispatchOutcome {
-            outcome: FrameOutcome::Accepted,
-            response: Some(Envelope {
-                request: Some(request),
-                watch: None,
-                message: Message::Result {
-                    status: ResultStatus::Failure,
-                    value: None,
-                    fingerprint,
-                    diagnostic: None,
-                },
-                extensions: BTreeMap::new(),
-            }),
-        },
-        RecoveryDisposition::ExternalEffectsUncertain => {
-            retained_without_value_outcome(request, fingerprint)
-        }
+fn redacted_failure_outcome(request: [u8; 16], fingerprint: [u8; 32]) -> DispatchOutcome {
+    DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        }),
     }
 }
 
@@ -4815,15 +4762,17 @@ mod tests {
     }
 
     #[test]
-    fn recovery_disposition_uses_existing_redacted_result_semantics() {
-        for (disposition, status) in [
-            (RecoveryDisposition::RollbackProven, ResultStatus::Failure),
+    fn recovery_outcomes_use_existing_redacted_result_semantics() {
+        for (outcome, status) in [
             (
-                RecoveryDisposition::ExternalEffectsUncertain,
+                redacted_failure_outcome([1; 16], [2; 32]),
+                ResultStatus::Failure,
+            ),
+            (
+                retained_without_value_outcome([1; 16], [2; 32]),
                 ResultStatus::RetainedWithoutValue,
             ),
         ] {
-            let outcome = recovery_outcome([1; 16], [2; 32], disposition);
             assert!(matches!(
                 outcome.response.unwrap().message,
                 Message::Result { status: returned, value: None, diagnostic: None, .. }
