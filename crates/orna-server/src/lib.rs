@@ -9,6 +9,7 @@ mod embedded;
 mod inspect;
 mod invoke;
 mod live;
+mod live_eval;
 mod local_auth;
 mod raw_call;
 mod raw_client_dispatch;
