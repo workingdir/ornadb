@@ -8,6 +8,7 @@ description = "Git-backed repository, CWD, index, and local runtime boundary for
 
 [dependencies]
 bytes = "1.10.1"
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 fs2 = "0.4.3"
 libc = "0.2.180"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
