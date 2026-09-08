@@ -327,7 +327,14 @@ fn published_report_only_promotes_exact_frozen_contracts() {
         .collect::<Vec<_>>();
     assert_eq!(
         declared,
-        ["PIPE-001", "PIPE-002", "REPL-001", "TXN-001", "TXN-002"]
+        [
+            "LET-REBIND-091",
+            "PIPE-001",
+            "PIPE-002",
+            "REPL-001",
+            "TXN-001",
+            "TXN-002"
+        ]
     );
     let scenarios = report["scenarios"]
         .as_array()
@@ -336,7 +343,7 @@ fn published_report_only_promotes_exact_frozen_contracts() {
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("PIPE-001" | "PIPE-002" | "REPL-001" | "TXN-001" | "TXN-002")
+            Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002" | "REPL-001" | "TXN-001" | "TXN-002")
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(

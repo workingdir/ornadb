@@ -89,6 +89,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if pipeline_precedence_contract(scenario) {
             return self.bounded.run_scenario(scenario);
         }
+        if let_rebinding_contract(scenario) {
+            return self.bounded.run_scenario(scenario);
+        }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
@@ -120,6 +123,27 @@ fn pipeline_precedence_contract(scenario: &Scenario) -> bool {
                 "parentheses allow arithmetic on a pipeline result",
             ]
         && scenario.requirements == ["ORNA-OP-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
+}
+
+fn let_rebinding_contract(scenario: &Scenario) -> bool {
+    scenario.id == "LET-REBIND-091"
+        && scenario.title == "Let slots rebind without mutable value identity"
+        && scenario.given == ["a let slot whose value is captured before reassignment"]
+        && scenario.when == ["assign a replacement value to the slot"]
+        && scenario.then
+            == [
+                "the slot observes the replacement",
+                "the captured value is unchanged",
+                "`var` receives ORNA091-E-VAR",
+            ]
+        && scenario.requirements
+            == [
+                "ORNA-VALUE-006",
+                "ORNA-VALUE-007",
+                "ORNA-CFLOW-005",
+                "ORNA-CFLOW-006",
+                "ORNA-CFLOW-011",
+            ]
 }
 
 fn repl_preview_contract(scenario: &Scenario) -> bool {
@@ -715,6 +739,7 @@ fn main() {
             .into_iter()
             .collect(),
             executed_scenario_contracts: vec![
+                "LET-REBIND-091".into(),
                 "PIPE-001".into(),
                 "PIPE-002".into(),
                 "REPL-001".into(),
