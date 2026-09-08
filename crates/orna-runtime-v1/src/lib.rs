@@ -838,6 +838,9 @@ impl TryFrom<&RunObservation> for SysRunProjection {
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        if observation.live && observation.status.is_terminal() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         Ok(Self {
             reference,
             id: observation.id.0,
@@ -888,6 +891,18 @@ impl SysStreamProjection {
         observation: &StreamObservation,
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
+        if observation.live
+            && (run.status.is_terminal()
+                || matches!(
+                    observation.status,
+                    StreamObservationStatus::Completed
+                        | StreamObservationStatus::Failed
+                        | StreamObservationStatus::Cancelled
+                        | StreamObservationStatus::Orphaned
+                ))
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         let run_reference = run.reference()?;
         let reference = observation.reference(run)?;
         validate_checkpoint_reference(
@@ -16733,6 +16748,19 @@ mod tests {
         assert_eq!(projections.streams.len(), 1);
         assert!(projections.runs[0].live);
         assert!(projections.streams[0].live);
+        let mut terminal_run = view.runs[0].clone();
+        terminal_run.status = RunObservationStatus::Completed;
+        terminal_run.ended_ms = Some(terminal_run.started_ms);
+        assert_eq!(
+            SysRunProjection::try_from(&terminal_run),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        let mut terminal_stream = view.streams[0].clone();
+        terminal_stream.status = StreamObservationStatus::Completed;
+        assert_eq!(
+            SysStreamProjection::try_from_observation(&terminal_stream, &view.runs[0]),
+            Err(RuntimeError::RecoveryInvalid)
+        );
         let mut historical_stream = view.streams[0].clone();
         historical_stream.live = false;
         assert!(
