@@ -37,8 +37,10 @@ use tokio_postgres::{Config, NoTls};
 
 use crate::{
     LocalRawSocketServer, LocalRawSocketServerError, OpenStandardDatabaseError, distribution,
-    open_standard_database, start_local_raw_socket,
+    open_standard_database, raw_socket::RawSocketRuntimeAdmission,
+    raw_socket::start_local_raw_socket_with_runtime_admission,
 };
+use orna_repository_v1::Repository;
 
 #[path = "support_fs.rs"]
 mod support_fs;
@@ -836,7 +838,19 @@ pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
         Ok(kernel) => kernel,
         Err(primary) => return stop_postmaster_after(primary, postmaster),
     };
-    let local_socket = match start_local_raw_socket(instance.paths.runtime_root(), kernel) {
+    let admission = match std::env::current_dir()
+        .ok()
+        .and_then(|directory| Repository::discover(directory).ok())
+        .and_then(|repository| RawSocketRuntimeAdmission::from_repository(repository).ok())
+    {
+        Some(admission) => admission,
+        None => return stop_postmaster_after(EmbeddedHostError::InvalidInstanceState, postmaster),
+    };
+    let local_socket = match start_local_raw_socket_with_runtime_admission(
+        instance.paths.runtime_root(),
+        kernel,
+        admission,
+    ) {
         Ok(local_socket) => local_socket,
         Err(source) => {
             return stop_postmaster_after(EmbeddedHostError::from(source), postmaster);
