@@ -19,6 +19,9 @@ pub enum SealedInvocationLifecycleFinalization {
     Failed { target_unavailable: bool },
     /// Cancellation won before the producer's terminal commit.
     Cancelled,
+    /// The invocation owner was lost after the accepted operation could no
+    /// longer prove a terminal execution outcome.
+    Orphaned,
 }
 
 impl SealedInvocationLifecycleFinalization {
@@ -32,6 +35,7 @@ impl SealedInvocationLifecycleFinalization {
                 target_unavailable: false,
             } => SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Internal),
             Self::Cancelled => SealedInvocationLifecycleTerminal::Cancelled,
+            Self::Orphaned => SealedInvocationLifecycleTerminal::Orphaned,
         }
     }
 }
