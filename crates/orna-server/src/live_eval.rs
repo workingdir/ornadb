@@ -434,6 +434,26 @@ impl PureEvalApplication {
             ),
         ]))
     }
+
+    fn watch_diagnostic(
+        &self,
+        request: [u8; 16],
+        watch: Option<[u8; 16]>,
+        code: &str,
+    ) -> Result<Envelope> {
+        let diagnostic = diagnostic_raw(diagnostic_for_code(code)?.with_reference(request))?;
+        let watch = watch.map_or(OvbRaw::Null, |watch| OvbRaw::Bytes(watch.to_vec()));
+        decode_envelope(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+            (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
+            (OvbRaw::Int(3.into()), watch),
+            (
+                OvbRaw::Int(4.into()),
+                OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+            ),
+        ]))
+    }
 }
 
 impl LiveApplication for PureEvalApplication {
@@ -535,7 +555,7 @@ impl LiveApplication for PureEvalApplication {
             // This application has no clock scheduler or dependency refresh
             // driver. Rejecting a requested floor keeps a successful Watch
             // honest instead of advertising a subscription that never ticks.
-            return Err(Error::ApplicationRejected);
+            return self.watch_diagnostic(request, None, "ORNA-LIVE-WATCH");
         }
         if !presentation.supported_kinds.is_empty()
             && !presentation
@@ -543,10 +563,9 @@ impl LiveApplication for PureEvalApplication {
                 .iter()
                 .any(|kind| kind == "text")
         {
-            // The current transport has only a snapshot success channel for
-            // Watch. It will turn this application rejection into its stable
-            // transport error; successful permitted watches remain live.
-            return Err(Error::ApplicationRejected);
+            // A rejected watch is a correlated redacted diagnostic. Successful
+            // permitted watches still return the canonical snapshot channel.
+            return self.watch_diagnostic(request, None, "ORNA-LIVE-WATCH");
         }
         let session_id = SessionId::new(session);
         let session_existed = self.sessions.contains_key(&session_id);
@@ -580,7 +599,7 @@ impl LiveApplication for PureEvalApplication {
                 if !session_existed {
                     self.sessions.remove(&session_id);
                 }
-                return Err(error);
+                self.watch_diagnostic(request, None, "ORNA-LIVE-WATCH")
             }
         }
     }
@@ -597,35 +616,38 @@ impl LiveApplication for PureEvalApplication {
         }
         let session_id = SessionId::new(session);
         if !self.expiries.borrow().contains_key(&session_id) {
-            return Err(Error::Closed);
+            return self.watch_diagnostic(request, Some(watch), "ORNA-LIVE-RESYNC");
         }
-        let (value, revision) = {
-            let state = self.sessions.get_mut(&session_id).ok_or(Error::Closed)?;
-            let source = state
-                .watches
-                .get(&watch)
+        let outcome = (|| {
+            let (value, revision) = {
+                let state = self.sessions.get_mut(&session_id).ok_or(Error::Closed)?;
+                let source = state
+                    .watches
+                    .get(&watch)
+                    .ok_or(Error::ApplicationRejected)?
+                    .source
+                    .clone();
+                let value = state
+                    .repl
+                    .preview(&source)
+                    .map_err(|_| Error::ApplicationRejected)?;
+                let watch_state = state
+                    .watches
+                    .get_mut(&watch)
+                    .ok_or(Error::ApplicationRejected)?;
+                watch_state.revision = watch_state.revision.saturating_add(1);
+                (value, watch_state.revision)
+            };
+            let snapshot = self
+                .sessions
+                .get(&session_id)
+                .and_then(|state| state.watches.get(&watch))
                 .ok_or(Error::ApplicationRejected)?
-                .source
+                .snapshot
                 .clone();
-            let value = state
-                .repl
-                .preview(&source)
-                .map_err(|_| Error::ApplicationRejected)?;
-            let watch_state = state
-                .watches
-                .get_mut(&watch)
-                .ok_or(Error::ApplicationRejected)?;
-            watch_state.revision = watch_state.revision.saturating_add(1);
-            (value, watch_state.revision)
-        };
-        let snapshot = self
-            .sessions
-            .get(&session_id)
-            .and_then(|state| state.watches.get(&watch))
-            .ok_or(Error::ApplicationRejected)?
-            .snapshot
-            .clone();
-        snapshot_envelope(request, watch, revision, value, snapshot)
+            snapshot_envelope(request, watch, revision, value, snapshot)
+        })();
+        outcome.or_else(|_| self.watch_diagnostic(request, Some(watch), "ORNA-LIVE-RESYNC"))
     }
 
     fn unsubscribe(
@@ -1176,7 +1198,12 @@ mod tests {
     fn response_diagnostic(response: &Envelope) -> FoundationDiagnostic {
         let encoded = response.encode(ProtocolLimits::default()).unwrap();
         let raw = Value::decode(&encoded).unwrap().raw().clone();
-        let diagnostic = raw_field(raw_field(&raw, 4), 3).clone();
+        let diagnostic_key = match response.message {
+            Message::Result { .. } => 3,
+            Message::Diagnostic { .. } => 0,
+            _ => panic!("expected a diagnostic response"),
+        };
+        let diagnostic = raw_field(raw_field(&raw, 4), diagnostic_key).clone();
         let bytes = Value::new(diagnostic).unwrap().encode().unwrap();
         FoundationDiagnostic::decode_ovb(&bytes).unwrap()
     }
@@ -1265,26 +1292,65 @@ mod tests {
     }
 
     #[test]
-    fn watch_with_refresh_floor_is_rejected_without_a_scheduler() {
+    fn watch_with_refresh_floor_returns_a_correlated_redacted_diagnostic() {
         let (mut application, expiries, database_id, _, _, _) = application();
         let session = [27; 16];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
-        let result = application.watch(
-            session,
-            [28; 16],
-            &Message::Watch {
-                source: "1 + 1".into(),
-                database: database(database_id),
-                presentation: presentation(),
-                refresh_floor: Some(orna_protocol_v1::Duration {
-                    floor_seconds: 1.into(),
-                    nanosecond: 0,
-                }),
-            },
-        );
-
-        assert!(matches!(result, Err(Error::ApplicationRejected)));
+        let response = application
+            .watch(
+                session,
+                [28; 16],
+                &Message::Watch {
+                    source: "1 + 1".into(),
+                    database: database(database_id),
+                    presentation: presentation(),
+                    refresh_floor: Some(orna_protocol_v1::Duration {
+                        floor_seconds: 1.into(),
+                        nanosecond: 0,
+                    }),
+                },
+            )
+            .unwrap();
+        assert_eq!(response.request, Some([28; 16]));
+        assert_eq!(response.watch, None);
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+        let diagnostic = response_diagnostic(&response);
+        assert_eq!(diagnostic.code(), "ORNA-LIVE-WATCH");
+        assert_eq!(diagnostic.message(), "<redacted>");
         assert!(application.sessions.is_empty());
+    }
+
+    #[test]
+    fn resync_rejection_retains_the_existing_watch_identity() {
+        let (mut application, expiries, database_id, _, _, _) = application();
+        let session = [29; 16];
+        let session_id = SessionId::new(session);
+        expiries.borrow_mut().insert(session_id, 100);
+        let watch = application
+            .watch(
+                session,
+                [30; 16],
+                &Message::Watch {
+                    source: "1 + 1".into(),
+                    database: database(database_id),
+                    presentation: presentation(),
+                    refresh_floor: None,
+                },
+            )
+            .unwrap()
+            .watch
+            .unwrap();
+        expiries.borrow_mut().remove(&session_id);
+
+        let response = application
+            .resync(session, [31; 16], watch, &Message::Resync)
+            .unwrap();
+        assert_eq!(response.request, Some([31; 16]));
+        assert_eq!(response.watch, Some(watch));
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+        let diagnostic = response_diagnostic(&response);
+        assert_eq!(diagnostic.code(), "ORNA-LIVE-RESYNC");
+        assert_eq!(diagnostic.message(), "<redacted>");
     }
 
     #[test]
