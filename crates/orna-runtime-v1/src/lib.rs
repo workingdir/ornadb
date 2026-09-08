@@ -214,6 +214,10 @@ CREATE TABLE IF NOT EXISTS stream_control (
 CREATE TABLE IF NOT EXISTS stream_pause_pending (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0)
 );
+CREATE TABLE IF NOT EXISTS stream_pause_reason (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    reason TEXT NOT NULL CHECK (length(reason) <= 16777216)
+);
 CREATE TABLE IF NOT EXISTS sys_run_observation (
     run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16),
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
@@ -1851,6 +1855,67 @@ impl RuntimeState {
             }
             _ => Err(RuntimeError::RecoveryInvalid),
         }
+    }
+
+    /// Applies a writer-fenced pause while retaining its supplied safe reason
+    /// in the same local transaction that admits the pause. A no-op pause
+    /// never overwrites the reason already attached to the existing pause.
+    pub async fn pause_stream_with_reason(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        reason: String,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        self.pause_stream_with_reason_at_capture(lease, key, reason, None)
+            .await
+    }
+
+    /// Equivalent to [`Self::pause_stream_with_reason`], additionally
+    /// requiring the CWD capture observed while resolving the stream.
+    pub async fn pause_stream_with_reason_at_capture(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        reason: String,
+        expected_capture: Option<&CwdCapture>,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        if reason.len() > 16_777_216 {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
+        if let Some(expected_capture) = expected_capture {
+            let current_capture = capture_tx(&transaction).await?;
+            if &current_capture != expected_capture {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(current_capture),
+                });
+            }
+        }
+        let result = apply_stream_intent_tx(&transaction, CommitIntent::Pause { key }).await?;
+        if stream_pause_changed(&result) {
+            store_stream_pause_reason(&transaction, stream_pause_key(&result)?, &reason).await?;
+        }
+        sync_stream_observation_tx(&transaction, &result).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        stream_administration_outcome(result)
+    }
+
+    /// Reads the most recently admitted pause reason retained for a stream.
+    /// This private runtime value is not a substitute for the public audit
+    /// projection.
+    pub async fn stream_pause_reason(
+        &self,
+        key: &CheckpointKey,
+    ) -> Result<Option<String>, RuntimeError> {
+        load_stream_pause_reason(&self.connection, key).await
     }
 
     /// Applies a writer-fenced durable resume transition for one resolved
@@ -6921,6 +6986,73 @@ async fn store_stream_status(
     Ok(())
 }
 
+async fn load_stream_pause_reason(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<Option<String>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT reason FROM stream_pause_reason WHERE key_id = ?1",
+            params![stream_key_id(key)],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    rows.next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
+        .transpose()
+}
+
+async fn store_stream_pause_reason(
+    connection: &Connection,
+    key: &CheckpointKey,
+    reason: &str,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO stream_pause_reason (key_id, reason) VALUES (?1, ?2)
+             ON CONFLICT(key_id) DO UPDATE SET reason = excluded.reason",
+            params![stream_key_id(key), reason],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+fn stream_pause_changed(result: &CommitResult) -> bool {
+    matches!(
+        result,
+        CommitResult::StreamStatusChanged { changed: true, .. }
+            | CommitResult::PausePending { changed: true, .. }
+    )
+}
+
+fn stream_pause_key(result: &CommitResult) -> Result<&CheckpointKey, RuntimeError> {
+    match result {
+        CommitResult::StreamStatusChanged { state, .. }
+        | CommitResult::PausePending { state, .. } => Ok(&state.key),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+fn stream_administration_outcome(
+    result: CommitResult,
+) -> Result<StreamAdministrationOutcome, RuntimeError> {
+    match result {
+        CommitResult::StreamStatusChanged { state, changed }
+            if state.status == StreamStatus::Paused =>
+        {
+            Ok(StreamAdministrationOutcome::Paused { changed })
+        }
+        CommitResult::PausePending { changed, .. } => {
+            Ok(StreamAdministrationOutcome::PausePending { changed })
+        }
+        CommitResult::Rejected(RejectReason::StreamBusy) => Ok(StreamAdministrationOutcome::Busy),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
 async fn stream_pause_pending(
     connection: &Connection,
     key: &CheckpointKey,
@@ -10373,6 +10505,41 @@ mod tests {
                 .await
                 .unwrap(),
             CommitResult::Rejected(RejectReason::StreamPaused)
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_pause_reason_survives_reopen_and_noop_pause_preserves_it() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("pause-reason", "pause-reason-next").checkpoint_key();
+        assert_eq!(
+            state
+                .pause_stream_with_reason(writer, key.clone(), "maintenance boundary".into())
+                .await,
+            Ok(StreamAdministrationOutcome::Paused { changed: true }),
+        );
+        assert_eq!(
+            state.stream_pause_reason(&key).await,
+            Ok(Some("maintenance boundary".into())),
+        );
+        assert_eq!(
+            state
+                .pause_stream_with_reason(writer, key.clone(), "replacement".into())
+                .await,
+            Ok(StreamAdministrationOutcome::Paused { changed: false }),
+        );
+        assert_eq!(
+            state.stream_pause_reason(&key).await,
+            Ok(Some("maintenance boundary".into())),
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.stream_pause_reason(&key).await,
+            Ok(Some("maintenance boundary".into())),
         );
     }
 
