@@ -393,6 +393,40 @@ pub struct WriterLease {
     pub epoch: u64,
 }
 
+/// An owner-fenced observation instant for the current runtime generation.
+///
+/// Values of this type can only be obtained from [`RuntimeState`]. Reusing a
+/// fence after its writer lease is replaced or its captured generation changes
+/// fails closed rather than silently treating retained rows as current.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeObservationFence {
+    lease: WriterLease,
+    capture: CwdCapture,
+}
+
+impl RuntimeObservationFence {
+    pub fn writer_lease(&self) -> WriterLease {
+        self.lease
+    }
+
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+}
+
+/// One coherent, owner-fenced view of the current-runtime Run and Stream
+/// subsets. The contained rows remain the durable retained projections; this
+/// type only establishes their membership in this observation instant.
+///
+/// Invocation, function, and snapshot relation handles are intentionally not
+/// added here: the runtime does not retain their physical coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeObservationView {
+    pub capture: CwdCapture,
+    pub runs: Vec<RunObservation>,
+    pub streams: Vec<StreamObservation>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub generation: u64,
@@ -1799,14 +1833,77 @@ impl RuntimeState {
         load_run_observations(&self.connection, &capture).await
     }
 
-    /// Reads the current-generation live subset for `sys.rt.runs`.
-    pub async fn runtime_run_observations(&self) -> Result<Vec<RunObservation>, RuntimeError> {
-        Ok(self
-            .run_observations()
+    /// Verifies `lease` and captures the current runtime generation in one
+    /// immediate transaction. Pass the returned fence to
+    /// [`Self::current_runtime_observations`] to prevent an owner or
+    /// generation change from being observed as a current-runtime row.
+    pub async fn runtime_observation_fence(
+        &self,
+        lease: WriterLease,
+    ) -> Result<RuntimeObservationFence, RuntimeError> {
+        validate_writer_lease(lease)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, lease).await?;
+        let capture = capture_tx(&tx).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RuntimeObservationFence { lease, capture })
+    }
+
+    /// Reads one owner-fenced current-runtime view over the same retained
+    /// `sys.Run` and `sys.Stream` projections.
+    ///
+    /// The writer lease and generation captured in `fence` are rechecked in
+    /// the same immediate transaction as both projection reads. Rows from an
+    /// earlier generation remain available through the retained APIs but are
+    /// excluded here.
+    pub async fn current_runtime_observations(
+        &self,
+        fence: &RuntimeObservationFence,
+    ) -> Result<RuntimeObservationView, RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, fence.lease).await?;
+        let capture = capture_tx(&tx).await?;
+        if capture != fence.capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture),
+            });
+        }
+        let runs = load_run_observations(&tx, &capture)
             .await?
             .into_iter()
             .filter(|row| row.live)
-            .collect())
+            .collect();
+        let streams = load_stream_observations(&tx, &capture)
+            .await?
+            .into_iter()
+            .filter(|row| row.live)
+            .collect();
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RuntimeObservationView {
+            capture,
+            runs,
+            streams,
+        })
+    }
+
+    /// Reads the owner-fenced current-runtime Run subset.
+    pub async fn runtime_run_observations(
+        &self,
+        fence: &RuntimeObservationFence,
+    ) -> Result<Vec<RunObservation>, RuntimeError> {
+        Ok(self.current_runtime_observations(fence).await?.runs)
     }
 
     /// Reads retained `sys.Stream` observations without mutating checkpoint or lease state.
@@ -1815,16 +1912,12 @@ impl RuntimeState {
         load_stream_observations(&self.connection, &capture).await
     }
 
-    /// Reads the current-generation live subset for `sys.rt.streams`.
+    /// Reads the owner-fenced current-runtime Stream subset.
     pub async fn runtime_stream_observations(
         &self,
+        fence: &RuntimeObservationFence,
     ) -> Result<Vec<StreamObservation>, RuntimeError> {
-        Ok(self
-            .stream_observations()
-            .await?
-            .into_iter()
-            .filter(|row| row.live)
-            .collect())
+        Ok(self.current_runtime_observations(fence).await?.streams)
     }
 
     pub async fn run_observation(
@@ -15851,7 +15944,16 @@ mod tests {
                 .items_seen,
             0
         );
-        assert_eq!(state.runtime_stream_observations().await.unwrap().len(), 1);
+        let owner = state.acquire_lease(id(178)).await.unwrap();
+        let fence = state.runtime_observation_fence(owner).await.unwrap();
+        assert_eq!(
+            state
+                .runtime_stream_observations(&fence)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
     }
 
@@ -15943,7 +16045,82 @@ mod tests {
         let retained = state.run_observation(run.id).await.unwrap().unwrap();
         assert!(!retained.live);
         assert_eq!(state.run_observations().await.unwrap().len(), 1);
-        assert!(state.runtime_run_observations().await.unwrap().is_empty());
+        let fence = state.runtime_observation_fence(lease).await.unwrap();
+        assert!(
+            state
+                .runtime_run_observations(&fence)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn current_runtime_view_is_owner_generation_fenced_and_coherent() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(201, 202);
+        let key = stream_delivery("current", "view").checkpoint_key();
+        state.reserve_request(request, digest(203)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.current".into(),
+                source_identity: None,
+                invocation_id: id(204),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let owner = state.acquire_lease(id(205)).await.unwrap();
+        let fence = state.runtime_observation_fence(owner).await.unwrap();
+        let view = state.current_runtime_observations(&fence).await.unwrap();
+        assert_eq!(view.capture, *fence.capture());
+        assert_eq!(
+            view.runs.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![run.id]
+        );
+        assert_eq!(
+            view.streams.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![stream.id]
+        );
+        assert_eq!(view.streams[0].run, view.runs[0].id);
+
+        assert_eq!(
+            state
+                .runtime_observation_fence(WriterLease {
+                    owner_id: id(206),
+                    epoch: owner.epoch,
+                })
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(owner, &capture, &mutation(207), digest(208), &NoFault)
+            .await
+            .unwrap();
+        assert!(matches!(
+            state.current_runtime_observations(&fence).await,
+            Err(RuntimeError::StaleCapture { .. })
+        ));
+        assert_eq!(state.run_observations().await.unwrap().len(), 1);
+        assert_eq!(state.stream_observations().await.unwrap().len(), 1);
+
+        let current = state.runtime_observation_fence(owner).await.unwrap();
+        let current_view = state.current_runtime_observations(&current).await.unwrap();
+        assert!(current_view.runs.is_empty());
+        assert!(current_view.streams.is_empty());
     }
 
     #[tokio::test]
@@ -16044,7 +16221,11 @@ mod tests {
         let orphaned = state.run_observation(run.id).await.unwrap().unwrap();
         assert_eq!(orphaned.status, RunObservationStatus::Orphaned);
         assert!(!orphaned.live);
-        assert_eq!(state.runtime_run_observations().await.unwrap().len(), 0);
+        let fence = state.runtime_observation_fence(fence).await.unwrap();
+        assert_eq!(
+            state.runtime_run_observations(&fence).await.unwrap().len(),
+            0
+        );
         drop(state);
         let reopened = open_state(&repo).await;
         let restored = reopened
