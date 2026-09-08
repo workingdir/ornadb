@@ -1162,6 +1162,11 @@ fn sealed_verified_standard_client_rechecks_active_identity_before_evaluation() 
         math_executable.revision().artifact().version(),
         orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     );
+    assert_eq!(
+        select_checked_standard_artifact_executor(&active, math_executable.revision())
+            .expect("the canonical standard math artifact must be admitted"),
+        CheckedStandardArtifactExecutor::ClientControlFlow
+    );
     let math_authorisation = recheck_verified_standard_client_target(
         &active,
         &security,

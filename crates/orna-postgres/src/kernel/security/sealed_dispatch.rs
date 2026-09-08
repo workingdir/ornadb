@@ -899,6 +899,7 @@ pub(super) enum CheckedStandardArtifactExecutor {
     ParameterEcho,
     JsonEncode,
     ClientExpression,
+    ClientControlFlow,
 }
 
 pub(super) fn select_checked_standard_artifact_executor(
@@ -925,6 +926,11 @@ pub(super) fn select_checked_standard_artifact_executor(
             orna_artifact::client_plan::FORMAT_IDENTITY,
             orna_artifact::client_plan::EXPRESSION_FORMAT_VERSION,
         ) => Ok(CheckedStandardArtifactExecutor::ClientExpression),
+        (
+            orna_core::revision::ExecutableArtifactKind::Client,
+            orna_artifact::client_plan::FORMAT_IDENTITY,
+            orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION,
+        ) => Ok(CheckedStandardArtifactExecutor::ClientControlFlow),
         _ => Err(sealed_target_invariant(
             active,
             "verified standard executable artifact is unsupported",
@@ -946,17 +952,16 @@ pub(super) fn recheck_verified_standard_client_target(
     prepared_authorisation: &AuthorisedInvocation,
 ) -> Result<AuthorisedInvocation, PostgresKernelError> {
     let checked_artifact = select_checked_standard_artifact_executor(active, executable.revision());
-    let expression_artifact = matches!(
-        &checked_artifact,
-        Ok(CheckedStandardArtifactExecutor::ClientExpression)
+    let checked_artifact = checked_artifact?;
+    let control_flow_artifact = matches!(
+        checked_artifact,
+        CheckedStandardArtifactExecutor::ClientControlFlow
     );
-    let control_flow_artifact = executable.revision().artifact().kind()
-        == orna_core::revision::ExecutableArtifactKind::Client
-        && executable.revision().artifact().format() == orna_artifact::client_plan::FORMAT_IDENTITY
-        && executable.revision().artifact().version()
-            == orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION;
-    if !expression_artifact && !control_flow_artifact {
-        checked_artifact?;
+    if !matches!(
+        checked_artifact,
+        CheckedStandardArtifactExecutor::ClientExpression
+            | CheckedStandardArtifactExecutor::ClientControlFlow
+    ) {
         return Err(sealed_target_invariant(
             active,
             "verified standard CLIENT target must retain a checked CLIENT artifact",
@@ -1031,7 +1036,8 @@ pub(super) fn execute_checked_standard_artifact(
         CheckedStandardArtifactExecutor::JsonEncode => {
             execute_standard_json_encode(definition, revision, arguments, active, registry)
         }
-        CheckedStandardArtifactExecutor::ClientExpression => Err(sealed_target_invariant(
+        CheckedStandardArtifactExecutor::ClientExpression
+        | CheckedStandardArtifactExecutor::ClientControlFlow => Err(sealed_target_invariant(
             active,
             "verified standard CLIENT expression artifacts require CLIENT dispatch",
         )),
