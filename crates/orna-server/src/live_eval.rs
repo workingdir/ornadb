@@ -9,7 +9,9 @@
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-use orna_conformance_v1::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
+use orna_conformance_v1::{
+    DurableTransactionalEvaluator, RunningTableRequestDisposition, SourceUnit, StageOutcome,
+};
 use orna_evaluator_v1::{
     AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
 };
@@ -23,7 +25,10 @@ use orna_protocol_v1::{
     DatabaseContext, Envelope, Limits as ProtocolLimits, Message, PresentationContext, ResultStatus,
 };
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{
+    DiagnosticClass, DiagnosticCode, RequestIdentity, RuntimeIdentity, RuntimeState,
+    SafeDiagnostic, TerminalOutcome,
+};
 use orna_security_v1::SessionId;
 
 /// The HTTP authority and the application share this expiry index. Keeping
@@ -282,6 +287,10 @@ impl PureEvalApplication {
         };
         let effectful = self.effectful.as_ref().ok_or(Error::ApplicationRejected)?;
         let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let identity = RequestIdentity {
+            session_id: session,
+            request_id: request,
+        };
         let response = Envelope {
             request: Some(request),
             watch: None,
@@ -293,34 +302,102 @@ impl PureEvalApplication {
             },
             extensions: BTreeMap::new(),
         };
-        let terminal = orna_runtime_v1::TerminalOutcome::new(
+        // Construct the sole canonical success response before source work.
+        // Its exact encoded form is passed through the continuation into the
+        // atomic controlled-write/request-terminal commit.
+        let terminal = TerminalOutcome::new(
             response
                 .encode(ProtocolLimits::default())
                 .map_err(|_| Error::ApplicationRejected)?,
         )
         .map_err(|_| Error::ApplicationRejected)?;
-        let stage =
-            futures::executor::block_on(evaluator.execute_source_request_with_success_terminal(
+        futures::executor::block_on(async {
+            // The transport has already made this request Running. Reopen
+            // the trusted state only to obtain its current owner lease and a
+            // checked continuation; never fresh-admit it here.
+            let state = RuntimeState::open(
                 &effectful.repository,
                 effectful.identity,
-                effectful.owner,
                 effectful.initial_digest,
-                orna_runtime_v1::RequestIdentity {
-                    session_id: session,
-                    request_id: request,
-                },
-                fingerprint,
-                &unit,
-                Some(terminal),
-            ))
-            .map_err(|_| Error::ApplicationRejected)?;
-        match stage {
-            StageOutcome::Passed => Ok(response),
-            StageOutcome::Failed(diagnostic) => {
-                self.failure_diagnostic(request, fingerprint, diagnostic)
+            )
+            .await
+            .map_err(|_| Error::ApplicationDeferred)?;
+            let lease = state
+                .acquire_lease(effectful.owner)
+                .await
+                .map_err(|_| Error::ApplicationDeferred)?;
+            let continuation = match state
+                .continue_running_table_request(identity, fingerprint, lease)
+                .await
+            {
+                Ok(continuation) => continuation,
+                Err(_) => {
+                    return replay_durable_terminal_or_defer(&state, identity, fingerprint).await;
+                }
+            };
+
+            match evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation,
+                    &unit,
+                    terminal.clone(),
+                )
+                .await
+            {
+                RunningTableRequestDisposition::Committed => Ok(response),
+                RunningTableRequestDisposition::NoMutation => {
+                    match state
+                        .complete_observed_request_with_owner(
+                            identity,
+                            fingerprint,
+                            lease,
+                            terminal,
+                        )
+                        .await
+                    {
+                        Ok(_) => Ok(response),
+                        Err(_) => {
+                            replay_durable_terminal_or_defer(&state, identity, fingerprint).await
+                        }
+                    }
+                }
+                RunningTableRequestDisposition::Semantic(outcome) => {
+                    let failure = self.failure_diagnostic(
+                        request,
+                        fingerprint,
+                        semantic_outcome_diagnostic(outcome),
+                    )?;
+                    let failure_terminal = TerminalOutcome::new(
+                        failure
+                            .encode(ProtocolLimits::default())
+                            .map_err(|_| Error::ApplicationRejected)?,
+                    )
+                    .map_err(|_| Error::ApplicationRejected)?;
+                    match state
+                        .fail_observed_request_with_owner(
+                            identity,
+                            fingerprint,
+                            lease,
+                            failure_terminal,
+                            SafeDiagnostic {
+                                code: DiagnosticCode::ExecutionRejected,
+                                class: DiagnosticClass::Permanent,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) => Ok(failure),
+                        Err(_) => {
+                            replay_durable_terminal_or_defer(&state, identity, fingerprint).await
+                        }
+                    }
+                }
+                RunningTableRequestDisposition::Fenced(_) => {
+                    replay_durable_terminal_or_defer(&state, identity, fingerprint).await
+                }
             }
-            StageOutcome::Skipped { .. } => Err(Error::ApplicationRejected),
-        }
+        })
     }
 
     fn failure(&self, request: [u8; 16], fingerprint: [u8; 32], code: &str) -> Result<Envelope> {
@@ -618,6 +695,49 @@ fn snapshot_envelope(
     ]))
 }
 
+/// A fenced continuation has no authority to mint a replacement terminal.
+/// A durable winner is replayed exactly; an active request is left for the
+/// live transport's deferred/nonterminal handling.
+async fn replay_durable_terminal_or_defer(
+    state: &RuntimeState,
+    identity: RequestIdentity,
+    fingerprint: [u8; 32],
+) -> Result<Envelope> {
+    let Some(status) = state
+        .request_status(identity, fingerprint)
+        .await
+        .map_err(|_| Error::ApplicationDeferred)?
+    else {
+        return Err(Error::ApplicationDeferred);
+    };
+    if !status.state.is_terminal() {
+        return Err(Error::ApplicationDeferred);
+    }
+    let terminal = status.terminal_outcome.ok_or(Error::ApplicationDeferred)?;
+    Envelope::decode(terminal.as_bytes(), ProtocolLimits::default())
+        .map_err(|_| Error::ApplicationDeferred)
+}
+
+fn semantic_outcome_diagnostic(
+    outcome: StageOutcome<FoundationDiagnostic>,
+) -> FoundationDiagnostic {
+    match outcome {
+        StageOutcome::Failed(diagnostic) => diagnostic,
+        StageOutcome::Skipped { .. } => FoundationDiagnostic::new(
+            SafeText::new("ORNA-EVAL-REQUEST").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("request source is not admitted for table evaluation")
+                .expect("static message"),
+        ),
+        StageOutcome::Passed => FoundationDiagnostic::new(
+            SafeText::new("ORNA-EVAL-REQUEST").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("request evaluation produced no terminal outcome")
+                .expect("static message"),
+        ),
+    }
+}
+
 /// The public protocol deliberately keeps diagnostic and PresentNode
 /// constructors opaque. This server-only adapter reuses the normative OVB
 /// representation and immediately decodes it through the protocol validator,
@@ -752,6 +872,31 @@ mod tests {
         let fingerprint = [4; 32];
         expiries.borrow_mut().insert(SessionId::new(session), 100);
         let source = "pub table Note(id: Int) { value: Int, } fn main() { Note.insert({ id: 1, value: 2 }); }";
+        let state =
+            futures::executor::block_on(RuntimeState::open(&repository, identity, initial_digest))
+                .unwrap();
+        let lease = futures::executor::block_on(state.acquire_lease([7; 16])).unwrap();
+        let start = futures::executor::block_on(state.begin_observed_request(
+            orna_runtime_v1::RunObservationRegistration {
+                request: RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
+                consumer_identity: orna_runtime_v1::ConsumerIdentity {
+                    principal: orna_runtime_v1::Component::new("orna").unwrap(),
+                    root: orna_runtime_v1::Component::new("live").unwrap(),
+                    function: orna_runtime_v1::Component::new("eval").unwrap(),
+                    binding: orna_runtime_v1::Component::new("request").unwrap(),
+                },
+                function: "main".into(),
+                source_identity: Some("live.eval".into()),
+                invocation_id: request,
+            },
+            fingerprint,
+            lease,
+        ))
+        .unwrap();
+        assert!(start.admitted);
 
         let first = application
             .eval(
@@ -767,9 +912,6 @@ mod tests {
                 ..
             }
         ));
-        let state =
-            futures::executor::block_on(RuntimeState::open(&repository, identity, initial_digest))
-                .unwrap();
         let status = futures::executor::block_on(state.request_status_for_identity(
             orna_runtime_v1::RequestIdentity {
                 session_id: session,
@@ -779,13 +921,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(status.state.is_terminal());
+        let retained = status.terminal_outcome.unwrap();
         assert_eq!(
-            Envelope::decode(
-                status.terminal_outcome.unwrap().as_bytes(),
-                ProtocolLimits::default(),
-            )
-            .unwrap(),
-            first
+            retained.as_bytes(),
+            first.encode(ProtocolLimits::default()).unwrap()
         );
         assert!(
             futures::executor::block_on(
@@ -801,6 +940,12 @@ mod tests {
                 &eval_message(database_id, source, fingerprint),
             ),
             Ok(first)
+        );
+        assert_eq!(
+            futures::executor::block_on(state.committed_table_rows("Note"))
+                .unwrap()
+                .len(),
+            1
         );
     }
 
