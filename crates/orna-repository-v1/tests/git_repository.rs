@@ -772,6 +772,32 @@ fn snapshot_resolution_accepts_commits_and_rejects_non_commits_and_malformed_ids
 }
 
 #[test]
+fn named_branch_snapshot_resolution_stays_pinned_after_branch_moves() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "published"]);
+
+    // ORNA-SYS-106/139: resolving a named selector returns the immutable
+    // commit it named at resolution time, rather than a live branch handle.
+    let first = repo.resolve_snapshot("published").unwrap();
+    let initial = git(root.path(), &["rev-parse", "published"]);
+    assert_eq!(first.as_str(), initial);
+
+    git(root.path(), &["switch", "published"]);
+    fs::write(root.path().join("ordinary.txt"), "published advance\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "advance published"]);
+    let advanced = git(root.path(), &["rev-parse", "published"]);
+
+    // The first snapshot stays pinned; a later selector resolution observes
+    // the branch's new immutable commit.
+    assert_eq!(first.as_str(), initial);
+    let second = repo.resolve_snapshot("published").unwrap();
+    assert_eq!(second.as_str(), advanced);
+    assert_ne!(first, second);
+}
+
+#[test]
 fn checkout_preflight_classifies_a_local_branch_without_mutating_cwd() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
