@@ -945,12 +945,21 @@ pub(super) fn recheck_verified_standard_client_target(
     prepared_target: InvocationTarget,
     prepared_authorisation: &AuthorisedInvocation,
 ) -> Result<AuthorisedInvocation, PostgresKernelError> {
-    if select_checked_standard_artifact_executor(active, executable.revision())?
-        != CheckedStandardArtifactExecutor::ClientExpression
-    {
+    let checked_artifact = select_checked_standard_artifact_executor(active, executable.revision());
+    let expression_artifact = matches!(
+        &checked_artifact,
+        Ok(CheckedStandardArtifactExecutor::ClientExpression)
+    );
+    let control_flow_artifact = executable.revision().artifact().kind()
+        == orna_core::revision::ExecutableArtifactKind::Client
+        && executable.revision().artifact().format() == orna_artifact::client_plan::FORMAT_IDENTITY
+        && executable.revision().artifact().version()
+            == orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION;
+    if !expression_artifact && !control_flow_artifact {
+        checked_artifact?;
         return Err(sealed_target_invariant(
             active,
-            "verified standard CLIENT target must retain its checked expression artifact",
+            "verified standard CLIENT target must retain a checked CLIENT artifact",
         ));
     }
     let Some(SealedResolvedTarget::VerifiedStandard {
@@ -974,6 +983,16 @@ pub(super) fn recheck_verified_standard_client_target(
         return Err(sealed_target_invariant(
             active,
             "verified standard CLIENT target must retain its active executable identity",
+        ));
+    }
+    if control_flow_artifact
+        && (active_definition.transaction().is_some()
+            || active_definition.volatility()
+                != orna_core::catalogue::FunctionVolatility::Immutable)
+    {
+        return Err(sealed_target_invariant(
+            active,
+            "verified standard CLIENT control-flow target must be immutable and transactionless",
         ));
     }
     let target = sealed_security_target(
