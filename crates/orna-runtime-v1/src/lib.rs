@@ -810,6 +810,9 @@ pub struct SysRunProjection {
     pub status_at_snapshot: RunObservationStatus,
     pub observed_at: SystemTime,
     pub runtime_id: Option<[u8; 16]>,
+    /// Derived from the retained observation. Current-runtime projection
+    /// rejects rows for which this is false.
+    pub live: bool,
     pub checkpoint_count: u64,
     pub failure: Option<SafeDiagnostic>,
 }
@@ -846,6 +849,7 @@ impl TryFrom<&RunObservation> for SysRunProjection {
             status_at_snapshot: observation.status,
             observed_at,
             runtime_id: Some(observation.runtime_id),
+            live: observation.live,
             checkpoint_count: observation.checkpoint_count,
             failure: observation.diagnostic,
         })
@@ -874,6 +878,9 @@ pub struct SysStreamProjection {
     pub last_failure: Option<FailureRef>,
     pub last_diagnostic: Option<SafeDiagnostic>,
     pub observed_at: SystemTime,
+    /// Derived from the retained observation. Current-runtime projection
+    /// rejects rows for which this is false.
+    pub live: bool,
 }
 
 impl SysStreamProjection {
@@ -922,6 +929,7 @@ impl SysStreamProjection {
             last_failure: observation.last_failure.clone(),
             last_diagnostic: observation.diagnostic,
             observed_at,
+            live: observation.live,
         })
     }
 }
@@ -929,6 +937,9 @@ impl SysStreamProjection {
 fn project_current_runtime_observations(
     view: RuntimeObservationView,
 ) -> Result<SysCurrentRuntimeProjection, RuntimeError> {
+    if view.runs.iter().any(|run| !run.live) || view.streams.iter().any(|stream| !stream.live) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let runs = view
         .runs
         .iter()
@@ -16265,6 +16276,7 @@ mod tests {
             RunObservationStatus::Starting
         );
         assert_eq!(run_projection.ended, None);
+        assert!(run_projection.live);
         let stream_projection =
             SysStreamProjection::try_from_observation(&first, &runs[0]).unwrap();
         assert_eq!(stream_projection.reference, stream_reference);
@@ -16274,6 +16286,7 @@ mod tests {
             Some(first.checkpoint_reference.clone())
         );
         assert_eq!(stream_projection.last_failure, None);
+        assert!(stream_projection.live);
         assert_eq!(first.parent_capture, runs[0].snapshot);
         assert_eq!(
             stream_reference.as_row_ref().snapshot,
@@ -16501,6 +16514,7 @@ mod tests {
             .unwrap();
         let retained = state.run_observation(run.id).await.unwrap().unwrap();
         assert!(!retained.live);
+        assert!(!SysRunProjection::try_from(&retained).unwrap().live);
         assert_eq!(state.run_observations().await.unwrap().len(), 1);
         let fence = state.runtime_observation_fence(lease).await.unwrap();
         assert!(
@@ -16562,6 +16576,15 @@ mod tests {
             vec![run.id.as_bytes()]
         );
         assert_eq!(projections.streams.len(), 1);
+        assert!(projections.runs[0].live);
+        assert!(projections.streams[0].live);
+        let mut historical_stream = view.streams[0].clone();
+        historical_stream.live = false;
+        assert!(
+            !SysStreamProjection::try_from_observation(&historical_stream, &view.runs[0])
+                .unwrap()
+                .live
+        );
         assert_eq!(projections.streams[0].run, projections.runs[0].reference);
         assert_eq!(
             project_current_runtime_observations(RuntimeObservationView {
@@ -16570,6 +16593,24 @@ mod tests {
                 streams: view.streams.clone(),
             }),
             Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut historical_run = view.runs[0].clone();
+        historical_run.live = false;
+        assert_eq!(
+            project_current_runtime_observations(RuntimeObservationView {
+                capture: view.capture.clone(),
+                runs: vec![historical_run],
+                streams: Vec::new(),
+            }),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(
+            project_current_runtime_observations(RuntimeObservationView {
+                capture: view.capture.clone(),
+                runs: view.runs.clone(),
+                streams: vec![historical_stream],
+            }),
+            Err(RuntimeError::RecoveryInvalid)
         );
         let mut malformed_run = view.runs[0].clone();
         malformed_run.runtime_id = id(206);
