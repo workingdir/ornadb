@@ -22,7 +22,10 @@ use std::{
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
-use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Snapshot, Value};
+use orna_foundation_v1::{
+    CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
+    Snapshot, StreamRef, Value, validate_run_reference, validate_stream_reference,
+};
 use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
 pub use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
@@ -133,7 +136,7 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint (
     source_format TEXT NOT NULL CHECK (length(source_format) > 0),
     source TEXT NOT NULL CHECK (length(source) > 0),
     partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
-    partition TEXT NOT NULL CHECK (length(partition) > 0),
+    partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
     position_format TEXT NOT NULL CHECK (length(position_format) > 0),
     version INTEGER NOT NULL CHECK (version >= 0),
     committed_position TEXT,
@@ -149,7 +152,7 @@ CREATE TABLE IF NOT EXISTS stream_failure (
     source_format TEXT NOT NULL CHECK (length(source_format) > 0),
     source TEXT NOT NULL CHECK (length(source) > 0),
     partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
-    partition TEXT NOT NULL CHECK (length(partition) > 0),
+    partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
     position_format TEXT NOT NULL CHECK (length(position_format) > 0),
     delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
     successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
@@ -240,7 +243,7 @@ CREATE TABLE IF NOT EXISTS sys_stream_observation (
     consumer_name TEXT,
     consumer_identity TEXT NOT NULL CHECK (length(consumer_identity) > 0),
     source_identity TEXT NOT NULL CHECK (length(source_identity) > 0),
-    partition TEXT,
+    partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
     status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 8),
     items_seen INTEGER NOT NULL DEFAULT 0 CHECK (items_seen >= 0),
     items_committed INTEGER NOT NULL DEFAULT 0 CHECK (items_committed >= 0),
@@ -253,6 +256,12 @@ CREATE TABLE IF NOT EXISTS sys_stream_observation (
     UNIQUE(run_id, source_identity, partition),
     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS sys_stream_observation_null_natural_key
+    ON sys_stream_observation (run_id, source_identity)
+    WHERE partition IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS sys_stream_observation_present_natural_key
+    ON sys_stream_observation (run_id, source_identity, partition)
+    WHERE partition IS NOT NULL;
 "#;
 
 pub const MAX_TERMINAL_OUTCOME_BYTES: usize = 16 * 1024 * 1024;
@@ -598,9 +607,39 @@ pub struct RunObservation {
     /// Durable Unix milliseconds at which this projection was last updated.
     pub observed_ms: i64,
     pub status: RunObservationStatus,
+    /// Runtime generation stored with the durable observation. This must
+    /// agree with the generation in [`Self::snapshot`] before a reference is
+    /// projected.
+    pub runtime_generation: i64,
     pub checkpoint_count: u64,
     pub diagnostic: Option<SafeDiagnostic>,
     pub live: bool,
+}
+
+impl RunObservation {
+    /// Reconstructs this retained observation's checked `sys.RunRef` using
+    /// its own pinned snapshot and database identity.
+    ///
+    /// This only proves that the durable coordinates have the canonical
+    /// `sys.Run` shape. It does not prove row existence, retention, or a
+    /// caller's authority to observe the row; an authenticated public query
+    /// surface remains a separate boundary.
+    pub fn reference(&self) -> Result<RunRef, RuntimeError> {
+        let generation = bigint_to_i64(self.snapshot.generation())
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        if self.runtime_id != self.snapshot.runtime_id() || self.runtime_generation != generation {
+            return Err(RuntimeError::InvalidObservationReference);
+        }
+        let reference = RowRef::new(
+            self.snapshot.database_id(),
+            SYS_RUN_TABLE_ID,
+            opaque_reference_key(self.id.0),
+            self.snapshot.snapshot().clone(),
+        )
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        validate_run_reference(reference, &self.snapshot)
+            .map_err(|_| RuntimeError::InvalidObservationReference)
+    }
 }
 
 /// Durable `sys.Stream` projection. `live` is derived from its parent run.
@@ -616,6 +655,15 @@ pub struct StreamObservation {
     pub source_identity: String,
     /// Durable optional partition copied from the stream natural key.
     pub partition: Option<String>,
+    // Loader-owned copies of the durable observation and checkpoint-key
+    // partition values. Keeping these separate from the public projection
+    // prevents a caller from changing `partition` on a cloned observation and
+    // manufacturing a different `sys.Stream` natural key.
+    partition_evidence: StreamPartitionEvidence,
+    /// The full pinned capture copied from the stream's durable parent run.
+    /// It prevents reference projection from accepting a same-ID parent from
+    /// another snapshot or runtime generation.
+    pub parent_capture: CwdCapture,
     pub checkpoint: CheckpointKey,
     pub status: StreamObservationStatus,
     pub items_seen: u64,
@@ -627,6 +675,57 @@ pub struct StreamObservation {
     /// Durable Unix milliseconds at which this projection was last updated.
     pub observed_ms: i64,
     pub live: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StreamPartitionEvidence {
+    observation: Option<String>,
+    checkpoint: Option<String>,
+}
+
+impl StreamObservation {
+    /// Reconstructs this retained observation's checked `sys.StreamRef` from
+    /// the exact `run + source_identity + partition` natural key.
+    ///
+    /// The caller must supply the retained parent run so this boundary can
+    /// reject mismatched observation coordinates and keep the stream pinned
+    /// to the run's admission snapshot. As with [`RunObservation::reference`],
+    /// a valid reference is not evidence of row existence or observation
+    /// authority.
+    pub fn reference(&self, run: &RunObservation) -> Result<StreamRef, RuntimeError> {
+        if self.run != run.id
+            || self.parent_capture != run.snapshot
+            || self.consumer_identity != self.checkpoint.consumer
+            || self.source_identity != self.checkpoint.source.as_str()
+            || self.partition != self.partition_evidence.observation
+            || self.partition != self.partition_evidence.checkpoint
+            || self.partition_evidence.checkpoint
+                != self
+                    .checkpoint
+                    .partition
+                    .as_ref()
+                    .map(|partition| partition.as_str().to_owned())
+        {
+            return Err(RuntimeError::ObservationCoordinateMismatch);
+        }
+        let run_reference = run.reference()?;
+        let reference = RowRef::new(
+            run_reference.as_row_ref().database_id,
+            SYS_STREAM_TABLE_ID,
+            OvbRaw::Array(vec![
+                row_reference_raw(run_reference.as_row_ref()),
+                OvbRaw::Text(self.source_identity.clone()),
+                self.partition
+                    .clone()
+                    .map(OvbRaw::Text)
+                    .unwrap_or(OvbRaw::Null),
+            ]),
+            run_reference.as_row_ref().snapshot.clone(),
+        )
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        validate_stream_reference(reference, &run.snapshot)
+            .map_err(|_| RuntimeError::InvalidObservationReference)
+    }
 }
 
 /// The durable result of finalizing one owner-fenced table activation.
@@ -673,6 +772,8 @@ impl FaultInjector for NoFault {
 pub enum RuntimeError {
     InvalidIdentity,
     InvalidDigest,
+    InvalidObservationReference,
+    ObservationCoordinateMismatch,
     StreamIdentityMismatch,
     StreamCheckpointStale,
     LeaseHeld,
@@ -704,6 +805,8 @@ impl fmt::Display for RuntimeError {
         f.write_str(match self {
             Self::InvalidIdentity => "invalid runtime identity",
             Self::InvalidDigest => "invalid durable digest",
+            Self::InvalidObservationReference => "invalid runtime observation reference",
+            Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::LeaseHeld => "runtime writer is held",
@@ -1346,6 +1449,7 @@ impl RuntimeState {
         state.migrate_observation_projection_schema().await?;
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
+        state.migrate_nullable_stream_partitions().await?;
         state.validate_recovery().await?;
         Ok(state)
     }
@@ -1510,7 +1614,11 @@ impl RuntimeState {
         ensure_stream_checkpoint(&tx, &registration.checkpoint).await?;
         let id = StreamObservationId(*Uuid::new_v4().as_bytes());
         let key_id = stream_key_id(&registration.checkpoint);
-        let partition = registration.checkpoint.partition.as_str().to_owned();
+        let partition = registration
+            .checkpoint
+            .partition
+            .as_ref()
+            .map(|value| value.as_str().to_owned());
         tx.execute(
             "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, ?10)",
             params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
@@ -2830,6 +2938,113 @@ impl RuntimeState {
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Upgrades the private stream identity store so its partition component
+    /// has the same nullable semantics as the public checkpoint and stream
+    /// natural keys. Existing non-null rows retain their byte-for-byte key
+    /// identifiers; only the SQL column constraint changes.
+    async fn migrate_nullable_stream_partitions(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let checkpoint_partition_required =
+            stream_partition_required(&transaction, "stream_checkpoint").await?;
+        let failure_partition_required =
+            stream_partition_required(&transaction, "stream_failure").await?;
+        if checkpoint_partition_required || failure_partition_required {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE stream_checkpoint_nullable_partition (
+                        key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+                        consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+                        consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+                        consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+                        consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+                        source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+                        source TEXT NOT NULL CHECK (length(source) > 0),
+                        partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+                        partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
+                        position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+                        version INTEGER NOT NULL CHECK (version >= 0),
+                        committed_position TEXT,
+                        next_fence INTEGER NOT NULL CHECK (next_fence >= 0)
+                    );
+                    CREATE TABLE stream_failure_nullable_partition (
+                        identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
+                        key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+                        consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+                        consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+                        consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+                        consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+                        source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+                        source TEXT NOT NULL CHECK (length(source) > 0),
+                        partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+                        partition TEXT CHECK (partition IS NULL OR length(partition) > 0),
+                        position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+                        delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
+                        successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
+                        version INTEGER NOT NULL CHECK (version >= 0),
+                        attempts INTEGER NOT NULL CHECK (attempts >= 0),
+                        status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 7),
+                        diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+                        diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
+                    );
+                    INSERT INTO stream_checkpoint_nullable_partition
+                        SELECT * FROM stream_checkpoint;
+                    INSERT INTO stream_failure_nullable_partition
+                        SELECT * FROM stream_failure;
+                    DROP TABLE stream_checkpoint;
+                    DROP TABLE stream_failure;
+                    ALTER TABLE stream_checkpoint_nullable_partition RENAME TO stream_checkpoint;
+                    ALTER TABLE stream_failure_nullable_partition RENAME TO stream_failure;",
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        let mut empty_partitions = transaction
+            .query(
+                "SELECT COUNT(*) FROM sys_stream_observation WHERE partition = ''",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let empty_partition_count = empty_partitions
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?
+            .get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if empty_partition_count != 0 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        transaction
+            .execute_batch(
+                "DROP INDEX IF EXISTS sys_stream_observation_natural_key;
+                 CREATE UNIQUE INDEX IF NOT EXISTS sys_stream_observation_null_natural_key
+                   ON sys_stream_observation (run_id, source_identity)
+                   WHERE partition IS NULL;
+                 CREATE UNIQUE INDEX IF NOT EXISTS sys_stream_observation_present_natural_key
+                   ON sys_stream_observation (run_id, source_identity, partition)
+                   WHERE partition IS NOT NULL;",
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('nullable-stream-partition-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         transaction
             .commit()
             .await
@@ -5834,13 +6049,18 @@ struct StoredStreamLease {
 }
 
 fn stream_key_id(key: &CheckpointKey) -> String {
+    let prefix = if key.partition.is_some() {
+        "checkpoint/v1"
+    } else {
+        "checkpoint/v1/null"
+    };
     format!(
-        "checkpoint/v1|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{prefix}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         key.consumer.canonical(),
         key.source_format.as_str(),
         key.source.as_str(),
         key.partition_format.as_str(),
-        key.partition.as_str(),
+        key.partition.as_ref().map(Component::as_str).unwrap_or(""),
         key.position_format.as_str(),
         key.consumer.root.as_str(),
         key.consumer.function.as_str(),
@@ -6039,6 +6259,7 @@ async fn load_run_observation_tx(
         ended_ms: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
         observed_ms: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
         status,
+        runtime_generation: generation,
         checkpoint_count: decode_u64(row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         diagnostic,
         live: runtime_id == capture.runtime_id()
@@ -6076,6 +6297,33 @@ async fn load_stream_observations(
     Ok(observations)
 }
 
+async fn stream_partition_required(
+    connection: &libsql::Transaction,
+    table: &str,
+) -> Result<bool, RuntimeError> {
+    let statement = match table {
+        "stream_checkpoint" => "PRAGMA table_info(stream_checkpoint)",
+        "stream_failure" => "PRAGMA table_info(stream_failure)",
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    };
+    let mut rows = connection
+        .query(statement, ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if name == "partition" {
+            let required: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            return Ok(required != 0);
+        }
+    }
+    Err(RuntimeError::RecoveryInvalid)
+}
+
 async fn load_stream_observation_tx(
     connection: &Connection,
     id: StreamObservationId,
@@ -6089,6 +6337,13 @@ async fn load_stream_observation_tx(
     else {
         return Ok(None);
     };
+    let parent_run_id = RunObservationId(fixed(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    let parent_run = load_run_observation_tx(connection, parent_run_id, capture)
+        .await?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let parent_capture = parent_run.snapshot.clone();
     let checkpoint = CheckpointKey {
         consumer: ConsumerIdentity {
             principal: decode_component(row_text(&row, 9)?)?,
@@ -6099,7 +6354,9 @@ async fn load_stream_observation_tx(
         source_format: decode_component(row_text(&row, 13)?)?,
         source: decode_component(row_text(&row, 14)?)?,
         partition_format: decode_component(row_text(&row, 15)?)?,
-        partition: decode_component(row_text(&row, 16)?)?,
+        partition: decode_optional_component(
+            row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
         position_format: decode_component(row_text(&row, 17)?)?,
     };
     let code: Option<i64> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -6117,16 +6374,30 @@ async fn load_stream_observation_tx(
     let run_status = decode_run_status(row.get(20).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id = fixed(row.get(18).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(19).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if runtime_id != parent_run.runtime_id || generation != parent_run.runtime_generation {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let partition: Option<String> = row.get(23).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let checkpoint_partition = checkpoint
+        .partition
+        .as_ref()
+        .map(|value| value.as_str().to_owned());
+    if partition != checkpoint_partition {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     Ok(Some(StreamObservation {
         id,
-        run: RunObservationId(fixed(
-            row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        )?),
+        run: parent_run_id,
         producer: row_text(&row, 1)?,
         consumer: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
         consumer_identity: decode_consumer_identity(&row_text(&row, 21)?)?,
         source_identity: row_text(&row, 22)?,
-        partition: row.get(23).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        partition: partition.clone(),
+        partition_evidence: StreamPartitionEvidence {
+            observation: partition,
+            checkpoint: checkpoint_partition,
+        },
+        parent_capture,
         checkpoint,
         status,
         items_seen: decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -6406,6 +6677,10 @@ fn row_text(row: &libsql::Row, index: i32) -> Result<String, RuntimeError> {
     row.get(index).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
+fn decode_optional_component(value: Option<String>) -> Result<Option<Component>, RuntimeError> {
+    value.map(decode_component).transpose()
+}
+
 fn decode_component(value: String) -> Result<Component, RuntimeError> {
     Component::new(value).map_err(|_| RuntimeError::RecoveryInvalid)
 }
@@ -6551,7 +6826,9 @@ async fn ensure_stream_checkpoint(
                 key.source_format.as_str().to_owned(),
                 key.source.as_str().to_owned(),
                 key.partition_format.as_str().to_owned(),
-                key.partition.as_str().to_owned(),
+                key.partition
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned()),
                 key.position_format.as_str().to_owned(),
             ],
         )
@@ -6733,7 +7010,9 @@ async fn load_stream_failure(
         source_format: decode_component(row_text(&row, 4)?)?,
         source: decode_component(row_text(&row, 5)?)?,
         partition_format: decode_component(row_text(&row, 6)?)?,
-        partition: decode_component(row_text(&row, 7)?)?,
+        partition: decode_optional_component(
+            row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
         position_format: decode_component(row_text(&row, 8)?)?,
         position: decode_position(row_text(&row, 9)?)?,
         successor: decode_position(row_text(&row, 10)?)?,
@@ -7198,7 +7477,10 @@ async fn apply_stream_intent_tx(
                         delivery.source_format.as_str().to_owned(),
                         delivery.source.as_str().to_owned(),
                         delivery.partition_format.as_str().to_owned(),
-                        delivery.partition.as_str().to_owned(),
+                        delivery
+                            .partition
+                            .as_ref()
+                            .map(|value| value.as_str().to_owned()),
                         delivery.position_format.as_str().to_owned(),
                         delivery.position.token.as_str().to_owned(),
                         delivery.successor.token.as_str().to_owned(),
@@ -7937,6 +8219,22 @@ fn require_fingerprint(status: &RequestStatus, fingerprint: [u8; 32]) -> Result<
     } else {
         Err(RuntimeError::RequestFingerprintMismatch)
     }
+}
+
+fn opaque_reference_key(id: [u8; 16]) -> OvbRaw {
+    OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.to_vec())))
+}
+
+fn row_reference_raw(reference: &RowRef) -> OvbRaw {
+    OvbRaw::Tag(
+        60010,
+        Box::new(OvbRaw::Array(vec![
+            opaque_reference_key(reference.database_id),
+            opaque_reference_key(reference.table_id),
+            reference.key.clone(),
+            reference.snapshot.raw(),
+        ])),
+    )
 }
 
 async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError> {
@@ -8784,7 +9082,7 @@ mod tests {
             source_format: Component::new("source-format").unwrap(),
             source: Component::new("source").unwrap(),
             partition_format: Component::new("partition-format").unwrap(),
-            partition: Component::new("partition").unwrap(),
+            partition: Some(Component::new("partition").unwrap()),
             position_format: Component::new("position-format").unwrap(),
             position: Position {
                 token: Component::new(position).unwrap(),
@@ -9782,11 +10080,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_stream_backend_reopens_with_checkpoint_and_failure_state() {
+    async fn durable_stream_backend_reopens_with_nullable_checkpoint_and_failure_state() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
-        let delivery = stream_delivery("one", "two");
+        let mut delivery = stream_delivery("one", "two");
+        delivery.partition = None;
         let expected = orna_stream_v1::CheckpointPrecondition {
             version: 0,
             committed: None,
@@ -13863,6 +14162,84 @@ mod tests {
         state.migrate_request_recovery_evidence().await.unwrap();
         state.validate_recovery().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn nullable_stream_partition_migration_preserves_legacy_checkpoint_keys() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(183)).await.unwrap();
+        let key = stream_delivery("migration:one", "migration:two").checkpoint_key();
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause { key: key.clone() })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { .. }
+        ));
+        drop(state);
+
+        let database = Builder::new_local(repo.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE stream_checkpoint RENAME TO stream_checkpoint_current;
+                 ALTER TABLE stream_failure RENAME TO stream_failure_current;
+                 CREATE TABLE stream_checkpoint (
+                    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+                    consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+                    consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+                    consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+                    consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+                    source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+                    source TEXT NOT NULL CHECK (length(source) > 0),
+                    partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+                    partition TEXT NOT NULL CHECK (length(partition) > 0),
+                    position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+                    version INTEGER NOT NULL CHECK (version >= 0),
+                    committed_position TEXT,
+                    next_fence INTEGER NOT NULL CHECK (next_fence >= 0)
+                 );
+                 CREATE TABLE stream_failure (
+                    identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
+                    key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+                    consumer_principal TEXT NOT NULL CHECK (length(consumer_principal) > 0),
+                    consumer_root TEXT NOT NULL CHECK (length(consumer_root) > 0),
+                    consumer_function TEXT NOT NULL CHECK (length(consumer_function) > 0),
+                    consumer_binding TEXT NOT NULL CHECK (length(consumer_binding) > 0),
+                    source_format TEXT NOT NULL CHECK (length(source_format) > 0),
+                    source TEXT NOT NULL CHECK (length(source) > 0),
+                    partition_format TEXT NOT NULL CHECK (length(partition_format) > 0),
+                    partition TEXT NOT NULL CHECK (length(partition) > 0),
+                    position_format TEXT NOT NULL CHECK (length(position_format) > 0),
+                    delivery_position TEXT NOT NULL CHECK (length(delivery_position) > 0),
+                    successor_position TEXT NOT NULL CHECK (length(successor_position) > 0),
+                    version INTEGER NOT NULL CHECK (version >= 0),
+                    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+                    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 7),
+                    diagnostic_code INTEGER NOT NULL CHECK (diagnostic_code BETWEEN 1 AND 5),
+                    diagnostic_class INTEGER NOT NULL CHECK (diagnostic_class BETWEEN 1 AND 3)
+                 );
+                 INSERT INTO stream_checkpoint SELECT * FROM stream_checkpoint_current;
+                 INSERT INTO stream_failure SELECT * FROM stream_failure_current;
+                 DROP TABLE stream_checkpoint_current;
+                 DROP TABLE stream_failure_current;
+                 DELETE FROM runtime_schema_migration
+                   WHERE migration = 'nullable-stream-partition-v1';",
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap().key, key);
+        reopened.migrate_nullable_stream_partitions().await.unwrap();
+    }
+
     #[tokio::test]
     async fn pre_evidence_ledger_migrates_and_reopens_as_legacy_uncertain() {
         let (_temp, repo) = repository();
@@ -14806,8 +15183,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_observation_rejects_cross_run_checkpoint_rebinding_and_projection_is_read_only()
-    {
+    async fn stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_references()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let key = stream_delivery("one", "two").checkpoint_key();
@@ -14840,6 +15217,113 @@ mod tests {
             })
             .await
             .unwrap();
+        let run_reference = runs[0].reference().unwrap();
+        assert_eq!(
+            run_reference.as_row_ref().database_id,
+            runs[0].snapshot.database_id()
+        );
+        assert_eq!(
+            run_reference.as_row_ref().snapshot,
+            *runs[0].snapshot.snapshot()
+        );
+        let mut mismatched_generation = runs[0].clone();
+        mismatched_generation.runtime_generation += 1;
+        assert_eq!(
+            mismatched_generation.reference(),
+            Err(RuntimeError::InvalidObservationReference)
+        );
+        let stream_reference = first.reference(&runs[0]).unwrap();
+        assert_eq!(first.parent_capture, runs[0].snapshot);
+        assert_eq!(
+            stream_reference.as_row_ref().snapshot,
+            *runs[0].snapshot.snapshot()
+        );
+        let OvbRaw::Array(natural_key) = &stream_reference.as_row_ref().key else {
+            panic!("stream reference did not retain its natural key");
+        };
+        assert_eq!(natural_key.len(), 3);
+        assert_eq!(
+            Value::new(natural_key[0].clone())
+                .unwrap()
+                .encode()
+                .unwrap(),
+            run_reference.as_row_ref().encode().unwrap()
+        );
+        let OvbRaw::Tag(60010, nested_body) = &natural_key[0] else {
+            panic!("stream natural key did not contain a canonical run RowRef");
+        };
+        let OvbRaw::Array(nested_fields) = nested_body.as_ref() else {
+            panic!("nested run RowRef did not contain its canonical fields");
+        };
+        assert_eq!(nested_fields.len(), 4);
+        assert_eq!(
+            nested_fields[0],
+            OvbRaw::Tag(
+                37,
+                Box::new(OvbRaw::Bytes(runs[0].snapshot.database_id().to_vec()))
+            )
+        );
+        assert_eq!(
+            nested_fields[1],
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(SYS_RUN_TABLE_ID.to_vec())))
+        );
+        assert_eq!(nested_fields[2], run_reference.as_row_ref().key);
+        assert_eq!(nested_fields[3], runs[0].snapshot.snapshot().raw().clone());
+        assert_eq!(natural_key[1], OvbRaw::Text(first.source_identity.clone()));
+        assert_eq!(
+            natural_key[2],
+            OvbRaw::Text(first.partition.clone().unwrap())
+        );
+        let mut unpartitioned = first.clone();
+        unpartitioned.partition = None;
+        assert_eq!(
+            unpartitioned.reference(&runs[0]),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut mismatched_partition = first.clone();
+        mismatched_partition.partition = Some("other-partition".into());
+        assert_eq!(
+            mismatched_partition.reference(&runs[0]),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        assert_eq!(
+            first.reference(&runs[1]),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut same_id_different_capture = runs[0].clone();
+        same_id_different_capture.snapshot = CwdCapture::new(
+            Snapshot::cwd(
+                runs[0].snapshot.database_id(),
+                runs[0].snapshot.runtime_id(),
+                BigInt::from(1),
+            )
+            .unwrap(),
+            digest(178),
+        )
+        .unwrap();
+        assert_eq!(
+            first.reference(&same_id_different_capture),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut mismatched_source = first.clone();
+        mismatched_source.source_identity = "other-source".into();
+        assert_eq!(
+            mismatched_source.reference(&runs[0]),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut mismatched_consumer = first.clone();
+        mismatched_consumer.consumer_identity.principal =
+            Component::new("other-principal").unwrap();
+        assert_eq!(
+            mismatched_consumer.reference(&runs[0]),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut mismatched_parent = runs[0].clone();
+        mismatched_parent.runtime_id = id(177);
+        assert_eq!(
+            first.reference(&mismatched_parent),
+            Err(RuntimeError::InvalidObservationReference)
+        );
         assert!(matches!(
             state
                 .register_stream_observation(StreamObservationRegistration {
@@ -14863,6 +15347,69 @@ mod tests {
         );
         assert_eq!(state.runtime_stream_observations().await.unwrap().len(), 1);
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn nullable_stream_partition_persists_reopens_and_projects_canonical_null() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(179, 180);
+        state.reserve_request(request, digest(181)).await.unwrap();
+        let mut key = stream_delivery("nullable:one", "nullable:two").checkpoint_key();
+        key.partition = None;
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume-nullable".into(),
+                source_identity: None,
+                invocation_id: id(182),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.partition, None);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap().key, key);
+        let reference = stream.reference(&run).unwrap();
+        let OvbRaw::Array(natural_key) = &reference.as_row_ref().key else {
+            panic!("nullable stream reference did not retain its natural key");
+        };
+        assert_eq!(natural_key[2], OvbRaw::Null);
+
+        let mut duplicate_key = key.clone();
+        duplicate_key.consumer.principal = Component::new("other-principal").unwrap();
+        assert!(matches!(
+            state
+                .register_stream_observation(StreamObservationRegistration {
+                    run: run.id,
+                    producer: "other-source-object".into(),
+                    consumer: None,
+                    checkpoint: duplicate_key,
+                })
+                .await,
+            Err(RuntimeError::StorageUnavailable)
+        ));
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let restored_run = reopened.run_observation(run.id).await.unwrap().unwrap();
+        let restored = reopened
+            .stream_observation(stream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.checkpoint, key);
+        assert_eq!(restored.partition, None);
+        assert_eq!(restored.reference(&restored_run).unwrap(), reference);
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap().key, key);
     }
 
     #[tokio::test]
@@ -14960,7 +15507,12 @@ mod tests {
         );
         assert_eq!(observed.consumer_identity, key.consumer);
         assert_eq!(observed.source_identity, key.source.as_str());
-        assert_eq!(observed.partition, Some(key.partition.as_str().to_owned()));
+        assert_eq!(
+            observed.partition,
+            key.partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned())
+        );
         assert!(observed.last_item_ms.is_some());
         assert!(observed.observed_ms >= observed.last_item_ms.unwrap());
         assert_eq!(
@@ -14997,7 +15549,12 @@ mod tests {
         assert_eq!(restored.run, run.id);
         assert_eq!(restored.consumer_identity, key.consumer);
         assert_eq!(restored.source_identity, key.source.as_str());
-        assert_eq!(restored.partition, Some(key.partition.as_str().to_owned()));
+        assert_eq!(
+            restored.partition,
+            key.partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned())
+        );
         assert_eq!(
             (
                 restored.items_seen,
