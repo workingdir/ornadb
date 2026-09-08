@@ -2353,6 +2353,7 @@ fn foreign_upgrade_reservation_cannot_consume_a_local_pending_handshake() {
         .begin_websocket_upgrade(&websocket_upgrade(1, &token(&second_created)), [5; 16], 1)
         .unwrap();
 
+    assert!(!second.abort_websocket_upgrade(&first_pending));
     assert_eq!(
         block_on(second.commit_websocket_upgrade(first_pending, 1)),
         Err(Error::Closed)
