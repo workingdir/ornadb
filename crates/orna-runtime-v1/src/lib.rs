@@ -11096,7 +11096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_failures_are_durable_until_the_checkpoint_is_admitted() {
+    async fn provider_failures_survive_reopen_until_the_checkpoint_is_admitted() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -11135,6 +11135,23 @@ mod tests {
 
         drop(state);
         let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .provider_failure_async(&key)
+                .await
+                .unwrap(),
+            Some(StreamProviderFailure {
+                checkpoint: StreamCheckpoint {
+                    key: key.clone(),
+                    version: 0,
+                    committed: None,
+                },
+                attempts: 2,
+                diagnostic,
+            })
+        );
         let mut source = TestSource {
             key: key.clone(),
             item: Some(StreamItem {
