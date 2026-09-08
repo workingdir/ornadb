@@ -774,6 +774,68 @@ impl EngineWitnesses {
     }
 }
 
+/// A reviewed binding for an executed scenario contract.  Unlike an
+/// [`EngineWitness`], this records implementation-scenario execution only;
+/// it makes no claim that an Orna engine executed the prose scenario.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScenarioExecutionBinding {
+    pub requirement_id: String,
+    pub scenario_id: String,
+    pub implementation_ref: String,
+    pub test_ref: String,
+}
+
+/// Traceable implementation-scenario evidence, pinned to the publication
+/// digests in the report that observed it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScenarioExecutionWitness {
+    requirement_id: String,
+    scenario_id: String,
+    implementation_ref: String,
+    test_ref: String,
+    observed_status: EvidenceStatus,
+}
+
+impl ScenarioExecutionWitness {
+    #[must_use]
+    pub fn requirement_id(&self) -> &str {
+        &self.requirement_id
+    }
+    #[must_use]
+    pub fn scenario_id(&self) -> &str {
+        &self.scenario_id
+    }
+    #[must_use]
+    pub fn implementation_ref(&self) -> &str {
+        &self.implementation_ref
+    }
+    #[must_use]
+    pub fn test_ref(&self) -> &str {
+        &self.test_ref
+    }
+    #[must_use]
+    pub fn observed_status(&self) -> &EvidenceStatus {
+        &self.observed_status
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScenarioExecutionWitnesses {
+    publication_digests: BTreeMap<String, String>,
+    witnesses: Vec<ScenarioExecutionWitness>,
+}
+
+impl ScenarioExecutionWitnesses {
+    #[must_use]
+    pub fn publication_digests(&self) -> &BTreeMap<String, String> {
+        &self.publication_digests
+    }
+    #[must_use]
+    pub fn witnesses(&self) -> &[ScenarioExecutionWitness] {
+        &self.witnesses
+    }
+}
+
 pub struct Harness {
     corpus: Corpus,
     claim: ImplementationClaim,
@@ -935,6 +997,96 @@ impl Harness {
             });
         }
         Ok(EngineWitnesses {
+            publication_digests: report.publication_digests.clone(),
+            witnesses,
+        })
+    }
+
+    /// Convert reviewed bindings into traceability evidence only when the
+    /// exact corpus scenario is declared and passed in this report.  This
+    /// boundary deliberately does not produce engine witnesses: the corpus
+    /// labels scenarios as implementation scenarios rather than executions
+    /// by an Orna engine.
+    pub fn scenario_execution_witnesses(
+        &self,
+        report: &RunReport,
+        bindings: &[ScenarioExecutionBinding],
+    ) -> Result<ScenarioExecutionWitnesses, String> {
+        let requirements = self
+            .corpus
+            .requirements
+            .iter()
+            .map(|requirement| requirement.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut witnesses = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            if !requirements.contains(binding.requirement_id.as_str()) {
+                return Err(format!(
+                    "unknown requirement binding: {}",
+                    binding.requirement_id
+                ));
+            }
+            let scenario = self.corpus.scenarios["scenarios"]
+                .as_array()
+                .expect("validated scenarios")
+                .iter()
+                .find(|value| value["id"].as_str() == Some(binding.scenario_id.as_str()))
+                .cloned()
+                .map(|value| serde_json::from_value::<Scenario>(value).expect("validated scenario"))
+                .ok_or_else(|| format!("unknown scenario binding: {}", binding.scenario_id))?;
+            if scenario.evidence_level != "implementation scenario, not executed by an Orna engine"
+                || !scenario.requirements.contains(&binding.requirement_id)
+            {
+                return Err(format!(
+                    "scenario requirement mismatch: {}",
+                    binding.scenario_id
+                ));
+            }
+            if !report
+                .implementation_claim
+                .executed_scenario_contracts
+                .contains(&binding.scenario_id)
+            {
+                return Err(format!(
+                    "scenario is not declared executed: {}",
+                    binding.scenario_id
+                ));
+            }
+            if !seen.insert((
+                binding.requirement_id.as_str(),
+                binding.scenario_id.as_str(),
+            )) {
+                return Err(format!(
+                    "duplicate scenario binding: {}",
+                    binding.scenario_id
+                ));
+            }
+            let result = report
+                .scenarios
+                .iter()
+                .find(|result| result.scenario == binding.scenario_id)
+                .ok_or_else(|| {
+                    format!("scenario is absent from report: {}", binding.scenario_id)
+                })?;
+            if result.status != EvidenceStatus::Passed
+                || result.class != EvidenceClass::Runtime
+                || !result.requirements.contains(&binding.requirement_id)
+            {
+                return Err(format!(
+                    "scenario is not executed evidence: {}",
+                    binding.scenario_id
+                ));
+            }
+            witnesses.push(ScenarioExecutionWitness {
+                requirement_id: binding.requirement_id.clone(),
+                scenario_id: binding.scenario_id.clone(),
+                implementation_ref: binding.implementation_ref.clone(),
+                test_ref: binding.test_ref.clone(),
+                observed_status: result.status.clone(),
+            });
+        }
+        Ok(ScenarioExecutionWitnesses {
             publication_digests: report.publication_digests.clone(),
             witnesses,
         })
