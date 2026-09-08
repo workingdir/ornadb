@@ -2073,6 +2073,44 @@ mod tests {
         assert!(!format!("{error:?}").contains(PROTECTED_PAYLOAD));
         assert!(!error.to_string().contains(PROTECTED_PAYLOAD));
     }
+
+    #[test]
+    fn protected_values_are_rejected_in_snapshot_present_properties() {
+        const PROTECTED_PAYLOAD: &str = "protected-snapshot-regression";
+        let bytes = wire(
+            16,
+            None,
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (
+                    uint(1),
+                    present_node(
+                        Node::Null,
+                        vec![Node::Tag(
+                            60012,
+                            Box::new(Node::Array(vec![
+                                Node::Array(vec![uint(0), Node::Text("value".into())]),
+                                Node::Map(vec![(
+                                    Node::Text("value".into()),
+                                    Node::Tag(0, Box::new(Node::Text(PROTECTED_PAYLOAD.into()))),
+                                )]),
+                                Node::Array(vec![]),
+                            ])),
+                        )],
+                    ),
+                ),
+                (uint(2), snapshot_node(&snapshot()).unwrap()),
+            ]),
+        );
+
+        let error = Envelope::decode(&bytes, Limits::default()).unwrap_err();
+        assert_eq!(error, Error::InvalidValue);
+        assert_eq!(error.code(), "wire.invalid_message");
+        assert!(!format!("{error:?}").contains(PROTECTED_PAYLOAD));
+        assert!(!error.to_string().contains(PROTECTED_PAYLOAD));
+    }
+
     #[test]
     fn request_fingerprint_omits_event_and_eval_redundant_fields() {
         let session_id = id(9);
