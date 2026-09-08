@@ -166,6 +166,53 @@ fn parsed_table_count_observes_nested_read_your_writes() {
 }
 
 #[test]
+fn parsed_relation_first_reads_canonical_candidate_rows_and_never_publishes_on_failure() {
+    let mut empty = TransactionalEvaluator::new("parent", Limits::default());
+    let empty_outcome = empty.execute_source(&source(
+        r#"assert (Note.first() ?? Note.insert({ id: 7, text: "fallback" })).id == 7;"#,
+    ));
+    assert!(
+        matches!(empty_outcome, StageOutcome::Passed),
+        "{empty_outcome:?}"
+    );
+    assert!(empty.committed_row("Note", &Value::int(7.into())).is_some());
+
+    let mut committed = TransactionalEvaluator::new("parent", Limits::default());
+    assert!(matches!(
+        committed.execute_source(&source(
+            r#"Note.insert({ id: 2, text: "two" }); Note.insert({ id: 1, text: "one" }); assert (Note.first() ?? Note.insert({ id: 99, text: "fallback" })).id == 1; assert (Note.first() ?? Note.insert({ id: 99, text: "fallback" })).text == "one";"#,
+        )),
+        StageOutcome::Passed
+    ));
+    assert!(
+        committed
+            .committed_row("Note", &Value::int(1.into()))
+            .is_some()
+    );
+    assert_eq!(
+        committed.committed_row("Note", &Value::int(99.into())),
+        None
+    );
+
+    let mut rolled_back = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = rolled_back.execute_source(&source(
+        r#"Note.insert({ id: 2, text: "two" }); Note.insert({ id: 1, text: "one" }); assert (Note.first() ?? Note.insert({ id: 99, text: "fallback" })).id == 1; assert false;"#,
+    ));
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+    ));
+    assert_eq!(
+        rolled_back.committed_row("Note", &Value::int(1.into())),
+        None
+    );
+    assert_eq!(
+        rolled_back.committed_row("Note", &Value::int(2.into())),
+        None
+    );
+}
+
+#[test]
 fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&source_with_count_function(
