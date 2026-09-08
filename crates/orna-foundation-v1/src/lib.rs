@@ -180,6 +180,67 @@ pub const SYS_RUN_TABLE_ID: [u8; 16] = [
 pub const SYS_STREAM_TABLE_ID: [u8; 16] = [
     0x7c, 0x10, 0x5b, 0xa9, 0x63, 0x2e, 0x43, 0x8c, 0x88, 0x19, 0x56, 0xd0, 0x47, 0xaf, 0x20, 0x02,
 ];
+pub const SYS_CHECKPOINT_TABLE_ID: [u8; 16] = [
+    0x9a, 0x73, 0xf8, 0x1d, 0x4c, 0x5f, 0x40, 0x14, 0x92, 0x2e, 0x61, 0x09, 0x6b, 0x82, 0x1f, 0x03,
+];
+pub const SYS_FAILURE_TABLE_ID: [u8; 16] = [
+    0xb4, 0x62, 0xcd, 0x70, 0x35, 0x2f, 0x4a, 0xb9, 0x8f, 0x3a, 0x97, 0x56, 0xe1, 0x4c, 0x28, 0x04,
+];
+
+/// Constructs a checked `sys.CheckpointRef` from the canonical durable
+/// checkpoint natural key (`consumer_identity + source_identity + partition`).
+/// It constructs coordinates only; it never proves durable retention or
+/// observation authority.
+pub fn checkpoint_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    consumer_identity: String,
+    source_identity: String,
+    partition: Option<String>,
+) -> Result<CheckpointRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    let key = checkpoint_key_raw(consumer_identity, source_identity, partition)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_CHECKPOINT_TABLE_ID,
+        key,
+        snapshot,
+    }))
+}
+
+/// Constructs a checked `sys.FailureRef` from its canonical durable natural
+/// key (`consumer_identity + source_identity + partition + position_format +
+/// position`). A retained physical failure identity may locate this row, but
+/// is deliberately not part of the public reference key.
+pub fn failure_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    consumer_identity: String,
+    source_identity: String,
+    partition: Option<String>,
+    position_format: String,
+    position: String,
+) -> Result<FailureRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    let OvbRaw::Array(mut key) = checkpoint_key_raw(consumer_identity, source_identity, partition)
+        .map_err(|_| SystemReferenceError::InvalidFailureKey)?
+    else {
+        return Err(SystemReferenceError::InvalidFailureKey);
+    };
+    if position_format.is_empty() || position.is_empty() {
+        return Err(SystemReferenceError::InvalidFailureKey);
+    }
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_FAILURE_TABLE_ID,
+        key: {
+            key.push(OvbRaw::Text(position_format));
+            key.push(OvbRaw::Text(position));
+            OvbRaw::Array(key)
+        },
+        snapshot,
+    }))
+}
 
 /// Constructs a checked `sys.InvocationRef` from the durable observation
 /// coordinates. This validates only the canonical reference shape and that
@@ -341,6 +402,84 @@ pub fn validate_stream_reference(
     Ok(TypedRowRef::from_row_ref(reference))
 }
 
+/// Checks a candidate `sys.CheckpointRef` against the supplied pinned CWD
+/// context and its exact durable natural-key representation.
+pub fn validate_checkpoint_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<CheckpointRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_CHECKPOINT_TABLE_ID)?;
+    checkpoint_key_from_raw(&reference.key)?;
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+/// Checks a candidate `sys.FailureRef` against the supplied pinned CWD
+/// context and its exact durable natural-key representation.
+pub fn validate_failure_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<FailureRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_FAILURE_TABLE_ID)?;
+    let OvbRaw::Array(key) = &reference.key else {
+        return Err(SystemReferenceError::InvalidFailureKey);
+    };
+    let [consumer, source, partition, position_format, position] = key.as_slice() else {
+        return Err(SystemReferenceError::InvalidFailureKey);
+    };
+    checkpoint_key_from_raw(&OvbRaw::Array(vec![
+        consumer.clone(),
+        source.clone(),
+        partition.clone(),
+    ]))
+    .map_err(|_| SystemReferenceError::InvalidFailureKey)?;
+    if !matches!(position_format, OvbRaw::Text(value) if !value.is_empty())
+        || !matches!(position, OvbRaw::Text(value) if !value.is_empty())
+    {
+        return Err(SystemReferenceError::InvalidFailureKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+fn checkpoint_key_raw(
+    consumer_identity: String,
+    source_identity: String,
+    partition: Option<String>,
+) -> Result<OvbRaw, SystemReferenceError> {
+    if consumer_identity.is_empty() || source_identity.is_empty() {
+        return Err(SystemReferenceError::InvalidCheckpointKey);
+    }
+    if matches!(partition.as_deref(), Some("")) {
+        return Err(SystemReferenceError::InvalidCheckpointKey);
+    }
+    Ok(OvbRaw::Array(vec![
+        OvbRaw::Text(consumer_identity),
+        OvbRaw::Text(source_identity),
+        partition.map(OvbRaw::Text).unwrap_or(OvbRaw::Null),
+    ]))
+}
+
+fn checkpoint_key_from_raw(key: &OvbRaw) -> Result<(), SystemReferenceError> {
+    let OvbRaw::Array(key) = key else {
+        return Err(SystemReferenceError::InvalidCheckpointKey);
+    };
+    let [consumer, source, partition] = key.as_slice() else {
+        return Err(SystemReferenceError::InvalidCheckpointKey);
+    };
+    match (consumer, source, partition) {
+        (OvbRaw::Text(consumer), OvbRaw::Text(source), OvbRaw::Null)
+            if !consumer.is_empty() && !source.is_empty() =>
+        {
+            Ok(())
+        }
+        (OvbRaw::Text(consumer), OvbRaw::Text(source), OvbRaw::Text(partition))
+            if !consumer.is_empty() && !source.is_empty() && !partition.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(SystemReferenceError::InvalidCheckpointKey),
+    }
+}
+
 fn validate_coordinates(
     reference: &RowRef,
     capture: &CwdCapture,
@@ -382,6 +521,8 @@ pub enum SystemReferenceError {
     InvalidInvocationArgumentKey,
     InvalidRunKey,
     InvalidStreamKey,
+    InvalidCheckpointKey,
+    InvalidFailureKey,
 }
 impl fmt::Display for SystemReferenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -397,6 +538,8 @@ impl fmt::Display for SystemReferenceError {
             }
             Self::InvalidRunKey => f.write_str("invalid sys.Run natural key"),
             Self::InvalidStreamKey => f.write_str("invalid sys.Stream natural key"),
+            Self::InvalidCheckpointKey => f.write_str("invalid sys.Checkpoint natural key"),
+            Self::InvalidFailureKey => f.write_str("invalid sys.Failure natural key"),
         }
     }
 }
@@ -1322,6 +1465,49 @@ mod tests {
         assert_eq!(
             validate_reference_context::<InvocationKind>(decoded, &wrong_snapshot),
             Err(SystemReferenceError::SnapshotMismatch)
+        );
+    }
+    #[test]
+    fn checkpoint_and_failure_references_preserve_nullable_natural_keys() {
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
+        let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
+        for partition in [None, Some("partition-a".into())] {
+            let checkpoint = checkpoint_reference(
+                [1; 16],
+                snapshot.clone(),
+                "principal/root/function/binding".into(),
+                "source-a".into(),
+                partition.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                validate_checkpoint_reference(checkpoint.as_row_ref().clone(), &capture).unwrap(),
+                checkpoint
+            );
+            let failure = failure_reference(
+                [1; 16],
+                snapshot.clone(),
+                "principal/root/function/binding".into(),
+                "source-a".into(),
+                partition,
+                "position-format".into(),
+                "position-a".into(),
+            )
+            .unwrap();
+            assert_eq!(
+                validate_failure_reference(failure.as_row_ref().clone(), &capture).unwrap(),
+                failure
+            );
+        }
+        assert!(
+            checkpoint_reference(
+                [1; 16],
+                snapshot,
+                "consumer".into(),
+                "source".into(),
+                Some(String::new()),
+            )
+            .is_err()
         );
     }
     #[test]
