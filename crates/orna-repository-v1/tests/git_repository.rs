@@ -3156,6 +3156,60 @@ fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
 }
 
 #[test]
+fn compact_publication_refuses_missing_manifest_or_shard_witness_before_ref_advance() {
+    for (ordinal, witness_path) in [(70, "manifest.orna"), (71, "shards/00000000.orna")] {
+        let root = repository();
+        let repo = Repository::discover(root.path()).unwrap();
+        let table = Uuid::new_v4();
+        let plan = compact_plan(
+            &repo,
+            table,
+            [ordinal as u8; 16],
+            &[compact_segment(
+                table,
+                ordinal,
+                b"compact object\n".to_vec(),
+            )],
+        );
+        let head = repo.head().unwrap().unwrap();
+        let object = git(
+            root.path(),
+            &[
+                "rev-parse",
+                &format!(
+                    "{}:.orna/storage/{table}/{witness_path}",
+                    plan.candidate_commit()
+                ),
+            ],
+        );
+        let object_path = root
+            .path()
+            .join(".git/objects")
+            .join(&object[..2])
+            .join(&object[2..]);
+        #[cfg(unix)]
+        fs::set_permissions(
+            &object_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        fs::remove_file(&object_path).unwrap();
+
+        let error = publish_compact_repository_boundary(&repo, plan).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                orna_repository_v1::RepositoryError::InvalidPublicationJournal
+                    | orna_repository_v1::RepositoryError::GitOperationFailed
+            ),
+            "unexpected missing-witness rejection: {error:?}"
+        );
+        assert_eq!(repo.head().unwrap(), Some(head));
+        assert_eq!(repo.read_publication_journal().unwrap(), None);
+    }
+}
+
+#[test]
 fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
