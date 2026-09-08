@@ -2570,6 +2570,39 @@ impl TableEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[Value],
     ) -> Result<Option<Value>, EvaluationError> {
+        if let Expr::Field { base, name, .. } = callee
+            && matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+            && matches!(name.as_str(), "window" | "window_count")
+        {
+            let (table, size, step) = relation_window_arguments(arguments)?;
+            let table = self
+                .key_fields
+                .get_key_value(table)
+                .map(|(table, _)| table)
+                .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
+            let windows = self
+                .activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+                .map(|(_, row)| row)
+                .window(size, step)
+                .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?
+                .collect::<Vec<_>>();
+            return match name.as_str() {
+                "window_count" => Ok(Some(Value::int(BigInt::from(windows.len())))),
+                "window" => Value::new(OvbRaw::Array(
+                    windows
+                        .into_iter()
+                        .map(|window| {
+                            OvbRaw::Array(window.into_iter().map(|row| row.raw().clone()).collect())
+                        })
+                        .collect(),
+                ))
+                .map(Some)
+                .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT")),
+                _ => unreachable!("window operation was matched above"),
+            };
+        }
         if matches!(
             callee,
             Expr::Field {
@@ -2770,6 +2803,26 @@ type ModuleAssertions = Vec<Expr>;
 type TableKeys = BTreeMap<String, Vec<String>>;
 type AdmittedTransaction = (Functions, TableKeys, TableAssertions, ModuleAssertions);
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
+
+fn relation_window_arguments(arguments: &[Value]) -> Result<(&str, usize, usize), EvaluationError> {
+    let [table, size, step] = arguments else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+    };
+    let (OvbRaw::Text(table), OvbRaw::Int(size), OvbRaw::Int(step)) =
+        (table.raw(), size.raw(), step.raw())
+    else {
+        return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+    };
+    let size = usize::try_from(size.clone())
+        .ok()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
+    let step = usize::try_from(step.clone())
+        .ok()
+        .filter(|step| *step > 0)
+        .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))?;
+    Ok((table, size, step))
+}
 
 fn admit_transaction_source(
     unit: &SourceUnit,
@@ -3043,9 +3096,11 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
 }
 
 fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
-    if let Some(lowered) = relation_lookup(expression, table_keys)
+    if let Some(lowered) = relation_window_count(expression, table_keys)
+        .or_else(|| relation_lookup(expression, table_keys))
         .or_else(|| relation_filter_count(expression, table_keys))
         .or_else(|| relation_count(expression, table_keys))
+        .or_else(|| relation_window(expression, table_keys))
     {
         *expression = lowered;
         return;
@@ -3167,6 +3222,132 @@ fn relation_count_target(expression: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn relation_window_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|" || !relation_count_target(rhs) {
+        return None;
+    }
+    relation_window_operation(lhs, table_keys, "window_count")
+}
+
+fn relation_window(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    relation_window_operation(expression, table_keys, "window")
+}
+
+fn relation_window_operation(
+    expression: &Expr,
+    table_keys: &TableKeys,
+    operation: &str,
+) -> Option<Expr> {
+    let (table, table_span, arguments) = match expression {
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            let Expr::Name { text: table, span } = lhs.as_ref() else {
+                return None;
+            };
+            let Expr::Call {
+                callee, arguments, ..
+            } = rhs.as_ref()
+            else {
+                return None;
+            };
+            if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "window") {
+                return None;
+            }
+            (table, span, arguments.as_slice())
+        }
+        Expr::Call {
+            callee, arguments, ..
+        } if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "window") => {
+            let [relation, rest @ ..] = arguments.as_slice() else {
+                return None;
+            };
+            let Expr::Name { text: table, span } = &relation.value else {
+                return None;
+            };
+            (table, span, rest)
+        }
+        _ => return None,
+    };
+    if !table_keys.contains_key(table) {
+        return None;
+    }
+    let (size, step) = relation_window_size_and_step(arguments)?;
+    let table = Expr::Literal {
+        text: format!("{table:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: table_span.clone(),
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: expression.span(),
+            }),
+            name: operation.into(),
+            span: expression.span(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: None,
+                span: table.span(),
+                value: table,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: size.span(),
+                value: size,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: step.span(),
+                value: step,
+            },
+        ],
+        span: expression.span(),
+    })
+}
+
+fn relation_window_size_and_step(arguments: &[orna_syntax_v1::Argument]) -> Option<(Expr, Expr)> {
+    let mut size = None;
+    let mut step = None;
+    let mut positional = 0usize;
+    let mut named_started = false;
+    for argument in arguments {
+        let slot = match argument.name.as_deref() {
+            Some("size") => {
+                named_started = true;
+                &mut size
+            }
+            Some("step") => {
+                named_started = true;
+                &mut step
+            }
+            Some(_) => return None,
+            None if named_started => return None,
+            None => {
+                positional += 1;
+                match positional {
+                    1 => &mut size,
+                    2 => &mut step,
+                    _ => return None,
+                }
+            }
+        };
+        if slot.replace(argument.value.clone()).is_some() {
+            return None;
+        }
+    }
+    let size = size?;
+    let step = step.unwrap_or_else(|| Expr::Literal {
+        text: "1".into(),
+        kind: orna_syntax_v1::LiteralKind::Integer,
+        span: size.span(),
+    });
+    Some((size, step))
 }
 
 fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
