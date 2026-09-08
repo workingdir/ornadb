@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
-    CwdCapture, InvocationArgumentRef, InvocationRef, Snapshot, Value,
+    CwdCapture, InvocationArgumentRef, InvocationRef, InvocationStatus, Snapshot, Value,
     invocation_argument_reference, invocation_reference, validate_invocation_argument_reference,
     validate_invocation_reference,
 };
@@ -79,6 +79,96 @@ pub enum SealedInvocationObservationStatus {
     Failed,
     Cancelled,
     Orphaned,
+}
+
+/// The currently supportable, durable subset of one public
+/// `sys.Invocation` row.
+///
+/// This is intentionally not a claim that the whole specification relation is
+/// available.  The sealed lifecycle retains checked invocation and argument
+/// references plus an exact closed status, but it does not yet retain physical
+/// `sys.FunctionRef`, `sys.SnapshotRef`, or `sys.TypeRef` coordinates.  Those
+/// fields, and every unsupported optional field, are consequently absent from
+/// this DTO instead of being reconstructed from implementation identifiers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableSysInvocationObservation {
+    /// `sys.Invocation.reference`.
+    pub reference: InvocationRef,
+    /// `sys.Invocation.id`.
+    pub id: InvocationId,
+    /// The retained `sys.Invocation.arguments` children.
+    pub arguments: Vec<DurableSysInvocationArgumentObservation>,
+    /// `sys.Invocation.started`. The sealed lifecycle always records this
+    /// durable instant.
+    pub started: Option<SystemTime>,
+    /// `sys.Invocation.ended`; this remains absent until terminal publication.
+    pub ended: Option<SystemTime>,
+    /// `sys.Invocation.status`, using the exact 1.0.0 closed vocabulary.
+    pub status: InvocationStatus,
+}
+
+/// The currently supportable, durable subset of one public
+/// `sys.InvocationArgument` row.
+///
+/// The durable metadata is always redacted and retains a value digest.  It
+/// does not retain a `sys.TypeRef` or recoverable `sys.Value`, so those fields
+/// are deliberately absent rather than represented by fabricated references
+/// or values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableSysInvocationArgumentObservation {
+    /// `sys.InvocationArgument.reference`.
+    pub reference: InvocationArgumentRef,
+    /// `sys.InvocationArgument.invocation`.
+    pub invocation: InvocationRef,
+    /// `sys.InvocationArgument.name`.
+    pub name: String,
+    /// `sys.InvocationArgument.position`.
+    pub position: u64,
+    /// `sys.InvocationArgument.digest`; sealed metadata always has this
+    /// redaction-safe digest.
+    pub digest: [u8; 32],
+    /// `sys.InvocationArgument.redacted`.
+    pub redacted: bool,
+}
+
+impl SealedInvocationObservation {
+    /// Converts checked private durable evidence into the public field subset
+    /// that the current schema can prove without inventing references or
+    /// optional relation ownership.
+    pub fn durable_sys_projection(&self) -> DurableSysInvocationObservation {
+        DurableSysInvocationObservation {
+            reference: self.reference.clone(),
+            id: self.invocation,
+            arguments: self
+                .arguments
+                .iter()
+                .map(|argument| DurableSysInvocationArgumentObservation {
+                    reference: argument.reference.clone(),
+                    invocation: self.reference.clone(),
+                    name: argument.name.clone(),
+                    position: argument.position,
+                    digest: argument.value_digest,
+                    redacted: true,
+                })
+                .collect(),
+            started: Some(self.started),
+            ended: self.ended,
+            status: self.status.into(),
+        }
+    }
+}
+
+impl From<SealedInvocationObservationStatus> for InvocationStatus {
+    fn from(status: SealedInvocationObservationStatus) -> Self {
+        match status {
+            SealedInvocationObservationStatus::Queued => Self::Queued,
+            SealedInvocationObservationStatus::Running => Self::Running,
+            SealedInvocationObservationStatus::Succeeded => Self::Succeeded,
+            SealedInvocationObservationStatus::Failed => Self::Failed,
+            SealedInvocationObservationStatus::Cancelled => Self::Cancelled,
+            SealedInvocationObservationStatus::Orphaned => Self::Orphaned,
+        }
+    }
 }
 
 impl SealedInvocationObservationStatus {
@@ -767,6 +857,56 @@ mod tests {
             observation(&current, 2, SealedInvocationObservationStatus::Succeeded),
         ];
         assert!(validate_observation_collection_capture(&retained).is_ok());
+    }
+
+    #[test]
+    fn durable_sys_projection_maps_only_proven_public_fields() {
+        let internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded);
+
+        let projection = internal.durable_sys_projection();
+        assert_eq!(projection.reference, internal.reference);
+        assert_eq!(projection.id, internal.invocation);
+        assert_eq!(projection.started, Some(internal.started));
+        assert_eq!(projection.ended, internal.ended);
+        assert_eq!(projection.status, InvocationStatus::Succeeded);
+        assert_eq!(projection.arguments.len(), 1);
+        assert_eq!(
+            projection.arguments[0].reference,
+            internal.arguments[0].reference
+        );
+        assert_eq!(projection.arguments[0].invocation, internal.reference);
+        assert_eq!(projection.arguments[0].name, internal.arguments[0].name);
+        assert_eq!(
+            projection.arguments[0].position,
+            internal.arguments[0].position
+        );
+        assert_eq!(
+            projection.arguments[0].digest,
+            internal.arguments[0].value_digest
+        );
+        assert!(projection.arguments[0].redacted);
+    }
+
+    #[test]
+    fn durable_sys_projection_exhaustively_omits_unsupported_fields() {
+        let projection = observation(&capture(1), 2, SealedInvocationObservationStatus::Running)
+            .durable_sys_projection();
+        let DurableSysInvocationObservation {
+            reference: _,
+            id: _,
+            arguments,
+            started: _,
+            ended: _,
+            status: _,
+        } = projection;
+        let DurableSysInvocationArgumentObservation {
+            reference: _,
+            invocation: _,
+            name: _,
+            position: _,
+            digest: _,
+            redacted: _,
+        } = &arguments[0];
     }
 
     #[test]
