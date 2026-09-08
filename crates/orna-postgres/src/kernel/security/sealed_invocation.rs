@@ -1,4 +1,178 @@
 use super::*;
+use orna_foundation_v1::{CwdCapture, Value as CanonicalValue};
+
+/// Runtime admission evidence bound to one sealed invocation.
+///
+/// The fields are opaque, but Rust visibility cannot make a value derived from
+/// [`CwdCapture`] cryptographically unforgeable across crates. Executable
+/// composition must therefore construct this only from runtime-owned state
+/// while it holds its admission/ownership fence. It is not protocol input and
+/// it is never reconstructed by a reader.
+///
+/// The canonical snapshot encoding and indexed components are retained in the
+/// same lifecycle insert so later observation can prove its reference pin.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedInvocationAdmissionContext {
+    capture: CwdCapture,
+    encoded_snapshot: Vec<u8>,
+    runtime_generation: i64,
+}
+
+impl SealedInvocationAdmissionContext {
+    /// Derives evidence from a capture obtained by executable composition.
+    ///
+    /// Call this only after the server has captured runtime-owned state under
+    /// its admission/ownership fence, and bind it before `CALL_ACCEPTED`.
+    /// This constructor validates representation only; it does not establish
+    /// runtime ownership or fence a generation change.
+    #[doc(hidden)]
+    pub fn from_runtime_capture(capture: CwdCapture) -> Result<Self, PostgresKernelError> {
+        let encoded_snapshot = CanonicalValue::new(capture.snapshot().raw())
+            .and_then(|value| value.encode())
+            .map_err(|_| PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation admission",
+                record: "cwd capture".to_owned(),
+                rule: "admission capture snapshot must have a canonical encoding",
+            })?;
+        if encoded_snapshot.is_empty() {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation admission",
+                record: "cwd capture".to_owned(),
+                rule: "admission capture snapshot encoding must not be empty",
+            });
+        }
+        let runtime_generation = capture.generation().to_string().parse().map_err(|_| {
+            PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation admission",
+                record: "cwd capture".to_owned(),
+                rule: "admission runtime generation must be a nonnegative PostgreSQL bigint",
+            }
+        })?;
+        if runtime_generation < 0 {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "sealed invocation admission",
+                record: "cwd capture".to_owned(),
+                rule: "admission runtime generation must be nonnegative",
+            });
+        }
+        Ok(Self {
+            capture,
+            encoded_snapshot,
+            runtime_generation,
+        })
+    }
+
+    /// Returns the authoritative capture retained for this admission.
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// Returns the canonical encoding of the capture's CWD snapshot.
+    pub fn encoded_snapshot(&self) -> &[u8] {
+        &self.encoded_snapshot
+    }
+
+    /// Returns the capture digest bound to the logical runtime generation.
+    pub fn generation_digest(&self) -> [u8; 32] {
+        self.capture.generation_digest()
+    }
+
+    /// Returns the authoritative runtime identity.
+    pub fn runtime_id(&self) -> [u8; 16] {
+        self.capture.runtime_id()
+    }
+
+    /// Returns the checked, nonnegative runtime generation.
+    pub const fn runtime_generation(&self) -> i64 {
+        self.runtime_generation
+    }
+}
+
+fn sealed_invocation_admission_evidence(
+    context: Option<&SealedInvocationAdmissionContext>,
+    resolved_target: bool,
+    invocation: InvocationId,
+) -> Result<
+    (
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<i64>,
+    ),
+    PostgresKernelError,
+> {
+    if !resolved_target {
+        return Ok((None, None, None, None));
+    }
+    let context = context.ok_or_else(|| PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.sealed_invocation_lifecycle",
+        record: invocation.canonical(),
+        rule: "resolved sealed invocation admission requires trusted runtime capture evidence",
+    })?;
+    Ok((
+        Some(context.encoded_snapshot().to_vec()),
+        Some(context.generation_digest().to_vec()),
+        Some(context.runtime_id().to_vec()),
+        Some(context.runtime_generation()),
+    ))
+}
+
+#[cfg(test)]
+mod admission_context_tests {
+    use super::{SealedInvocationAdmissionContext, sealed_invocation_admission_evidence};
+    use crate::PostgresKernelError;
+    use orna_core::InvocationId;
+    use orna_foundation_v1::{CanonicalSnapshot, CwdCapture, Value as CanonicalValue};
+
+    fn capture() -> CwdCapture {
+        CwdCapture::new(
+            CanonicalSnapshot::cwd([0x11; 16], [0x22; 16], 7.into()).expect("test CWD snapshot"),
+            [0x33; 32],
+        )
+        .expect("test CWD capture")
+    }
+
+    #[test]
+    fn admission_context_retains_canonical_capture_shape() {
+        let capture = capture();
+        let context = SealedInvocationAdmissionContext::from_runtime_capture(capture.clone())
+            .expect("capture must encode canonically");
+
+        let expected = CanonicalValue::new(capture.snapshot().raw())
+            .expect("snapshot raw value")
+            .encode()
+            .expect("snapshot canonical encoding");
+        assert_eq!(context.capture(), &capture);
+        assert_eq!(context.encoded_snapshot(), expected);
+        assert_eq!(context.generation_digest(), [0x33; 32]);
+        assert_eq!(context.runtime_id(), [0x22; 16]);
+        assert_eq!(context.runtime_generation(), 7);
+    }
+
+    #[test]
+    fn resolved_lifecycle_without_context_fails_closed_before_insert() {
+        let error = sealed_invocation_admission_evidence(None, true, InvocationId::new())
+            .expect_err("resolved lifecycle requires trusted admission evidence");
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.sealed_invocation_lifecycle",
+                rule: "resolved sealed invocation admission requires trusted runtime capture evidence",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unresolved_private_denial_keeps_admission_evidence_absent() {
+        assert_eq!(
+            sealed_invocation_admission_evidence(None, false, InvocationId::new())
+                .expect("unresolved denial must remain private"),
+            (None, None, None, None)
+        );
+    }
+}
 /// The owned redacted result of one sealed `sys.invoke` dispatch.
 ///
 /// The completed variant carries the full Event batch so a server adapter can
@@ -128,6 +302,24 @@ pub enum SealedInvocationPreflight {
     Accepted(SealedInvocationContinuation),
 }
 
+impl SealedInvocationPreflight {
+    /// Binds runtime-owned evidence before the accepted continuation is used.
+    ///
+    /// A raw server adapter should capture its runtime state under its
+    /// admission/ownership fence, call this method, then emit `CALL_ACCEPTED`
+    /// and prepare the returned continuation. Rejected preflights are left
+    /// unchanged and do not consume or retain admission evidence.
+    #[doc(hidden)]
+    pub fn bind_admission_context(self, context: SealedInvocationAdmissionContext) -> Self {
+        match self {
+            Self::Rejected { failure } => Self::Rejected { failure },
+            Self::Accepted(continuation) => {
+                Self::Accepted(continuation.bind_admission_context(context))
+            }
+        }
+    }
+}
+
 /// The private, one-shot continuation created after sealed preflight.
 #[doc(hidden)]
 pub struct SealedInvocationContinuation {
@@ -140,6 +332,7 @@ pub struct SealedInvocationContinuation {
     request: RetainedInvokeRequest,
     invocation: InvocationId,
     started_events: InvocationEventBatch,
+    admission_context: Option<SealedInvocationAdmissionContext>,
 }
 
 impl SealedInvocationContinuation {
@@ -151,6 +344,17 @@ impl SealedInvocationContinuation {
     /// Returns the start-only Event batch queued before target work.
     pub fn started_events(&self) -> &InvocationEventBatch {
         &self.started_events
+    }
+
+    /// Binds runtime-owned evidence before this continuation is prepared.
+    ///
+    /// The server must obtain the capture under its admission/ownership fence
+    /// before it sends `CALL_ACCEPTED`. Rebinding replaces no state because a
+    /// continuation can only be consumed once and starts unbound.
+    #[doc(hidden)]
+    pub fn bind_admission_context(mut self, context: SealedInvocationAdmissionContext) -> Self {
+        self.admission_context = Some(context);
+        self
     }
 }
 
@@ -202,6 +406,7 @@ pub struct SealedInvocationOperation {
     request: RetainedInvokeRequest,
     invocation: InvocationId,
     started_events: InvocationEventBatch,
+    admission_context: Option<SealedInvocationAdmissionContext>,
     outcome: SealedInvocationPreparedOutcome,
     consumed: bool,
     #[cfg(test)]
@@ -300,6 +505,7 @@ impl SealedInvocationOperation {
             request,
             invocation,
             started_events: sealed_started_events(invocation)?,
+            admission_context: None,
             outcome,
             consumed: false,
             test_hooks: None,
@@ -782,6 +988,7 @@ impl PostgresKernel {
                     request: request.clone(),
                     invocation,
                     started_events,
+                    admission_context: None,
                 },
             ))
         }
@@ -801,6 +1008,25 @@ impl SealedInvocationContinuation {
     pub async fn prepare_sealed_sys_invoke_after_accept(
         self,
     ) -> Result<SealedInvocationOperation, PostgresKernelError> {
+        self.prepare_sealed_sys_invoke_after_accept_with_optional_admission_context()
+    }
+
+    /// Prepares an accepted invocation with runtime-owned admission evidence.
+    ///
+    /// Only executable composition may supply this context. Protocol input and
+    /// durable observation readers must never manufacture it.
+    #[doc(hidden)]
+    pub async fn prepare_sealed_sys_invoke_after_accept_with_admission_context(
+        self,
+        admission_context: SealedInvocationAdmissionContext,
+    ) -> Result<SealedInvocationOperation, PostgresKernelError> {
+        self.bind_admission_context(admission_context)
+            .prepare_sealed_sys_invoke_after_accept_with_optional_admission_context()
+    }
+
+    fn prepare_sealed_sys_invoke_after_accept_with_optional_admission_context(
+        self,
+    ) -> Result<SealedInvocationOperation, PostgresKernelError> {
         let SealedInvocationContinuation {
             kernel,
             authenticated_session,
@@ -811,6 +1037,7 @@ impl SealedInvocationContinuation {
             request,
             invocation,
             started_events,
+            admission_context,
         } = self;
         let outcome = match resolve_sealed_target(&active, decoded.target()) {
             Some(target) => {
@@ -870,6 +1097,7 @@ impl SealedInvocationContinuation {
             request,
             invocation,
             started_events,
+            admission_context,
             outcome,
             consumed: false,
             #[cfg(test)]
@@ -879,6 +1107,25 @@ impl SealedInvocationContinuation {
 }
 
 impl SealedInvocationOperation {
+    fn admission_evidence_for_lifecycle(
+        &self,
+        resolved_target: bool,
+    ) -> Result<
+        (
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<i64>,
+        ),
+        PostgresKernelError,
+    > {
+        sealed_invocation_admission_evidence(
+            self.admission_context.as_ref(),
+            resolved_target,
+            self.invocation,
+        )
+    }
+
     async fn append_sealed_invocation_argument_metadata(
         &self,
         transaction: &Transaction<'_>,
@@ -945,14 +1192,32 @@ impl SealedInvocationOperation {
                 Some(target.function().to_bytes().to_vec()),
             )
         });
+        let (
+            admission_snapshot,
+            admission_generation_digest,
+            admission_runtime_id,
+            admission_runtime_generation,
+        ) = self.admission_evidence_for_lifecycle(target.is_some())?;
         let owner = self.authenticated_session.principal().to_bytes().to_vec();
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.sealed_invocation_lifecycle (\
                     invocation_id, source_revision_id, catalogue_revision_id, function_id, \
-                    owner_principal_id, status\
-                 ) VALUES ($1, $2, $3, $4, $5, 'running')",
-                &[&invocation, &source, &catalogue, &function, &owner],
+                    owner_principal_id, status, admission_snapshot, \
+                    admission_generation_digest, admission_runtime_id, \
+                    admission_runtime_generation\
+                 ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9)",
+                &[
+                    &invocation,
+                    &source,
+                    &catalogue,
+                    &function,
+                    &owner,
+                    &admission_snapshot,
+                    &admission_generation_digest,
+                    &admission_runtime_id,
+                    &admission_runtime_generation,
+                ],
             )
             .await
             .map_err(PostgresKernelError::Database)?;
