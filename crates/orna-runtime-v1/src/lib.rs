@@ -42,6 +42,7 @@ use orna_stream_v1::{
     ReplayGrant, SafeDiagnostic, StreamState, StreamStatus,
 };
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 const SCHEMA: &str = r#"
@@ -1517,6 +1518,15 @@ pub trait StreamHandler {
 /// Lets a stream owner stop admission between delivery transactions.
 pub trait StreamRunControl {
     fn cancelled(&self) -> bool;
+    /// Resolves when a blocked runner must re-check cancellation.
+    ///
+    /// The default is deliberately inert for controls that never request
+    /// asynchronous cancellation. A control used with a provider wait must
+    /// override this so the runtime, rather than the provider, owns wakeup on
+    /// cancellation.
+    fn cancellation_wait<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(std::future::pending())
+    }
     /// Acquires the linearization point for a new delivery admission.
     fn acquire_admission(&self) -> bool;
     /// Releases the admission point after the durable acquire attempt returns.
@@ -1544,6 +1554,7 @@ impl StreamRunControl for NeverCancelled {
 #[derive(Clone, Debug)]
 pub struct StreamRunGate {
     state: Arc<AtomicU8>,
+    cancellation: Arc<Notify>,
 }
 
 impl StreamRunGate {
@@ -1555,6 +1566,7 @@ impl StreamRunGate {
     pub fn new() -> Self {
         Self {
             state: Arc::new(AtomicU8::new(Self::RUNNING)),
+            cancellation: Arc::new(Notify::new()),
         }
     }
 
@@ -1574,6 +1586,7 @@ impl StreamRunGate {
                         )
                         .is_ok()
                     {
+                        self.cancellation.notify_one();
                         return true;
                     }
                 }
@@ -1588,6 +1601,7 @@ impl StreamRunGate {
                         )
                         .is_ok()
                     {
+                        self.cancellation.notify_one();
                         return true;
                     }
                 }
@@ -1607,6 +1621,16 @@ impl Default for StreamRunGate {
 impl StreamRunControl for StreamRunGate {
     fn cancelled(&self) -> bool {
         self.state.load(Ordering::Acquire) >= Self::CANCEL_REQUESTED
+    }
+
+    fn cancellation_wait<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let notified = self.cancellation.notified();
+            if self.cancelled() {
+                return;
+            }
+            notified.await;
+        })
     }
 
     fn acquire_admission(&self) -> bool {
@@ -3385,7 +3409,28 @@ impl RuntimeState {
                     });
                 }
                 StreamStep::Waiting => {
-                    if let Err(diagnostic) = source.wait(control as &dyn StreamRunControl).await {
+                    if control.cancelled() {
+                        self.complete_stream_observation(
+                            writer,
+                            key,
+                            StreamObservationStatus::Cancelled,
+                        )
+                        .await
+                        .map_err(StreamStepError::Runtime)?;
+                        return Ok(StreamRunOutcome::Cancelled {
+                            delivered,
+                            checkpoint,
+                        });
+                    }
+                    let wait = source.wait(control as &dyn StreamRunControl);
+                    let wait_result = tokio::select! {
+                        _ = control.cancellation_wait() => Err(SafeDiagnostic {
+                            code: DiagnosticCode::Cancelled,
+                            class: DiagnosticClass::Cancellation,
+                        }),
+                        result = wait => result,
+                    };
+                    if let Err(diagnostic) = wait_result {
                         if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
                             self.complete_stream_observation(
                                 writer,
@@ -10344,6 +10389,84 @@ mod tests {
         }
     }
 
+    struct BlockingWaitSource {
+        key: CheckpointKey,
+        wait_started: Arc<Notify>,
+        polls: usize,
+        waits: usize,
+    }
+
+    impl StreamSource for BlockingWaitSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<(), SafeDiagnostic>> + 'a>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Unbounded,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
+        }
+
+        fn next<'a>(&'a mut self, _: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.polls += 1;
+            ready(Ok(StreamSourcePoll::Waiting))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            self.waits += 1;
+            self.wait_started.notify_one();
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_wait_cancellation_wakes_provider_and_preserves_checkpoint() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("wait-cancel", "wait-cancel-next");
+        let key = delivery.checkpoint_key();
+        let wait_started = Arc::new(Notify::new());
+        let mut source = BlockingWaitSource {
+            key: key.clone(),
+            wait_started: wait_started.clone(),
+            polls: 0,
+            waits: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        let gate = StreamRunGate::new();
+        let mut run = Box::pin(state.run_stream(writer, &key, &mut source, &mut handler, &gate));
+        tokio::select! {
+            _ = wait_started.notified() => {}
+            outcome = &mut run => panic!("stream completed before provider wait: {outcome:?}"),
+        }
+        assert!(gate.cancel());
+        assert!(matches!(
+            run.await.unwrap(),
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint {
+                    version: 0,
+                    committed: None,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(source.polls, 1);
+        assert_eq!(source.waits, 1);
+        assert_eq!(handler.calls, 0);
+    }
+
     struct CommitHandler {
         calls: usize,
     }
@@ -11403,6 +11526,82 @@ mod tests {
         assert_eq!(
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_pause_reason_survives_cancellation_terminal_boundary() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("pause-cancel", "pause-cancel-next");
+        let key = delivery.checkpoint_key();
+        let checkpoint = state
+            .stream_backend(writer)
+            .checkpoint_async(&key)
+            .await
+            .unwrap();
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery: delivery.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        assert_eq!(
+            state
+                .pause_stream_with_reason(writer, key.clone(), "operator shutdown".into())
+                .await,
+            Ok(StreamAdministrationOutcome::PausePending { changed: true }),
+        );
+        assert_eq!(
+            state.stream_pause_reason(&key).await,
+            Ok(Some("operator shutdown".into())),
+        );
+
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Cancel { lease })
+                .await
+                .unwrap(),
+            CommitResult::Cancelled {
+                checkpoint: StreamCheckpoint {
+                    version: 0,
+                    committed: None,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            state.stream_pause_reason(&key).await,
+            Ok(Some("operator shutdown".into())),
+        );
+        assert_eq!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Acquire {
+                    delivery,
+                    expected: CheckpointPrecondition::from(&checkpoint),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StreamPaused),
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.stream_pause_reason(&key).await,
+            Ok(Some("operator shutdown".into())),
         );
     }
 
