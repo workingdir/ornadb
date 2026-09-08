@@ -177,6 +177,7 @@ impl SealedInvocationObservation {
                 "persisted admission capture cannot construct a snapshot reference",
             )
         })?;
+        validate_argument_order(&self.arguments, &record)?;
         for argument in &self.arguments {
             let expected = invocation_argument_observation_reference(
                 &self.admission_capture,
@@ -1101,6 +1102,32 @@ mod tests {
             "test",
         )
         .unwrap();
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_unordered_argument_natural_keys() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        let position = internal.arguments[0].position;
+        internal
+            .arguments
+            .push(SealedInvocationArgumentObservation {
+                reference: invocation_argument_observation_reference(
+                    &admitted,
+                    internal.invocation,
+                    position + 1,
+                    "test",
+                )
+                .unwrap(),
+                position: position + 1,
+                parameter: orna_core::ParameterId::from_bytes([3; 16]),
+                name: "later".to_owned(),
+                type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+                value_digest: [3; 32],
+            });
+        internal.arguments.swap(0, 1);
+
         assert!(internal.durable_sys_projection().is_err());
     }
 
