@@ -684,6 +684,8 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         RuntimeError::StorageUnavailable => Error::RuntimeUnavailable,
         RuntimeError::InvalidIdentity
         | RuntimeError::InvalidDigest
+        | RuntimeError::InvalidObservationReference
+        | RuntimeError::ObservationCoordinateMismatch
         | RuntimeError::ConflictingPublicationIntent
         | RuntimeError::ConflictingPublicationCommit
         | RuntimeError::InvalidPublicationCommit
