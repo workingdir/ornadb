@@ -3068,6 +3068,25 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     ))
     .unwrap();
     assert_eq!(first_application.calls, 1);
+    let first_response_bytes = first
+        .response
+        .as_ref()
+        .unwrap()
+        .encode(Limits::default().protocol)
+        .unwrap();
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [23; 16],
+    };
+    let retained_terminal_bytes =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap()
+            .terminal_outcome
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+    assert_eq!(first_response_bytes, retained_terminal_bytes);
     let observations = block_on(open_durable_state(&repository).run_observations()).unwrap();
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].invocation_id, [23; 16]);
@@ -3087,16 +3106,23 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     }))
     .unwrap();
     let mut second_application = UnitApplication::default();
-    assert_eq!(
-        block_on(second_host.dispatch_frame(
-            [6; 16],
-            4,
-            Frame::Binary(request),
-            &mut second_application,
-        )),
-        Ok(first)
-    );
+    let replay = block_on(second_host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(request),
+        &mut second_application,
+    ))
+    .unwrap();
+    let replay_response_bytes = replay
+        .response
+        .as_ref()
+        .unwrap()
+        .encode(Limits::default().protocol)
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(replay_response_bytes, retained_terminal_bytes);
     assert_eq!(second_application.calls, 0);
+    assert_eq!(first_application.calls + second_application.calls, 1);
     assert_eq!(
         block_on(second_host.dispatch_frame(
             [6; 16],
