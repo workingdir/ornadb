@@ -1453,7 +1453,10 @@ fn websocket_connection_driver_does_not_commit_an_upgrade_before_handshake_deliv
         .unwrap()
         .request()
         .clone();
-    assert_eq!(block_on(transport.upgrade(request, [4; 16], 1)).status, 101);
+    assert_eq!(
+        block_on(transport.upgrade(request.clone(), [4; 16], 1)).status,
+        101
+    );
     let mut reader = Cursor::new(input.into_bytes());
     let mut writer = FailFirstWriter { writes: 0 };
     let mut connection = HttpConnection::new(TransportLimits::default());
@@ -1480,7 +1483,20 @@ fn websocket_connection_driver_does_not_commit_an_upgrade_before_handshake_deliv
         ))
         .is_ok()
     );
+    // The failed 101 write aborts only the candidate handoff. The active
+    // attachment remains usable above; the candidate stays fenced until the
+    // executable owner cancels and joins it.
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&request, [5; 16], 2)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+    assert_eq!(block_on(transport.upgrade(request, [5; 16], 2)).status, 101);
+    assert_eq!(transport.take_retired_attachments(), vec![[4; 16]]);
 }
 
 #[test]
@@ -1875,15 +1891,38 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
         101
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
-    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
+    assert_eq!(
+        block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 3)).status,
+        503
+    );
     assert_eq!(
         block_on(transport.close_attachment([5; 16], 3)),
         Err(Error::Closed)
     );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([6; 16]),
+            3,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
     assert_eq!(
-        block_on(transport.close_attachment([6; 16], 3)),
+        block_on(transport.upgrade(upgrade([5; 16]).0, [5; 16], 4)).status,
+        101
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
+    assert_eq!(
+        block_on(transport.close_attachment([6; 16], 4)),
+        Err(Error::Closed)
+    );
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 4)),
         Ok(FrameOutcome::Closed)
     );
+    assert!(transport.acknowledge_retired_attachment([6; 16]));
+    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
 }
 
 #[test]
@@ -1986,6 +2025,101 @@ fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
 }
 
 #[test]
+fn websocket_upgrade_rejects_attachment_identity_owned_by_another_handoff() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
+    let mut deletion = Delete(true);
+    let first = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let second = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(3)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let first_token = token(&first);
+    let second_token = token(&second);
+
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [5; 16], 1)
+        .unwrap();
+    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(2, &second_token), [5; 16], 2)
+            .unwrap_err()
+            .status,
+        503
+    );
+
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [6; 16], 2)
+        .unwrap();
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(2, &second_token), [6; 16], 2)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.abort_websocket_upgrade(&pending));
+    assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(2, &second_token), [6; 16], 3)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.acknowledge_retired_attachment([6; 16]));
+
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(2, &second_token), [6; 16], 3)).status,
+        101
+    );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([6; 16]),
+            3,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([5; 16]),
+            3,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
 fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
@@ -2035,19 +2169,28 @@ fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
     assert!(!transport.abort_websocket_upgrade(&aborted));
     assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
     assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 3)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.acknowledge_retired_attachment([6; 16]));
+    assert!(!transport.acknowledge_retired_attachment([6; 16]));
+    assert_eq!(
         block_on(transport.commit_websocket_upgrade(aborted, 3)),
         Err(Error::Closed)
     );
 
     assert_eq!(
-        block_on(transport.upgrade(websocket_upgrade(1, &credential), [7; 16], 3)).status,
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [6; 16], 3)).status,
         101
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
 }
 
 #[test]
-fn websocket_upgrade_expiry_releases_candidate_without_replacing_attachment() {
+fn websocket_upgrade_expiry_queues_and_fences_candidate_without_replacing_attachment() {
     let limits = TransportLimits {
         lease_ms: 10,
         request_retention_ms: 10,
@@ -2055,7 +2198,10 @@ fn websocket_upgrade_expiry_releases_candidate_without_replacing_attachment() {
     };
     let mut transport = LiveTransport::new(host(), limits).unwrap();
     let mut issuer = Issuer(1, None);
-    let mut authority = Authority;
+    let mut authority = CountingAuthority {
+        calls: 0,
+        times: Vec::new(),
+    };
     let mut deletion = Delete(true);
     let created = block_on(transport.handle(
         wire(
@@ -2072,6 +2218,21 @@ fn websocket_upgrade_expiry_releases_candidate_without_replacing_attachment() {
         &mut deletion,
     ));
     let credential = token(&created);
+    let second = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(3)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let second_token = token(&second);
     let active = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
@@ -2088,14 +2249,48 @@ fn websocket_upgrade_expiry_releases_candidate_without_replacing_attachment() {
     transport.expire_pending_websocket_upgrades(12);
     assert_eq!(transport.take_retired_attachments(), vec![[6; 16]]);
     assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 12)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(2, &second_token), [6; 16], 12)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert!(transport.acknowledge_retired_attachment([6; 16]));
+    assert_eq!(
         block_on(transport.commit_websocket_upgrade(pending, 12)),
         Err(Error::Closed)
     );
     assert_eq!(
-        block_on(transport.upgrade(websocket_upgrade(1, &credential), [7; 16], 13)).status,
+        block_on(transport.upgrade(websocket_upgrade(2, &second_token), [6; 16], 13)).status,
         101
     );
-    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([6; 16]),
+            13,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+    assert!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([5; 16]),
+            13,
+            &masked(true, 2, &unsubscribe()),
+        ))
+        .is_ok()
+    );
+    // The expired candidate was retired and acknowledged above. This
+    // cross-session admission never replaced the original attachment, so it
+    // has no additional worker to retire.
+    assert_eq!(transport.take_retired_attachments(), Vec::<[u8; 16]>::new());
 }
 
 #[test]

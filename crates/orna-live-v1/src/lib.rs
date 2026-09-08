@@ -3009,6 +3009,7 @@ pub struct LiveTransport {
     pending_upgrades: BTreeMap<[u8; 16], PendingUpgrade>,
     next_upgrade_reservation: u128,
     retired_attachments: VecDeque<[u8; 16]>,
+    retiring_attachments: BTreeSet<[u8; 16]>,
 }
 
 impl LiveTransport {
@@ -3094,15 +3095,28 @@ impl LiveTransport {
             pending_upgrades: BTreeMap::new(),
             next_upgrade_reservation: 0,
             retired_attachments: VecDeque::new(),
+            retiring_attachments: BTreeSet::new(),
         })
     }
 
-    /// Takes attachment identities retired by successful HTTP session resume
-    /// or deletion.
-    /// The executable host uses these identities to cancel and join the old
-    /// socket task without changing session-owned work.
+    /// Takes attachment identities queued by session resume/replacement,
+    /// deletion, an aborted or expired handoff, or a failed commit.
+    ///
+    /// This is a host callback primitive: the executable owner uses these
+    /// identities to request cancellation and join old socket workers. Queue
+    /// delivery does not acknowledge either action or prove that either one
+    /// occurred; the identity remains fenced until explicit acknowledgement.
     pub fn take_retired_attachments(&mut self) -> Vec<[u8; 16]> {
         self.retired_attachments.drain(..).collect()
+    }
+
+    /// Records the executable owner's acknowledgement after it cancelled and
+    /// joined a retired connection worker. This method is only a host callback
+    /// primitive; it does not perform or prove cancellation or join itself.
+    /// Queue delivery alone is not acknowledgement: the identity remains
+    /// fenced until the owner calls this method.
+    pub fn acknowledge_retired_attachment(&mut self, attachment: [u8; 16]) -> bool {
+        self.retiring_attachments.remove(&attachment)
     }
 
     /// Expires handshake reservations whose bounded delivery window has
@@ -3373,7 +3387,7 @@ impl LiveTransport {
     }
 
     fn queue_retired_attachment(&mut self, attachment: [u8; 16]) {
-        if !self.retired_attachments.contains(&attachment) {
+        if self.retiring_attachments.insert(attachment) {
             self.retired_attachments.push_back(attachment);
         }
     }
@@ -3888,6 +3902,20 @@ impl LiveTransport {
         self.expire_pending_websocket_upgrades(now);
         let admission = self.prepare_upgrade(request, attachment, now)?;
         if self.pending_upgrades.contains_key(&admission.id) {
+            return Err(wire_error(503, "live.unavailable"));
+        }
+        // Attachment identities belong to executable connection workers, not
+        // clients. Reusing one would let a later commit overwrite an active
+        // owner (or another pending handoff) and then retire the wrong worker.
+        // Reject before reserving so a failed candidate cannot disturb either
+        // existing attachment.
+        if self.host.attachments.contains_key(&attachment)
+            || self.retiring_attachments.contains(&attachment)
+            || self
+                .pending_upgrades
+                .values()
+                .any(|pending| pending.admission.attachment == attachment)
+        {
             return Err(wire_error(503, "live.unavailable"));
         }
         let Some(reservation) = self.allocate_reservation() else {
