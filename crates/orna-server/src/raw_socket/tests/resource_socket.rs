@@ -2271,3 +2271,105 @@ async fn server_shutdown_cancels_active_resource_without_emitting_a_terminal_fra
     assert!(dropped.load(Ordering::SeqCst));
     assert!(cancelled.load(Ordering::SeqCst));
 }
+
+#[derive(Clone)]
+struct JoinAcknowledgedResourceDispatch {
+    started: Arc<Notify>,
+    cancellation_seen: Arc<Notify>,
+    release: Arc<Notify>,
+    joined: Arc<AtomicBool>,
+}
+
+impl DispatchService for JoinAcknowledgedResourceDispatch {
+    fn start(
+        &self,
+        _session: AuthenticatedSession,
+        _stream: u64,
+        _call: RawCall,
+    ) -> StartedDispatch {
+        panic!("application-child shutdown test does not issue a raw call")
+    }
+
+    fn start_resource(
+        &self,
+        _session: AuthenticatedSession,
+        _request: ResourceRequest,
+        _resources: LocalRawSocketResources,
+        _version: RawProtocolVersion,
+    ) -> Option<StartedResourceDispatch> {
+        let started = Arc::clone(&self.started);
+        let cancellation_seen = Arc::clone(&self.cancellation_seen);
+        let release = Arc::clone(&self.release);
+        let joined = Arc::clone(&self.joined);
+        let cancellation = ResourceCancellation::new();
+        let operation_cancellation = cancellation.clone();
+        Some(StartedResourceDispatch {
+            future: Box::pin(async move {
+                started.notify_one();
+                operation_cancellation.cancelled().await;
+                cancellation_seen.notify_one();
+                release.notified().await;
+                joined.store(true, Ordering::SeqCst);
+                ResourceDispatchCompletion {
+                    actions: VecDeque::new(),
+                    producer: None,
+                    producer_waiting_bytes: None,
+                    terminal_provenance: ResourceTerminalProvenance::Uncommitted,
+                }
+            }),
+            cancellation,
+        })
+    }
+}
+
+#[tokio::test]
+async fn server_shutdown_waits_for_application_child_join_acknowledgement() {
+    let (version, revision) = constructed_test_version();
+    let (active, registry) = match &version {
+        RawProtocolVersion::Constructed(active, registry) => (active.clone(), registry.clone()),
+        _ => unreachable!("constructed test version"),
+    };
+    let encoded = encode_resource_client_frame(
+        &active,
+        &registry,
+        &ResourceClientFrame::Request(resource_request(revision)),
+    )
+    .unwrap();
+    let started = Arc::new(Notify::new());
+    let cancellation_seen = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let joined = Arc::new(AtomicBool::new(false));
+    let dispatcher = JoinAcknowledgedResourceDispatch {
+        started: Arc::clone(&started),
+        cancellation_seen: Arc::clone(&cancellation_seen),
+        release: Arc::clone(&release),
+        joined: Arc::clone(&joined),
+    };
+    let (shutdown_sender, shutdown) = watch::channel(false);
+    let (server, _client) = UnixStream::pair().unwrap();
+    let mut server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+        dispatcher,
+        test_session(),
+        version,
+        server,
+        LocalRawSocketResources::new(),
+        shutdown,
+    ));
+
+    client.write_all(&encoded).await.unwrap();
+    started.notified().await;
+    shutdown_sender.send(true).unwrap();
+    cancellation_seen.notified().await;
+
+    assert!(
+        timeout(Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "shutdown must retain application-child ownership after its grace interval"
+    );
+    assert!(!joined.load(Ordering::SeqCst));
+
+    release.notify_one();
+    server_task.await.unwrap().unwrap();
+    assert!(joined.load(Ordering::SeqCst));
+}

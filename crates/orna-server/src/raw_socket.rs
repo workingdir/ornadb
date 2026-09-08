@@ -112,6 +112,14 @@ const CONNECTION_LIMIT: usize = 64;
 // and the scheduler permits at most one completion in flight per live stream.
 const RESOURCE_COMPLETION_CHANNEL_CAPACITY: usize = CONNECTION_LIMIT;
 const RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A cooperative application child gets this bounded cancellation window
+/// before the transport retains ownership and waits for its join acknowledgement.
+/// The shorter test window exercises the retained-ownership branch without
+/// changing production shutdown behavior.
+#[cfg(not(test))]
+const APPLICATION_CHILD_JOIN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const APPLICATION_CHILD_JOIN_GRACE: Duration = Duration::from_millis(20);
 const FRAME_CHANNEL_CAPACITY: usize = 64;
 const PREFLIGHT_FRAME_FAIRNESS_BUDGET: usize = 8;
 const PENDING_FLUSH_FAIRNESS_BUDGET: usize = 8;
@@ -2326,6 +2334,43 @@ async fn retain_shutdown_tasks_until_terminal(mut shutdown_tasks: JoinSet<()>) {
     }
 }
 
+/// Drains every direct resource task while still receiving late completions.
+///
+/// A resource future can own an application callback. Its JoinHandle is the
+/// acknowledgement that cancellation has reached that child, so callers must
+/// retain this set until every handle has joined. A full completion channel
+/// must be drained concurrently or an otherwise-complete child could remain
+/// blocked while publishing its redacted terminal state.
+async fn join_resource_tasks_until_acknowledged(
+    tasks: &mut JoinSet<Result<(), JoinError>>,
+    completion_receiver: &mut mpsc::Receiver<(u64, ResourceDispatchCompletion)>,
+    pending: &mut BTreeMap<u64, ResourceDispatchCompletion>,
+) -> Option<JoinError> {
+    let mut failure = None;
+    while !tasks.is_empty() {
+        tokio::select! {
+            joined = tasks.join_next() => match joined {
+                Some(Ok(Ok(()))) | None => {}
+                Some(Ok(Err(source))) | Some(Err(source)) => {
+                    failure.get_or_insert(source);
+                }
+            },
+            completion = completion_receiver.recv() => {
+                let Some((stream_id, completion)) = completion else {
+                    continue;
+                };
+                if completion.producer.is_some() {
+                    if let Some(producer) = completion.producer.as_ref() {
+                        producer.cancel();
+                    }
+                    pending.insert(stream_id, completion);
+                }
+            }
+        }
+    }
+    failure
+}
+
 fn schedule_resource_producer_shutdown(
     producer: AuthenticatedServerResourceProducer,
     shutdown_tasks: &mut JoinSet<()>,
@@ -3204,8 +3249,7 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
     // Late completions can outnumber currently live resources after client
     // cancellation frees a stream slot. Drain them while the dispatch tasks
     // join so a bounded completion channel cannot block shutdown.
-    let mut resource_shutdown = JoinSet::new();
-    let mut resource_abort_handles = Vec::with_capacity(resource_tasks.len());
+    let mut resource_shutdown = JoinSet::<Result<(), JoinError>>::new();
     let mut resource_guards = Vec::with_capacity(resource_tasks.len());
     for (_, task) in std::mem::take(&mut resource_tasks) {
         let ResourceTask {
@@ -3217,44 +3261,36 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         if let Some(guards) = guards {
             resource_guards.push(guards);
         }
-        resource_abort_handles.push(handle.abort_handle());
-        resource_shutdown.spawn(async move {
-            let _ = handle.await;
-        });
+        resource_shutdown.spawn(async move { handle.await });
     }
-    let resource_shutdown_completed = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
-        while !resource_shutdown.is_empty() {
-            tokio::select! {
-                joined = resource_shutdown.join_next() => {
-                    let _ = joined;
-                }
-                completion = resource_completion_receiver.recv() => {
-                    let Some((stream_id, completion)) = completion else {
-                        continue;
-                    };
-                    if completion.producer.is_some() {
-                        if let Some(producer) = completion.producer.as_ref() {
-                            producer.cancel();
-                        }
-                        resource_pending.insert(stream_id, completion);
-                    }
-                }
-            }
-        }
-    })
+    let resource_shutdown_failure = match timeout(
+        APPLICATION_CHILD_JOIN_GRACE,
+        join_resource_tasks_until_acknowledged(
+            &mut resource_shutdown,
+            &mut resource_completion_receiver,
+            &mut resource_pending,
+        ),
+    )
     .await
-    .is_ok();
-    if !resource_shutdown_completed {
-        for abort_handle in resource_abort_handles {
-            abort_handle.abort();
+    {
+        Ok(failure) => failure,
+        Err(_) => {
+            // A child that did not cooperate within the grace interval cannot
+            // be detached: a successful shutdown must retain it until its
+            // JoinHandle acknowledges completion.
+            join_resource_tasks_until_acknowledged(
+                &mut resource_shutdown,
+                &mut resource_completion_receiver,
+                &mut resource_pending,
+            )
+            .await
         }
-        resource_shutdown.abort_all();
-        let _ = timeout(RESOURCE_PRODUCER_SHUTDOWN_TIMEOUT, async {
-            while let Some(joined) = resource_shutdown.join_next().await {
-                let _ = joined;
-            }
-        })
-        .await;
+    };
+    if let Some(source) = resource_shutdown_failure {
+        // The raw transport is already closed, so preserve the redacted
+        // external boundary by failing the owning listener rather than
+        // publishing cleanup details or reporting a successful drain.
+        drain_failure.get_or_insert(LocalRawSocketError::DispatchTask { source });
     }
     drain_resource_completions(
         &dispatcher,
