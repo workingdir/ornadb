@@ -325,7 +325,7 @@ fn published_report_only_promotes_exact_frozen_contracts() {
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["REPL-001", "TXN-001", "TXN-002"]);
+    assert_eq!(declared, ["PIPE-001", "REPL-001", "TXN-001", "TXN-002"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
@@ -333,9 +333,9 @@ fn published_report_only_promotes_exact_frozen_contracts() {
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("REPL-001" | "TXN-001" | "TXN-002")
+            Some("PIPE-001" | "REPL-001" | "TXN-001" | "TXN-002")
         ) {
-            assert_eq!(result["status"], "passed", "transaction must execute");
+            assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(
                 result["detail"],
                 "scenario execution satisfied its adapter contract"
