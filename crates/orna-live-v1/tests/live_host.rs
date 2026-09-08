@@ -3780,6 +3780,83 @@ fn durable_runtime_recovers_an_owned_running_request_after_takeover() {
 }
 
 #[test]
+fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [77; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [77; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let old = block_on(runtime.acquire_lease([73; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    let activation = block_on(runtime.begin_activation()).unwrap();
+    let mutation = TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap();
+    assert_eq!(
+        block_on(runtime.commit_table_request_activation(
+            old,
+            identity,
+            fingerprint,
+            &activation,
+            &[mutation],
+            [3; 32],
+            TerminalOutcome::new(vec![4]).unwrap(),
+            &FailAt(FaultPoint::AfterTerminalClaim),
+        )),
+        Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
+    );
+    let fence = block_on(runtime.recover_abandoned(old.owner_id, [74; 16])).unwrap();
+    let mismatched = TerminalOutcome::new(
+        Envelope {
+            request: Some([77; 16]),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap(),
+    )
+    .unwrap();
+    block_on(runtime.recover_running_request_with_outcomes(
+        identity,
+        fingerprint,
+        RequestOwner::from(old),
+        fence,
+        mismatched.clone(),
+        mismatched,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [74; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [9; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [79; 16], "1");

@@ -25,7 +25,7 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    Component, ConsumerIdentity, RequestIdentity, RequestOwner,
+    Component, ConsumerIdentity, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeError, RuntimeState, TerminalOutcome, WriterLease,
 };
@@ -1663,10 +1663,12 @@ impl LiveHost {
         }
         let bytes = status
             .terminal_outcome
+            .as_ref()
             .ok_or(Error::RuntimeUnavailable)?
-            .into_bytes();
-        let response = Envelope::decode(&bytes, self.limits.protocol)
-            .map_err(|_| Error::RuntimeUnavailable)?;
+            .as_bytes();
+        let response =
+            Envelope::decode(bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?;
+        self.validate_recovered_response(&status, &response).await?;
         self.validate_retained_response(status.fingerprint, envelope, &response)?;
         let outcome = if matches!(envelope.message, Message::Cancel { .. })
             || matches!(
@@ -1696,12 +1698,57 @@ impl LiveHost {
         fingerprint: [u8; 32],
         status: &DurableRequestStatus,
     ) -> Result<Option<ResultBody>> {
+        let Some(bytes) = status
+            .terminal_outcome
+            .as_ref()
+            .map(TerminalOutcome::as_bytes)
+        else {
+            return Ok(None);
+        };
+        let response =
+            Envelope::decode(bytes, self.limits.protocol).map_err(|_| Error::RuntimeUnavailable)?;
+        self.validate_recovered_response(status, &response).await?;
         Ok(durable_result_body(
             request,
             fingerprint,
             status,
             self.limits.protocol,
         ))
+    }
+
+    /// An orphaned request has one of two persisted meanings. Do not replay a
+    /// malformed ledger row as an apparent result: uncertainty must remain
+    /// visibly distinct from a runtime-proven rollback.
+    async fn validate_recovered_response(
+        &self,
+        status: &DurableRequestStatus,
+        response: &Envelope,
+    ) -> Result<()> {
+        if status.state != DurableRequestState::Orphaned {
+            return Ok(());
+        }
+        let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+        let disposition = runtime
+            .request_recovery_disposition(status.identity, status.fingerprint)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?
+            .ok_or(Error::RuntimeUnavailable)?;
+        let expected = match disposition {
+            RecoveryDisposition::RollbackProven => ResultStatus::Failure,
+            RecoveryDisposition::ExternalEffectsUncertain => ResultStatus::RetainedWithoutValue,
+        };
+        if !matches!(
+            &response.message,
+            Message::Result {
+                status: response_status,
+                value: None,
+                fingerprint: response_fingerprint,
+                diagnostic: None,
+            } if *response_status == expected && *response_fingerprint == status.fingerprint
+        ) {
+            return Err(Error::RuntimeUnavailable);
+        }
+        Ok(())
     }
 
     fn validate_retained_response(
@@ -2154,7 +2201,7 @@ fn retained_result_body(
 ) -> Option<ResultBody> {
     let response = terminal?.response.as_ref()?;
     validate_result_response(request, fingerprint, response.clone(), limits).ok()?;
-    ResultBody::from_result(response, limits).ok()
+    ResultBody::from_result(&response, limits).ok()
 }
 
 fn durable_result_body(
