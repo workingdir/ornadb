@@ -15,7 +15,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
         validated_migration_registry()
             .expect("registry is valid")
             .len(),
-        51
+        52
     );
     assert_eq!(MIGRATIONS[0].version, 1);
     assert_eq!(MIGRATIONS[1].version, 2);
@@ -98,6 +98,7 @@ fn migration_registry_is_a_strict_contiguous_sequence() {
     assert_eq!(MIGRATIONS[48].name, "sealed invocation lifecycle");
     assert_eq!(MIGRATIONS[49].name, "sealed invocation unresolved target");
     assert_eq!(MIGRATIONS[50].name, "sealed invocation argument metadata");
+    assert_eq!(MIGRATIONS[51].name, "sealed invocation admission capture");
     assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
     assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
     assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
