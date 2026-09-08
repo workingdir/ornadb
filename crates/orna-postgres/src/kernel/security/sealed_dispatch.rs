@@ -1,3 +1,6 @@
+use super::sealed_invocation::{
+    SealedInvocationLifecycleTerminal, transition_sealed_invocation_lifecycle,
+};
 use super::*;
 
 impl PostgresKernel {
@@ -871,6 +874,14 @@ impl PostgresKernel {
                     SealedInvocationResult::Denied { invocation }
                 }
             };
+            if pre_audited {
+                transition_sealed_invocation_lifecycle(
+                    &transaction,
+                    invocation,
+                    SealedInvocationLifecycleTerminal::for_result(&result),
+                )
+                .await?;
+            }
             transaction
                 .commit()
                 .await
