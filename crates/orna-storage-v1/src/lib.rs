@@ -468,6 +468,14 @@ impl RuntimePublicationCoordinator {
         ) {
             return Err(Error::InvalidTransition);
         }
+        // An empty frozen range is evidence that the runtime has consumed the
+        // prefix, but that evidence is only reader-safe after the candidate
+        // has completed its repository reconciliation.  Returning the old
+        // snapshot with an empty tail at an earlier journal stage would omit
+        // the frozen logical rows.
+        if frozen_prefix.is_empty() && !candidate_visible {
+            return Err(Error::InvalidTransition);
+        }
         if candidate_visible {
             // A durable runtime receipt has removed the frozen prefix from
             // the ledger, so exposing the old snapshot here would lose rows.
@@ -1500,6 +1508,45 @@ mod tests {
         repository.write_publication_journal(&journal).unwrap();
 
         assert_eq!(runtime.pending().await.unwrap().len(), 2);
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
+            Err(Error::InvalidTransition)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_reader_visibility_rejects_cleanup_before_candidate_reconciliation() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        runtime
+            .bind_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+        runtime
+            .complete_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let mut forged = PublicationJournal::new_with_runtime_intent(
+            journal.old_head().clone(),
+            journal.new_head().clone(),
+            journal.base_index_tree().unwrap().clone(),
+            journal.runtime_intent_id().unwrap(),
+            journal.entries().to_vec(),
+        )
+        .unwrap()
+        .with_compact_manifest(journal.compact_manifest().unwrap().clone())
+        .unwrap();
+        forged
+            .advance(orna_repository_v1::PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&forged).unwrap();
+
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap(), Vec::new());
         assert_eq!(
             RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
             Err(Error::InvalidTransition)
