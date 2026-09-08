@@ -4034,7 +4034,7 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
 }
 
 #[test]
-fn durable_runtime_rejects_a_current_owner_without_reexecution() {
+fn durable_runtime_reports_a_current_owner_as_active_without_reexecution() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [77; 16], "1");
     let fingerprint = request_fingerprint(&request, [1; 16]);
@@ -4060,11 +4060,17 @@ fn durable_runtime_rejects_a_current_owner_without_reexecution() {
     }))
     .unwrap();
     let mut application = UnitApplication::default();
-    assert_eq!(
-        block_on(host.dispatch_frame([10; 16], 2, Frame::Binary(request), &mut application)),
-        Err(Error::RuntimeUnavailable)
-    );
+    let outcome =
+        block_on(host.dispatch_frame([10; 16], 2, Frame::Binary(request), &mut application))
+            .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Accepted);
+    assert!(outcome.response.is_none());
     assert_eq!(application.calls, 0);
+    let status = block_on(open_durable_state(&repository).request_status(identity, fingerprint))
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, orna_runtime_v1::RequestState::Running);
+    assert!(status.terminal_outcome.is_none());
     drop(host);
     remove_test_repository(&root);
 }
