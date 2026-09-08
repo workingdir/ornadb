@@ -1532,16 +1532,27 @@ impl LiveHost {
         // A matching terminal is an exact replay, not a fresh admission. In
         // particular, it must not need a new writer lease after a host has
         // reconstructed around a completed request.
-        if let Some(current) = self
+        let current = self
             .runtime
             .as_ref()
             .ok_or(Error::RuntimeUnavailable)?
             .request_status(identity, fingerprint)
             .await
-            .map_err(|error| map_runtime(&error))?
-            && current.state.is_terminal()
-        {
-            return self.durable_admission(current, envelope).await;
+            .map_err(|error| map_runtime(&error))?;
+        if let Some(current) = current {
+            match current.state {
+                DurableRequestState::Reserved => return Ok(DurableAdmission::Active),
+                DurableRequestState::Running => {
+                    return self
+                        .admit_running_request(identity, session, request, fingerprint, envelope)
+                        .await;
+                }
+                DurableRequestState::Completed
+                | DurableRequestState::Cancelled
+                | DurableRequestState::Orphaned => {
+                    return self.durable_admission(current, envelope).await;
+                }
+            }
         }
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
@@ -1603,31 +1614,39 @@ impl LiveHost {
         {
             return Ok(DurableAdmission::Active);
         }
+        // A Running row is active unless this host was explicitly constructed
+        // after taking over its exact recorded owner.  A fresh host (and a
+        // legacy row without ownership evidence) has no liveness proof and
+        // therefore may neither recover nor re-execute it.
+        let owner = {
+            let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+            runtime
+                .request_owner(identity, fingerprint)
+                .await
+                .map_err(|error| map_runtime(&error))?
+        };
+        let Some(lost_owner) = self
+            .recovered_owner
+            .filter(|recovered_owner| Some(*recovered_owner) == owner)
+        else {
+            return Ok(DurableAdmission::Active);
+        };
         let lease = self.writer_lease().await?;
         let uncertain =
             self.terminal_outcome(&retained_without_value_outcome(request, fingerprint))?;
         let rollback_proven =
             self.terminal_outcome(&redacted_failure_outcome(request, fingerprint))?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
-        let recovered = match self.recovered_owner {
-            Some(lost_owner) => {
-                runtime
-                    .recover_running_request_with_outcomes(
-                        identity,
-                        fingerprint,
-                        lost_owner,
-                        lease,
-                        rollback_proven,
-                        uncertain,
-                    )
-                    .await
-            }
-            None => {
-                runtime
-                    .recover_legacy_running_request(identity, fingerprint, lease, uncertain)
-                    .await
-            }
-        };
+        let recovered = runtime
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                lost_owner,
+                lease,
+                rollback_proven,
+                uncertain,
+            )
+            .await;
         match recovered {
             Ok(recovered) => self.durable_admission(recovered.status, envelope).await,
             Err(RuntimeError::RequestStateConflict) => {
