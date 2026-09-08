@@ -1443,6 +1443,25 @@ fn module_assertion_scope_distinguishes_zero_and_one_table_invariants() {
 }
 
 #[test]
+fn module_assertion_dependencies_count_resolved_tables_not_uppercase_values() {
+    let result = analyze(&[ModuleInput::new(
+        "one-table-optional.orna",
+        "pub table User(id: Uuid) { name: Str, } assert every(User, user => Some(user.name) != null);",
+    )]);
+
+    assert!(has(&result, DIAG_ASSERTION_ONE_TABLE));
+    let plans = result
+        .assertions
+        .values()
+        .next()
+        .expect("module assertion plan");
+    assert_eq!(
+        plans[0].dependencies,
+        std::collections::BTreeSet::from(["User".into()])
+    );
+}
+
+#[test]
 fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
     let runtime = analyze(&[ModuleInput::new(
         "runtime.orna",
