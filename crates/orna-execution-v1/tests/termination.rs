@@ -87,7 +87,7 @@ fn checkpoint() -> CheckpointIntent {
         source_format: component("s"),
         source: component("source"),
         partition_format: component("p"),
-        partition: component("0"),
+        partition: Some(component("0")),
         position_format: component("offset"),
         position: Position {
             token: component("0"),
