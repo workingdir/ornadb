@@ -3061,6 +3061,7 @@ pub struct LiveTransport {
     pending_upgrades: BTreeMap<[u8; 16], PendingUpgrade>,
     next_upgrade_reservation: u128,
     retired_attachments: VecDeque<[u8; 16]>,
+    delivered_retired_attachments: BTreeSet<[u8; 16]>,
     // An attachment remains associated with its session until the executable
     // owner has acknowledged a real cancellation-and-join.  Keeping that
     // association lets the child-free HTTP seam reject DELETE rather than
@@ -3157,6 +3158,7 @@ impl LiveTransport {
             pending_upgrades: BTreeMap::new(),
             next_upgrade_reservation: 0,
             retired_attachments: VecDeque::new(),
+            delivered_retired_attachments: BTreeSet::new(),
             retiring_attachments: BTreeMap::new(),
         })
     }
@@ -3169,7 +3171,10 @@ impl LiveTransport {
     /// delivery does not acknowledge either action or prove that either one
     /// occurred; the identity remains fenced until explicit acknowledgement.
     pub fn take_retired_attachments(&mut self) -> Vec<[u8; 16]> {
-        self.retired_attachments.drain(..).collect()
+        let attachments = self.retired_attachments.drain(..).collect::<Vec<_>>();
+        self.delivered_retired_attachments
+            .extend(attachments.iter().copied());
+        attachments
     }
 
     /// Records the executable owner's acknowledgement after it cancelled and
@@ -3178,7 +3183,8 @@ impl LiveTransport {
     /// Queue delivery alone is not acknowledgement: the identity remains
     /// fenced until the owner calls this method.
     pub fn acknowledge_retired_attachment(&mut self, attachment: [u8; 16]) -> bool {
-        self.retiring_attachments.remove(&attachment).is_some()
+        self.delivered_retired_attachments.remove(&attachment)
+            && self.retiring_attachments.remove(&attachment).is_some()
     }
 
     /// Expires handshake reservations whose bounded delivery window has
