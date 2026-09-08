@@ -1955,6 +1955,97 @@ mod tests {
             Err(Error::InvalidMessage)
         );
     }
+
+    #[test]
+    fn protected_values_are_rejected_at_each_typed_live_message_boundary() {
+        const PROTECTED_PAYLOAD: &str = "protected-wire-regression";
+
+        let outbound = [
+            Envelope {
+                request: Some(id(1)),
+                watch: Some(id(2)),
+                message: Message::Event {
+                    revision: 0,
+                    action: id(3),
+                    value: CanonicalValue::protected(),
+                    fingerprint: digest(1),
+                },
+                extensions: BTreeMap::new(),
+            },
+            Envelope {
+                request: Some(id(1)),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::protected()),
+                    fingerprint: digest(1),
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            },
+        ];
+        for envelope in outbound {
+            let error = envelope.encode(Limits::default()).unwrap_err();
+            assert_eq!(error, Error::InvalidValue);
+            assert_eq!(error.code(), "wire.invalid_message");
+            assert!(!format!("{error:?}").contains(PROTECTED_PAYLOAD));
+            assert!(!error.to_string().contains(PROTECTED_PAYLOAD));
+        }
+
+        let protected = || Node::Tag(0, Box::new(Node::Text(PROTECTED_PAYLOAD.into())));
+        let inbound = [
+            wire(
+                3,
+                Some(id(1)),
+                Some(id(2)),
+                Node::Map(vec![
+                    (uint(0), uint(0)),
+                    (uint(1), Node::Bytes(id(3).to_vec())),
+                    (uint(2), protected()),
+                    (uint(3), Node::Bytes(digest(1).to_vec())),
+                ]),
+            ),
+            wire(
+                18,
+                Some(id(1)),
+                None,
+                Node::Map(vec![
+                    (uint(0), uint(ResultStatus::Success.code())),
+                    (uint(1), protected()),
+                    (uint(2), Node::Bytes(digest(1).to_vec())),
+                    (uint(3), Node::Null),
+                ]),
+            ),
+            result_body(Node::Map(vec![
+                (uint(0), uint(ResultStatus::Success.code())),
+                (uint(1), protected()),
+                (uint(2), Node::Bytes(digest(1).to_vec())),
+                (uint(3), Node::Null),
+            ])),
+        ];
+        for bytes in inbound {
+            let error = Envelope::decode(&bytes, Limits::default()).unwrap_err();
+            assert_eq!(error, Error::InvalidValue);
+            assert_eq!(error.code(), "wire.invalid_message");
+            assert!(!format!("{error:?}").contains(PROTECTED_PAYLOAD));
+            assert!(!error.to_string().contains(PROTECTED_PAYLOAD));
+        }
+
+        let redacted_diagnostic = Envelope {
+            request: None,
+            watch: None,
+            message: Message::Diagnostic {
+                diagnostic: diagnostic(),
+                recoverable: Some(true),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let bytes = redacted_diagnostic.encode(Limits::default()).unwrap();
+        assert_eq!(
+            Envelope::decode(&bytes, Limits::default()).unwrap(),
+            redacted_diagnostic
+        );
+    }
     #[test]
     fn request_fingerprint_omits_event_and_eval_redundant_fields() {
         let session_id = id(9);
