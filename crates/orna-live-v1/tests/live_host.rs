@@ -2374,6 +2374,64 @@ fn foreign_upgrade_reservation_cannot_consume_a_local_pending_handshake() {
 }
 
 #[test]
+fn foreign_expired_reservation_commit_cannot_expire_local_pending_handshake() {
+    let limits = TransportLimits {
+        lease_ms: 10,
+        request_retention_ms: 10,
+        ..TransportLimits::default()
+    };
+    let mut first = LiveTransport::new(host(), limits).unwrap();
+    let mut second = LiveTransport::new(host(), limits).unwrap();
+    let mut first_issuer = Issuer(1, None);
+    let mut second_issuer = Issuer(1, None);
+    let mut first_authority = Authority;
+    let mut second_authority = Authority;
+    let mut first_deletion = Delete(true);
+    let mut second_deletion = Delete(true);
+    let body = format!(
+        r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+        uuid(2)
+    );
+    let first_created = block_on(first.handle(
+        wire("POST", "/orna/session", &body),
+        0,
+        &mut first_authority,
+        &mut first_issuer,
+        &mut first_deletion,
+    ));
+    let second_created = block_on(second.handle(
+        wire("POST", "/orna/session", &body),
+        0,
+        &mut second_authority,
+        &mut second_issuer,
+        &mut second_deletion,
+    ));
+    let first_pending = first
+        .begin_websocket_upgrade(&websocket_upgrade(1, &token(&first_created)), [5; 16], 1)
+        .unwrap();
+    let second_pending = second
+        .begin_websocket_upgrade(&websocket_upgrade(1, &token(&second_created)), [5; 16], 1)
+        .unwrap();
+
+    // Ownership is checked before expiry cleanup: a foreign actor cannot use
+    // an expired-looking reservation to mutate a local actor's admission.
+    assert_eq!(
+        block_on(second.commit_websocket_upgrade(first_pending, 11)),
+        Err(Error::Closed)
+    );
+    assert!(second.take_retired_attachments().is_empty());
+
+    // The owning actor still performs the normal expiry transition and fences
+    // its candidate before that stale reservation can be used again.
+    second.expire_pending_websocket_upgrades(11);
+    assert_eq!(second.take_retired_attachments(), vec![[5; 16]]);
+    assert_eq!(
+        block_on(second.commit_websocket_upgrade(second_pending, 11)),
+        Err(Error::Closed)
+    );
+}
+
+#[test]
 fn child_aware_delete_retires_active_and_pending_websocket_candidates() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
