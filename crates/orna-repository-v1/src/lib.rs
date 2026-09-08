@@ -109,6 +109,7 @@ pub struct PrivateCommit {
 }
 
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
+const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// The recovery stages persisted for one publication attempt.
@@ -579,6 +580,117 @@ pub struct ValidatedCheckoutDiscard {
     preflight: CheckoutPreflight,
     force_token: CheckoutPlanToken,
     discard_paths: Vec<ManagedPath>,
+}
+
+/// A durable, opaque record that fences recovery of a force-discard checkout.
+///
+/// It is written before an eventual destructive executor crosses a Git-visible
+/// boundary. Until that executor exists, recovery can only prove that the
+/// original preflight is still current and discard the no-mutation intent; it
+/// must never infer permission to resume a discard after state drift.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CheckoutRecoveryJournal {
+    target: CheckoutTarget,
+    runtime: RuntimeGeneration,
+    force_token: CheckoutPlanToken,
+    discard_paths: Vec<ManagedPath>,
+}
+
+impl CheckoutRecoveryJournal {
+    fn from_validated(discard: &ValidatedCheckoutDiscard) -> Self {
+        Self {
+            target: discard.preflight.target.clone(),
+            runtime: discard.preflight.cwd.runtime,
+            force_token: discard.force_token,
+            discard_paths: discard.discard_paths.clone(),
+        }
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CHECKOUT_JOURNAL_MAGIC);
+        bytes.push(1);
+        bytes.extend_from_slice(&self.runtime.get().to_be_bytes());
+        match &self.target {
+            CheckoutTarget::Branch { name, commit } => {
+                bytes.push(1);
+                put_string(&mut bytes, name)?;
+                put_string(&mut bytes, commit.as_str())?;
+            }
+            CheckoutTarget::Detached { commit } => {
+                bytes.push(2);
+                put_string(&mut bytes, commit.as_str())?;
+            }
+        }
+        bytes.extend_from_slice(self.force_token.as_bytes());
+        put_u32(&mut bytes, self.discard_paths.len())?;
+        for path in &self.discard_paths {
+            put_string(
+                &mut bytes,
+                path.as_path()
+                    .to_str()
+                    .ok_or(RepositoryError::InvalidCheckoutJournal)?,
+            )?;
+        }
+        if bytes.len() > MAX_JOURNAL_BYTES {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8], object_id_length: usize) -> Result<Self, RepositoryError> {
+        if bytes.len() > MAX_JOURNAL_BYTES || !bytes.starts_with(CHECKOUT_JOURNAL_MAGIC) {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        let mut cursor = CHECKOUT_JOURNAL_MAGIC.len();
+        if take_byte(bytes, &mut cursor)? != 1 {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(
+            bytes,
+            &mut cursor,
+        )?));
+        let target = match take_byte(bytes, &mut cursor)? {
+            1 => CheckoutTarget::Branch {
+                name: take_string(bytes, &mut cursor)?,
+                commit: GitCommitRef::from_verified_commit(
+                    take_string(bytes, &mut cursor)?,
+                    object_id_length,
+                )?,
+            },
+            2 => CheckoutTarget::Detached {
+                commit: GitCommitRef::from_verified_commit(
+                    take_string(bytes, &mut cursor)?,
+                    object_id_length,
+                )?,
+            },
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        };
+        let force_token = CheckoutPlanToken(take_fixed_array::<32>(bytes, &mut cursor)?);
+        let count = usize::try_from(take_u32(bytes, &mut cursor)?)
+            .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+        if count > bytes.len().saturating_sub(cursor) {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        let mut discard_paths = Vec::with_capacity(count);
+        for _ in 0..count {
+            discard_paths.push(ManagedPath::new(take_string(bytes, &mut cursor)?)?);
+        }
+        if cursor != bytes.len()
+            || discard_paths.is_empty()
+            || discard_paths
+                .windows(2)
+                .any(|paths| paths[0].as_path() >= paths[1].as_path())
+        {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        Ok(Self {
+            target,
+            runtime,
+            force_token,
+            discard_paths,
+        })
+    }
 }
 
 /// The failure boundary for a checkout that validates its logical candidate
@@ -1352,6 +1464,84 @@ impl Repository {
         Ok(())
     }
 
+    fn write_checkout_recovery_journal_locked(
+        &self,
+        journal: &CheckoutRecoveryJournal,
+    ) -> Result<(), RepositoryError> {
+        let encoded = journal.encode()?;
+        self.runtime.ensure_exists()?;
+        let path = self.runtime.root().join("checkout-journal.bin");
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        let temporary = self.runtime.root().join(format!(
+            ".checkout-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                .as_nanos()
+        ));
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            file.write_all(&encoded)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            file.sync_all()
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::rename(&temporary, &path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::File::open(self.runtime.root())
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn read_checkout_recovery_journal_locked(
+        &self,
+    ) -> Result<Option<CheckoutRecoveryJournal>, RepositoryError> {
+        let path = self.runtime.root().join("checkout-journal.bin");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        let bytes = fs::read(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(Some(CheckoutRecoveryJournal::decode(
+            &bytes,
+            self.native_object_id_length()?,
+        )?))
+    }
+
+    fn clear_checkout_recovery_journal_locked(&self) -> Result<(), RepositoryError> {
+        let path = self.runtime.root().join("checkout-journal.bin");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(RepositoryError::InvalidCheckoutJournal);
+            }
+            Ok(_) => {
+                fs::remove_file(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                fs::File::open(self.runtime.root())
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+        }
+        Ok(())
+    }
+
     /// Executes the non-crashing PUB-1 publication path over one prepared
     /// journal. Every durable stage is written before the next boundary; a
     /// returned error leaves the journal available for recovery.
@@ -1732,10 +1922,18 @@ impl Repository {
         selector: &str,
         runtime: RuntimeGeneration,
     ) -> Result<CheckoutPreflight, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.plan_checkout_locked(selector, runtime)
+    }
+
+    fn plan_checkout_locked(
+        &self,
+        selector: &str,
+        runtime: RuntimeGeneration,
+    ) -> Result<CheckoutPreflight, RepositoryError> {
         if selector.is_empty() || selector.starts_with('-') || selector.contains('\0') {
             return Err(RepositoryError::InvalidSelector);
         }
-        let _lock = self.acquire_coordination_lock()?;
         let target = self.resolve_checkout_target(selector)?;
         let cwd = self.cwd_generation_locked(runtime)?;
         let git = self.checkout_git_subplan(cwd.head.as_ref(), target.commit())?;
@@ -2052,6 +2250,13 @@ impl Repository {
         discard: &ValidatedCheckoutDiscard,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.verify_validated_checkout_discard_locked(discard)
+    }
+
+    fn verify_validated_checkout_discard_locked(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+    ) -> Result<(), RepositoryError> {
         self.verify_checkout_preflight_locked(&discard.preflight)?;
         if discard.discard_paths != discard.preflight.git.discardable_paths() {
             return Err(RepositoryError::CheckoutDiscardSetMismatch);
@@ -2062,6 +2267,56 @@ impl Repository {
         discard
             .preflight
             .authorize_force(true, Some(&discard.force_token))
+    }
+
+    /// Durably records a verified force-discard capability before a future
+    /// destructive executor can alter Git state. The record is intentionally
+    /// not an execution command: restart recovery may only clear it after
+    /// proving that the exact original preflight still holds.
+    pub fn persist_validated_checkout_discard(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_validated_checkout_discard_locked(discard)?;
+        let journal = CheckoutRecoveryJournal::from_validated(discard);
+        match self.read_checkout_recovery_journal_locked()? {
+            Some(existing) if existing != journal => Err(RepositoryError::CheckoutRecoveryRequired),
+            Some(_) => Ok(()),
+            None => self.write_checkout_recovery_journal_locked(&journal),
+        }
+    }
+
+    /// Resolves a pre-execution force-discard journal after restart.
+    ///
+    /// This boundary intentionally performs no checkout and does not recreate
+    /// a capability. It clears the durable intent only when a fresh preflight
+    /// exactly recreates its target, canonical force witness, and discard set.
+    /// Any drift leaves the journal retained for explicit operator recovery.
+    pub fn recover_pre_execution_checkout(&self) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let Some(journal) = self.read_checkout_recovery_journal_locked()? else {
+            return Ok(());
+        };
+        let selector = journal.target.branch_name().map_or_else(
+            || journal.target.commit().as_str().to_owned(),
+            str::to_owned,
+        );
+        let plan = self.plan_checkout_locked(&selector, journal.runtime)?;
+        if plan.target != journal.target
+            || plan.force_token() != journal.force_token
+            || plan.git.discardable_paths != journal.discard_paths
+        {
+            return Err(RepositoryError::CheckoutRecoveryRequired);
+        }
+        self.clear_checkout_recovery_journal_locked()
+    }
+
+    /// Reports whether restart recovery has a retained pre-execution checkout
+    /// intent. This exposes no capability or discard details.
+    pub fn has_pending_pre_execution_checkout(&self) -> Result<bool, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        Ok(self.read_checkout_recovery_journal_locked()?.is_some())
     }
 
     /// Explicitly resolves a Git selector to an immutable commit. This is the
@@ -3544,6 +3799,8 @@ pub enum RepositoryError {
     CheckoutPlanStale,
     CheckoutDiscardSetMismatch,
     CheckoutExecutionUnsafe,
+    InvalidCheckoutJournal,
+    CheckoutRecoveryRequired,
     RuntimeCompletionRequired,
     /// A compact candidate is stale at the selected branch head. Its journal
     /// remains retained and the caller must use the typed compact recovery
@@ -3600,6 +3857,10 @@ impl fmt::Display for RepositoryError {
             }
             Self::CheckoutExecutionUnsafe => {
                 f.write_str("checkout target does not match the current commit")
+            }
+            Self::InvalidCheckoutJournal => f.write_str("invalid checkout recovery journal"),
+            Self::CheckoutRecoveryRequired => {
+                f.write_str("checkout recovery requires explicit operator resolution")
             }
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
