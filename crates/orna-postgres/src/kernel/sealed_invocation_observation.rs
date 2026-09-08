@@ -4,9 +4,9 @@ use std::time::SystemTime;
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
-    CwdCapture, InvocationArgumentRef, InvocationRef, InvocationStatus, Snapshot, Value,
-    invocation_argument_reference, invocation_reference, validate_invocation_argument_reference,
-    validate_invocation_reference,
+    CwdCapture, InvocationArgumentRef, InvocationRef, InvocationStatus, Snapshot, SnapshotRef,
+    Value, invocation_argument_reference, invocation_reference, snapshot_reference,
+    validate_invocation_argument_reference, validate_invocation_reference,
 };
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
@@ -21,6 +21,13 @@ use crate::kernel::bootstrap::require_current_migrations;
 /// synthetic public target identity through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedInvocationObservation {
+    /// Complete CWD capture decoded from the persisted admission evidence.
+    ///
+    /// This stays private because it is projection provenance, not a second
+    /// public snapshot field. It lets the public projection derive checked
+    /// snapshot coordinates from the admission pin rather than from a caller
+    /// or current runtime state.
+    admission_capture: CwdCapture,
     /// Checked `sys.InvocationRef` pinned to the durable admission capture.
     pub reference: InvocationRef,
     /// Exact durable invocation identity.
@@ -87,15 +94,18 @@ pub enum SealedInvocationObservationStatus {
 /// This is intentionally not a claim that the whole specification relation is
 /// available.  The sealed lifecycle retains checked invocation and argument
 /// references plus an exact closed status, but it does not yet retain physical
-/// `sys.FunctionRef`, `sys.SnapshotRef`, or `sys.TypeRef` coordinates.  Those
-/// fields, and every unsupported optional field, are consequently absent from
-/// this DTO instead of being reconstructed from implementation identifiers.
+/// `sys.FunctionRef` or `sys.TypeRef` coordinates. Those fields, and every
+/// unsupported optional field, are consequently absent from this DTO instead
+/// of being reconstructed from implementation identifiers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableSysInvocationObservation {
     /// `sys.Invocation.reference`.
     pub reference: InvocationRef,
     /// `sys.Invocation.id`.
     pub id: InvocationId,
+    /// `sys.Invocation.snapshot`, derived from the exact CWD capture pinned
+    /// at durable admission.
+    pub snapshot: SnapshotRef,
     /// The retained `sys.Invocation.arguments` children.
     pub arguments: Vec<DurableSysInvocationArgumentObservation>,
     /// `sys.Invocation.started`. The sealed lifecycle always records this
@@ -135,10 +145,34 @@ impl SealedInvocationObservation {
     /// Converts checked private durable evidence into the public field subset
     /// that the current schema can prove without inventing references or
     /// optional relation ownership.
-    pub fn durable_sys_projection(&self) -> DurableSysInvocationObservation {
-        DurableSysInvocationObservation {
+    pub fn durable_sys_projection(
+        &self,
+    ) -> Result<DurableSysInvocationObservation, PostgresKernelError> {
+        let record = self.invocation.canonical();
+        validate_invocation_reference(
+            self.reference.clone().into_row_ref(),
+            &self.admission_capture,
+        )
+        .map_err(|_| {
+            observation_invariant(
+                &record,
+                "invocation reference disagrees with persisted admission capture",
+            )
+        })?;
+        let snapshot = snapshot_reference(
+            self.admission_capture.database_id(),
+            self.admission_capture.snapshot().clone(),
+        )
+        .map_err(|_| {
+            observation_invariant(
+                &record,
+                "persisted admission capture cannot construct a snapshot reference",
+            )
+        })?;
+        Ok(DurableSysInvocationObservation {
             reference: self.reference.clone(),
             id: self.invocation,
+            snapshot,
             arguments: self
                 .arguments
                 .iter()
@@ -154,7 +188,7 @@ impl SealedInvocationObservation {
             started: Some(self.started),
             ended: self.ended,
             status: self.status.into(),
-        }
+        })
     }
 }
 
@@ -207,8 +241,9 @@ impl PostgresKernel {
         invocation: InvocationId,
     ) -> Result<Option<DurableSysInvocationObservation>, PostgresKernelError> {
         self.load_retained_sealed_invocation_observation(invocation)
-            .await
-            .map(|observation| observation.map(|observation| observation.durable_sys_projection()))
+            .await?
+            .map(|observation| observation.durable_sys_projection())
+            .transpose()
     }
 
     /// Loads the checked durable subset of retained `sys.Invocation` rows in
@@ -220,9 +255,10 @@ impl PostgresKernel {
     pub async fn load_durable_sys_invocation_observations(
         &self,
     ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
-        self.load_retained_sealed_invocation_observation_collection()
-            .await
-            .map(project_durable_sys_invocation_collection)
+        project_durable_sys_invocation_collection(
+            self.load_retained_sealed_invocation_observation_collection()
+                .await?,
+        )
     }
 
     /// Loads one durable observation without starting, resuming, or otherwise
@@ -345,7 +381,7 @@ impl PostgresKernel {
 
 fn project_durable_sys_invocation_collection(
     observations: Vec<SealedInvocationObservation>,
-) -> Vec<DurableSysInvocationObservation> {
+) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
     observations
         .into_iter()
         .map(|observation| observation.durable_sys_projection())
@@ -358,16 +394,15 @@ fn validate_observation_collection_capture(
 ) -> Result<(), PostgresKernelError> {
     for observation in observations {
         let record = observation.invocation.canonical();
-        let capture =
-            observation_admission_capture_from_reference(&observation.reference, &record)?;
-        validate_invocation_reference(observation.reference.clone().into_row_ref(), &capture)
-            .map_err(|_| {
-                observation_invariant(&record, "collection contains an invalid capture")
-            })?;
+        validate_invocation_reference(
+            observation.reference.clone().into_row_ref(),
+            &observation.admission_capture,
+        )
+        .map_err(|_| observation_invariant(&record, "collection contains an invalid capture"))?;
         for argument in &observation.arguments {
             validate_invocation_argument_reference(
                 argument.reference.clone().into_row_ref(),
-                &capture,
+                &observation.admission_capture,
             )
             .map_err(|_| {
                 observation_invariant(&record, "collection contains an invalid argument capture")
@@ -433,6 +468,7 @@ async fn load_observation_by_id(
         .collect::<Result<Vec<_>, _>>()?;
     validate_argument_order(&arguments, &record)?;
     Ok(Some(SealedInvocationObservation {
+        admission_capture: capture,
         reference,
         invocation,
         source_revision,
@@ -513,15 +549,6 @@ fn decode_admission_capture_fields(
         ));
     }
     Ok(capture)
-}
-
-#[cfg(test)]
-fn observation_admission_capture_from_reference(
-    reference: &InvocationRef,
-    record: &str,
-) -> Result<CwdCapture, PostgresKernelError> {
-    CwdCapture::new(reference.as_row_ref().snapshot.clone(), [0; 32])
-        .map_err(|_| observation_invariant(record, "invocation reference must use a CWD snapshot"))
 }
 
 fn decode_observation_timestamps(
@@ -873,6 +900,7 @@ mod tests {
     ) -> SealedInvocationObservation {
         let invocation = InvocationId::from_bytes([invocation_byte; 16]);
         SealedInvocationObservation {
+            admission_capture: capture.clone(),
             reference: invocation_observation_reference(capture, invocation, "test").unwrap(),
             invocation,
             source_revision: SourceRevisionId::from_bytes([3; 16]),
@@ -909,9 +937,17 @@ mod tests {
     fn durable_sys_projection_maps_only_proven_public_fields() {
         let internal = observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded);
 
-        let projection = internal.durable_sys_projection();
+        let projection = internal.durable_sys_projection().unwrap();
         assert_eq!(projection.reference, internal.reference);
         assert_eq!(projection.id, internal.invocation);
+        assert_eq!(
+            projection.snapshot.as_row_ref().snapshot,
+            *internal.admission_capture.snapshot()
+        );
+        assert_eq!(
+            projection.snapshot.as_row_ref().database_id,
+            internal.admission_capture.database_id()
+        );
         assert_eq!(projection.started, Some(internal.started));
         assert_eq!(projection.ended, internal.ended);
         assert_eq!(projection.status, InvocationStatus::Succeeded);
@@ -936,10 +972,12 @@ mod tests {
     #[test]
     fn durable_sys_projection_exhaustively_omits_unsupported_fields() {
         let projection = observation(&capture(1), 2, SealedInvocationObservationStatus::Running)
-            .durable_sys_projection();
+            .durable_sys_projection()
+            .unwrap();
         let DurableSysInvocationObservation {
             reference: _,
             id: _,
+            snapshot: _,
             arguments,
             started: _,
             ended: _,
@@ -963,7 +1001,7 @@ mod tests {
         ];
         let original = retained.clone();
 
-        let projected = project_durable_sys_invocation_collection(retained);
+        let projected = project_durable_sys_invocation_collection(retained).unwrap();
 
         assert_eq!(original[0].invocation, InvocationId::from_bytes([3; 16]));
         assert_eq!(original[1].invocation, InvocationId::from_bytes([2; 16]));
@@ -971,6 +1009,43 @@ mod tests {
         assert_eq!(projected[1].id, original[1].invocation);
         assert_eq!(projected[0].status, InvocationStatus::Running);
         assert_eq!(projected[1].status, InvocationStatus::Succeeded);
+    }
+
+    #[test]
+    fn durable_sys_projection_snapshot_remains_pinned_after_later_capture_changes() {
+        let admitted = capture(1);
+        let later = capture(2);
+        let projection = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded)
+            .durable_sys_projection()
+            .unwrap();
+
+        assert_eq!(
+            projection.snapshot,
+            snapshot_reference(admitted.database_id(), admitted.snapshot().clone()).unwrap()
+        );
+        assert_ne!(projection.snapshot.as_row_ref().snapshot, *later.snapshot());
+        assert_ne!(
+            projection.snapshot,
+            snapshot_reference(later.database_id(), later.snapshot().clone()).unwrap()
+        );
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_malformed_admission_coordinates() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        let reference = internal.reference.as_row_ref();
+        internal.reference = InvocationRef::from_row_ref(
+            RowRef::new(
+                admitted.database_id(),
+                SYS_INVOCATION_ARGUMENT_TABLE_ID,
+                reference.key.clone(),
+                admitted.snapshot().clone(),
+            )
+            .unwrap(),
+        );
+
+        assert!(internal.durable_sys_projection().is_err());
     }
 
     #[test]
