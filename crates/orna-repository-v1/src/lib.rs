@@ -920,6 +920,14 @@ pub enum RemoteContinuity {
     Unverifiable,
 }
 
+impl RemoteContinuity {
+    /// Whether this observation is sufficient to claim remote allocator or
+    /// checkpoint continuity. Every non-continuous observation is fail-closed.
+    pub const fn permits_continuity_claim(self) -> bool {
+        matches!(self, Self::Continuous)
+    }
+}
+
 /// A normal Git repository and its selected worktree.
 #[derive(Clone, Debug)]
 pub struct Repository {
@@ -3752,7 +3760,17 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 mod tests {
     use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
-    use super::{Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs};
+    use super::{
+        RemoteContinuity, Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs,
+    };
+
+    #[test]
+    fn only_verified_remote_continuity_permits_a_continuity_claim() {
+        assert!(RemoteContinuity::Continuous.permits_continuity_claim());
+        assert!(!RemoteContinuity::Missing.permits_continuity_claim());
+        assert!(!RemoteContinuity::Stale.permits_continuity_claim());
+        assert!(!RemoteContinuity::Unverifiable.permits_continuity_claim());
+    }
 
     #[test]
     fn remote_ref_parser_rejects_blank_or_unexpected_records() {
