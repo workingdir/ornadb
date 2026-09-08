@@ -2475,17 +2475,20 @@ impl RuntimeState {
             .map(TableMutation::runtime_mutation)
             .collect::<Result<Vec<_>, _>>()?;
         validate_mutations(&encoded, next_digest)?;
-        let current = self.capture().await?;
-        if &current != context.capture() {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(current),
-            });
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        // The capture comparison belongs inside the writer transaction. A
+        // pre-transaction check could otherwise race a competing activation
+        // that commits between the observation and durable publication.
+        let current = capture_tx(&tx).await?;
+        if &current != context.capture() {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
         self.require_owner(&tx, lease).await?;
         for mutation in mutations {
             apply_table_mutation_tx(&tx, mutation).await?;
@@ -9807,6 +9810,58 @@ mod tests {
                 (vec![3], vec![11]),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn stale_table_snapshot_cannot_publish_partial_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 1, Some(9))],
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["books"]).await.unwrap();
+        let later_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &later_context,
+                &[table_mutation(7, 1, Some(10))],
+                digest(8),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let later_capture = state.capture().await.unwrap();
+        let later_checkpoint = state.latest_checkpoint().await.unwrap();
+
+        assert!(matches!(
+            state
+                .commit_table_activation(
+                    lease,
+                    snapshot.context(),
+                    &[table_mutation(9, 2, Some(11))],
+                    digest(10),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::StaleCapture { .. })
+        ));
+        assert_eq!(
+            state.committed_table_rows("books").await.unwrap(),
+            vec![(vec![1], vec![10])]
+        );
+        assert_eq!(state.latest_checkpoint().await.unwrap(), later_checkpoint);
+        assert_eq!(state.capture().await.unwrap(), later_capture);
     }
 
     #[tokio::test]
