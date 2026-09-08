@@ -95,12 +95,18 @@ impl LiveOnceHost {
         let runtime_id = capture.runtime_id();
         let expiries: SessionExpiries = Rc::new(RefCell::new(BTreeMap::new()));
         let deleted_leases: DeletedLeaseIndex = Rc::new(RefCell::new(BTreeMap::new()));
+        let mut runtime_owner = [0; 16];
+        getrandom::fill(&mut runtime_owner).map_err(|_| LiveHostError::Runtime)?;
+        if runtime_owner == [0; 16] {
+            return Err(LiveHostError::Runtime);
+        }
         let application = Rc::new(RefCell::new(Some(
             PureEvalApplication::from_repository(
                 repository,
                 database_id,
                 identity,
                 initial_digest,
+                runtime_owner,
                 Rc::clone(&expiries),
             )
             .map_err(|_| LiveHostError::Repository)?,
@@ -119,7 +125,7 @@ impl LiveOnceHost {
             .map_err(|_| LiveHostError::Configuration)?;
         let bare_localhost =
             Origin::parse("http://localhost").map_err(|_| LiveHostError::Configuration)?;
-        let host = LiveHost::with_runtime_state(
+        let host = LiveHost::with_runtime_state_and_owner(
             Limits::default(),
             SessionBoundary::new(
                 OriginPolicy::new([bare_localhost, localhost, loopback], []),
@@ -127,6 +133,7 @@ impl LiveOnceHost {
             ),
             Serving::new(ServingLimits::default()).map_err(|_| LiveHostError::Configuration)?,
             state,
+            runtime_owner,
         )
         .map_err(|_| LiveHostError::Configuration)?;
         let transport = LiveTransport::new(host, TransportLimits::default())
