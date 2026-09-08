@@ -85,6 +85,12 @@ pub enum Error {
     UnsupportedOperation,
     RequestMismatch,
     ApplicationRejected,
+    /// The application deliberately left an admitted request nonterminal.
+    ///
+    /// The host must not replace this outcome with its generic retained
+    /// failure: a durable request can still be recovered or completed by its
+    /// fenced owner.
+    ApplicationDeferred,
     RuntimeUnavailable,
 }
 
@@ -104,6 +110,7 @@ impl Error {
             Self::UnsupportedOperation => "live.unsupported_operation",
             Self::RequestMismatch => "wire.request_mismatch",
             Self::ApplicationRejected => "live.application_rejected",
+            Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
         }
     }
@@ -315,7 +322,7 @@ impl HttpResponse {
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
                 | Error::ApplicationRejected => 400,
-                Error::RuntimeUnavailable => 503,
+                Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
             headers: Vec::new(),
             body: HttpBody::ErrorCode(error.code()),
@@ -1474,7 +1481,7 @@ impl LiveHost {
                     }
                 }
                 .await;
-                if dispatched.is_err() {
+                if dispatched.is_err() && !matches!(&dispatched, Err(Error::ApplicationDeferred)) {
                     self.retain_failure(session, request, fingerprint).await?;
                 }
                 dispatched
@@ -4532,6 +4539,7 @@ fn host_error(error: Error) -> WireResponse {
         Error::Limit => (413, "live.limit"),
         Error::Closed => (410, "live.expired"),
         Error::Denied => (403, "live.denied"),
+        Error::ApplicationDeferred => (503, "live.application_deferred"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
@@ -4865,6 +4873,13 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_repository_v1::Repository;
+    use orna_runtime_v1::RuntimeIdentity;
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     struct FixedIssuer(Option<[u8; 32]>);
 
@@ -4880,6 +4895,126 @@ mod tests {
         fn last_issued(&self) -> Option<[u8; 32]> {
             self.0
         }
+    }
+
+    struct FencedApplication;
+
+    impl LiveApplication for FencedApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::ApplicationDeferred)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    struct RejectingApplication;
+
+    impl LiveApplication for RejectingApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::ApplicationRejected)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    fn subscribed_host(runtime: Option<RuntimeState>) -> LiveHost {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = match runtime {
+            Some(runtime) => LiveHost::with_runtime_state_and_owner(
+                Limits::default(),
+                SessionBoundary::new(
+                    orna_security_v1::OriginPolicy::new([origin.clone()], []),
+                    10,
+                ),
+                Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+                runtime,
+                [9; 16],
+            )
+            .unwrap(),
+            None => LiveHost::new(
+                Limits::default(),
+                SessionBoundary::new(
+                    orna_security_v1::OriginPolicy::new([origin.clone()], []),
+                    10,
+                ),
+                Serving::new(orna_serving_v1::Limits::default()).unwrap(),
+            )
+            .unwrap(),
+        };
+        let subscribe = Envelope {
+            request: Some([2; 16]),
+            watch: None,
+            message: Message::Subscribe {
+                resource: [3; 16],
+                presentation: orna_protocol_v1::PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "dark".into(),
+                    supported_kinds: vec![],
+                },
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap();
+        let mut issuer = FixedIssuer(None);
+        let credential = futures::executor::block_on(host.create(
+            CreateRequest {
+                id: [1; 16],
+                origin: origin.clone(),
+                expires_at: 10,
+                now: 0,
+                subscribe: &subscribe,
+            },
+            &mut issuer,
+        ))
+        .unwrap();
+        futures::executor::block_on(host.resume(ResumeRequest {
+            id: [1; 16],
+            origin: &origin,
+            credential: &credential,
+            attachment: [4; 16],
+            now: 1,
+        }))
+        .unwrap();
+        host
+    }
+
+    fn eval_frame(request: [u8; 16]) -> Vec<u8> {
+        let mut envelope = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Eval {
+                source: "1".into(),
+                database: orna_protocol_v1::DatabaseContext {
+                    database: [2; 16],
+                    snapshot: None,
+                },
+                presentation: orna_protocol_v1::PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "dark".into(),
+                    supported_kinds: vec![],
+                },
+                fingerprint: [0; 32],
+            },
+            extensions: BTreeMap::new(),
+        };
+        let fingerprint =
+            canonical_request_fingerprint([1; 16], &envelope, Limits::default().protocol).unwrap();
+        if let Message::Eval {
+            fingerprint: sent, ..
+        } = &mut envelope.message
+        {
+            *sent = fingerprint;
+        }
+        envelope.encode(Limits::default().protocol).unwrap()
     }
 
     fn result(request: u8, fingerprint: u8) -> Envelope {
@@ -4968,6 +5103,89 @@ mod tests {
                     if returned == status
             ));
         }
+    }
+
+    #[test]
+    fn deferred_application_error_keeps_durable_request_running_without_a_replacement_terminal() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("orna-live-deferred-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [6; 16],
+                repository_id: [7; 16],
+            },
+            [8; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let request = [5; 16];
+        let frame = eval_frame(request);
+        let mut application = FencedApplication;
+
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(frame),
+                &mut application,
+            )),
+            Err(Error::ApplicationDeferred)
+        );
+        let status = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .unwrap()
+                .request_status_for_identity(RequestIdentity {
+                    session_id: [1; 16],
+                    request_id: request,
+                }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(status.state, DurableRequestState::Running);
+        assert!(status.terminal_outcome.is_none());
+        assert!(host.requests[&([1; 16], request)].terminal.is_none());
+        assert_eq!(HttpResponse::error(Error::ApplicationDeferred).status, 503);
+        assert_eq!(host_error(Error::ApplicationDeferred).status, 503);
+
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_application_error_still_retains_a_failure_terminal() {
+        let mut host = subscribed_host(None);
+        let request = [6; 16];
+        let mut application = RejectingApplication;
+
+        assert_eq!(
+            futures::executor::block_on(host.dispatch_frame(
+                [4; 16],
+                2,
+                Frame::Binary(eval_frame(request)),
+                &mut application,
+            )),
+            Err(Error::ApplicationRejected)
+        );
+        assert!(host.requests[&([1; 16], request)].terminal.is_some());
+        assert_eq!(
+            host.serving.request_state([1; 16], request),
+            Ok(orna_serving_v1::RequestState::Completed)
+        );
     }
 
     #[test]
