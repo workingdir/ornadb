@@ -2173,16 +2173,10 @@ impl Repository {
         if !remotes.iter().any(|candidate| candidate == remote) {
             return RemoteContinuity::Unverifiable;
         }
-        let observed = match self.observer_remote_orna_refs(remote, native_length) {
+        let observed = match self.observer_remote_orna_refs(remote, native_length, &expected) {
             Ok(observed) => observed,
             Err(_) => return RemoteContinuity::Unverifiable,
         };
-        if observed
-            .keys()
-            .any(|reference| !expected.contains_key(reference.as_str()))
-        {
-            return RemoteContinuity::Unverifiable;
-        }
         if expected
             .keys()
             .any(|reference| !observed.contains_key(*reference))
@@ -2418,33 +2412,22 @@ impl Repository {
         &self,
         remote: &str,
         object_id_length: usize,
+        expected: &std::collections::BTreeMap<&str, &str>,
     ) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
         let mut command = self.observer_command();
-        command.args(["ls-remote", "--refs", remote, "refs/orna/*"]);
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["ls-remote", "--refs", remote])
+            .args(expected.keys());
         let output = command
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
         if !output.status.success() {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let mut refs = std::collections::BTreeMap::new();
         let output =
             std::str::from_utf8(&output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
-        for line in output.trim_end_matches(['\r', '\n']).lines() {
-            let Some((object_id, reference)) = line.split_once('\t') else {
-                return Err(RepositoryError::GitOperationFailed);
-            };
-            if object_id.len() != object_id_length
-                || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                || !valid_orna_internal_ref(reference)
-                || refs
-                    .insert(reference.to_owned(), object_id.to_ascii_lowercase())
-                    .is_some()
-            {
-                return Err(RepositoryError::GitOperationFailed);
-            }
-        }
-        Ok(refs)
+        parse_remote_orna_refs(output, object_id_length, expected)
     }
 
     fn observer_native_object_id_length(&self) -> Result<usize, RepositoryError> {
@@ -3428,12 +3411,44 @@ fn valid_orna_internal_ref(reference: &str) -> bool {
                 && !component.ends_with('.')
                 && !component.ends_with(".lock")
                 && !component.bytes().any(|byte| {
-                    byte <= b' ' || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+                    byte <= b' '
+                        || byte == 0x7f
+                        || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
                 })
         })
         && !reference.contains("..")
         && !reference.contains("@{")
         && !reference.ends_with('@')
+}
+
+fn parse_remote_orna_refs(
+    output: &str,
+    object_id_length: usize,
+    expected: &std::collections::BTreeMap<&str, &str>,
+) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
+    if output.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let Some(records) = output.strip_suffix('\n') else {
+        return Err(RepositoryError::GitOperationFailed);
+    };
+    let mut refs = std::collections::BTreeMap::new();
+    for record in records.split('\n') {
+        let Some((object_id, reference)) = record.split_once('\t') else {
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        if object_id.len() != object_id_length
+            || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !valid_orna_internal_ref(reference)
+            || !expected.contains_key(reference)
+            || refs
+                .insert(reference.to_owned(), object_id.to_ascii_lowercase())
+                .is_some()
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+    }
+    Ok(refs)
 }
 
 fn valid_native_object_id(object_id: &str) -> bool {
@@ -3735,9 +3750,34 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
-    use super::{Repository, RepositoryError, RuntimeGeneration};
+    use super::{Repository, RepositoryError, RuntimeGeneration, parse_remote_orna_refs};
+
+    #[test]
+    fn remote_ref_parser_rejects_blank_or_unexpected_records() {
+        let expected = BTreeMap::from([(
+            "refs/orna/ids/0123456789abcdef",
+            "0123456789012345678901234567890123456789",
+        )]);
+        assert!(parse_remote_orna_refs("\n", 40, &expected).is_err());
+        assert!(
+            parse_remote_orna_refs(
+                "0123456789012345678901234567890123456789\trefs/orna/ids/unexpected\n",
+                40,
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_remote_orna_refs(
+                "0123456789012345678901234567890123456789\trefs/orna/ids/0123456789abcdef\n\n",
+                40,
+                &expected,
+            )
+            .is_err()
+        );
+    }
 
     fn git(directory: &Path, arguments: &[&str]) {
         let output = Command::new("git")
