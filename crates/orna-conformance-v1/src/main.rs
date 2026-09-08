@@ -9,7 +9,6 @@ use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
-#[cfg(test)]
 use orna_semantic_v1::{ModuleInput, analyze};
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
 use std::collections::BTreeMap;
@@ -94,6 +93,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         }
         if live_resync_contract(scenario) {
             return run_live_resync_scenario(scenario);
+        }
+        if sys_rt_rename_contract(scenario) {
+            return run_sys_rt_rename_scenario(scenario);
         }
         if pipeline_insertion_contract(scenario)
             || pipeline_precedence_contract(scenario)
@@ -668,7 +670,6 @@ fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
-#[cfg(test)]
 fn sys_rt_rename_contract(scenario: &Scenario) -> bool {
     scenario.id == "SYS-RT-RENAME-100"
         && scenario.title == "The runtime root is sys.rt"
@@ -683,7 +684,6 @@ fn sys_rt_rename_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-SYS-005", "ORNA-SYS-105"]
 }
 
-#[cfg(test)]
 fn run_sys_rt_rename_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !sys_rt_rename_contract(scenario) {
         return StageOutcome::Skipped {
@@ -735,7 +735,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, SYS-RT-RENAME-100 system-name resolution, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
@@ -748,6 +748,7 @@ fn main() {
                 "LIVE-002".into(),
                 "LIVE-003".into(),
                 "LIVE-004".into(),
+                "SYS-RT-RENAME-100".into(),
             ],
         })
         .run(&mut adapter);

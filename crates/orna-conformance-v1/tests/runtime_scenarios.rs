@@ -328,7 +328,14 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     assert_eq!(
         declared,
         [
-            "REPL-001", "TXN-001", "TXN-002", "LIVE-001", "LIVE-002", "LIVE-003", "LIVE-004"
+            "REPL-001",
+            "TXN-001",
+            "TXN-002",
+            "LIVE-001",
+            "LIVE-002",
+            "LIVE-003",
+            "LIVE-004",
+            "SYS-RT-RENAME-100"
         ]
     );
     let scenarios = report["scenarios"]
@@ -346,6 +353,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                     | "LIVE-002"
                     | "LIVE-003"
                     | "LIVE-004"
+                    | "SYS-RT-RENAME-100"
             )
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
@@ -411,4 +419,13 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         ])
     );
     assert_eq!(live_fallback["status"], "passed");
+    let runtime_root = scenarios
+        .iter()
+        .find(|result| result["scenario"] == "SYS-RT-RENAME-100")
+        .expect("SYS-RT-RENAME-100 result is present");
+    assert_eq!(
+        runtime_root["requirements"],
+        serde_json::json!(["ORNA-SYS-005", "ORNA-SYS-105"])
+    );
+    assert_eq!(runtime_root["status"], "passed");
 }
