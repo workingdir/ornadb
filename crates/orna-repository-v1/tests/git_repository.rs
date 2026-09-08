@@ -3257,6 +3257,97 @@ fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
 }
 
 #[test]
+fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let signing_key = compact_receipt_signing_key();
+    provision_compact_receipt_trust_root(&repo, &signing_key);
+    let table = Uuid::new_v4();
+    let plan = compact_plan(
+        &repo,
+        table,
+        [67; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
+    let receipt = compact_runtime_receipt(&pending, &signing_key);
+    repo.finish_compact_with_receipt(&receipt).unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+
+    let published = repo.head().unwrap().unwrap();
+    let manifest_path = format!(".orna/storage/{table}/manifest.orna");
+    let manifest_object = git(
+        root.path(),
+        &["rev-parse", &format!("{published}:{manifest_path}")],
+    );
+    let manifest = repo
+        .read_compact_manifest(&published, table)
+        .unwrap()
+        .unwrap();
+    let entry = manifest.entries().first().unwrap();
+    let segment_path = entry.relative_path().as_path().display().to_string();
+    let segment_object = entry.git_object_id().to_owned();
+    assert_eq!(
+        git(
+            root.path(),
+            &["rev-parse", &format!("{published}:{segment_path}")],
+        ),
+        segment_object
+    );
+
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
+    let unstaged_before = git(root.path(), &["diff", "--binary"]);
+
+    fs::write(root.path().join("ordinary-commit.txt"), "ordinary commit\n").unwrap();
+    git(root.path(), &["add", "ordinary-commit.txt"]);
+    git(
+        root.path(),
+        &[
+            "commit",
+            "-m",
+            "ordinary commit after compact publication",
+            "ordinary-commit.txt",
+        ],
+    );
+
+    let current = repo.head().unwrap().unwrap();
+    assert_ne!(current, published);
+    assert_eq!(
+        git(
+            root.path(),
+            &["rev-parse", &format!("{current}:{manifest_path}")],
+        ),
+        manifest_object
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["rev-parse", &format!("{current}:{segment_path}")],
+        ),
+        segment_object
+    );
+    assert_eq!(
+        repo.read_compact_manifest(&current, table)
+            .unwrap()
+            .unwrap(),
+        manifest
+    );
+    assert_eq!(
+        git(root.path(), &["diff", "--cached", "--binary"]),
+        staged_before
+    );
+    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+}
+
+#[test]
 fn compact_publication_refuses_missing_manifest_or_shard_witness_before_ref_advance() {
     for (ordinal, witness_path) in [(70, "manifest.orna"), (71, "shards/00000000.orna")] {
         let root = repository();
