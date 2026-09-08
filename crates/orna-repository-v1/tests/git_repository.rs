@@ -2824,6 +2824,68 @@ fn compact_manifest_journal_recovery_proves_candidate_before_reconciling() {
 }
 
 #[test]
+fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(
+        root.path().join("ordinary.txt"),
+        "staged ordinary\nunstaged ordinary\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
+    let unstaged_before = git(root.path(), &["diff", "--binary"]);
+
+    let plan = compact_plan(
+        &repo,
+        table,
+        [53; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let head = repo.head().unwrap().unwrap();
+    let candidate = plan.candidate_commit().clone();
+    repo.persist_compact_publication(&plan).unwrap();
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/heads/main",
+            candidate.as_str(),
+            head.as_str(),
+        ],
+    );
+
+    let recovery = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        recovery,
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref pending)
+            if pending.commit() == &candidate
+    ));
+    assert_eq!(
+        git(root.path(), &["diff", "--cached", "--binary"]),
+        staged_before
+    );
+    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+    assert!(
+        repo.read_compact_manifest(&candidate, table)
+            .unwrap()
+            .is_some()
+    );
+    assert!(repo.read_publication_journal().unwrap().is_some());
+}
+
+#[test]
 fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_post_ref_boundaries() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
