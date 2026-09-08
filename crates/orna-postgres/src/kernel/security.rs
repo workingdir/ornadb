@@ -121,9 +121,11 @@ pub(crate) use sealed_invocation::InvocationAuditDecision;
 use sealed_invocation::{
     PreparedSealedTarget, SealedInvocationFailureClass, SealedInvocationPreparedOutcome,
 };
+#[allow(unused_imports)]
+// Forwarded by the kernel facade when executable composition adopts it.
 pub use sealed_invocation::{
-    SealedInvocationContinuation, SealedInvocationExecution, SealedInvocationOperation,
-    SealedInvocationPreflight, SealedInvocationResult,
+    SealedInvocationAdmissionContext, SealedInvocationContinuation, SealedInvocationExecution,
+    SealedInvocationOperation, SealedInvocationPreflight, SealedInvocationResult,
 };
 pub use sealed_lifecycle_finalization::SealedInvocationLifecycleFinalization;
 #[cfg(test)]
