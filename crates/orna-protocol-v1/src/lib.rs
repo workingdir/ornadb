@@ -635,6 +635,7 @@ impl Message {
                 if number >= 32768 {
                     return Err(Error::UnknownMandatoryExtension);
                 }
+                let _ = canonical_value(value)?;
                 extensions.insert(number, ValueNode(value.clone()));
             }
         }
@@ -2045,6 +2046,32 @@ mod tests {
             Envelope::decode(&bytes, Limits::default()).unwrap(),
             redacted_diagnostic
         );
+    }
+
+    #[test]
+    fn protected_values_are_rejected_in_optional_live_extensions() {
+        const PROTECTED_PAYLOAD: &str = "protected-extension-regression";
+        let bytes = wire(
+            3,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), Node::Bytes(id(3).to_vec())),
+                (uint(2), Node::Text("ordinary event value".into())),
+                (uint(3), Node::Bytes(digest(1).to_vec())),
+                (
+                    uint(11),
+                    Node::Tag(0, Box::new(Node::Text(PROTECTED_PAYLOAD.into()))),
+                ),
+            ]),
+        );
+
+        let error = Envelope::decode(&bytes, Limits::default()).unwrap_err();
+        assert_eq!(error, Error::InvalidValue);
+        assert_eq!(error.code(), "wire.invalid_message");
+        assert!(!format!("{error:?}").contains(PROTECTED_PAYLOAD));
+        assert!(!error.to_string().contains(PROTECTED_PAYLOAD));
     }
     #[test]
     fn request_fingerprint_omits_event_and_eval_redundant_fields() {
