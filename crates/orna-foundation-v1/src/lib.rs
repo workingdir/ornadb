@@ -96,6 +96,8 @@ pub enum ObjectKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DefinitionKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraceKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FunctionKind {}
@@ -118,6 +120,7 @@ pub type SnapshotRef = TypedRowRef<SnapshotKind>;
 pub type DiagnosticRef = TypedRowRef<DiagnosticKind>;
 pub type ObjectRef = TypedRowRef<ObjectKind>;
 pub type DefinitionRef = TypedRowRef<DefinitionKind>;
+pub type TypeRef = TypedRowRef<TypeKind>;
 pub type TraceRef = TypedRowRef<TraceKind>;
 /// Typed `sys.RowRef<sys.Function>` marker. This is not proof that the
 /// referenced row is a function, exists, or may be invoked.
@@ -163,17 +166,58 @@ pub fn validate_reference_context<Kind>(
 }
 
 /// Stable implementation-defined physical identities for the canonical
-/// `sys.Invocation`, `sys.InvocationArgument`, `sys.Run`, and `sys.Stream`
-/// relations. The Orna specification names these relations but does not
-/// prescribe their sixteen-byte physical identities.
+/// `sys.Type`, `sys.Function`, `sys.Snapshot`, `sys.Invocation`,
+/// `sys.InvocationArgument`, `sys.Run`, and `sys.Stream` relations. The Orna
+/// specification names these relations but does not prescribe their
+/// sixteen-byte physical identities.
 /// These constants are therefore versioned implementation compatibility
 /// values, not per-runtime generated identifiers.
 pub const SYS_INVOCATION_TABLE_ID: [u8; 16] = [
     0x26, 0x90, 0x51, 0xdc, 0x83, 0x3a, 0x48, 0x61, 0x91, 0x07, 0x65, 0xe8, 0x2b, 0x74, 0x19, 0x03,
 ];
+pub const SYS_TYPE_TABLE_ID: [u8; 16] = [
+    0x58, 0xce, 0xa4, 0x91, 0x3e, 0x77, 0x4f, 0x08, 0x9a, 0x43, 0x2d, 0xb6, 0x05, 0x1f, 0x83, 0x05,
+];
+pub const SYS_FUNCTION_TABLE_ID: [u8; 16] = [
+    0x6f, 0x29, 0xd2, 0x84, 0x4b, 0x5a, 0x45, 0xc1, 0x87, 0x06, 0x31, 0xe9, 0x94, 0x6c, 0x70, 0x06,
+];
+pub const SYS_SNAPSHOT_TABLE_ID: [u8; 16] = [
+    0x81, 0xb5, 0x3a, 0xe7, 0x20, 0x4d, 0x49, 0x6c, 0x95, 0x18, 0x7f, 0xc2, 0x46, 0x09, 0xab, 0x07,
+];
 pub const SYS_INVOCATION_ARGUMENT_TABLE_ID: [u8; 16] = [
     0x4b, 0x17, 0x8d, 0x20, 0x6f, 0x91, 0x44, 0x72, 0xa8, 0x3e, 0x10, 0xc5, 0x59, 0xd2, 0x84, 0x04,
 ];
+
+/// Constructs a checked `sys.TypeRef` from the exact `sys.Type` natural key
+/// (`object`). The reference remains coordinate data only: it neither proves
+/// that the object is a type nor establishes row existence or authority.
+pub fn type_reference(object: ObjectRef) -> Result<TypeRef, SystemReferenceError> {
+    catalogue_reference(SYS_TYPE_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.FunctionRef` from the exact `sys.Function`
+/// natural key (`object`). The reference remains coordinate data only: it
+/// neither proves that the object is a function nor establishes row existence
+/// or authority.
+pub fn function_reference(object: ObjectRef) -> Result<FunctionRef, SystemReferenceError> {
+    catalogue_reference(SYS_FUNCTION_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.SnapshotRef` from the exact `sys.Snapshot`
+/// natural key (`id`). The ID is derived from the pinned snapshot descriptor,
+/// never accepted as an independently rebindable selector.
+pub fn snapshot_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+) -> Result<SnapshotRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_SNAPSHOT_TABLE_ID,
+        key: OvbRaw::Bytes(snapshot_id(&snapshot)?.to_vec()),
+        snapshot,
+    }))
+}
 pub const SYS_RUN_TABLE_ID: [u8; 16] = [
     0x3d, 0x64, 0x87, 0x71, 0x5a, 0x4c, 0x4e, 0x80, 0x9d, 0x2f, 0x11, 0xa4, 0x92, 0x36, 0x70, 0x01,
 ];
@@ -335,6 +379,44 @@ pub fn validate_invocation_reference(
     Ok(TypedRowRef::from_row_ref(reference))
 }
 
+/// Checks a candidate `sys.TypeRef` against a supplied CWD context, fixed
+/// `sys.Type` relation identity, and the exact one-field `object` natural
+/// key. This validates coordinates only; it does not establish object kind,
+/// relation existence, provenance, or authorization.
+pub fn validate_type_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<TypeRef, SystemReferenceError> {
+    validate_catalogue_reference(reference, capture, SYS_TYPE_TABLE_ID)
+}
+
+/// Checks a candidate `sys.FunctionRef` against a supplied CWD context, fixed
+/// `sys.Function` relation identity, and the exact one-field `object` natural
+/// key. This validates coordinates only; it does not establish object kind,
+/// relation existence, provenance, or authorization.
+pub fn validate_function_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<FunctionRef, SystemReferenceError> {
+    validate_catalogue_reference(reference, capture, SYS_FUNCTION_TABLE_ID)
+}
+
+/// Checks a candidate `sys.SnapshotRef` against a supplied CWD context, fixed
+/// `sys.Snapshot` relation identity, and the exact `id` natural key derived
+/// from its pinned descriptor. This does not establish retained history or
+/// authorization to observe it.
+pub fn validate_snapshot_reference(
+    reference: RowRef,
+    capture: &CwdCapture,
+) -> Result<SnapshotRef, SystemReferenceError> {
+    validate_coordinates(&reference, capture, SYS_SNAPSHOT_TABLE_ID)?;
+    if !matches!(&reference.key, OvbRaw::Bytes(id) if id.as_slice() == snapshot_id(&reference.snapshot)?.as_slice())
+    {
+        return Err(SystemReferenceError::InvalidSnapshotKey);
+    }
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
 /// Checks a candidate `sys.InvocationArgumentRef` against a supplied CWD
 /// context, fixed `sys.InvocationArgument` relation identity, and the
 /// declared natural key (`invocation + position`). The position is a
@@ -458,6 +540,43 @@ fn checkpoint_key_raw(
     ]))
 }
 
+fn catalogue_reference<Kind>(
+    table_id: [u8; 16],
+    object: ObjectRef,
+) -> Result<TypedRowRef<Kind>, SystemReferenceError> {
+    let object = object.into_row_ref();
+    ensure_snapshot_database(object.database_id, &object.snapshot)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id: object.database_id,
+        table_id,
+        key: row_ref_raw(&object),
+        snapshot: object.snapshot,
+    }))
+}
+
+fn validate_catalogue_reference<Kind>(
+    reference: RowRef,
+    capture: &CwdCapture,
+    expected_table: [u8; 16],
+) -> Result<TypedRowRef<Kind>, SystemReferenceError> {
+    validate_coordinates(&reference, capture, expected_table)?;
+    let object =
+        row_ref_from_raw(&reference.key).map_err(|_| SystemReferenceError::InvalidObjectKey)?;
+    validate_reference_context::<ObjectKind>(object, capture)
+        .map_err(|_| SystemReferenceError::InvalidObjectKey)?;
+    Ok(TypedRowRef::from_row_ref(reference))
+}
+
+fn snapshot_id(snapshot: &CanonicalSnapshot) -> Result<[u8; 32], SystemReferenceError> {
+    match snapshot {
+        CanonicalSnapshot::Cwd { id, .. } => Ok(*id),
+        CanonicalSnapshot::Commit { .. } => {
+            orna_value_v1::domain_digest("orna.snapshot.v1", &snapshot.raw())
+                .map_err(|_| SystemReferenceError::InvalidSnapshotKey)
+        }
+    }
+}
+
 fn checkpoint_key_from_raw(key: &OvbRaw) -> Result<(), SystemReferenceError> {
     let OvbRaw::Array(key) = key else {
         return Err(SystemReferenceError::InvalidCheckpointKey);
@@ -519,6 +638,8 @@ pub enum SystemReferenceError {
     RelationMismatch,
     InvalidInvocationKey,
     InvalidInvocationArgumentKey,
+    InvalidObjectKey,
+    InvalidSnapshotKey,
     InvalidRunKey,
     InvalidStreamKey,
     InvalidCheckpointKey,
@@ -536,6 +657,8 @@ impl fmt::Display for SystemReferenceError {
             Self::InvalidInvocationArgumentKey => {
                 f.write_str("invalid sys.InvocationArgument natural key")
             }
+            Self::InvalidObjectKey => f.write_str("invalid sys.Object natural key"),
+            Self::InvalidSnapshotKey => f.write_str("invalid sys.Snapshot natural key"),
             Self::InvalidRunKey => f.write_str("invalid sys.Run natural key"),
             Self::InvalidStreamKey => f.write_str("invalid sys.Stream natural key"),
             Self::InvalidCheckpointKey => f.write_str("invalid sys.Checkpoint natural key"),
@@ -1465,6 +1588,129 @@ mod tests {
         assert_eq!(
             validate_reference_context::<InvocationKind>(decoded, &wrong_snapshot),
             Err(SystemReferenceError::SnapshotMismatch)
+        );
+    }
+    #[test]
+    fn catalogue_and_snapshot_references_use_exact_pinned_natural_keys() {
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
+        let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
+        let object = ObjectRef::from_row_ref(
+            RowRef::new([1; 16], [5; 16], uuid([6; 16]), snapshot.clone()).unwrap(),
+        );
+
+        let type_reference = type_reference(object.clone()).unwrap();
+        let function_reference = function_reference(object.clone()).unwrap();
+        let snapshot_ref = snapshot_reference([1; 16], snapshot.clone()).unwrap();
+
+        assert_eq!(
+            row_ref_from_raw(&type_reference.as_row_ref().key).unwrap(),
+            object.clone().into_row_ref()
+        );
+        assert_eq!(
+            row_ref_from_raw(&function_reference.as_row_ref().key).unwrap(),
+            object.into_row_ref()
+        );
+        assert_eq!(
+            snapshot_ref.as_row_ref().key,
+            OvbRaw::Bytes(match &snapshot {
+                Snapshot::Cwd { id, .. } => id.to_vec(),
+                Snapshot::Commit { .. } => unreachable!(),
+            })
+        );
+        let committed = commit();
+        let committed_reference = snapshot_reference([7; 16], committed.clone()).unwrap();
+        assert_eq!(
+            committed_reference.as_row_ref().key,
+            OvbRaw::Bytes(
+                orna_value_v1::domain_digest("orna.snapshot.v1", &committed.raw())
+                    .unwrap()
+                    .to_vec()
+            )
+        );
+
+        for reference in [
+            type_reference.as_row_ref(),
+            function_reference.as_row_ref(),
+            snapshot_ref.as_row_ref(),
+        ] {
+            let decoded =
+                row_ref_from_raw(Value::decode(&reference.encode().unwrap()).unwrap().raw())
+                    .unwrap();
+            assert_eq!(decoded, *reference);
+        }
+        assert_eq!(
+            validate_type_reference(type_reference.clone().into_row_ref(), &capture)
+                .unwrap()
+                .as_row_ref(),
+            type_reference.as_row_ref()
+        );
+        assert_eq!(
+            validate_function_reference(function_reference.clone().into_row_ref(), &capture)
+                .unwrap()
+                .as_row_ref(),
+            function_reference.as_row_ref()
+        );
+        assert_eq!(
+            validate_snapshot_reference(snapshot_ref.clone().into_row_ref(), &capture)
+                .unwrap()
+                .as_row_ref(),
+            snapshot_ref.as_row_ref()
+        );
+    }
+    #[test]
+    fn catalogue_and_snapshot_reference_validation_rejects_invalid_coordinates_and_keys() {
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 3.into()).unwrap();
+        let capture = CwdCapture::new(snapshot.clone(), [4; 32]).unwrap();
+        let object = ObjectRef::from_row_ref(
+            RowRef::new([1; 16], [5; 16], uuid([6; 16]), snapshot.clone()).unwrap(),
+        );
+        let type_reference = type_reference(object).unwrap().into_row_ref();
+        let snapshot_ref = snapshot_reference([1; 16], snapshot.clone())
+            .unwrap()
+            .into_row_ref();
+
+        let mut null_object_key = type_reference.clone();
+        null_object_key.key = OvbRaw::Null;
+        assert_eq!(
+            validate_type_reference(null_object_key, &capture),
+            Err(SystemReferenceError::InvalidObjectKey)
+        );
+        let mut wrong_object_snapshot = type_reference.clone();
+        wrong_object_snapshot.key = row_ref_raw(
+            &RowRef::new(
+                [1; 16],
+                [5; 16],
+                uuid([6; 16]),
+                Snapshot::cwd([1; 16], [2; 16], 4.into()).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            validate_type_reference(wrong_object_snapshot, &capture),
+            Err(SystemReferenceError::InvalidObjectKey)
+        );
+        let mut null_snapshot_key = snapshot_ref.clone();
+        null_snapshot_key.key = OvbRaw::Null;
+        assert_eq!(
+            validate_snapshot_reference(null_snapshot_key, &capture),
+            Err(SystemReferenceError::InvalidSnapshotKey)
+        );
+
+        let wrong_database =
+            CwdCapture::new(Snapshot::cwd([9; 16], [2; 16], 3.into()).unwrap(), [4; 32]).unwrap();
+        assert_eq!(
+            validate_type_reference(type_reference.clone(), &wrong_database),
+            Err(SystemReferenceError::DatabaseMismatch)
+        );
+        let wrong_snapshot =
+            CwdCapture::new(Snapshot::cwd([1; 16], [2; 16], 4.into()).unwrap(), [4; 32]).unwrap();
+        assert_eq!(
+            validate_snapshot_reference(snapshot_ref, &wrong_snapshot),
+            Err(SystemReferenceError::SnapshotMismatch)
+        );
+        assert_eq!(
+            snapshot_reference([9; 16], snapshot),
+            Err(SystemReferenceError::DatabaseMismatch)
         );
     }
     #[test]
