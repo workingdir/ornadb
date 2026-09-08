@@ -548,7 +548,9 @@ impl LiveApplication for PureEvalApplication {
             // transport error; successful permitted watches remain live.
             return Err(Error::ApplicationRejected);
         }
-        let (watch, value, snapshot) = {
+        let session_id = SessionId::new(session);
+        let session_existed = self.sessions.contains_key(&session_id);
+        let outcome = (|| {
             let (state, snapshot) = self
                 .session(session, database, presentation)
                 .map_err(|_| Error::ApplicationRejected)?;
@@ -565,9 +567,22 @@ impl LiveApplication for PureEvalApplication {
                     snapshot: snapshot.clone(),
                 },
             );
-            (watch, value, snapshot)
-        };
-        snapshot_envelope(request, watch, 0, value, snapshot)
+            snapshot_envelope(request, watch, 0, value, snapshot)
+        })();
+        match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // A rejected first Watch must not establish a resumable REPL
+                // overlay. `session` needs to build that overlay before it
+                // can type-check the expression, so undo only the state that
+                // this failed operation created. Existing session bindings
+                // and watches remain untouched.
+                if !session_existed {
+                    self.sessions.remove(&session_id);
+                }
+                return Err(error);
+            }
+        }
     }
 
     fn resync(
@@ -1270,6 +1285,48 @@ mod tests {
 
         assert!(matches!(result, Err(Error::ApplicationRejected)));
         assert!(application.sessions.is_empty());
+    }
+
+    #[test]
+    fn rejected_first_watch_does_not_retain_a_session_overlay() {
+        let (mut application, expiries, database_id, _, _, repl_admissions) = application();
+        let session = [60; 16];
+        let session_id = SessionId::new(session);
+        expiries.borrow_mut().insert(session_id, 100);
+
+        assert_eq!(
+            application.watch(
+                session,
+                [61; 16],
+                &Message::Watch {
+                    source: "missing_binding + 1".into(),
+                    database: database(database_id),
+                    presentation: presentation(),
+                    refresh_floor: None,
+                },
+            ),
+            Err(Error::ApplicationRejected)
+        );
+        assert!(!application.sessions.contains_key(&session_id));
+        assert_eq!(repl_admissions.get(), 1);
+
+        let watch = application
+            .watch(
+                session,
+                [62; 16],
+                &Message::Watch {
+                    source: "1 + 1".into(),
+                    database: database(database_id),
+                    presentation: presentation(),
+                    refresh_floor: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            watch.message,
+            Message::Snapshot { revision: 0, .. }
+        ));
+        assert_eq!(repl_admissions.get(), 2);
     }
 
     #[test]
