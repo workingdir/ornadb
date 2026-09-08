@@ -3934,6 +3934,69 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
 }
 
 #[test]
+fn durable_replay_rejects_a_rollback_payload_for_external_uncertainty() {
+    let (root, repository) = durable_repository();
+    let request = eval([1; 16], [78; 16], "1");
+    let fingerprint = request_fingerprint(&request, [1; 16]);
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id: [78; 16],
+    };
+    let runtime = open_durable_state(&repository);
+    let old = block_on(runtime.acquire_lease([75; 16])).unwrap();
+    block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
+    block_on(runtime.start_request_with_owner(identity, fingerprint, old)).unwrap();
+    block_on(runtime.record_external_effect(identity, fingerprint, old)).unwrap();
+    let fence = block_on(runtime.recover_abandoned(old.owner_id, [76; 16])).unwrap();
+    let mismatched = TerminalOutcome::new(
+        Envelope {
+            request: Some([78; 16]),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(Limits::default().protocol)
+        .unwrap(),
+    )
+    .unwrap();
+    block_on(runtime.recover_running_request_with_outcomes(
+        identity,
+        fingerprint,
+        RequestOwner::from(old),
+        fence,
+        mismatched.clone(),
+        mismatched,
+    ))
+    .unwrap();
+    drop(runtime);
+
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [76; 16]);
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [9; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    assert_eq!(
+        block_on(host.dispatch_frame([9; 16], 2, Frame::Binary(request), &mut application)),
+        Err(Error::RuntimeUnavailable)
+    );
+    assert_eq!(application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [79; 16], "1");
