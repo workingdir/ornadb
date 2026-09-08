@@ -1651,7 +1651,20 @@ fn remote_continuity_fails_closed_for_invalid_or_ambiguous_input_and_remote_fail
     assert!(NativeObjectId::new("not-a-native-object-id").is_err());
     assert_eq!(
         repo.observe_remote_continuity("origin", &[]),
-        RemoteContinuity::Unverifiable
+        RemoteContinuity::InvalidEvidence
+    );
+    assert_eq!(
+        repo.observe_remote_continuity("origin", &[required.clone(), required.clone()]),
+        RemoteContinuity::InvalidEvidence
+    );
+    let wrong_native_format = RequiredInternalRef::new(
+        OrnaInternalRef::new("refs/orna/ids/0123456789abcdef").unwrap(),
+        NativeObjectId::new("0123456789012345678901234567890123456789012345678901234567890123")
+            .unwrap(),
+    );
+    assert_eq!(
+        repo.observe_remote_continuity("origin", &[wrong_native_format]),
+        RemoteContinuity::InvalidEvidence
     );
     assert_eq!(
         repo.observe_remote_continuity("missing", std::slice::from_ref(&required)),
