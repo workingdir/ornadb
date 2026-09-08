@@ -839,6 +839,87 @@ pub enum GitObjectState {
     Malformed,
 }
 
+/// A validated Orna-managed remote reference.  Only refs in `refs/orna/*`
+/// participate in continuity checks; ordinary Git refs remain outside this
+/// observer's authority.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct OrnaInternalRef(String);
+
+impl OrnaInternalRef {
+    /// Validates one fully qualified internal reference name.
+    pub fn new(reference: impl Into<String>) -> Result<Self, RepositoryError> {
+        let reference = reference.into();
+        if !valid_orna_internal_ref(&reference) {
+            return Err(RepositoryError::InvalidInternalRef);
+        }
+        Ok(Self(reference))
+    }
+
+    /// The fully qualified `refs/orna/*` name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A validated native Git object ID supplied to a remote-continuity check.
+/// The observer additionally verifies that its length agrees with the local
+/// repository's native object format before contacting a remote.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NativeObjectId(String);
+
+impl NativeObjectId {
+    /// Accepts complete SHA-1 or SHA-256 hexadecimal object IDs only.
+    pub fn new(object_id: impl Into<String>) -> Result<Self, RepositoryError> {
+        let mut object_id = object_id.into();
+        if !valid_native_object_id(&object_id) {
+            return Err(RepositoryError::InvalidObjectId);
+        }
+        object_id.make_ascii_lowercase();
+        Ok(Self(object_id))
+    }
+
+    /// The native hexadecimal object ID.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One remote internal ref whose exact native object ID is required before an
+/// allocator or checkpoint can claim continuity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequiredInternalRef {
+    reference: OrnaInternalRef,
+    expected: NativeObjectId,
+}
+
+impl RequiredInternalRef {
+    pub fn new(reference: OrnaInternalRef, expected: NativeObjectId) -> Self {
+        Self {
+            reference,
+            expected,
+        }
+    }
+
+    pub fn reference(&self) -> &OrnaInternalRef {
+        &self.reference
+    }
+
+    pub fn expected(&self) -> &NativeObjectId {
+        &self.expected
+    }
+}
+
+/// Read-only continuity evidence for a configured remote's `refs/orna/*`
+/// namespace.  `Unverifiable` is deliberately fail-closed: callers must not
+/// allocate IDs or claim checkpoint/allocator continuity from it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteContinuity {
+    Continuous,
+    Missing,
+    Stale,
+    Unverifiable,
+}
+
 /// A normal Git repository and its selected worktree.
 #[derive(Clone, Debug)]
 pub struct Repository {
@@ -2051,6 +2132,73 @@ impl Repository {
             .collect())
     }
 
+    /// Passively verifies that a configured ordinary remote has exactly the
+    /// required `refs/orna/*` object identities. This invokes only
+    /// `git ls-remote --refs`; it never fetches, pushes, hydrates promised
+    /// objects, or changes local configuration, refs, index, or worktree.
+    ///
+    /// A plain-Git transfer that lacks a required ref is `Missing`; a present
+    /// ref at another object is `Stale`. Invalid input, unexpected internal
+    /// refs, malformed command output, unsupported local object format, or an
+    /// unreachable remote are all `Unverifiable` rather than guessed at.
+    pub fn observe_remote_continuity(
+        &self,
+        remote: &str,
+        required: &[RequiredInternalRef],
+    ) -> RemoteContinuity {
+        if !valid_remote_name(remote) || required.is_empty() {
+            return RemoteContinuity::Unverifiable;
+        }
+        let native_length = match self.observer_native_object_id_length() {
+            Ok(length) => length,
+            Err(_) => return RemoteContinuity::Unverifiable,
+        };
+        let mut expected = std::collections::BTreeMap::new();
+        for requirement in required {
+            if requirement.expected.as_str().len() != native_length
+                || expected
+                    .insert(
+                        requirement.reference.as_str(),
+                        requirement.expected.as_str(),
+                    )
+                    .is_some()
+            {
+                return RemoteContinuity::Unverifiable;
+            }
+        }
+        let remotes = match self.observer_remote_names() {
+            Ok(remotes) => remotes,
+            Err(_) => return RemoteContinuity::Unverifiable,
+        };
+        if !remotes.iter().any(|candidate| candidate == remote) {
+            return RemoteContinuity::Unverifiable;
+        }
+        let observed = match self.observer_remote_orna_refs(remote, native_length) {
+            Ok(observed) => observed,
+            Err(_) => return RemoteContinuity::Unverifiable,
+        };
+        if observed
+            .keys()
+            .any(|reference| !expected.contains_key(reference.as_str()))
+        {
+            return RemoteContinuity::Unverifiable;
+        }
+        if expected
+            .keys()
+            .any(|reference| !observed.contains_key(*reference))
+        {
+            return RemoteContinuity::Missing;
+        }
+        if expected.iter().any(|(reference, expected_id)| {
+            observed
+                .get(*reference)
+                .is_none_or(|observed_id| !observed_id.eq_ignore_ascii_case(expected_id))
+        }) {
+            return RemoteContinuity::Stale;
+        }
+        RemoteContinuity::Continuous
+    }
+
     /// Observes sparse-checkout and partial/promisor configuration without
     /// changing Git configuration, refs, the index, or the worktree.
     ///
@@ -2264,6 +2412,39 @@ impl Repository {
             .filter(|line| !line.is_empty())
             .map(str::to_owned)
             .collect())
+    }
+
+    fn observer_remote_orna_refs(
+        &self,
+        remote: &str,
+        object_id_length: usize,
+    ) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
+        let mut command = self.observer_command();
+        command.args(["ls-remote", "--refs", remote, "refs/orna/*"]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut refs = std::collections::BTreeMap::new();
+        let output =
+            std::str::from_utf8(&output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
+        for line in output.trim_end_matches(['\r', '\n']).lines() {
+            let Some((object_id, reference)) = line.split_once('\t') else {
+                return Err(RepositoryError::GitOperationFailed);
+            };
+            if object_id.len() != object_id_length
+                || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !valid_orna_internal_ref(reference)
+                || refs
+                    .insert(reference.to_owned(), object_id.to_ascii_lowercase())
+                    .is_some()
+            {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+        }
+        Ok(refs)
     }
 
     fn observer_native_object_id_length(&self) -> Result<usize, RepositoryError> {
@@ -3235,6 +3416,30 @@ fn valid_remote_name(name: &str) -> bool {
         && !name.ends_with('/')
 }
 
+fn valid_orna_internal_ref(reference: &str) -> bool {
+    let Some(suffix) = reference.strip_prefix("refs/orna/") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.ends_with('.')
+                && !component.ends_with(".lock")
+                && !component.bytes().any(|byte| {
+                    byte <= b' ' || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+                })
+        })
+        && !reference.contains("..")
+        && !reference.contains("@{")
+        && !reference.ends_with('@')
+}
+
+fn valid_native_object_id(object_id: &str) -> bool {
+    matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn valid_branch_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -3256,6 +3461,7 @@ pub enum RepositoryError {
     LocalStateUnavailable,
     NotAWorktree,
     InvalidObjectId,
+    InvalidInternalRef,
     UnsupportedObjectFormat,
     SnapshotNotFound,
     SnapshotNotReachable,
@@ -3299,6 +3505,7 @@ impl fmt::Display for RepositoryError {
             Self::LocalStateUnavailable => f.write_str("local Orna state is unavailable"),
             Self::NotAWorktree => f.write_str("not inside a Git worktree"),
             Self::InvalidObjectId => f.write_str("invalid native Git object ID"),
+            Self::InvalidInternalRef => f.write_str("invalid Orna internal Git ref"),
             Self::UnsupportedObjectFormat => f.write_str("unsupported Git object format"),
             Self::SnapshotNotFound => f.write_str("committed snapshot was not found"),
             Self::SnapshotNotReachable => {
