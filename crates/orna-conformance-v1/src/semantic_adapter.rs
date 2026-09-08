@@ -20,10 +20,10 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ListStreamSource, NoFault, RequestIdentity, RequestStatus, RunObservationRegistration,
-    RunningTableRequestContinuation, RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler,
-    StreamHandlerResult, StreamItem, StreamRunOutcome, StreamTableMutationBatch, TableMutation,
-    TerminalOutcome, WriterLease,
+    FaultInjector, ListStreamSource, NoFault, RequestIdentity, RequestStatus,
+    RunObservationRegistration, RunningTableRequestContinuation, RuntimeError, RuntimeIdentity,
+    RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
+    StreamTableMutationBatch, TableMutation, TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
@@ -1352,6 +1352,25 @@ impl DurableTransactionalEvaluator {
         unit: &SourceUnit,
         success_terminal: TerminalOutcome,
     ) -> RunningTableRequestDisposition {
+        self.execute_running_table_request_with_success_terminal_with_faults(
+            state,
+            continuation,
+            unit,
+            success_terminal,
+            &NoFault,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_running_table_request_with_success_terminal_with_faults(
+        &self,
+        state: &RuntimeState,
+        continuation: RunningTableRequestContinuation,
+        unit: &SourceUnit,
+        success_terminal: TerminalOutcome,
+        faults: &dyn FaultInjector,
+    ) -> RunningTableRequestDisposition {
         // Reconstruct the capability from the durable Running request before
         // source work. In particular, a completed, foreign, stale, or
         // owner-mismatched capability cannot cause a second evaluation.
@@ -1438,7 +1457,7 @@ impl DurableTransactionalEvaluator {
                 &mutations,
                 next_digest,
                 success_terminal,
-                &NoFault,
+                faults,
             )
             .await
         {
@@ -4247,8 +4266,9 @@ mod durable_tests {
     use orna_foundation_v1::Value;
     use orna_repository_v1::Repository;
     use orna_runtime_v1::{
-        NoFault, RequestIdentity, RequestState, RunObservationRegistration, RunObservationStatus,
-        RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
+        FaultInjector, FaultPoint, NoFault, RecoveryDisposition, RequestIdentity, RequestOwner,
+        RequestState, RunObservationRegistration, RunObservationStatus, RuntimeError,
+        RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
     use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use std::{path::Path, process::Command};
@@ -4271,6 +4291,18 @@ mod durable_tests {
             source_id: "durable-txn.orna".into(),
             parse_as: "module_unit".into(),
             source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
+        }
+    }
+
+    struct FailAt(FaultPoint);
+
+    impl FaultInjector for FailAt {
+        fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+            if point == self.0 {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -4617,6 +4649,163 @@ mod durable_tests {
                 .committed_table_row("Note", &Value::int(18.into()).encode().unwrap())
                 .await
                 .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn running_table_continuation_fault_recovers_as_proven() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [181; 16],
+            repository_id: [182; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [183; 16],
+            request_id: [184; 16],
+        };
+        let fingerprint = [185; 32];
+        let initial_digest = [186; 32];
+        let state = RuntimeState::open(&repository, identity, initial_digest)
+            .await
+            .expect("runtime");
+        let initial_capture = state.capture().await.expect("initial capture");
+        let owner = state.acquire_lease([187; 16]).await.expect("writer lease");
+        let continuation = admit_running_table_request(&state, owner, request, fingerprint).await;
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let success =
+            TerminalOutcome::new(b"canonical-success-bytes".to_vec()).expect("bounded terminal");
+        let row_key = Value::int(23.into()).encode().expect("encoded row key");
+
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal_with_faults(
+                    &state,
+                    continuation,
+                    &source(r#"Note.insert({ id: 23, text: "faulted" });"#),
+                    success,
+                    &FailAt(FaultPoint::AfterTerminalClaim),
+                )
+                .await,
+            RunningTableRequestDisposition::Fenced(RuntimeError::FaultInjected(
+                FaultPoint::AfterTerminalClaim
+            ))
+        ));
+        assert!(
+            state
+                .committed_table_row("Note", &row_key)
+                .await
+                .expect("row lookup")
+                .is_none()
+        );
+        assert_eq!(
+            state.capture().await.expect("unchanged capture"),
+            initial_capture
+        );
+        let running = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("running request");
+        assert_eq!(running.state, RequestState::Running);
+        assert!(running.terminal_outcome.is_none());
+        drop(state);
+
+        let reopened = RuntimeState::open(&repository, identity, initial_digest)
+            .await
+            .expect("reopened runtime");
+        assert!(
+            reopened
+                .committed_table_row("Note", &row_key)
+                .await
+                .expect("reopened row lookup")
+                .is_none()
+        );
+        assert_eq!(
+            reopened.capture().await.expect("reopened capture"),
+            initial_capture
+        );
+        let running = reopened
+            .request_status(request, fingerprint)
+            .await
+            .expect("reopened request status")
+            .expect("running request");
+        assert_eq!(running.state, RequestState::Running);
+        assert!(running.terminal_outcome.is_none());
+
+        let recovery_owner = reopened
+            .takeover_lease(owner, [188; 16])
+            .await
+            .expect("owner takeover");
+        let rollback_proven = TerminalOutcome::new(b"rollback-proven-bytes".to_vec())
+            .expect("rollback-proven terminal");
+        let uncertain =
+            TerminalOutcome::new(b"uncertain-bytes".to_vec()).expect("uncertain terminal");
+        let recovered = reopened
+            .recover_running_request_with_outcomes(
+                request,
+                fingerprint,
+                RequestOwner::from(owner),
+                recovery_owner,
+                rollback_proven.clone(),
+                uncertain,
+            )
+            .await
+            .expect("rollback-proven recovery");
+        assert_eq!(recovered.disposition, RecoveryDisposition::RollbackProven);
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            recovered
+                .status
+                .terminal_outcome
+                .as_ref()
+                .expect("recovered terminal")
+                .as_bytes(),
+            rollback_proven.as_bytes()
+        );
+        assert_eq!(
+            reopened
+                .request_status(request, fingerprint)
+                .await
+                .expect("recovered request status")
+                .expect("orphaned request")
+                .terminal_outcome
+                .expect("durable terminal")
+                .as_bytes(),
+            rollback_proven.as_bytes()
+        );
+        assert_eq!(
+            reopened
+                .recover_running_request(
+                    request,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    recovery_owner,
+                    TerminalOutcome::new(b"replacement-bytes".to_vec())
+                        .expect("replacement terminal"),
+                )
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+        assert_eq!(
+            reopened
+                .reserve_request(request, fingerprint)
+                .await
+                .expect("terminal replay"),
+            recovered.status
+        );
+        assert!(
+            reopened
+                .committed_table_row("Note", &row_key)
+                .await
+                .expect("durable row remains absent")
                 .is_none()
         );
     }
