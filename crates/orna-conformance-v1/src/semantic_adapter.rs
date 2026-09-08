@@ -4689,6 +4689,93 @@ mod durable_tests {
     }
 
     #[tokio::test]
+    async fn running_table_continuation_semantic_terminal_is_absorbing_before_replay() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [191; 16],
+            repository_id: [192; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [193; 16],
+            request_id: [194; 16],
+        };
+        let fingerprint = [195; 32];
+        let state = RuntimeState::open(&repository, identity, [196; 32])
+            .await
+            .expect("runtime");
+        let owner = state.acquire_lease([197; 16]).await.expect("writer lease");
+        let continuation = admit_running_table_request(&state, owner, request, fingerprint).await;
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation.clone(),
+                    &source("unknown()"),
+                    TerminalOutcome::new(b"must-not-retain".to_vec()).expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Semantic(StageOutcome::Failed(_))
+        ));
+        let failure =
+            TerminalOutcome::new(b"exact-semantic-terminal".to_vec()).expect("bounded terminal");
+        state
+            .fail_observed_request_with_owner(
+                request,
+                fingerprint,
+                owner,
+                failure.clone(),
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+            )
+            .await
+            .expect("owner-fenced semantic terminal");
+
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation,
+                    &source(r#"Note.insert({ id: 24, text: "must not run" });"#),
+                    TerminalOutcome::new(b"replacement-terminal".to_vec())
+                        .expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Fenced(RuntimeError::RequestStateConflict)
+        ));
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(24.into()).encode().unwrap())
+                .await
+                .expect("row lookup")
+                .is_none()
+        );
+        let status = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("semantic terminal");
+        assert_eq!(status.state, RequestState::Completed);
+        assert_eq!(
+            status
+                .terminal_outcome
+                .expect("retained semantic terminal")
+                .as_bytes(),
+            failure.as_bytes()
+        );
+    }
+
+    #[tokio::test]
     async fn running_table_continuation_fault_recovers_as_proven() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
