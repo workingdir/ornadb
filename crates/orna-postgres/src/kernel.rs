@@ -47,6 +47,8 @@ pub(crate) mod inspect;
 pub(crate) mod physical;
 #[path = "kernel/recovery.rs"]
 pub(crate) mod recovery;
+#[path = "kernel/sealed_invocation_observation.rs"]
+mod sealed_invocation_observation;
 #[path = "kernel/security.rs"]
 pub(crate) mod security;
 #[path = "kernel/security_admin.rs"]
@@ -67,6 +69,10 @@ pub use bootstrap::ActiveRevision;
 pub use inspect::AuthenticatedInspectSnapshot;
 pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use recovery::RevisionPairHistoryEntry;
+pub use sealed_invocation_observation::{
+    SealedInvocationArgumentObservation, SealedInvocationArgumentTypeKind,
+    SealedInvocationObservation, SealedInvocationObservationStatus,
+};
 pub use security::{
     AuthenticatedRawCallResult, AuthenticatedServerResourceAccepted,
     AuthenticatedServerResourceEvent, AuthenticatedServerResourceKind,
