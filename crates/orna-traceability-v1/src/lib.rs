@@ -1,7 +1,7 @@
 //! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
-use orna_conformance_v1::{EngineWitnesses, Stage};
+use orna_conformance_v1::{EngineWitnesses, ScenarioExecutionWitnesses, Stage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -182,7 +182,7 @@ struct Model {
 /// Returns an error when the reference bundle or its publication digests are
 /// invalid.
 pub fn generate(root: impl AsRef<Path>) -> Result<Report> {
-    generate_inner(root.as_ref(), None)
+    generate_inner(root.as_ref(), None, None)
 }
 
 /// Generate the frozen report with an execution register produced by the
@@ -197,10 +197,29 @@ pub fn generate_with_engine_witnesses(
     root: impl AsRef<Path>,
     witnesses: &EngineWitnesses,
 ) -> Result<Report> {
-    generate_inner(root.as_ref(), Some(witnesses))
+    generate_inner(root.as_ref(), Some(witnesses), None)
 }
 
-fn generate_inner(root: &Path, engine_witnesses: Option<&EngineWitnesses>) -> Result<Report> {
+/// Generate the frozen report with implementation-scenario execution
+/// witnesses. These are recorded as distinct runtime boundaries and never as
+/// Orna-engine execution.
+///
+/// # Errors
+///
+/// Returns an error when the reference bundle, its digests, or the witness
+/// register is invalid.
+pub fn generate_with_scenario_execution_witnesses(
+    root: impl AsRef<Path>,
+    witnesses: &ScenarioExecutionWitnesses,
+) -> Result<Report> {
+    generate_inner(root.as_ref(), None, Some(witnesses))
+}
+
+fn generate_inner(
+    root: &Path,
+    engine_witnesses: Option<&EngineWitnesses>,
+    scenario_execution_witnesses: Option<&ScenarioExecutionWitnesses>,
+) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
     if release.version != VERSION
         || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
@@ -268,7 +287,7 @@ fn generate_inner(root: &Path, engine_witnesses: Option<&EngineWitnesses>) -> Re
         fixture_classes: fixture_classes(&manifest),
         behavioral_scenarios: scenarios
             .scenarios
-            .into_iter()
+            .iter()
             .map(|scenario| {
                 let status = if scenario
                     .requirements
@@ -280,8 +299,8 @@ fn generate_inner(root: &Path, engine_witnesses: Option<&EngineWitnesses>) -> Re
                     status_from_level(&scenario.evidence_level)
                 };
                 ScenarioTrace {
-                    scenario_id: scenario.id,
-                    requirements: scenario.requirements,
+                    scenario_id: scenario.id.clone(),
+                    requirements: scenario.requirements.clone(),
                     status,
                 }
             })
@@ -289,6 +308,9 @@ fn generate_inner(root: &Path, engine_witnesses: Option<&EngineWitnesses>) -> Re
     };
     if let Some(witnesses) = engine_witnesses {
         apply_engine_witnesses(&mut report, witnesses, &manifest)?;
+    }
+    if let Some(witnesses) = scenario_execution_witnesses {
+        apply_scenario_execution_witnesses(&mut report, witnesses, &scenarios)?;
     }
     Ok(report)
 }
@@ -364,6 +386,83 @@ fn apply_engine_witnesses(
         requirement.boundaries.push(Boundary {
             kind: "engine-witness".into(),
             logical_id: format!("{}:{stage}", witness.fixture_id()),
+            implementation_ref: Some(witness.implementation_ref().into()),
+            test_ref: Some(witness.test_ref().into()),
+            status: Status::Executed,
+        });
+        requirement.status = aggregate(
+            &requirement
+                .boundaries
+                .iter()
+                .map(|boundary| boundary.status)
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(())
+}
+
+fn apply_scenario_execution_witnesses(
+    report: &mut Report,
+    witnesses: &ScenarioExecutionWitnesses,
+    scenarios: &Scenarios,
+) -> Result<()> {
+    if report.publication_digests != *witnesses.publication_digests() {
+        return Err(err(
+            "scenario execution witness publication digests do not match report",
+        ));
+    }
+    let scenarios = scenarios
+        .scenarios
+        .iter()
+        .map(|scenario| (scenario.id.as_str(), scenario))
+        .collect::<BTreeMap<_, _>>();
+    let mut requirements = report
+        .requirements
+        .iter_mut()
+        .map(|requirement| (requirement.requirement_id.clone(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for witness in witnesses.witnesses() {
+        let scenario = scenarios.get(witness.scenario_id()).ok_or_else(|| {
+            err(format!(
+                "scenario execution witness names unknown scenario: {}",
+                witness.scenario_id()
+            ))
+        })?;
+        if scenario.evidence_level != "implementation scenario, not executed by an Orna engine"
+            || !scenario
+                .requirements
+                .iter()
+                .any(|id| id == witness.requirement_id())
+        {
+            return Err(err(format!(
+                "scenario execution witness requirement mismatch: {}",
+                witness.scenario_id()
+            )));
+        }
+        if witness.implementation_ref().is_empty() || witness.test_ref().is_empty() {
+            return Err(err(
+                "scenario execution witness lacks implementation or test reference",
+            ));
+        }
+        if witness.observed_status() != &orna_conformance_v1::EvidenceStatus::Passed {
+            return Err(err("scenario execution witness has non-passing status"));
+        }
+        let key = (witness.requirement_id(), witness.scenario_id());
+        if !seen.insert(key) {
+            return Err(err("duplicate scenario execution witness binding"));
+        }
+        let requirement = requirements
+            .get_mut(witness.requirement_id())
+            .ok_or_else(|| {
+                err(format!(
+                    "scenario execution witness names unknown requirement: {}",
+                    witness.requirement_id()
+                ))
+            })?;
+        requirement.boundaries.push(Boundary {
+            kind: "implementation-scenario-witness".into(),
+            logical_id: witness.scenario_id().into(),
             implementation_ref: Some(witness.implementation_ref().into()),
             test_ref: Some(witness.test_ref().into()),
             status: Status::Executed,
@@ -960,6 +1059,55 @@ mod tests {
             .engine_witnesses(&mismatched_report, std::slice::from_ref(&binding))
             .expect("witness can carry the observed report digest inventory");
         assert!(generate_with_engine_witnesses(&root, &mismatched).is_err());
+    }
+    #[test]
+    fn digest_bound_scenario_witnesses_remain_distinct_from_engine_execution() {
+        let root = corpus();
+        let harness = orna_conformance_v1::Harness::new(
+            orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
+        );
+        let mut adapter = orna_conformance_v1::RuntimeAdapter::new(
+            orna_conformance_v1::BoundedEvaluator::default(),
+        );
+        let mut conformance_report = harness.run(&mut adapter);
+        conformance_report
+            .implementation_claim
+            .executed_scenario_contracts
+            .push("LET-REBIND-091".into());
+        let binding = orna_conformance_v1::ScenarioExecutionBinding {
+            requirement_id: "ORNA-VALUE-006".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "orna.bounded-expression-runtime.let-rebinding".into(),
+            test_ref: "conformance.runtime_scenarios.let_rebinding".into(),
+        };
+        let witnesses = harness
+            .scenario_execution_witnesses(&conformance_report, std::slice::from_ref(&binding))
+            .expect("declared passed scenario becomes a digest-bound witness");
+        let report = generate_with_scenario_execution_witnesses(&root, &witnesses)
+            .expect("digest-bound scenario witness is accepted");
+        let requirement = report
+            .requirements
+            .iter()
+            .find(|requirement| requirement.requirement_id == "ORNA-VALUE-006")
+            .expect("witnessed requirement");
+        assert_eq!(requirement.status, Status::PartiallyExecuted);
+        assert!(requirement.boundaries.iter().any(|boundary| {
+            boundary.kind == "implementation-scenario-witness"
+                && boundary.logical_id == "LET-REBIND-091"
+                && boundary.status == Status::Executed
+        }));
+        assert!(
+            requirement
+                .boundaries
+                .iter()
+                .all(|boundary| boundary.kind != "engine-witness")
+        );
+        let scenario = report
+            .behavioral_scenarios
+            .iter()
+            .find(|scenario| scenario.scenario_id == "LET-REBIND-091")
+            .expect("published scenario");
+        assert_eq!(scenario.status, Status::JustifiedGap);
     }
     #[test]
     fn reproducible() {
