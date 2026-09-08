@@ -312,7 +312,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
 }
 
 #[test]
-fn published_report_only_promotes_exact_frozen_contracts() {
+fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .output()
         .expect("conformance binary runs");
@@ -325,17 +325,7 @@ fn published_report_only_promotes_exact_frozen_contracts() {
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        declared,
-        [
-            "LET-REBIND-091",
-            "PIPE-001",
-            "PIPE-002",
-            "REPL-001",
-            "TXN-001",
-            "TXN-002"
-        ]
-    );
+    assert_eq!(declared, ["REPL-001", "TXN-001", "TXN-002"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
@@ -343,7 +333,7 @@ fn published_report_only_promotes_exact_frozen_contracts() {
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002" | "REPL-001" | "TXN-001" | "TXN-002")
+            Some("REPL-001" | "TXN-001" | "TXN-002")
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(
@@ -356,10 +346,15 @@ fn published_report_only_promotes_exact_frozen_contracts() {
                 "{} must remain skipped",
                 result["scenario"]
             );
-            assert_eq!(
-                result["detail"],
+            let expected = if matches!(
+                result["scenario"].as_str(),
+                Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002")
+            ) {
+                "scenario execution skipped: direct bounded-evaluator regression lacks an authoritative compiler/runtime scenario witness"
+            } else {
                 "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
-            );
+            };
+            assert_eq!(result["detail"], expected);
         }
     }
 }

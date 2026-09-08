@@ -25,8 +25,9 @@ use std::{
 /// Routes each conformance surface to the evaluator that actually owns it.
 /// Fixture and project stages stay on the bounded evaluator; the authoritative
 /// duplicate-key fixture and exact unsafe row-key repeat admission check use
-/// their owning table/row boundaries. Behavioral scenarios remain explicit
-/// corpus skips until their own authoritative compiler/runtime witness exists.
+/// their owning table/row boundaries. A direct bounded-evaluator scenario is
+/// useful regression evidence, but it is not an authoritative compiler/runtime
+/// scenario witness and therefore remains an explicit corpus skip.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -83,14 +84,13 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
         }
-        if pipeline_insertion_contract(scenario) {
-            return self.bounded.run_scenario(scenario);
-        }
-        if pipeline_precedence_contract(scenario) {
-            return self.bounded.run_scenario(scenario);
-        }
-        if let_rebinding_contract(scenario) {
-            return self.bounded.run_scenario(scenario);
+        if pipeline_insertion_contract(scenario)
+            || pipeline_precedence_contract(scenario)
+            || let_rebinding_contract(scenario)
+        {
+            return StageOutcome::Skipped {
+                reason: "direct bounded-evaluator regression lacks an authoritative compiler/runtime scenario witness".into(),
+            };
         }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
@@ -739,9 +739,6 @@ fn main() {
             .into_iter()
             .collect(),
             executed_scenario_contracts: vec![
-                "LET-REBIND-091".into(),
-                "PIPE-001".into(),
-                "PIPE-002".into(),
                 "REPL-001".into(),
                 "TXN-001".into(),
                 "TXN-002".into(),
