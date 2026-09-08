@@ -1474,6 +1474,10 @@ fn remote_continuity_reports_matching_and_stale_internal_refs_without_mutation()
         remote.path(),
         &["update-ref", "refs/orna/ids/0123456789abcdef", &head],
     );
+    git(
+        remote.path(),
+        &["update-ref", "refs/orna/ids/unrelated", &head],
+    );
     let before = git_state(&repo, root.path());
 
     assert_eq!(
@@ -1510,6 +1514,7 @@ fn remote_continuity_fails_closed_for_invalid_or_ambiguous_input_and_remote_fail
     let before = git_state(&repo, root.path());
 
     assert!(OrnaInternalRef::new("refs/heads/main").is_err());
+    assert!(OrnaInternalRef::new("refs/orna/ids/contains\x7fdel").is_err());
     assert!(NativeObjectId::new("not-a-native-object-id").is_err());
     assert_eq!(
         repo.observe_remote_continuity("origin", &[]),
@@ -1525,7 +1530,7 @@ fn remote_continuity_fails_closed_for_invalid_or_ambiguous_input_and_remote_fail
     );
     assert_eq!(
         repo.observe_remote_continuity("origin", std::slice::from_ref(&required)),
-        RemoteContinuity::Unverifiable
+        RemoteContinuity::Missing
     );
     assert_eq!(git_state(&repo, root.path()), before);
 
