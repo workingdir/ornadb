@@ -83,6 +83,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
         }
+        if live_keyed_update_contract(scenario) {
+            return run_live_keyed_update_scenario(scenario);
+        }
         if live_resync_contract(scenario) {
             return run_live_resync_scenario(scenario);
         }
@@ -321,7 +324,6 @@ fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
     )
 }
 
-#[cfg(test)]
 fn live_keyed_update_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-001"
         && scenario.title == "Keyed row update sends contextual delta"
@@ -331,7 +333,6 @@ fn live_keyed_update_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-001", "ORNA-LIVE-003"]
 }
 
-#[cfg(test)]
 fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_keyed_update_contract(scenario) {
         return StageOutcome::Skipped {
@@ -732,7 +733,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-003 serving resynchronization contract execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update and LIVE-003 serving resynchronization contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
@@ -741,6 +742,7 @@ fn main() {
                 "REPL-001".into(),
                 "TXN-001".into(),
                 "TXN-002".into(),
+                "LIVE-001".into(),
                 "LIVE-003".into(),
             ],
         })
