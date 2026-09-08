@@ -1538,6 +1538,81 @@ fn pending_force_checkout_recovery_fences_other_git_visible_checkout_executors()
 }
 
 #[test]
+fn restarted_force_discard_recovery_requires_the_recorded_canonical_witness() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+    git(root.path(), &["branch", "same-commit"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(38))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let restarted = Repository::discover(root.path()).unwrap();
+    let unrelated = restarted
+        .plan_checkout("same-commit", RuntimeGeneration::new(38))
+        .unwrap();
+    let before_unrelated = git_state(&restarted, root.path());
+    assert!(matches!(
+        restarted.execute_same_commit_checkout(&unrelated),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert_eq!(git_state(&restarted, root.path()), before_unrelated);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+
+    fs::write(root.path().join("ordinary.txt"), "stale local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let stale = restarted
+        .plan_checkout("experiment", RuntimeGeneration::new(38))
+        .unwrap();
+    assert_ne!(stale.force_token(), token);
+    let stale_discard = restarted
+        .validate_checkout_discard_set(
+            &stale,
+            true,
+            Some(&stale.force_token()),
+            stale.git().discardable_paths(),
+        )
+        .unwrap();
+    let before_stale = git_state(&restarted, root.path());
+    assert!(matches!(
+        restarted.persist_validated_checkout_discard(&stale_discard),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(matches!(
+        restarted.recover_pre_execution_checkout(),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert_eq!(git_state(&restarted, root.path()), before_stale);
+    assert_eq!(
+        fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+        "stale local\n"
+    );
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "stale local");
+    assert!(restarted.has_pending_pre_execution_checkout().unwrap());
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    restarted.recover_pre_execution_checkout().unwrap();
+    assert!(!restarted.has_pending_pre_execution_checkout().unwrap());
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+}
+
+#[test]
 fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
