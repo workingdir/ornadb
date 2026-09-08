@@ -311,3 +311,71 @@ fn engine_witnesses_require_an_exact_expectation_satisfied_fixture_stage() {
             .is_err()
     );
 }
+
+#[test]
+fn scenario_witnesses_bind_only_declared_passed_implementation_scenarios() {
+    let harness = Harness::new(Corpus::load_default().expect("reference corpus loads"));
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let report = harness.run(&mut adapter);
+    let bindings = [
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-VALUE-006".into(),
+            scenario_id: "LET-REBIND-091".into(),
+            implementation_ref: "orna.bounded-expression-runtime.let-rebinding".into(),
+            test_ref: "conformance.runtime_scenarios.let_rebinding".into(),
+        },
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-001".into(),
+            scenario_id: "PIPE-001".into(),
+            implementation_ref: "orna.bounded-expression-runtime.pipeline-insertion".into(),
+            test_ref: "conformance.runtime_scenarios.pipeline_insertion".into(),
+        },
+        ScenarioExecutionBinding {
+            requirement_id: "ORNA-PIPE-002".into(),
+            scenario_id: "PIPE-002".into(),
+            implementation_ref: "orna.bounded-expression-runtime.pipeline-precedence".into(),
+            test_ref: "conformance.runtime_scenarios.pipeline_precedence".into(),
+        },
+    ];
+
+    assert!(
+        harness
+            .scenario_execution_witnesses(&report, &bindings)
+            .is_err()
+    );
+
+    let mut declared_report = report.clone();
+    declared_report
+        .implementation_claim
+        .executed_scenario_contracts
+        .extend([
+            "LET-REBIND-091".into(),
+            "PIPE-001".into(),
+            "PIPE-002".into(),
+            "REPL-001".into(),
+            "TXN-001".into(),
+            "TXN-002".into(),
+        ]);
+    let witnesses = harness
+        .scenario_execution_witnesses(&declared_report, &bindings)
+        .expect("declared passed scenario becomes implementation-scenario traceability evidence");
+    assert_eq!(witnesses.witnesses().len(), 3);
+    assert_eq!(
+        witnesses.publication_digests(),
+        &declared_report.publication_digests
+    );
+    assert!(
+        witnesses
+            .witnesses()
+            .iter()
+            .all(|witness| witness.observed_status() == &EvidenceStatus::Passed)
+    );
+    assert_eq!(
+        witnesses
+            .witnesses()
+            .iter()
+            .map(ScenarioExecutionWitness::scenario_id)
+            .collect::<Vec<_>>(),
+        ["LET-REBIND-091", "PIPE-001", "PIPE-002"]
+    );
+}
