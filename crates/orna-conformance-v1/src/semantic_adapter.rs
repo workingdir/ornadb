@@ -21,8 +21,9 @@ use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     ListStreamSource, NoFault, RequestIdentity, RequestStatus, RunObservationRegistration,
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamRunOutcome, StreamTableMutationBatch, TableMutation, TerminalOutcome, WriterLease,
+    RunningTableRequestContinuation, RuntimeError, RuntimeIdentity, RuntimeState, StreamHandler,
+    StreamHandlerResult, StreamItem, StreamRunOutcome, StreamTableMutationBatch, TableMutation,
+    TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
@@ -1068,6 +1069,25 @@ pub struct DurableTransactionalEvaluator {
     limits: EvaluatorLimits,
 }
 
+/// The outcome of attempting to continue an already-admitted table request.
+///
+/// `Committed` records controlled table writes and the supplied terminal in
+/// one durable transaction. `NoMutation` is a successfully evaluated
+/// read-only request; it deliberately leaves terminal handling to its
+/// dedicated route rather than claiming table-activation proof.
+///
+/// A caller may retain a correlated protocol failure only for `Semantic`.
+/// `Fenced` means durable request ownership, identity, capture, or terminal
+/// state prevented this attempt from proceeding. The caller must re-read the
+/// durable request instead of synthesizing a replacement terminal.
+#[derive(Debug)]
+pub enum RunningTableRequestDisposition {
+    Committed,
+    NoMutation,
+    Semantic(StageOutcome<Diagnostic>),
+    Fenced(RuntimeError),
+}
+
 impl DurableTransactionalEvaluator {
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
@@ -1308,6 +1328,123 @@ impl DurableTransactionalEvaluator {
             )
             .await?;
         Ok(StageOutcome::Passed)
+    }
+
+    /// Continues one already-admitted, owner-fenced table request.
+    ///
+    /// This entry point deliberately has no admission inputs. The supplied
+    /// continuation is revalidated against `state` before parsing or
+    /// evaluation, then its identity, fingerprint, writer lease, and pinned
+    /// activation context are passed unchanged to the runtime's atomic table
+    /// commit boundary. It neither reserves nor starts a request, and it does
+    /// not acquire a replacement lease.
+    ///
+    /// Only the controlled table-mutation evaluator is admitted here. Stream
+    /// roots and all source forms rejected by the retained transactional
+    /// admission path return their original `StageOutcome` before a table
+    /// snapshot is read or a mutation is staged. A caller-provided success
+    /// terminal remains opaque and is retained byte-for-byte; this adapter
+    /// never synthesizes rollback proof.
+    pub async fn execute_running_table_request_with_success_terminal(
+        &self,
+        state: &RuntimeState,
+        continuation: RunningTableRequestContinuation,
+        unit: &SourceUnit,
+        success_terminal: TerminalOutcome,
+    ) -> RunningTableRequestDisposition {
+        // Reconstruct the capability from the durable Running request before
+        // source work. In particular, a completed, foreign, stale, or
+        // owner-mismatched capability cannot cause a second evaluation.
+        let continuation = match state
+            .continue_running_table_request(
+                continuation.identity(),
+                continuation.fingerprint(),
+                continuation.writer_lease(),
+            )
+            .await
+        {
+            Ok(continuation) => continuation,
+            Err(error) => return RunningTableRequestDisposition::Fenced(error),
+        };
+
+        let (functions, key_fields, table_assertions, module_assertions) =
+            match admit_transaction_source(unit, self.limits, &self.entry) {
+                Ok(value) => value,
+                Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
+            };
+        if functions
+            .get(&self.entry)
+            .is_some_and(|function| literal_stream_pipeline(&function.body).is_some())
+        {
+            return RunningTableRequestDisposition::Semantic(StageOutcome::Skipped {
+                reason: "running table request continuation does not admit stream roots".into(),
+            });
+        }
+
+        let tables = key_fields.keys().map(String::as_str).collect::<Vec<_>>();
+        let snapshot = match state.begin_table_activation(&tables).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return RunningTableRequestDisposition::Fenced(error),
+        };
+        if snapshot.context().capture() != continuation.context().capture() {
+            return RunningTableRequestDisposition::Fenced(RuntimeError::StaleCapture {
+                current: Box::new(snapshot.context().capture().clone()),
+            });
+        }
+        let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits);
+        for (table, rows) in snapshot.table_rows() {
+            for (key, row) in rows {
+                let row = match Value::decode(row) {
+                    Ok(row) => row,
+                    Err(_) => {
+                        return RunningTableRequestDisposition::Fenced(
+                            RuntimeError::RecoveryInvalid,
+                        );
+                    }
+                };
+                if let Err(error) = evaluator.seed_committed(table.clone(), key.clone(), row) {
+                    return RunningTableRequestDisposition::Fenced(error);
+                }
+            }
+        }
+        let mutations = match evaluator.execute_admitted(
+            &functions,
+            &key_fields,
+            &table_assertions,
+            &module_assertions,
+        ) {
+            Ok(mutations) => mutations,
+            Err(diagnostic) => {
+                return RunningTableRequestDisposition::Semantic(StageOutcome::Failed(*diagnostic));
+            }
+        };
+        // The atomic request activation boundary intentionally rejects an
+        // empty batch. A pure result must use its dedicated terminal route;
+        // accepting it here would claim table-activation proof without a
+        // controlled table write.
+        if mutations.is_empty() {
+            return RunningTableRequestDisposition::NoMutation;
+        }
+        let next_digest = durable_activation_digest(
+            continuation.context().capture().generation_digest(),
+            &mutations,
+        );
+        match state
+            .commit_table_request_activation(
+                continuation.writer_lease(),
+                continuation.identity(),
+                continuation.fingerprint(),
+                continuation.context(),
+                &mutations,
+                next_digest,
+                success_terminal,
+                &NoFault,
+            )
+            .await
+        {
+            Ok(_) => RunningTableRequestDisposition::Committed,
+            Err(error) => RunningTableRequestDisposition::Fenced(error),
+        }
     }
 
     /// Admits distinct project modules and executes one namespace-qualified
@@ -4027,16 +4164,16 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{
-        DurableTransactionalEvaluator, SourceUnit, StageOutcome, replay_request_terminal,
-        request_terminal,
+        DurableTransactionalEvaluator, RunningTableRequestDisposition, SourceUnit, StageOutcome,
+        replay_request_terminal, request_terminal,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
     use orna_foundation_v1::Value;
     use orna_repository_v1::Repository;
     use orna_runtime_v1::{
-        RequestIdentity, RequestState, RunObservationStatus, RuntimeError, RuntimeIdentity,
-        RuntimeState,
+        NoFault, RequestIdentity, RequestState, RunObservationRegistration, RunObservationStatus,
+        RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
     use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
     use std::{path::Path, process::Command};
@@ -4060,6 +4197,33 @@ mod durable_tests {
             parse_as: "module_unit".into(),
             source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
         }
+    }
+
+    async fn admit_running_table_request(
+        state: &RuntimeState,
+        owner: WriterLease,
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> orna_runtime_v1::RunningTableRequestContinuation {
+        let start = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: super::request_consumer_identity(),
+                    function: "main".into(),
+                    source_identity: Some("durable-continuation.orna".into()),
+                    invocation_id: request.request_id,
+                },
+                fingerprint,
+                owner,
+            )
+            .await
+            .expect("running request admission");
+        assert!(start.admitted);
+        state
+            .continue_running_table_request(request, fingerprint, owner)
+            .await
+            .expect("running request continuation")
     }
 
     fn project(modules: Vec<(&str, &str)>) -> ProjectUnit {
@@ -4280,6 +4444,232 @@ mod durable_tests {
                 .await,
             Ok(StageOutcome::Passed)
         ));
+    }
+
+    #[tokio::test]
+    async fn running_table_continuation_commits_once_with_the_exact_success_terminal() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [111; 16],
+            repository_id: [112; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [113; 16],
+            request_id: [114; 16],
+        };
+        let fingerprint = [115; 32];
+        let state = RuntimeState::open(&repository, identity, [116; 32])
+            .await
+            .expect("runtime");
+        let owner = state.acquire_lease([117; 16]).await.expect("writer lease");
+        let continuation = admit_running_table_request(&state, owner, request, fingerprint).await;
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let read_only = evaluator
+            .execute_running_table_request_with_success_terminal(
+                &state,
+                continuation.clone(),
+                &source(""),
+                TerminalOutcome::new(b"read-only-success".to_vec()).expect("bounded terminal"),
+            )
+            .await;
+        assert!(matches!(
+            read_only,
+            RunningTableRequestDisposition::NoMutation
+        ));
+        let read_only_status = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("running request");
+        assert_eq!(read_only_status.state, RequestState::Running);
+        assert!(read_only_status.terminal_outcome.is_none());
+        let retained =
+            TerminalOutcome::new(b"exact-protocol-success".to_vec()).expect("bounded terminal");
+
+        let outcome = evaluator
+            .execute_running_table_request_with_success_terminal(
+                &state,
+                continuation.clone(),
+                &source(r#"Note.insert({ id: 17, text: "continued" });"#),
+                retained,
+            )
+            .await;
+        assert!(matches!(outcome, RunningTableRequestDisposition::Committed));
+        let status = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("completed request");
+        assert_eq!(status.state, RequestState::Completed);
+        assert_eq!(
+            status
+                .terminal_outcome
+                .expect("retained terminal")
+                .as_bytes(),
+            b"exact-protocol-success"
+        );
+        let key = Value::int(17.into()).encode().expect("encoded key");
+        assert!(
+            state
+                .committed_table_row("Note", &key)
+                .await
+                .expect("committed row")
+                .is_some()
+        );
+
+        // A completed capability is rejected before source evaluation, so a
+        // later source cannot create a second row under the retained request.
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation,
+                    &source(r#"Note.insert({ id: 18, text: "must not run" });"#),
+                    TerminalOutcome::new(b"must-not-retain".to_vec()).expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Fenced(RuntimeError::RequestStateConflict)
+        ));
+        assert!(
+            state
+                .committed_table_row("Note", &Value::int(18.into()).encode().unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes() {
+        let temp = TempDir::new().expect("temporary repository");
+        git(temp.path(), &["init"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "user.name", "test"]);
+        let repository = Repository::discover(temp.path()).expect("repository");
+        let identity = RuntimeIdentity {
+            database_id: [121; 16],
+            repository_id: [122; 16],
+        };
+        let request = RequestIdentity {
+            session_id: [123; 16],
+            request_id: [124; 16],
+        };
+        let fingerprint = [125; 32];
+        let state = RuntimeState::open(&repository, identity, [126; 32])
+            .await
+            .expect("runtime");
+        let owner = state.acquire_lease([127; 16]).await.expect("writer lease");
+        let continuation = admit_running_table_request(&state, owner, request, fingerprint).await;
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let target_key = Value::int(19.into()).encode().expect("encoded target key");
+
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation.clone(),
+                    &source("unknown()"),
+                    TerminalOutcome::new(b"semantic-failure".to_vec()).expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Semantic(StageOutcome::Failed(_))
+        ));
+        let semantic_status = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("running request");
+        assert_eq!(semantic_status.state, RequestState::Running);
+        assert!(semantic_status.terminal_outcome.is_none());
+
+        let foreign_temp = TempDir::new().expect("foreign temporary repository");
+        git(foreign_temp.path(), &["init"]);
+        git(
+            foreign_temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(foreign_temp.path(), &["config", "user.name", "test"]);
+        let foreign_repository =
+            Repository::discover(foreign_temp.path()).expect("foreign repository");
+        let foreign = RuntimeState::open(&foreign_repository, identity, [126; 32])
+            .await
+            .expect("foreign runtime");
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &foreign,
+                    continuation.clone(),
+                    &source(r#"Note.insert({ id: 19, text: "foreign" });"#),
+                    TerminalOutcome::new(b"foreign".to_vec()).expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Fenced(RuntimeError::RequestUnknown)
+        ));
+        assert!(
+            foreign
+                .committed_table_row("Note", &target_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Advance the durable capture after admission. The old continuation
+        // must fail before it can stage the target mutation.
+        let snapshot = state
+            .begin_table_activation(&["maintenance"])
+            .await
+            .expect("maintenance snapshot");
+        let maintenance = TableMutation::new([131; 16], "maintenance", vec![1], Some(vec![1]))
+            .expect("maintenance mutation");
+        let next = super::durable_activation_digest(
+            snapshot.context().capture().generation_digest(),
+            &[maintenance.clone()],
+        );
+        state
+            .commit_table_activation(owner, snapshot.context(), &[maintenance], next, &NoFault)
+            .await
+            .expect("maintenance commit");
+        let after_maintenance = state.capture().await.expect("advanced capture");
+
+        assert!(matches!(
+            evaluator
+                .execute_running_table_request_with_success_terminal(
+                    &state,
+                    continuation,
+                    &source(r#"Note.insert({ id: 19, text: "stale" });"#),
+                    TerminalOutcome::new(b"stale".to_vec()).expect("bounded terminal"),
+                )
+                .await,
+            RunningTableRequestDisposition::Fenced(RuntimeError::StaleCapture { .. })
+        ));
+        assert_eq!(
+            state.capture().await.expect("unchanged capture"),
+            after_maintenance
+        );
+        assert!(
+            state
+                .committed_table_row("Note", &target_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let status = state
+            .request_status(request, fingerprint)
+            .await
+            .expect("request status")
+            .expect("running request");
+        assert_eq!(status.state, RequestState::Running);
+        assert!(status.terminal_outcome.is_none());
     }
 
     #[tokio::test]
