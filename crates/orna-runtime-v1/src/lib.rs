@@ -427,6 +427,20 @@ pub struct RuntimeObservationView {
     pub streams: Vec<StreamObservation>,
 }
 
+/// Checked, read-only current-runtime projections for the `sys.rt.runs` and
+/// `sys.rt.streams` subsets.
+///
+/// This type preserves the one coherent observation instant established by
+/// [`RuntimeObservationFence`]. It intentionally represents only the Run and
+/// Stream fields for which the runtime has durable evidence; it does not
+/// manufacture physical FunctionRef, ObjectRef, or InvocationRef links.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SysCurrentRuntimeProjection {
+    pub capture: CwdCapture,
+    pub runs: Vec<SysRunProjection>,
+    pub streams: Vec<SysStreamProjection>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub generation: u64,
@@ -910,6 +924,33 @@ impl SysStreamProjection {
             observed_at,
         })
     }
+}
+
+fn project_current_runtime_observations(
+    view: RuntimeObservationView,
+) -> Result<SysCurrentRuntimeProjection, RuntimeError> {
+    let runs = view
+        .runs
+        .iter()
+        .map(SysRunProjection::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let streams = view
+        .streams
+        .iter()
+        .map(|stream| {
+            let run = view
+                .runs
+                .iter()
+                .find(|run| run.id == stream.run)
+                .ok_or(RuntimeError::ObservationCoordinateMismatch)?;
+            SysStreamProjection::try_from_observation(stream, run)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SysCurrentRuntimeProjection {
+        capture: view.capture,
+        runs,
+        streams,
+    })
 }
 
 fn observation_instant(milliseconds: i64) -> Result<SystemTime, RuntimeError> {
@@ -1901,6 +1942,21 @@ impl RuntimeState {
             runs,
             streams,
         })
+    }
+
+    /// Reads checked, durable-field-only projections for the current runtime
+    /// Run and Stream subsets without starting, resuming, recovering, or
+    /// otherwise mutating an activation.
+    ///
+    /// The supplied fence is rechecked through
+    /// [`Self::current_runtime_observations`] before any projection occurs.
+    /// Every current Stream must have its retained parent Run in that same
+    /// fenced view; missing or malformed retained coordinates fail closed.
+    pub async fn current_runtime_sys_projections(
+        &self,
+        fence: &RuntimeObservationFence,
+    ) -> Result<SysCurrentRuntimeProjection, RuntimeError> {
+        project_current_runtime_observations(self.current_runtime_observations(fence).await?)
     }
 
     /// Reads the owner-fenced current-runtime Run subset.
@@ -16133,6 +16189,36 @@ mod tests {
             vec![stream.id]
         );
         assert_eq!(view.streams[0].run, view.runs[0].id);
+        let projections = state.current_runtime_sys_projections(&fence).await.unwrap();
+        assert_eq!(projections.capture, *fence.capture());
+        assert_eq!(
+            projections
+                .runs
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![run.id.as_bytes()]
+        );
+        assert_eq!(projections.streams.len(), 1);
+        assert_eq!(projections.streams[0].run, projections.runs[0].reference);
+        assert_eq!(
+            project_current_runtime_observations(RuntimeObservationView {
+                capture: view.capture.clone(),
+                runs: Vec::new(),
+                streams: view.streams.clone(),
+            }),
+            Err(RuntimeError::ObservationCoordinateMismatch)
+        );
+        let mut malformed_run = view.runs[0].clone();
+        malformed_run.runtime_id = id(206);
+        assert_eq!(
+            project_current_runtime_observations(RuntimeObservationView {
+                capture: view.capture.clone(),
+                runs: vec![malformed_run],
+                streams: Vec::new(),
+            }),
+            Err(RuntimeError::InvalidObservationReference)
+        );
 
         assert_eq!(
             state
@@ -16153,6 +16239,10 @@ mod tests {
             state.current_runtime_observations(&fence).await,
             Err(RuntimeError::StaleCapture { .. })
         ));
+        assert!(matches!(
+            state.current_runtime_sys_projections(&fence).await,
+            Err(RuntimeError::StaleCapture { .. })
+        ));
         assert_eq!(state.run_observations().await.unwrap().len(), 1);
         assert_eq!(state.stream_observations().await.unwrap().len(), 1);
 
@@ -16160,6 +16250,12 @@ mod tests {
         let current_view = state.current_runtime_observations(&current).await.unwrap();
         assert!(current_view.runs.is_empty());
         assert!(current_view.streams.is_empty());
+        let current_projections = state
+            .current_runtime_sys_projections(&current)
+            .await
+            .unwrap();
+        assert!(current_projections.runs.is_empty());
+        assert!(current_projections.streams.is_empty());
     }
 
     #[tokio::test]
