@@ -9,8 +9,9 @@
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
+use orna_conformance_v1::{DurableTransactionalEvaluator, SourceUnit, StageOutcome};
 use orna_evaluator_v1::{
-    reference_standard_profile, reference_standard_sources, AdmittedReplSession, Limits,
+    AdmittedReplSession, Limits, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
     CanonicalSnapshot, CwdCapture, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw,
@@ -47,6 +48,14 @@ struct SessionState {
 /// The immutable durable CWD pin captured for one admitted operation.
 struct OperationAdmission {
     snapshot: CanonicalSnapshot,
+}
+
+/// Trusted runtime inputs held only by the executable-owned live adapter.
+struct EffectfulAdmission {
+    repository: Repository,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    owner: [u8; 16],
 }
 
 /// Server-owned source for the durable CWD pin and immutable project inputs.
@@ -94,6 +103,7 @@ impl OperationAdmissionSource for RepositoryAdmissionSource {
 pub(crate) struct PureEvalApplication {
     database_id: [u8; 16],
     admissions: Box<dyn OperationAdmissionSource>,
+    effectful: Option<EffectfulAdmission>,
     expiries: SessionExpiries,
     sessions: BTreeMap<SessionId, SessionState>,
 }
@@ -105,6 +115,7 @@ impl PureEvalApplication {
         database_id: [u8; 16],
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
+        runtime_owner: [u8; 16],
         expiries: SessionExpiries,
     ) -> std::result::Result<Self, ()> {
         if identity.database_id != database_id {
@@ -116,6 +127,12 @@ impl PureEvalApplication {
                 repository: repository.clone(),
                 identity,
                 initial_digest,
+            }),
+            effectful: Some(EffectfulAdmission {
+                repository: repository.clone(),
+                identity,
+                initial_digest,
+                owner: runtime_owner,
             }),
             expiries,
             sessions: BTreeMap::new(),
@@ -247,6 +264,65 @@ impl PureEvalApplication {
         }
     }
 
+    fn execute_table_eval(
+        &self,
+        session: [u8; 16],
+        request: [u8; 16],
+        fingerprint: [u8; 32],
+        source: &str,
+    ) -> Result<Envelope> {
+        // This deliberately narrow production route admits only table-bearing
+        // Eval source with the conventional `main` root. Other effectful
+        // forms remain rejected until they have an equivalent fenced contract.
+        let unit = SourceUnit {
+            fixture_id: "live.eval".into(),
+            source_id: "live.eval".into(),
+            parse_as: "module_unit".into(),
+            source: source.into(),
+        };
+        let effectful = self.effectful.as_ref().ok_or(Error::ApplicationRejected)?;
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let response = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                value: None,
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        };
+        let terminal = orna_runtime_v1::TerminalOutcome::new(
+            response
+                .encode(ProtocolLimits::default())
+                .map_err(|_| Error::ApplicationRejected)?,
+        )
+        .map_err(|_| Error::ApplicationRejected)?;
+        let stage =
+            futures::executor::block_on(evaluator.execute_source_request_with_success_terminal(
+                &effectful.repository,
+                effectful.identity,
+                effectful.owner,
+                effectful.initial_digest,
+                orna_runtime_v1::RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
+                fingerprint,
+                &unit,
+                Some(terminal),
+            ))
+            .map_err(|_| Error::ApplicationRejected)?;
+        match stage {
+            StageOutcome::Passed => Ok(response),
+            StageOutcome::Failed(diagnostic) => {
+                self.failure_diagnostic(request, fingerprint, diagnostic)
+            }
+            StageOutcome::Skipped { .. } => Err(Error::ApplicationRejected),
+        }
+    }
+
     fn failure(&self, request: [u8; 16], fingerprint: [u8; 32], code: &str) -> Result<Envelope> {
         let diagnostic = diagnostic_for_code(code)?;
         self.failure_diagnostic(request, fingerprint, diagnostic)
@@ -299,6 +375,16 @@ impl LiveApplication for PureEvalApplication {
             // before reaching this callback. This local fence covers a
             // duplicate callback during the same retained session without
             // re-admitting or re-executing its source.
+            return Ok(response);
+        }
+        if source.contains("table ") {
+            if let Err(code) = self.session(session, database, presentation) {
+                let response = self.failure(request, *fingerprint, code)?;
+                self.retain_terminal(session_id, request, *fingerprint, &response);
+                return Ok(response);
+            }
+            let response = self.execute_table_eval(session, request, *fingerprint, source)?;
+            self.retain_terminal(session_id, request, *fingerprint, &response);
             return Ok(response);
         }
         let result = {
@@ -613,6 +699,7 @@ mod tests {
                 capture_admissions: Rc::clone(&capture_admissions),
                 repl_admissions: Rc::clone(&repl_admissions),
             }),
+            effectful: None,
             expiries: Rc::clone(&expiries),
             sessions: BTreeMap::new(),
         };
@@ -633,6 +720,88 @@ mod tests {
             presentation: presentation(),
             fingerprint,
         }
+    }
+
+    #[test]
+    fn table_eval_uses_the_request_owned_runtime_activation_and_replays() {
+        let directory = tempfile::tempdir().unwrap();
+        let initialized = orna_repository_v1::initialize_repository(directory.path()).unwrap();
+        let repository = initialized.into_repository();
+        let database_id = *orna_repository_v1::inspect_metadata(&repository)
+            .unwrap()
+            .unwrap()
+            .database_id()
+            .as_bytes();
+        let identity = RuntimeIdentity {
+            database_id,
+            repository_id: [9; 16],
+        };
+        let initial_digest = [8; 32];
+        let expiries = Rc::new(RefCell::new(BTreeMap::new()));
+        let mut application = PureEvalApplication::from_repository(
+            &repository,
+            database_id,
+            identity,
+            initial_digest,
+            [7; 16],
+            Rc::clone(&expiries),
+        )
+        .unwrap();
+        let session = [6; 16];
+        let request = [5; 16];
+        let fingerprint = [4; 32];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+        let source = "pub table Note(id: Int) { value: Int, } fn main() { Note.insert({ id: 1, value: 2 }); }";
+
+        let first = application
+            .eval(
+                session,
+                request,
+                &eval_message(database_id, source, fingerprint),
+            )
+            .unwrap();
+        assert!(matches!(
+            &first.message,
+            Message::Result {
+                status: ResultStatus::RetainedWithoutValue,
+                ..
+            }
+        ));
+        let state =
+            futures::executor::block_on(RuntimeState::open(&repository, identity, initial_digest))
+                .unwrap();
+        let status = futures::executor::block_on(state.request_status_for_identity(
+            orna_runtime_v1::RequestIdentity {
+                session_id: session,
+                request_id: request,
+            },
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(status.state.is_terminal());
+        assert_eq!(
+            Envelope::decode(
+                status.terminal_outcome.unwrap().as_bytes(),
+                ProtocolLimits::default(),
+            )
+            .unwrap(),
+            first
+        );
+        assert!(
+            futures::executor::block_on(
+                state.committed_table_row("Note", &Value::int(1.into()).encode().unwrap(),)
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            application.eval(
+                session,
+                request,
+                &eval_message(database_id, source, fingerprint),
+            ),
+            Ok(first)
+        );
     }
 
     fn raw_field(raw: &OvbRaw, key: u8) -> &OvbRaw {
@@ -948,9 +1117,11 @@ mod tests {
         let replay = application.eval(session, request, &stale).unwrap();
         assert_eq!(replay, first);
         assert_eq!(capture_admissions.get(), captures_after_failure);
-        assert!(application.sessions[&SessionId::new(session)]
-            .terminal
-            .contains_key(&request));
+        assert!(
+            application.sessions[&SessionId::new(session)]
+                .terminal
+                .contains_key(&request)
+        );
     }
 
     #[test]
@@ -1032,9 +1203,11 @@ mod tests {
             .unwrap()
             .watch
             .unwrap();
-        assert!(application.sessions[&session_id]
-            .watches
-            .contains_key(&watch));
+        assert!(
+            application.sessions[&session_id]
+                .watches
+                .contains_key(&watch)
+        );
         application.remove(session_id);
         assert!(!application.sessions.contains_key(&session_id));
         assert!(!expiries.borrow().contains_key(&session_id));
