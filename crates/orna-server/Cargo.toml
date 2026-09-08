@@ -20,6 +20,7 @@ nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user
 orna-artifact = { path = "../orna-artifact" }
 orna-client = { path = "../orna-client" }
 orna-compiler = { path = "../orna-compiler" }
+orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-core = { path = "../orna-core" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-postgres = { path = "../orna-postgres", features = ["embedded"] }
