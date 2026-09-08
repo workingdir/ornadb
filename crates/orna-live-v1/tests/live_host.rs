@@ -340,11 +340,19 @@ impl LiveSessionChildren for LateAdmissionChildren<'_> {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum UnitEvalOutcome {
+    #[default]
+    Unit,
+    SemanticFailure,
+}
+
 #[derive(Default)]
 struct UnitApplication {
     calls: usize,
     reject: bool,
     reject_cancel: bool,
+    eval_outcome: UnitEvalOutcome,
 }
 
 struct FailAt(FaultPoint);
@@ -373,6 +381,20 @@ fn unit_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
     }
 }
 
+fn semantic_failure_result(request: [u8; 16], fingerprint: [u8; 32]) -> Envelope {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Result {
+            status: ResultStatus::Failure,
+            value: None,
+            fingerprint,
+            diagnostic: None,
+        },
+        extensions: BTreeMap::new(),
+    }
+}
+
 impl LiveApplication for UnitApplication {
     fn eval(
         &mut self,
@@ -387,7 +409,10 @@ impl LiveApplication for UnitApplication {
         if self.reject {
             return Err(Error::ApplicationRejected);
         }
-        Ok(unit_result(request, *fingerprint))
+        Ok(match self.eval_outcome {
+            UnitEvalOutcome::Unit => unit_result(request, *fingerprint),
+            UnitEvalOutcome::SemanticFailure => semantic_failure_result(request, *fingerprint),
+        })
     }
 
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
@@ -3134,6 +3159,140 @@ fn durable_runtime_replays_a_terminal_request_after_host_reconstruction() {
     );
     drop(second_host);
     remove_test_repository(&root);
+}
+
+fn assert_durable_application_result_replays_verbatim(
+    mut first_application: UnitApplication,
+    request_id: [u8; 16],
+    expected_status: ResultStatus,
+) {
+    let (root, repository) = durable_repository();
+    let mut first_host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut first_host, &mut issuer);
+    block_on(first_host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = eval([1; 16], request_id, "1");
+    let first = block_on(first_host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut first_application,
+    ))
+    .unwrap();
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result { status, .. } if status == expected_status
+    ));
+    assert_eq!(first_application.calls, 1);
+    let first_response_bytes = first
+        .response
+        .as_ref()
+        .unwrap()
+        .encode(Limits::default().protocol)
+        .unwrap();
+    let identity = RequestIdentity {
+        session_id: [1; 16],
+        request_id,
+    };
+    let durable_status =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        durable_status.state,
+        orna_runtime_v1::RequestState::Completed
+    );
+    let retained_terminal_bytes = durable_status.terminal_outcome.unwrap().as_bytes().to_vec();
+    assert_eq!(first_response_bytes, retained_terminal_bytes);
+
+    let replay = block_on(first_host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut first_application,
+    ))
+    .unwrap();
+    let replay_response_bytes = replay
+        .response
+        .as_ref()
+        .unwrap()
+        .encode(Limits::default().protocol)
+        .unwrap();
+    assert_eq!(replay_response_bytes, retained_terminal_bytes);
+    assert_eq!(first_application.calls, 1);
+    drop(first_host);
+
+    let mut reconstructed_host = durable_host(open_durable_state(&repository));
+    let mut reconstructed_issuer = Issuer(1, None);
+    let reconstructed_credential = create(&mut reconstructed_host, &mut reconstructed_issuer);
+    block_on(reconstructed_host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &reconstructed_credential,
+        attachment: [6; 16],
+        now: 3,
+    }))
+    .unwrap();
+    let mut reconstructed_application = UnitApplication::default();
+    let reconstructed_replay = block_on(reconstructed_host.dispatch_frame(
+        [6; 16],
+        4,
+        Frame::Binary(request),
+        &mut reconstructed_application,
+    ))
+    .unwrap();
+    let reconstructed_replay_bytes = reconstructed_replay
+        .response
+        .as_ref()
+        .unwrap()
+        .encode(Limits::default().protocol)
+        .unwrap();
+    assert_eq!(reconstructed_replay_bytes, retained_terminal_bytes);
+    assert_eq!(reconstructed_application.calls, 0);
+    assert_eq!(first_application.calls + reconstructed_application.calls, 1);
+    let reconstructed_status =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reconstructed_status.state,
+        orna_runtime_v1::RequestState::Completed
+    );
+    assert_eq!(
+        reconstructed_status.terminal_outcome.unwrap().as_bytes(),
+        retained_terminal_bytes
+    );
+    drop(reconstructed_host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_runtime_retains_and_replays_a_correlated_semantic_failure_result() {
+    assert_durable_application_result_replays_verbatim(
+        UnitApplication {
+            eval_outcome: UnitEvalOutcome::SemanticFailure,
+            ..UnitApplication::default()
+        },
+        [28; 16],
+        ResultStatus::Failure,
+    );
+}
+
+#[test]
+fn durable_runtime_retains_and_replays_a_unit_success_result() {
+    assert_durable_application_result_replays_verbatim(
+        UnitApplication::default(),
+        [29; 16],
+        ResultStatus::Success,
+    );
 }
 
 #[test]
