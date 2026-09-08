@@ -1111,6 +1111,22 @@ pub struct RuntimeActivationContext {
     activation_time: SystemTime,
 }
 
+/// A checked capability to continue one already-admitted table request.
+///
+/// This does not reserve, start, execute, or finalize a request. It only
+/// carries the durable admission pin that the caller may pass to
+/// [`RuntimeState::commit_table_request_activation`] after evaluation has
+/// staged controlled table mutations. The commit boundary independently
+/// rechecks all ownership and capture preconditions before it writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunningTableRequestContinuation {
+    identity: RequestIdentity,
+    fingerprint: [u8; 32],
+    lease: WriterLease,
+    run: RunObservationId,
+    context: RuntimeActivationContext,
+}
+
 /// The immutable admission view for a table-backed activation.
 ///
 /// The context and every requested relation are read from one database
@@ -1141,6 +1157,30 @@ impl RuntimeActivationContext {
 
     pub fn activation_time(&self) -> SystemTime {
         self.activation_time
+    }
+}
+
+impl RunningTableRequestContinuation {
+    pub fn identity(&self) -> RequestIdentity {
+        self.identity
+    }
+
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+
+    pub fn writer_lease(&self) -> WriterLease {
+        self.lease
+    }
+
+    pub fn run(&self) -> RunObservationId {
+        self.run
+    }
+
+    /// Returns the immutable admission context required by the existing
+    /// controlled table-activation commit boundary.
+    pub fn context(&self) -> &RuntimeActivationContext {
+        &self.context
     }
 }
 
@@ -2269,6 +2309,73 @@ impl RuntimeState {
         Ok(RuntimeActivationContext {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
+        })
+    }
+
+    /// Returns a checked continuation for an already-admitted Running table
+    /// request without changing durable state.
+    ///
+    /// The request identity and fingerprint must match the durable ledger,
+    /// the supplied writer lease must still be current and own that request,
+    /// and exactly one live Running `sys.Run` observation must retain the
+    /// current runtime capture. The returned context is reconstructed from
+    /// that observation's admission capture, never from a later caller
+    /// snapshot. Any missing, stale, or inconsistent evidence fails closed.
+    pub async fn continue_running_table_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        lease: WriterLease,
+    ) -> Result<RunningTableRequestContinuation, RuntimeError> {
+        validate_request_identity(identity)?;
+        validate_writer_lease(lease)?;
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let request = request_status_tx(&transaction, identity)
+            .await?
+            .ok_or(RuntimeError::RequestUnknown)?;
+        require_fingerprint(&request, fingerprint)?;
+        if request.state != RequestState::Running {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        let evidence = request_execution_evidence_tx(&transaction, identity).await?;
+        validate_request_execution_evidence(&request, evidence)?;
+        self.require_owner(&transaction, lease).await?;
+        if evidence.owner != Some(RequestOwner::from(lease)) {
+            return Err(RuntimeError::RequestOwnerConflict);
+        }
+        let current_capture = capture_tx(&transaction).await?;
+        let run = load_run_observation_for_request_tx(&transaction, identity, &current_capture)
+            .await?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        if run.status != RunObservationStatus::Running
+            || run.ended_ms.is_some()
+            || run.diagnostic.is_some()
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+        if !run.live || run.snapshot != current_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current_capture),
+            });
+        }
+        let context = RuntimeActivationContext {
+            capture: run.snapshot,
+            activation_time: observation_instant(run.started_ms)?,
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(RunningTableRequestContinuation {
+            identity,
+            fingerprint,
+            lease,
+            run: run.id,
+            context,
         })
     }
 
@@ -6633,6 +6740,46 @@ async fn load_run_observations(
     Ok(observations)
 }
 
+/// Loads the one durable Run that proves a request's admission capture.
+///
+/// A Running request without exactly one matching observation is not safe to
+/// continue: the runtime cannot tell which capture should pin evaluation.
+async fn load_run_observation_for_request_tx(
+    connection: &Connection,
+    identity: RequestIdentity,
+    capture: &CwdCapture,
+) -> Result<Option<RunObservation>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT run_id FROM sys_run_observation
+             WHERE session_id = ?1 AND request_id = ?2
+             ORDER BY started_ms, run_id",
+            params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let id = RunObservationId(fixed(
+        row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?);
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    drop(rows);
+    load_run_observation_tx(connection, id, capture).await
+}
+
 async fn load_run_observation_tx(
     connection: &Connection,
     id: RunObservationId,
@@ -9458,6 +9605,34 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    async fn begin_continuable_request(
+        state: &RuntimeState,
+        owner: WriterLease,
+        session: u8,
+        request_id: u8,
+        fingerprint_value: u8,
+    ) -> (RequestIdentity, [u8; 32], RunObservation) {
+        let identity = request(session, request_id);
+        let fingerprint = digest(fingerprint_value);
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request: identity,
+                    consumer_identity: stream_delivery("continuation", "admission").consumer,
+                    function: "pkg.continuation".into(),
+                    source_identity: Some("table books".into()),
+                    invocation_id: id(request_id.wrapping_add(1)),
+                },
+                fingerprint,
+                owner,
+            )
+            .await
+            .unwrap()
+            .run
+            .unwrap();
+        (identity, fingerprint, run)
     }
 
     #[tokio::test]
@@ -12998,6 +13173,193 @@ mod tests {
             assert_eq!(state.latest_checkpoint().await.unwrap(), None);
             assert_eq!(state.capture().await.unwrap(), capture);
         }
+    }
+
+    #[tokio::test]
+    async fn running_table_request_continuation_uses_admission_pin_without_mutation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, run) =
+            begin_continuable_request(&state, owner, 40, 41, 42).await;
+        let before = state.capture().await.unwrap();
+
+        let continuation = state
+            .continue_running_table_request(identity, fingerprint, owner)
+            .await
+            .unwrap();
+
+        assert_eq!(continuation.identity(), identity);
+        assert_eq!(continuation.fingerprint(), fingerprint);
+        assert_eq!(continuation.writer_lease(), owner);
+        assert_eq!(continuation.run(), run.id);
+        assert_eq!(continuation.context().capture(), &run.snapshot);
+        assert_eq!(continuation.context().capture(), &before);
+        assert_eq!(
+            continuation.context().activation_time(),
+            observation_instant(run.started_ms).unwrap()
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let committed = state
+            .commit_table_request_activation(
+                continuation.writer_lease(),
+                continuation.identity(),
+                continuation.fingerprint(),
+                continuation.context(),
+                &[table_mutation(43, 1, Some(9))],
+                digest(44),
+                outcome(45),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.request.state, RequestState::Completed);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+    }
+
+    #[tokio::test]
+    async fn running_table_request_continuation_rejects_fingerprint_mismatch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, _fingerprint, _run) =
+            begin_continuable_request(&state, owner, 46, 47, 48).await;
+
+        assert_eq!(
+            state
+                .continue_running_table_request(identity, digest(49), owner)
+                .await,
+            Err(RuntimeError::RequestFingerprintMismatch)
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn running_table_request_continuation_rejects_mismatched_owner() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, _run) =
+            begin_continuable_request(&state, owner, 50, 51, 52).await;
+        let replacement = state.takeover_lease(owner, id(5)).await.unwrap();
+
+        assert_eq!(
+            state
+                .continue_running_table_request(identity, fingerprint, replacement)
+                .await,
+            Err(RuntimeError::RequestOwnerConflict)
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn running_table_request_continuation_rejects_stale_run_capture() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, run) =
+            begin_continuable_request(&state, owner, 53, 54, 55).await;
+        let later = state.begin_activation().await.unwrap();
+        let current = state
+            .commit_table_activation(
+                owner,
+                &later,
+                &[table_mutation(56, 1, Some(9))],
+                digest(57),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            state
+                .continue_running_table_request(identity, fingerprint, owner)
+                .await,
+            Err(RuntimeError::StaleCapture { current: captured }) if *captured == current
+        ));
+        assert_ne!(run.snapshot, current);
+        assert_eq!(
+            state
+                .request_status(identity, fingerprint)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn running_table_request_continuation_rejects_terminal_and_non_running_requests() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let (identity, fingerprint, _run) =
+            begin_continuable_request(&state, owner, 58, 59, 60).await;
+        let continuation = state
+            .continue_running_table_request(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        state
+            .commit_table_request_activation(
+                owner,
+                identity,
+                fingerprint,
+                continuation.context(),
+                &[table_mutation(61, 1, Some(9))],
+                digest(62),
+                outcome(63),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .continue_running_table_request(identity, fingerprint, owner)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+
+        let reserved = request(64, 65);
+        let reserved_fingerprint = digest(66);
+        state
+            .reserve_request(reserved, reserved_fingerprint)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .continue_running_table_request(reserved, reserved_fingerprint, owner)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
     }
 
     #[tokio::test]
