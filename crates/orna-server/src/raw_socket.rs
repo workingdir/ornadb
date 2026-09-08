@@ -839,6 +839,31 @@ impl RawSocketRuntimeAdmissionFence {
     }
 }
 
+/// Fences an admitted sealed invocation immediately before execution.
+///
+/// A changed lease or capture means this runtime no longer owns the admitted
+/// execution context. The lifecycle is therefore orphaned without asserting
+/// rollback or an external-effect outcome.
+async fn finalize_lost_admission_authority<D: DispatchService>(
+    dispatcher: &D,
+    fence: &RawSocketRuntimeAdmissionFence,
+    invocation: InvocationId,
+) -> Result<bool, PostgresKernelError> {
+    match fence.verify().await {
+        Ok(()) => Ok(false),
+        Err(source) => {
+            report_private_dispatch_source(&source);
+            dispatcher
+                .finalize_sealed_invocation_lifecycle(
+                    invocation,
+                    SealedInvocationLifecycleFinalization::Orphaned,
+                )
+                .await?;
+            Ok(true)
+        }
+    }
+}
+
 fn raw_runtime_identity(database_id: [u8; 16]) -> (RuntimeIdentity, [u8; 32]) {
     let mut repository_id = database_id;
     for (index, byte) in repository_id.iter_mut().enumerate() {
@@ -1902,9 +1927,8 @@ impl DispatchService for RawDispatchService {
             }
 
             if let Some(fence) = fence.as_ref()
-                && let Err(source) = fence.verify().await
+                && finalize_lost_admission_authority(self, fence, invocation).await?
             {
-                report_private_dispatch_source(&source);
                 cancellations
                     .lock()
                     .expect("invocation cancellation lock")
@@ -1962,6 +1986,30 @@ impl DispatchService for RawDispatchService {
                     };
                 }
             };
+            if operation.lifecycle_is_active()
+                && let Some(fence) = fence.as_ref()
+                && finalize_lost_admission_authority(self, fence, invocation).await?
+            {
+                cancellations
+                    .lock()
+                    .expect("invocation cancellation lock")
+                    .remove(&stream);
+                return DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: Some(invocation),
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
+                    actions: sealed_presentation_failure_actions(stream, invocation),
+                    cancellation: ServerAction::InvokeCancelled { stream },
+                    cancellation_token: None,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: true,
+                    worker_completed: true,
+                    _guards: None,
+                };
+            }
             let _ = tokio::select! {
                 biased;
                 _ = start_signal => {}
@@ -5048,6 +5096,45 @@ fn report_private_dispatch_source(source: &orna_postgres::PostgresKernelError) {
 mod runtime_admission_tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct OwnerLossFinalizer {
+        finalizations: Arc<Mutex<Vec<(InvocationId, SealedInvocationLifecycleFinalization)>>>,
+    }
+
+    impl OwnerLossFinalizer {
+        fn new() -> Self {
+            Self {
+                finalizations: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl DispatchService for OwnerLossFinalizer {
+        fn start(
+            &self,
+            _session: AuthenticatedSession,
+            _stream: u64,
+            _call: RawCall,
+        ) -> StartedDispatch {
+            panic!("owner-loss finalizer does not dispatch calls")
+        }
+
+        fn finalize_sealed_invocation_lifecycle(
+            &self,
+            invocation: InvocationId,
+            finalization: SealedInvocationLifecycleFinalization,
+        ) -> SealedLifecycleFinalizationFuture {
+            let finalizations = Arc::clone(&self.finalizations);
+            Box::pin(async move {
+                finalizations
+                    .lock()
+                    .expect("owner-loss finalization lock")
+                    .push((invocation, finalization));
+                Ok(())
+            })
+        }
+    }
+
     fn repository_admission() -> (tempfile::TempDir, Repository, RawSocketRuntimeAdmission) {
         let directory = tempfile::tempdir().expect("temporary repository");
         let repository = orna_repository_v1::initialize_repository(directory.path())
@@ -5097,6 +5184,41 @@ mod runtime_admission_tests {
             .expect("test owner handover");
 
         assert!(fence.verify().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn lost_runtime_owner_orphans_an_active_sealed_lifecycle() {
+        let (_directory, _repository, admission) = repository_admission();
+        let (_context, fence) = admission
+            .capture()
+            .await
+            .expect("runtime admission capture");
+        let state = RuntimeState::open(
+            &admission.repository,
+            admission.identity,
+            admission.initial_digest,
+        )
+        .await
+        .expect("runtime state");
+        state
+            .takeover_lease(fence.lease, [0x45; 16])
+            .await
+            .expect("test owner handover");
+        let finalizer = OwnerLossFinalizer::new();
+        let invocation = InvocationId::from_bytes([0x46; 16]);
+
+        assert!(
+            finalize_lost_admission_authority(&finalizer, &fence, invocation)
+                .await
+                .expect("lost owner finalizes")
+        );
+        assert_eq!(
+            *finalizer
+                .finalizations
+                .lock()
+                .expect("owner-loss finalization lock"),
+            vec![(invocation, SealedInvocationLifecycleFinalization::Orphaned)]
+        );
     }
 
     #[tokio::test]
