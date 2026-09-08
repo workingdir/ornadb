@@ -8085,6 +8085,15 @@ async fn apply_stream_intent_tx(
             let failure_status = load_stream_failure(connection, &identity)
                 .await?
                 .map(|failure| failure.status);
+            let authorised_blocking_delivery = matches!(
+                (purpose, failure_status),
+                (LeasePurpose::Deliver, Some(FailureStatus::Retrying))
+                    | (LeasePurpose::Skip, Some(FailureStatus::Failed))
+            );
+            if has_blocking_stream_failure(connection, &key).await? && !authorised_blocking_delivery
+            {
+                return Ok(CommitResult::Rejected(RejectReason::BlockingFailure));
+            }
             if let Some(stored) = load_stream_lease(connection, &key).await? {
                 if purpose == LeasePurpose::Deliver
                     && failure_status == Some(FailureStatus::Retrying)
@@ -11356,7 +11365,8 @@ mod tests {
             StreamStep::Exhausted
         );
 
-        let failed_delivery = stream_delivery("scheduler:fail", "scheduler:after-fail");
+        let mut failed_delivery = stream_delivery("scheduler:fail", "scheduler:after-fail");
+        failed_delivery.source = Component::new("scheduler-failure-source").unwrap();
         let failed_key = failed_delivery.checkpoint_key();
         let mut failing_source = TestSource {
             key: failed_key.clone(),
@@ -12015,6 +12025,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_retry_keeps_the_stable_failure_blocking_and_checkpoint_unadvanced() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let failed_delivery = stream_delivery("retry-cancelled", "retry-cancelled-next");
+        let later_delivery = stream_delivery("later-delivery", "later-delivery-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Permanent,
+        };
+        let mut stream = state.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: failed_delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected delivery lease: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                lease,
+                diagnostic,
+                StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected failure result: {other:?}"),
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: later_delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::BlockingFailure)
+        );
+        let retrying = match stream
+            .apply_async(CommitIntent::Retry {
+                failure: failed.identity.clone(),
+                expected_version: failed.version,
+                expected: expected.clone(),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("unexpected retry result: {other:?}"),
+        };
+        let retry_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: failed_delivery.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected retry lease: {other:?}"),
+        };
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Cancel { lease: retry_lease })
+                .await
+                .unwrap(),
+            CommitResult::Cancelled { .. }
+        ));
+        let checkpoint = stream
+            .checkpoint_async(&failed_delivery.checkpoint_key())
+            .await
+            .unwrap();
+        assert_eq!(checkpoint.version, expected.version);
+        assert_eq!(checkpoint.committed, expected.committed);
+        let recovered = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure after cancellation");
+        assert_eq!(recovered.identity, failed.identity);
+        assert_eq!(recovered.status, FailureStatus::Failed);
+        assert_eq!(recovered.attempts, retrying.attempts);
+        assert_eq!(recovered.version, retrying.version + 1);
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: later_delivery,
+                    expected,
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::BlockingFailure)
+        );
+    }
+
+    #[tokio::test]
     async fn recovery_rejects_missing_orphaned_and_malformed_failure_payloads() {
         {
             let (_temp, repo) = repository();
@@ -12495,35 +12615,15 @@ mod tests {
                 .checkpoint_async(&stale_delivery.checkpoint_key())
                 .await
                 .unwrap();
-            let later = stream_delivery("later", "later-next");
-            let later_lease = match stream
-                .apply_async(CommitIntent::Acquire {
-                    delivery: later.clone(),
-                    expected: orna_stream_v1::CheckpointPrecondition::from(&current),
-                    purpose: LeasePurpose::Deliver,
-                })
-                .await
-                .unwrap()
-            {
-                CommitResult::Acquired { lease } => lease,
-                other => panic!("unexpected later acquire result: {other:?}"),
-            };
-            assert!(matches!(
-                stream
-                    .apply_async(CommitIntent::Complete {
-                        lease: later_lease,
-                        expected: orna_stream_v1::CheckpointPrecondition::from(&current),
-                    })
-                    .await
-                    .unwrap(),
-                CommitResult::CheckpointAdvanced { .. }
-            ));
             assert_eq!(
                 stream
                     .apply_async(CommitIntent::Retry {
                         failure: stale_failure.identity.clone(),
                         expected_version: stale_failure.version,
-                        expected: orna_stream_v1::CheckpointPrecondition::from(&current),
+                        expected: orna_stream_v1::CheckpointPrecondition {
+                            version: current.version + 1,
+                            committed: current.committed.clone(),
+                        },
                     })
                     .await
                     .unwrap(),
