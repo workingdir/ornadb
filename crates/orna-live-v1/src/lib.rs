@@ -1262,7 +1262,7 @@ impl LiveHost {
                                 self.serving.resync(session, 0).map_err(map_serving)?.len();
                             let response =
                                 application.resync(session, request, watch, &envelope.message)?;
-                            let outcome = validate_snapshot_response(
+                            let outcome = validate_watch_response(
                                 request,
                                 Some(watch),
                                 response,
@@ -1326,18 +1326,23 @@ impl LiveHost {
                         Message::Watch { .. } => {
                             let response =
                                 application.watch(session, request, &envelope.message)?;
-                            let outcome = validate_snapshot_response(
+                            let outcome = validate_watch_response(
                                 request,
                                 None,
                                 response,
                                 self.limits.protocol,
                             )?;
-                            let watch = outcome
-                                .response
-                                .as_ref()
-                                .and_then(|response| response.watch)
-                                .ok_or(Error::ApplicationRejected)?;
-                            self.open_watch(session, watch, &outcome)?;
+                            if matches!(
+                                outcome.response.as_ref().map(|response| &response.message),
+                                Some(Message::Snapshot { .. })
+                            ) {
+                                let watch = outcome
+                                    .response
+                                    .as_ref()
+                                    .and_then(|response| response.watch)
+                                    .ok_or(Error::ApplicationRejected)?;
+                                self.open_watch(session, watch, &outcome)?;
+                            }
                             self.complete(session, request, outcome).await
                         }
                         Message::Cancel {
@@ -1783,13 +1788,17 @@ impl LiveHost {
     ) -> Result<()> {
         let request = envelope.request.ok_or(Error::RuntimeUnavailable)?;
         let valid = match &envelope.message {
-            Message::Subscribe { .. } | Message::Watch { .. } => {
+            Message::Subscribe { .. } => {
                 validate_snapshot_response(request, None, response.clone(), self.limits.protocol)
+                    .is_ok()
+            }
+            Message::Watch { .. } => {
+                validate_watch_response(request, None, response.clone(), self.limits.protocol)
                     .is_ok()
             }
             Message::Resync => {
                 let watch = envelope.watch.ok_or(Error::RuntimeUnavailable)?;
-                validate_snapshot_response(
+                validate_watch_response(
                     request,
                     Some(watch),
                     response.clone(),
@@ -2318,6 +2327,35 @@ fn validate_snapshot_response(
     }
     if !matches!(response.message, Message::Snapshot { .. }) {
         return Err(Error::ApplicationRejected);
+    }
+    Ok(DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(response),
+    })
+}
+
+/// Watch requests may be rejected with a structured host diagnostic. An
+/// initial watch has no server-issued identity yet, while resync must retain
+/// its existing watch identity so a client can correlate the failure without
+/// treating it as a new watch admission.
+fn validate_watch_response(
+    request: [u8; 16],
+    watch: Option<[u8; 16]>,
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
+    if response.request != Some(request) {
+        return Err(Error::ApplicationRejected);
+    }
+    match &response.message {
+        Message::Snapshot { .. }
+            if response.watch.is_some()
+                && watch.is_none_or(|expected| response.watch == Some(expected)) => {}
+        Message::Diagnostic { .. } if response.watch == watch => {}
+        _ => return Err(Error::ApplicationRejected),
     }
     Ok(DispatchOutcome {
         outcome: FrameOutcome::Accepted,
@@ -5021,6 +5059,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_foundation_v1::{
+        Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
+    };
     use orna_repository_v1::Repository;
     use orna_runtime_v1::RuntimeIdentity;
     use std::{
@@ -5213,6 +5254,124 @@ mod tests {
             },
             extensions: BTreeMap::new(),
         }
+    }
+
+    fn watch_diagnostic_response(request: [u8; 16], watch: Option<[u8; 16]>) -> Envelope {
+        let diagnostic = FoundationDiagnostic::new(
+            SafeText::new("ORNA-LIVE-WATCH").unwrap(),
+            DiagnosticSeverity::Error,
+            SafeText::redacted(),
+        )
+        .unwrap()
+        .redacted()
+        .with_reference(request);
+        let diagnostic = Value::decode(&diagnostic.encode_ovb().unwrap())
+            .unwrap()
+            .raw()
+            .clone();
+        let bytes = Value::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Int(1.into()), OvbRaw::Int(19.into())),
+            (OvbRaw::Int(2.into()), OvbRaw::Bytes(request.to_vec())),
+            (
+                OvbRaw::Int(3.into()),
+                watch.map_or(OvbRaw::Null, |watch| OvbRaw::Bytes(watch.to_vec())),
+            ),
+            (
+                OvbRaw::Int(4.into()),
+                OvbRaw::Map(vec![(OvbRaw::Int(0.into()), diagnostic)]),
+            ),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        Envelope::decode(&bytes, ProtocolLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn watch_diagnostics_require_exact_request_and_watch_correlation() {
+        let request = [7; 16];
+        let watch = [8; 16];
+
+        assert!(
+            validate_watch_response(
+                request,
+                None,
+                watch_diagnostic_response(request, None),
+                ProtocolLimits::default(),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_watch_response(
+                request,
+                None,
+                watch_diagnostic_response(request, Some(watch)),
+                ProtocolLimits::default(),
+            ),
+            Err(Error::ApplicationRejected)
+        ));
+        assert!(
+            validate_watch_response(
+                request,
+                Some(watch),
+                watch_diagnostic_response(request, Some(watch)),
+                ProtocolLimits::default(),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_watch_response(
+                request,
+                Some(watch),
+                watch_diagnostic_response(request, Some([9; 16])),
+                ProtocolLimits::default(),
+            ),
+            Err(Error::ApplicationRejected)
+        ));
+    }
+
+    #[test]
+    fn retained_watch_diagnostic_replays_only_for_its_request_fingerprint() {
+        let host = subscribed_host(None);
+        let request = [7; 16];
+        let fingerprint = [8; 32];
+        let envelope = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Watch {
+                source: "1 + 1".into(),
+                database: orna_protocol_v1::DatabaseContext {
+                    database: [2; 16],
+                    snapshot: None,
+                },
+                presentation: orna_protocol_v1::PresentationContext {
+                    locale: "en-GB".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "dark".into(),
+                    supported_kinds: vec![],
+                },
+                refresh_floor: None,
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert!(
+            host.validate_retained_response(
+                fingerprint,
+                &envelope,
+                &watch_diagnostic_response(request, None),
+            )
+            .is_ok()
+        );
+        assert!(
+            host.validate_retained_response(
+                fingerprint,
+                &envelope,
+                &watch_diagnostic_response([9; 16], None),
+            )
+            .is_err()
+        );
     }
 
     #[test]
