@@ -441,6 +441,21 @@ pub struct SysCurrentRuntimeProjection {
     pub streams: Vec<SysStreamProjection>,
 }
 
+/// Checked, read-only retained projections for the durable `sys.Run` and
+/// `sys.Stream` relations.
+///
+/// The rows are read from one database snapshot and every Stream is bound to
+/// its retained parent Run before it is exposed. This establishes only the
+/// coherent durable-observation query boundary: fields requiring physical
+/// FunctionRef, ObjectRef, or InvocationRef coordinates remain unavailable
+/// until the runtime durably owns those coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SysRetainedObservationProjection {
+    pub capture: CwdCapture,
+    pub runs: Vec<SysRunProjection>,
+    pub streams: Vec<SysStreamProjection>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub generation: u64,
@@ -955,6 +970,17 @@ fn project_current_runtime_observations(
     if view.runs.iter().any(|run| !run.live) || view.streams.iter().any(|stream| !stream.live) {
         return Err(RuntimeError::RecoveryInvalid);
     }
+    let retained = project_retained_observations(view)?;
+    Ok(SysCurrentRuntimeProjection {
+        capture: retained.capture,
+        runs: retained.runs,
+        streams: retained.streams,
+    })
+}
+
+fn project_retained_observations(
+    view: RuntimeObservationView,
+) -> Result<SysRetainedObservationProjection, RuntimeError> {
     let runs = view
         .runs
         .iter()
@@ -972,7 +998,7 @@ fn project_current_runtime_observations(
             SysStreamProjection::try_from_observation(stream, run)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(SysCurrentRuntimeProjection {
+    Ok(SysRetainedObservationProjection {
         capture: view.capture,
         runs,
         streams,
@@ -1948,6 +1974,34 @@ impl RuntimeState {
     pub async fn run_observations(&self) -> Result<Vec<RunObservation>, RuntimeError> {
         let capture = self.capture().await?;
         load_run_observations(&self.connection, &capture).await
+    }
+
+    /// Reads one coherent, checked, retained projection of the durable
+    /// `sys.Run` and `sys.Stream` relations without mutating runtime state.
+    ///
+    /// The captured database state and both relation reads occur in one
+    /// transaction. A Stream whose durable parent Run is absent or whose
+    /// checked natural-key reference does not agree with that parent fails
+    /// closed rather than being exposed as an orphaned relation row.
+    pub async fn retained_sys_observation_projections(
+        &self,
+    ) -> Result<SysRetainedObservationProjection, RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let capture = capture_tx(&tx).await?;
+        let runs = load_run_observations(&tx, &capture).await?;
+        let streams = load_stream_observations(&tx, &capture).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        project_retained_observations(RuntimeObservationView {
+            capture,
+            runs,
+            streams,
+        })
     }
 
     /// Verifies `lease` and captures the current runtime generation in one
@@ -16762,6 +16816,65 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_sys_projection_keeps_historical_parent_relation_and_rejects_orphans() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(215, 216);
+        let key = stream_delivery("retained", "coherent").checkpoint_key();
+        state.reserve_request(request, digest(217)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.retained".into(),
+                source_identity: None,
+                invocation_id: id(218),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let owner = state.acquire_lease(id(219)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(owner, &capture, &mutation(220), digest(221), &NoFault)
+            .await
+            .unwrap();
+
+        let before = state.stream_checkpoint(&key).await.unwrap();
+        let projections = state.retained_sys_observation_projections().await.unwrap();
+        assert_eq!(projections.capture, state.capture().await.unwrap());
+        assert_eq!(projections.runs.len(), 1);
+        assert_eq!(projections.streams.len(), 1);
+        assert!(!projections.runs[0].live);
+        assert!(!projections.streams[0].live);
+        assert_eq!(projections.runs[0].id, run.id.as_bytes());
+        assert_eq!(
+            projections.streams[0].reference,
+            stream.reference(&run).unwrap()
+        );
+        assert_eq!(projections.streams[0].run, projections.runs[0].reference);
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+
+        let retained = RuntimeObservationView {
+            capture: projections.capture,
+            runs: Vec::new(),
+            streams: state.stream_observations().await.unwrap(),
+        };
+        assert_eq!(
+            project_retained_observations(retained),
+            Err(RuntimeError::ObservationCoordinateMismatch)
         );
     }
 
