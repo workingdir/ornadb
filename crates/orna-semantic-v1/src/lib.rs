@@ -5823,7 +5823,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
         return EffectSummary::default();
     };
     let effect = match path.as_slice() {
-        ["sys", "io", ..] => Some("filesystem"),
+        ["sys", "io", ..] | ["std", "io", "fs", ..] => Some("filesystem"),
         ["sys", "net", ..] => Some("network"),
         ["std", "net", ..] => Some("network"),
         ["sys", "process", ..] => Some("process"),
@@ -5880,6 +5880,8 @@ fn assertion(
     if inferred.effects.forbidden_for_assertion() {
         let message = if inferred.effects.effects.contains("network") {
             "declaration assertion uses forbidden network effect"
+        } else if inferred.effects.effects.contains("filesystem") {
+            "declaration assertion uses forbidden filesystem effect"
         } else {
             "assertion has forbidden effects or failure"
         };
