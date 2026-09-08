@@ -1431,6 +1431,48 @@ fn pre_execution_force_checkout_recovery_retains_drifted_intent_without_mutation
 }
 
 #[test]
+fn pending_force_checkout_recovery_fences_other_git_visible_checkout_executors() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+    git(root.path(), &["branch", "same-commit"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let force_plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(37))
+        .unwrap();
+    let force_token = force_plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(
+            &force_plan,
+            true,
+            Some(&force_token),
+            force_plan.git().discardable_paths(),
+        )
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let safe_plan = repo
+        .plan_checkout("same-commit", RuntimeGeneration::new(37))
+        .unwrap();
+    let before = git_state(&repo, root.path());
+    assert!(matches!(
+        repo.execute_same_commit_checkout(&safe_plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+}
+
+#[test]
 fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

@@ -1989,6 +1989,7 @@ impl Repository {
         plan: &CheckoutPreflight,
     ) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
         self.verify_checkout_preflight_locked(plan)?;
         if plan.expected_head.as_ref() != Some(plan.target.commit()) {
             return Err(RepositoryError::CheckoutExecutionUnsafe);
@@ -2051,6 +2052,8 @@ impl Repository {
     {
         let _lock = self
             .acquire_coordination_lock()
+            .map_err(CheckoutExecutionError::Repository)?;
+        self.require_no_pending_checkout_recovery_locked()
             .map_err(CheckoutExecutionError::Repository)?;
         self.verify_checkout_preflight_locked(plan)
             .map_err(CheckoutExecutionError::Repository)?;
@@ -2267,6 +2270,18 @@ impl Repository {
         discard
             .preflight
             .authorize_force(true, Some(&discard.force_token))
+    }
+
+    /// A durable force-discard intent means recovery owns the next checkout
+    /// transition. No other Git-visible checkout may interleave with it: doing
+    /// so would invalidate the before-state that recovery has to compare and
+    /// could turn a recoverable intent into a partial switch.
+    fn require_no_pending_checkout_recovery_locked(&self) -> Result<(), RepositoryError> {
+        if self.read_checkout_recovery_journal_locked()?.is_some() {
+            Err(RepositoryError::CheckoutRecoveryRequired)
+        } else {
+            Ok(())
+        }
     }
 
     /// Durably records a verified force-discard capability before a future
