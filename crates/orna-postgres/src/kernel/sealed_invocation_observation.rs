@@ -159,6 +159,14 @@ impl SealedInvocationObservation {
                 "invocation reference disagrees with persisted admission capture",
             )
         })?;
+        let expected_reference =
+            invocation_observation_reference(&self.admission_capture, self.invocation, &record)?;
+        if self.reference != expected_reference {
+            return Err(observation_invariant(
+                &record,
+                "invocation reference disagrees with persisted invocation identity",
+            ));
+        }
         let snapshot = snapshot_reference(
             self.admission_capture.database_id(),
             self.admission_capture.snapshot().clone(),
@@ -1058,6 +1066,17 @@ mod tests {
             )
             .unwrap(),
         );
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_reference_for_another_invocation() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.reference =
+            invocation_observation_reference(&admitted, InvocationId::from_bytes([3; 16]), "test")
+                .unwrap();
 
         assert!(internal.durable_sys_projection().is_err());
     }
