@@ -1620,6 +1620,10 @@ impl<C: StreamRunControl> Drop for AdmissionPermit<'_, C> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamRunOutcome {
+    Paused {
+        delivered: usize,
+        checkpoint: StreamCheckpoint,
+    },
     Exhausted {
         delivered: usize,
         checkpoint: StreamCheckpoint,
@@ -1646,6 +1650,7 @@ pub enum StreamRunOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamStep {
+    Paused { checkpoint: StreamCheckpoint },
     Waiting,
     Exhausted,
     Committed { checkpoint: StreamCheckpoint },
@@ -2917,9 +2922,10 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
-    /// Records a terminal runner outcome that has no delivery lease (for
-    /// example finite exhaustion or cancellation before admission). The
-    /// observation update is still writer-fenced and committed atomically.
+    /// Records a completed or paused runner boundary that has no delivery
+    /// lease (for example finite exhaustion, cancellation before admission,
+    /// or a pause before the next item). The observation update is still
+    /// writer-fenced and committed atomically.
     async fn complete_stream_observation(
         &self,
         writer: WriterLease,
@@ -2928,7 +2934,9 @@ impl RuntimeState {
     ) -> Result<(), RuntimeError> {
         debug_assert!(matches!(
             status,
-            StreamObservationStatus::Completed | StreamObservationStatus::Cancelled
+            StreamObservationStatus::Completed
+                | StreamObservationStatus::Cancelled
+                | StreamObservationStatus::Paused
         ));
         let transaction = self
             .connection
@@ -3069,6 +3077,13 @@ impl RuntimeState {
             .checkpoint_async(key)
             .await
             .map_err(StreamStepError::Runtime)?;
+        if load_stream_status(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?
+            == StreamStatus::Paused
+        {
+            return Ok(StreamStep::Paused { checkpoint });
+        }
         let poll = match source.next(&checkpoint).await {
             Ok(poll) => poll,
             Err(diagnostic) => {
@@ -3139,6 +3154,9 @@ impl RuntimeState {
                 .map_err(StreamStepError::Runtime)?
             {
                 CommitResult::Acquired { lease } => lease,
+                CommitResult::Rejected(RejectReason::StreamPaused) => {
+                    return Ok(StreamStep::Paused { checkpoint });
+                }
                 CommitResult::Rejected(reason) => return Ok(StreamStep::Rejected(reason)),
                 _ => {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
@@ -3303,6 +3321,15 @@ impl RuntimeState {
                 .run_stream_once_controlled(writer, key, source, handler, control)
                 .await?
             {
+                StreamStep::Paused { checkpoint } => {
+                    self.complete_stream_observation(writer, key, StreamObservationStatus::Paused)
+                        .await
+                        .map_err(StreamStepError::Runtime)?;
+                    return Ok(StreamRunOutcome::Paused {
+                        delivered,
+                        checkpoint,
+                    });
+                }
                 StreamStep::Waiting => {
                     if let Err(diagnostic) = source.wait(control as &dyn StreamRunControl).await {
                         if control.cancelled() || is_cancellation_diagnostic(diagnostic) {
@@ -10580,6 +10607,49 @@ mod tests {
         ));
         assert_eq!(raced_source.polls, 1);
         assert_eq!(raced_handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_stream_runner_stops_at_a_paused_admission_boundary() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("paused-boundary:one", "paused-boundary:two");
+        let key = delivery.checkpoint_key();
+        assert_eq!(
+            state.pause_stream(writer, key.clone()).await,
+            Ok(StreamAdministrationOutcome::Paused { changed: true }),
+        );
+
+        let mut source = SequenceSource {
+            key: key.clone(),
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Item(Box::new(StreamItem {
+                delivery,
+                payload: vec![1],
+            }))]),
+        };
+        let mut handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled)
+                .await,
+            Ok(StreamRunOutcome::Paused {
+                delivered: 0,
+                checkpoint: StreamCheckpoint {
+                    version: 0,
+                    committed: None,
+                    ..
+                },
+            })
+        ));
+        assert_eq!(source.polls, 0);
+        assert_eq!(handler.calls, 0);
     }
 
     #[tokio::test]
