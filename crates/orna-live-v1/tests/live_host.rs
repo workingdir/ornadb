@@ -2430,6 +2430,44 @@ fn child_aware_delete_retires_active_and_pending_websocket_candidates() {
 }
 
 #[test]
+fn cleanup_acknowledgement_requires_a_delivered_retirement_notice() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
+        .unwrap();
+    assert!(transport.abort_websocket_upgrade(&pending));
+
+    assert!(!transport.acknowledge_retired_attachment([5; 16]));
+    assert_eq!(
+        transport
+            .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 3)
+            .unwrap_err()
+            .status,
+        503
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+}
+
+#[test]
 fn child_free_delete_preserves_session_until_socket_cleanup_can_be_joined() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
