@@ -3,7 +3,7 @@ use super::{PostgresKernel, PostgresKernelError};
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
     CwdCapture, InvocationArgumentRef, InvocationRef, invocation_argument_reference,
-    invocation_reference,
+    invocation_reference, validate_invocation_argument_reference, validate_invocation_reference,
 };
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
@@ -112,71 +112,7 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            let invocation_bytes = invocation.to_bytes().to_vec();
-            // Requiring every target coordinate at query time is intentional:
-            // the private unresolved-denial row has no FunctionRef-equivalent
-            // coordinate and is not part of this public observation boundary.
-            let row = transaction
-                .query_opt(
-                    "SELECT source_revision_id, catalogue_revision_id, function_id, status \
-                     FROM _orna_kernel.sealed_invocation_lifecycle \
-                     WHERE invocation_id = $1 \
-                       AND source_revision_id IS NOT NULL \
-                       AND catalogue_revision_id IS NOT NULL \
-                       AND function_id IS NOT NULL",
-                    &[&invocation_bytes],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
-            let result = match row {
-                None => None,
-                Some(row) => {
-                    let record = invocation.canonical();
-                    let reference = invocation_observation_reference(capture, invocation, &record)?;
-                    let source_revision = SourceRevisionId::from_bytes(observation_id(
-                        &row,
-                        &record,
-                        "source_revision_id",
-                    )?);
-                    let catalogue_revision = CatalogueRevisionId::from_bytes(observation_id(
-                        &row,
-                        &record,
-                        "catalogue_revision_id",
-                    )?);
-                    let function =
-                        FunctionId::from_bytes(observation_id(&row, &record, "function_id")?);
-                    let status = SealedInvocationObservationStatus::decode(
-                        observation_column(&row, &record, "status")?,
-                        &record,
-                    )?;
-                    let argument_rows = transaction
-                        .query(
-                            "SELECT position, parameter_id, name, type_kind, scalar_type, \
-                                    target_type_id, value_digest, redacted \
-                             FROM _orna_kernel.sealed_invocation_argument_metadata \
-                             WHERE invocation_id = $1 ORDER BY position ASC",
-                            &[&invocation_bytes],
-                        )
-                        .await
-                        .map_err(PostgresKernelError::Database)?;
-                    let arguments = argument_rows
-                        .iter()
-                        .map(|argument| {
-                            decode_argument_observation(argument, capture, invocation, &record)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    validate_argument_order(&arguments, &record)?;
-                    Some(SealedInvocationObservation {
-                        reference,
-                        invocation,
-                        source_revision,
-                        catalogue_revision,
-                        function,
-                        status,
-                        arguments,
-                    })
-                }
-            };
+            let result = load_observation_by_id(&transaction, capture, invocation).await?;
             transaction
                 .rollback()
                 .await
@@ -186,6 +122,158 @@ impl PostgresKernel {
         .await;
         finish_observation_session(operation, session.shutdown().await)
     }
+
+    /// Loads all retained sealed-invocation observations in stable durable
+    /// order without starting, resuming, or mutating any invocation.
+    ///
+    /// This retained collection makes no current-runtime membership claim.
+    /// Lifecycle rows do not yet retain the admission evidence needed for a
+    /// current-runtime projection.
+    ///
+    /// The supplied capture is the one coherent snapshot used to construct
+    /// every public reference. Rows with incomplete pinned target coordinates
+    /// are intentionally excluded: they are private unresolved-denial
+    /// evidence, not public observations.
+    pub async fn load_sealed_invocation_observations(
+        &self,
+        capture: &CwdCapture,
+    ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
+        self.load_retained_sealed_invocation_observation_collection(capture)
+            .await
+    }
+
+    async fn load_retained_sealed_invocation_observation_collection(
+        &self,
+        capture: &CwdCapture,
+    ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .read_only(true)
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let rows = transaction
+                .query(
+                    "SELECT invocation_id FROM _orna_kernel.sealed_invocation_lifecycle \
+                     WHERE source_revision_id IS NOT NULL \
+                       AND catalogue_revision_id IS NOT NULL \
+                       AND function_id IS NOT NULL \
+                     ORDER BY started_at ASC, invocation_id ASC",
+                    &[],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            let mut observations = Vec::with_capacity(rows.len());
+            for row in rows {
+                let invocation = InvocationId::from_bytes(observation_id(
+                    &row,
+                    "sealed invocation observation collection",
+                    "invocation_id",
+                )?);
+                let observation = load_observation_by_id(&transaction, capture, invocation)
+                    .await?
+                    .ok_or_else(|| {
+                        observation_invariant(
+                            &invocation.canonical(),
+                            "collection row disappeared during repeatable read",
+                        )
+                    })?;
+                observations.push(observation);
+            }
+            validate_observation_collection_capture(&observations, capture)?;
+            transaction
+                .rollback()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(observations)
+        }
+        .await;
+        finish_observation_session(operation, session.shutdown().await)
+    }
+}
+
+fn validate_observation_collection_capture(
+    observations: &[SealedInvocationObservation],
+    capture: &CwdCapture,
+) -> Result<(), PostgresKernelError> {
+    for observation in observations {
+        let record = observation.invocation.canonical();
+        validate_invocation_reference(observation.reference.clone().into_row_ref(), capture)
+            .map_err(|_| observation_invariant(&record, "collection contains a mixed capture"))?;
+        for argument in &observation.arguments {
+            validate_invocation_argument_reference(
+                argument.reference.clone().into_row_ref(),
+                capture,
+            )
+            .map_err(|_| {
+                observation_invariant(&record, "collection contains a mixed argument capture")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+async fn load_observation_by_id(
+    transaction: &tokio_postgres::Transaction<'_>,
+    capture: &CwdCapture,
+    invocation: InvocationId,
+) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
+    let invocation_bytes = invocation.to_bytes().to_vec();
+    let row = transaction
+        .query_opt(
+            "SELECT source_revision_id, catalogue_revision_id, function_id, status \
+             FROM _orna_kernel.sealed_invocation_lifecycle \
+             WHERE invocation_id = $1 \
+               AND source_revision_id IS NOT NULL \
+               AND catalogue_revision_id IS NOT NULL \
+               AND function_id IS NOT NULL",
+            &[&invocation_bytes],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let record = invocation.canonical();
+    let reference = invocation_observation_reference(capture, invocation, &record)?;
+    let source_revision =
+        SourceRevisionId::from_bytes(observation_id(&row, &record, "source_revision_id")?);
+    let catalogue_revision =
+        CatalogueRevisionId::from_bytes(observation_id(&row, &record, "catalogue_revision_id")?);
+    let function = FunctionId::from_bytes(observation_id(&row, &record, "function_id")?);
+    let status = SealedInvocationObservationStatus::decode(
+        observation_column(&row, &record, "status")?,
+        &record,
+    )?;
+    let argument_rows = transaction
+        .query(
+            "SELECT position, parameter_id, name, type_kind, scalar_type, \
+                    target_type_id, value_digest, redacted \
+             FROM _orna_kernel.sealed_invocation_argument_metadata \
+             WHERE invocation_id = $1 ORDER BY position ASC",
+            &[&invocation_bytes],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let arguments = argument_rows
+        .iter()
+        .map(|argument| decode_argument_observation(argument, capture, invocation, &record))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_argument_order(&arguments, &record)?;
+    Ok(Some(SealedInvocationObservation {
+        reference,
+        invocation,
+        source_revision,
+        catalogue_revision,
+        function,
+        status,
+        arguments,
+    }))
 }
 
 fn decode_argument_observation(
@@ -480,5 +568,48 @@ mod tests {
             validate_invocation_argument_reference(invalid_position, &pinned_capture),
             Err(SystemReferenceError::InvalidInvocationArgumentKey)
         );
+    }
+
+    fn observation(
+        capture: &CwdCapture,
+        invocation_byte: u8,
+        status: SealedInvocationObservationStatus,
+    ) -> SealedInvocationObservation {
+        let invocation = InvocationId::from_bytes([invocation_byte; 16]);
+        SealedInvocationObservation {
+            reference: invocation_observation_reference(capture, invocation, "test").unwrap(),
+            invocation,
+            source_revision: SourceRevisionId::from_bytes([3; 16]),
+            catalogue_revision: CatalogueRevisionId::from_bytes([4; 16]),
+            function: FunctionId::from_bytes([5; 16]),
+            status,
+            arguments: vec![SealedInvocationArgumentObservation {
+                reference: invocation_argument_observation_reference(
+                    capture, invocation, 0, "test",
+                )
+                .unwrap(),
+                position: 0,
+                parameter: orna_core::ParameterId::from_bytes([6; 16]),
+                name: "value".to_owned(),
+                type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+                value_digest: [7; 32],
+            }],
+        }
+    }
+
+    #[test]
+    fn retained_collection_requires_one_coherent_capture_for_rows_and_arguments() {
+        let current = capture(1);
+        let retained = vec![
+            observation(&current, 1, SealedInvocationObservationStatus::Running),
+            observation(&current, 2, SealedInvocationObservationStatus::Succeeded),
+        ];
+        assert!(validate_observation_collection_capture(&retained, &current).is_ok());
+
+        let mixed = vec![
+            observation(&current, 1, SealedInvocationObservationStatus::Running),
+            observation(&capture(2), 2, SealedInvocationObservationStatus::Succeeded),
+        ];
+        assert!(validate_observation_collection_capture(&mixed, &current).is_err());
     }
 }
