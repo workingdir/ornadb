@@ -377,7 +377,96 @@ pub struct RuntimePublicationCoordinator {
     journal: PublicationJournal,
 }
 
+/// The committed snapshot and pending-mutation window a logical compact reader
+/// must use for one observation.  The two choices deliberately make the
+/// publication boundary explicit: the frozen prefix is read either from the
+/// old snapshot's pending tail or from the compact candidate, never both.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactReaderVisibility {
+    snapshot: GitCommitRef,
+    tail: CompactTailWindow,
+}
+
+impl CompactReaderVisibility {
+    pub fn snapshot(&self) -> &GitCommitRef {
+        &self.snapshot
+    }
+
+    pub const fn tail(&self) -> CompactTailWindow {
+        self.tail
+    }
+}
+
+/// The portion of the pending ledger which remains visible beside a compact
+/// snapshot.  `AfterWatermark` is also suitable for a reader holding a cached
+/// ledger view that predates the runtime cleanup transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactTailWindow {
+    AllPending,
+    AfterWatermark(u64),
+}
+
 impl RuntimePublicationCoordinator {
+    /// Selects the one valid compact reader view across PUB-1's ref and
+    /// runtime-cleanup boundaries.  A reader observes the old snapshot plus
+    /// the full pending tail until the runtime has durably consumed the frozen
+    /// range.  Once that receipt is durable, it observes the candidate and
+    /// masks the frozen range even if repository journal cleanup is still
+    /// pending after a crash.
+    pub async fn compact_reader_visibility(
+        repository: &Repository,
+        runtime: &RuntimeState,
+    ) -> Result<CompactReaderVisibility, Error> {
+        let Some(journal) = repository
+            .read_publication_journal()
+            .map_err(map_publication_repository_error)?
+        else {
+            return repository
+                .head()
+                .map_err(map_publication_repository_error)?
+                .map(|snapshot| CompactReaderVisibility {
+                    snapshot,
+                    tail: CompactTailWindow::AllPending,
+                })
+                .ok_or(Error::InvalidTransition);
+        };
+        if journal.compact_manifest().is_none() {
+            return Err(Error::InvalidTransition);
+        }
+        let intent_id = journal
+            .runtime_intent_id()
+            .ok_or(Error::InvalidTransition)?;
+        let freeze = runtime
+            .publication_freeze(intent_id)
+            .await
+            .map_err(map_compact_runtime_error)?;
+        let frozen_prefix = runtime
+            .pending_through(&freeze)
+            .await
+            .map_err(map_compact_runtime_error)?;
+        let candidate_visible = matches!(
+            journal.stage(),
+            orna_repository_v1::PublicationJournalStage::RuntimeCompleted
+                | orna_repository_v1::PublicationJournalStage::Complete
+        ) || (journal.stage()
+            == orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+            && frozen_prefix.is_empty());
+        if candidate_visible {
+            runtime
+                .validate_recovery()
+                .await
+                .map_err(map_compact_runtime_error)?;
+            return Ok(CompactReaderVisibility {
+                snapshot: journal.new_head().clone(),
+                tail: CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence),
+            });
+        }
+        Ok(CompactReaderVisibility {
+            snapshot: journal.old_head().clone(),
+            tail: CompactTailWindow::AllPending,
+        })
+    }
+
     /// The production compact route. The repository owns ref advancement,
     /// witness proof, and journal finalization; storage receives only the
     /// sealed runtime operation that must consume the frozen prefix.
@@ -1270,6 +1359,57 @@ mod tests {
 
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert_eq!(repository.read_publication_journal().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn compact_reader_visibility_switches_at_the_durable_runtime_watermark() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        let old_head = repository.head().unwrap().unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
+                .await
+                .unwrap(),
+            CompactReaderVisibility {
+                snapshot: old_head.clone(),
+                tail: CompactTailWindow::AllPending,
+            }
+        );
+
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
+                .await
+                .unwrap(),
+            CompactReaderVisibility {
+                snapshot: old_head,
+                tail: CompactTailWindow::AllPending,
+            }
+        );
+
+        runtime
+            .bind_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+        runtime
+            .complete_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
+                .await
+                .unwrap(),
+            CompactReaderVisibility {
+                snapshot: pending.commit().clone(),
+                tail: CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence),
+            }
+        );
+        assert_eq!(runtime.pending().await.unwrap().len(), 1);
+        assert!(repository.read_publication_journal().unwrap().is_some());
     }
 
     #[tokio::test]
