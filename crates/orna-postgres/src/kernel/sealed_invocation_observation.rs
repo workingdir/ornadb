@@ -1,6 +1,10 @@
 use super::{PostgresKernel, PostgresKernelError};
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
+use orna_foundation_v1::{
+    CwdCapture, InvocationArgumentRef, InvocationRef, invocation_argument_reference,
+    invocation_reference,
+};
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
 use crate::kernel::bootstrap::require_current_migrations;
@@ -14,6 +18,8 @@ use crate::kernel::bootstrap::require_current_migrations;
 /// synthetic public target identity through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedInvocationObservation {
+    /// Checked `sys.InvocationRef` pinned to the caller's CWD capture.
+    pub reference: InvocationRef,
     /// Exact durable invocation identity.
     pub invocation: InvocationId,
     /// Pinned source coordinate selected at protected admission.
@@ -31,6 +37,9 @@ pub struct SealedInvocationObservation {
 /// One declaration-ordered redaction-safe argument observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedInvocationArgumentObservation {
+    /// Checked `sys.InvocationArgumentRef` pinned to the caller's CWD
+    /// capture.
+    pub reference: InvocationArgumentRef,
     /// Pinned declaration position.
     pub position: u64,
     /// Pinned parameter identity.
@@ -83,11 +92,13 @@ impl SealedInvocationObservationStatus {
 
 impl PostgresKernel {
     /// Loads one durable observation without starting, resuming, or otherwise
-    /// mutating its invocation.  The returned coordinates are the snapshot
-    /// and target pinned at admission, not the database's current active
-    /// revision.
+    /// mutating its invocation. The returned source, catalogue, and target
+    /// coordinates are pinned at admission, not the database's current active
+    /// revision. `capture` supplies the canonical snapshot pinned into each
+    /// returned row reference; this lookup never reads or advances CWD state.
     pub async fn load_sealed_invocation_observation(
         &self,
+        capture: &CwdCapture,
         invocation: InvocationId,
     ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
@@ -121,6 +132,7 @@ impl PostgresKernel {
                 None => None,
                 Some(row) => {
                     let record = invocation.canonical();
+                    let reference = invocation_observation_reference(capture, invocation, &record)?;
                     let source_revision = SourceRevisionId::from_bytes(observation_id(
                         &row,
                         &record,
@@ -149,10 +161,13 @@ impl PostgresKernel {
                         .map_err(PostgresKernelError::Database)?;
                     let arguments = argument_rows
                         .iter()
-                        .map(|argument| decode_argument_observation(argument, &record))
+                        .map(|argument| {
+                            decode_argument_observation(argument, capture, invocation, &record)
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     validate_argument_order(&arguments, &record)?;
                     Some(SealedInvocationObservation {
+                        reference,
                         invocation,
                         source_revision,
                         catalogue_revision,
@@ -175,6 +190,8 @@ impl PostgresKernel {
 
 fn decode_argument_observation(
     row: &Row,
+    capture: &CwdCapture,
+    invocation: InvocationId,
     record: &str,
 ) -> Result<SealedInvocationArgumentObservation, PostgresKernelError> {
     let position: i64 = observation_column(row, record, "position")?;
@@ -207,12 +224,43 @@ fn decode_argument_observation(
         .try_into()
         .map_err(|_| observation_invariant(record, "argument digest must be 32 bytes"))?;
     Ok(SealedInvocationArgumentObservation {
+        reference: invocation_argument_observation_reference(
+            capture, invocation, position, record,
+        )?,
         position,
         parameter,
         name,
         type_kind,
         value_digest,
     })
+}
+
+fn invocation_observation_reference(
+    capture: &CwdCapture,
+    invocation: InvocationId,
+    record: &str,
+) -> Result<InvocationRef, PostgresKernelError> {
+    invocation_reference(
+        capture.database_id(),
+        capture.snapshot().clone(),
+        invocation.to_bytes(),
+    )
+    .map_err(|_| observation_invariant(record, "invocation reference coordinates are invalid"))
+}
+
+fn invocation_argument_observation_reference(
+    capture: &CwdCapture,
+    invocation: InvocationId,
+    position: u64,
+    record: &str,
+) -> Result<InvocationArgumentRef, PostgresKernelError> {
+    invocation_argument_reference(
+        capture.database_id(),
+        capture.snapshot().clone(),
+        invocation.to_bytes(),
+        position.into(),
+    )
+    .map_err(|_| observation_invariant(record, "argument reference coordinates are invalid"))
 }
 
 fn decode_argument_type_kind(
@@ -329,6 +377,19 @@ fn finish_observation_session<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_foundation_v1::{
+        CanonicalSnapshot, OvbRaw, RowRef, SYS_INVOCATION_ARGUMENT_TABLE_ID,
+        SYS_INVOCATION_TABLE_ID, SystemReferenceError, validate_invocation_argument_reference,
+        validate_invocation_reference,
+    };
+
+    fn capture(generation: u64) -> CwdCapture {
+        CwdCapture::new(
+            CanonicalSnapshot::cwd([7; 16], [8; 16], generation.into()).unwrap(),
+            [9; 32],
+        )
+        .unwrap()
+    }
 
     #[test]
     fn observation_status_is_closed() {
@@ -342,6 +403,13 @@ mod tests {
     #[test]
     fn argument_order_requires_distinct_declaration_positions() {
         let argument = |position| SealedInvocationArgumentObservation {
+            reference: invocation_argument_observation_reference(
+                &capture(1),
+                InvocationId::from_bytes([2; 16]),
+                position,
+                "test",
+            )
+            .unwrap(),
             position,
             parameter: orna_core::ParameterId::from_bytes([1; 16]),
             name: "value".to_owned(),
@@ -356,5 +424,61 @@ mod tests {
     fn scalar_metadata_cannot_expand_the_closed_vocabulary() {
         assert!(sealed_scalar_type_is_closed("integer"));
         assert!(!sealed_scalar_type_is_closed("unredacted-value"));
+    }
+
+    #[test]
+    fn observation_references_are_checked_and_snapshot_pinned() {
+        let capture = capture(1);
+        let invocation = InvocationId::from_bytes([2; 16]);
+        let reference = invocation_observation_reference(&capture, invocation, "test").unwrap();
+        let argument =
+            invocation_argument_observation_reference(&capture, invocation, 3, "test").unwrap();
+
+        assert_eq!(reference.as_row_ref().table_id, SYS_INVOCATION_TABLE_ID);
+        assert_eq!(
+            argument.as_row_ref().table_id,
+            SYS_INVOCATION_ARGUMENT_TABLE_ID
+        );
+        assert_eq!(reference.as_row_ref().snapshot, *capture.snapshot());
+        assert_eq!(argument.as_row_ref().snapshot, *capture.snapshot());
+        assert!(validate_invocation_reference(reference.into_row_ref(), &capture).is_ok());
+        assert!(validate_invocation_argument_reference(argument.into_row_ref(), &capture).is_ok());
+    }
+
+    #[test]
+    fn observation_reference_validation_rejects_wrong_snapshot_relation_and_position() {
+        let pinned_capture = capture(1);
+        let invocation = InvocationId::from_bytes([2; 16]);
+        let reference = invocation_observation_reference(&pinned_capture, invocation, "test")
+            .unwrap()
+            .into_row_ref();
+        assert_eq!(
+            validate_invocation_reference(reference.clone(), &capture(2)),
+            Err(SystemReferenceError::SnapshotMismatch)
+        );
+
+        let wrong_relation = RowRef::new(
+            pinned_capture.database_id(),
+            SYS_INVOCATION_ARGUMENT_TABLE_ID,
+            reference.key.clone(),
+            pinned_capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_invocation_reference(wrong_relation, &pinned_capture),
+            Err(SystemReferenceError::RelationMismatch)
+        );
+
+        let invalid_position = RowRef::new(
+            pinned_capture.database_id(),
+            SYS_INVOCATION_ARGUMENT_TABLE_ID,
+            OvbRaw::Array(vec![]),
+            pinned_capture.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_invocation_argument_reference(invalid_position, &pinned_capture),
+            Err(SystemReferenceError::InvalidInvocationArgumentKey)
+        );
     }
 }
