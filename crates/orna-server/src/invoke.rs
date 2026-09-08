@@ -468,6 +468,12 @@ pub(crate) struct SessionBridge {
     response_ready: Condvar,
 }
 
+/// The ordinary interactive prompt specified for a terminal REPL session.
+///
+/// The prompt travels in the authenticated session frame, so a terminal host
+/// renders it only after it has validated the root invocation and call stream.
+const TERMINAL_REPL_PROMPT: &str = "> ";
+
 struct SessionBridgeWaiting {
     state: SessionInputState,
     response: Option<SessionClientFrame>,
@@ -502,7 +508,7 @@ impl SessionBridge {
             root_invocation_id: self.root_invocation_id,
             call_stream: self.call_stream,
             request_invocation_id,
-            prompt: String::new(),
+            prompt: TERMINAL_REPL_PROMPT.to_owned(),
         });
         let send_result = {
             let mut waiting = self.waiting.lock().expect("session bridge waiting lock");
@@ -4981,5 +4987,103 @@ mod daemon_session_tests {
         .expect("dynamic command evaluates");
         assert_eq!(value, RuntimeValue::Integer(5));
         assert_eq!(function.name().to_string(), "std.math.increment_app");
+    }
+
+    #[test]
+    fn installed_cli_repl_reads_a_session_command_and_returns_typed_ui() {
+        let (active, standard) = active_and_standard();
+        let repl = standard
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.id() == orna_standard::STD_CLI_REPL_FUNCTION_ID)
+            .expect("the retained standard exposes std.cli.repl");
+        let text = standard
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.id() == orna_standard::STD_UI_TEXT_FUNCTION_ID)
+            .expect("the retained standard exposes std.ui.text");
+        let principal = PrincipalId::from_bytes([0x96; 16]);
+        let security = SecuritySnapshot::new_with_function_targets(
+            active.pair(),
+            vec![
+                SecurityFunctionTarget::verified_standard(
+                    repl.id(),
+                    standard.revision(),
+                    repl.current_revision(),
+                ),
+                SecurityFunctionTarget::verified_standard(
+                    text.id(),
+                    standard.revision(),
+                    text.current_revision(),
+                ),
+            ],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            Vec::new(),
+            vec![
+                ExecuteGrant::new(principal, repl.id()),
+                ExecuteGrant::new(principal, text.id()),
+            ],
+        )
+        .expect("standard security snapshot");
+        let session = security
+            .bind_authenticated_session(principal, Vec::new())
+            .expect("authenticated session");
+        let authorisation = match security
+            .authorise_execute(&session, InvocationTarget::new(repl.id(), active.pair()))
+        {
+            orna_core::security::ExecuteDecision::Allowed(authorisation) => authorisation,
+            decision => panic!("repl must authorise: {decision:?}"),
+        };
+        let root = InvocationId::from_bytes([0x97; 16]);
+        let broker = SharedInvokeBroker::session_only();
+        let bridge = broker
+            .install_session_bridge(root, 19)
+            .expect("session bridge installs");
+        broker.bind_dynamic_context(active.clone(), security, session.clone(), root);
+        let mut executor = InstalledClientResourceExecutor::new_with_broker(
+            PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent").expect("kernel config"),
+            session,
+            active.clone(),
+            broker,
+            ResourceCancellation::new(),
+        );
+        executor.bind_current_invocation(root);
+
+        let worker = thread::spawn(move || {
+            orna_client::evaluate_client_function_with_executor(
+                &active,
+                &authorisation,
+                &mut executor,
+            )
+        });
+        let request = loop {
+            if let Some(SessionServerFrame::InputRequested(request)) = bridge.try_take_outbound() {
+                break request;
+            }
+            thread::yield_now();
+        };
+        assert_eq!(request.prompt, TERMINAL_REPL_PROMPT);
+        bridge
+            .accept_response(SessionClientFrame::InputLine {
+                root_invocation_id: root,
+                call_stream: 19,
+                request_invocation_id: request.request_invocation_id,
+                line: "std.ui.text --text=Ready".to_owned(),
+            })
+            .expect("input response accepted");
+        let result = worker
+            .join()
+            .expect("repl worker joins")
+            .expect("installed repl evaluates");
+        assert!(matches!(
+            result.value(),
+            RuntimeValue::Opaque(value) if value.opaque_type() == orna_standard::STD_UI_TYPE_ID
+        ));
     }
 }
