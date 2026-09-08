@@ -10,7 +10,7 @@
 
 use crate::live_eval::{PureEvalApplication, SessionExpiries};
 use futures::{
-    Future, FutureExt,
+    Future, FutureExt, StreamExt,
     executor::block_on,
     io::{AsyncReadExt, AsyncWriteExt},
 };
@@ -217,6 +217,9 @@ impl LiveOnceHost {
             tokio::net::TcpListener::from_std(listener).map_err(|_| LiveHostError::Listener)?;
         let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
         let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+        let (retirement_ack_sender, retirement_ack_receiver) = futures::channel::mpsc::unbounded();
+        let (retirement_gate_sender, mut retirement_gate_receiver) =
+            futures::channel::mpsc::unbounded();
         let actor = tokio::task::spawn_local(run_host_actor(
             actor_receiver,
             ConcurrentHostState {
@@ -227,8 +230,15 @@ impl LiveOnceHost {
                 application,
             },
             Rc::clone(&registry),
+            retirement_ack_receiver,
+            retirement_gate_sender,
         ));
         let mut workers = tokio::task::JoinSet::new();
+        // Retirements created by an actor-owned event (such as expiry) have
+        // no connection worker waiting for them. Keep their join gates in the
+        // host supervisor so shutdown drains successful acknowledgements while
+        // the actor still owns the transport fence.
+        let mut retirement_tasks = tokio::task::JoinSet::new();
         let mut actor = Some(actor);
         loop {
             tokio::select! {
@@ -238,6 +248,9 @@ impl LiveOnceHost {
                     return shutdown_concurrent_host(
                         &registry,
                         &mut workers,
+                        &mut retirement_tasks,
+                        &mut retirement_gate_receiver,
+                        &retirement_ack_sender,
                         actor_sender,
                         actor.take(),
                         LiveHostError::Cancelled,
@@ -252,6 +265,9 @@ impl LiveOnceHost {
                     return shutdown_concurrent_host(
                         &registry,
                         &mut workers,
+                        &mut retirement_tasks,
+                        &mut retirement_gate_receiver,
+                        &retirement_ack_sender,
                         actor_sender,
                         None,
                         LiveHostError::Runtime,
@@ -263,11 +279,38 @@ impl LiveOnceHost {
                         return shutdown_concurrent_host(
                             &registry,
                             &mut workers,
+                            &mut retirement_tasks,
+                            &mut retirement_gate_receiver,
+                            &retirement_ack_sender,
                             actor_sender,
                             actor.take(),
                             LiveHostError::Connection,
                         ).await;
                     }
+                }
+                retirement = retirement_gate_receiver.next() => {
+                    let Some(retirement) = retirement else {
+                        drop(listener);
+                        return shutdown_concurrent_host(
+                            &registry,
+                            &mut workers,
+                            &mut retirement_tasks,
+                            &mut retirement_gate_receiver,
+                            &retirement_ack_sender,
+                            actor_sender,
+                            actor.take(),
+                            LiveHostError::Runtime,
+                        ).await;
+                    };
+                    retirement_tasks.spawn_local(supervise_retirement_gates(
+                        retirement_ack_sender.clone(),
+                        retirement,
+                    ));
+                }
+                result = retirement_tasks.join_next(), if !retirement_tasks.is_empty() => {
+                    // Failed or dropped worker joins deliberately leave their
+                    // identities fenced; the task itself has no host error.
+                    let _ = result;
                 }
                 result = listener.accept() => {
                     let (stream, _) = match result {
@@ -277,6 +320,9 @@ impl LiveOnceHost {
                             return shutdown_concurrent_host(
                                 &registry,
                                 &mut workers,
+                                &mut retirement_tasks,
+                                &mut retirement_gate_receiver,
+                                &retirement_ack_sender,
                                 actor_sender,
                                 actor.take(),
                                 LiveHostError::Connection,
@@ -285,11 +331,13 @@ impl LiveOnceHost {
                     };
                     let (worker_id, cancellation_receiver) = registry.borrow_mut().register();
                     let actor = actor_sender.clone();
+                    let retirement = retirement_ack_sender.clone();
                     let worker_registry = Rc::clone(&registry);
                     let task = workers.spawn_local(async move {
                         serve_socket_worker(
                             stream,
                             actor,
+                            retirement,
                             worker_registry,
                             worker_id,
                             cancellation_receiver,
@@ -486,16 +534,33 @@ struct ActorHttpResult {
     retirement: RetirementGates,
 }
 
-type RetirementGates = Vec<futures::channel::oneshot::Receiver<Result<(), ()>>>;
+struct RetirementGate {
+    attachment: [u8; 16],
+    completion: futures::channel::oneshot::Receiver<Result<(), ()>>,
+}
+
+type RetirementGates = Vec<RetirementGate>;
+
+enum RetirementAcknowledgement {
+    Acknowledge {
+        attachment: [u8; 16],
+        reply: futures::channel::oneshot::Sender<bool>,
+    },
+}
 
 async fn run_host_actor(
     mut commands: futures::channel::mpsc::UnboundedReceiver<ActorCommand>,
     mut state: ConcurrentHostState,
     registry: Rc<RefCell<WorkerRegistry>>,
+    mut retirement_acknowledgements: futures::channel::mpsc::UnboundedReceiver<
+        RetirementAcknowledgement,
+    >,
+    retirement_gates: futures::channel::mpsc::UnboundedSender<RetirementGates>,
 ) {
     use futures::StreamExt;
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut retirement_acknowledgements_open = true;
     loop {
         let command = tokio::select! {
             command = commands.next() => match command {
@@ -510,13 +575,23 @@ async fn run_host_actor(
                     return;
                 };
                 application.expire(now);
-                if capture_retirement_gates(
+                let Ok(retirement) = capture_retirement_gates(
                     &registry,
                     state.transport.take_retired_attachments(),
-                )
-                .is_err()
-                {
+                ) else {
                     return;
+                };
+                if retirement_gates.unbounded_send(retirement).is_err() {
+                    return;
+                }
+                continue;
+            }
+            acknowledgement = retirement_acknowledgements.next(), if retirement_acknowledgements_open => {
+                match acknowledgement {
+                    Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                        let _ = reply.send(state.transport.acknowledge_retired_attachment(attachment));
+                    }
+                    None => retirement_acknowledgements_open = false,
                 }
                 continue;
             }
@@ -594,7 +669,14 @@ async fn run_host_actor(
                 // Register before transport admission. Because this is one
                 // actor turn, a subsequent DELETE or replacement observes a
                 // worker retirement gate for every successful reservation.
-                registry.borrow_mut().attach(attachment, worker_id);
+                // The registry is only a worker-lifecycle index; transport is
+                // authoritative for active, pending, and retiring attachment
+                // state. A duplicate registry key must therefore fail closed
+                // without replacing its incumbent worker association.
+                if !registry.borrow_mut().attach(attachment, worker_id) {
+                    let _ = reply.send(Err(temporary_unavailable_response()));
+                    continue;
+                }
                 let result = state.transport.begin_websocket_upgrade(
                     &request,
                     attachment,
@@ -605,9 +687,14 @@ async fn run_host_actor(
                         .borrow_mut()
                         .unregister_candidate(attachment, worker_id);
                 }
-                if capture_retirement_gates(&registry, state.transport.take_retired_attachments())
-                    .is_err()
-                {
+                let Ok(retirement) =
+                    capture_retirement_gates(&registry, state.transport.take_retired_attachments())
+                else {
+                    return;
+                };
+                // A failed Begin can retire a prior pending candidate. This
+                // actor-owned observer acknowledges only after its join.
+                if retirement_gates.unbounded_send(retirement).is_err() {
                     return;
                 }
                 let _ = reply.send(result);
@@ -631,6 +718,14 @@ async fn run_host_actor(
             }
             ActorCommand::Abort { upgrade, reply } => {
                 state.transport.abort_websocket_upgrade(&upgrade);
+                let Ok(retirement) =
+                    capture_retirement_gates(&registry, state.transport.take_retired_attachments())
+                else {
+                    return;
+                };
+                if retirement_gates.unbounded_send(retirement).is_err() {
+                    return;
+                }
                 let _ = reply.send(());
             }
             ActorCommand::Receive {
@@ -659,7 +754,16 @@ async fn run_host_actor(
                 now,
                 reply,
             } => {
-                let _ = reply.send(state.transport.close_attachment(attachment, now).await);
+                let outcome = state.transport.close_attachment(attachment, now).await;
+                let Ok(retirement) =
+                    capture_retirement_gates(&registry, state.transport.take_retired_attachments())
+                else {
+                    return;
+                };
+                if retirement_gates.unbounded_send(retirement).is_err() {
+                    return;
+                }
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -672,6 +776,11 @@ async fn run_host_actor(
 async fn shutdown_concurrent_host(
     registry: &Rc<RefCell<WorkerRegistry>>,
     workers: &mut tokio::task::JoinSet<u64>,
+    retirement_tasks: &mut tokio::task::JoinSet<()>,
+    retirement_gates: &mut futures::channel::mpsc::UnboundedReceiver<RetirementGates>,
+    retirement_acknowledgements: &futures::channel::mpsc::UnboundedSender<
+        RetirementAcknowledgement,
+    >,
     actor_sender: futures::channel::mpsc::UnboundedSender<ActorCommand>,
     actor: Option<tokio::task::JoinHandle<()>>,
     requested: LiveHostError,
@@ -681,6 +790,20 @@ async fn shutdown_concurrent_host(
     while let Some(result) = workers.join_next_with_id().await {
         worker_failed |= acknowledge_worker_join(registry, result);
     }
+    // Socket workers wait for their Close/Abort acknowledgement before they
+    // join, so all meaningful actor-originated gates have been published by
+    // this point. Drain any that were queued when shutdown preempted the
+    // outer event loop before closing the actor's acknowledgement receiver.
+    while let Some(Some(retirement)) = retirement_gates.next().now_or_never() {
+        retirement_tasks.spawn_local(supervise_retirement_gates(
+            retirement_acknowledgements.clone(),
+            retirement,
+        ));
+    }
+    // A successful worker join may unblock an actor-owned retirement gate.
+    // Keep the actor and acknowledgement channel alive until every tracked
+    // gate has either acknowledged the fence or observed a failed join.
+    while retirement_tasks.join_next().await.is_some() {}
     drop(actor_sender);
     let actor_failed = match actor {
         Some(actor) => actor.await.is_err(),
@@ -725,6 +848,7 @@ mod shutdown_tests {
             let (worker_id, cancellation) = registry.borrow_mut().register();
             let (finished_sender, finished) = futures::channel::oneshot::channel();
             let mut workers = tokio::task::JoinSet::new();
+            let mut retirement_tasks = tokio::task::JoinSet::new();
             let task = workers.spawn_local(async move {
                 cancellation.await.unwrap();
                 let _ = finished_sender.send(());
@@ -732,6 +856,10 @@ mod shutdown_tests {
             });
             registry.borrow_mut().bind_task(worker_id, task.id());
             let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, _retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (_retirement_gate_sender, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
             let actor = tokio::task::spawn_local(async move {
                 use futures::StreamExt;
                 let mut actor_receiver = actor_receiver;
@@ -742,6 +870,9 @@ mod shutdown_tests {
                 shutdown_concurrent_host(
                     &registry,
                     &mut workers,
+                    &mut retirement_tasks,
+                    &mut retirement_gates,
+                    &retirement_acknowledgements,
                     actor_sender,
                     Some(actor),
                     LiveHostError::Cancelled,
@@ -762,6 +893,7 @@ mod shutdown_tests {
             let (worker_id, cancellation) = registry.borrow_mut().register();
             let (finished_sender, finished) = futures::channel::oneshot::channel();
             let mut workers = tokio::task::JoinSet::new();
+            let mut retirement_tasks = tokio::task::JoinSet::new();
             let task = workers.spawn_local(async move {
                 cancellation.await.unwrap();
                 let _ = finished_sender.send(());
@@ -769,6 +901,10 @@ mod shutdown_tests {
             });
             registry.borrow_mut().bind_task(worker_id, task.id());
             let (actor_sender, _actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, _retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (_retirement_gate_sender, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
             let actor = tokio::task::spawn_local(async {
                 panic!("actor termination is observed by its owner");
             });
@@ -777,6 +913,9 @@ mod shutdown_tests {
                 shutdown_concurrent_host(
                     &registry,
                     &mut workers,
+                    &mut retirement_tasks,
+                    &mut retirement_gates,
+                    &retirement_acknowledgements,
                     actor_sender,
                     Some(actor),
                     LiveHostError::Connection,
@@ -795,11 +934,16 @@ mod shutdown_tests {
             let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
             let (worker_id, _cancellation) = registry.borrow_mut().register();
             let mut workers = tokio::task::JoinSet::<u64>::new();
+            let mut retirement_tasks = tokio::task::JoinSet::new();
             let task = workers.spawn_local(async move {
                 panic!("worker termination is observed by its owner");
             });
             registry.borrow_mut().bind_task(worker_id, task.id());
             let (actor_sender, actor_receiver) = futures::channel::mpsc::unbounded();
+            let (retirement_acknowledgements, _retirement_acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (_retirement_gate_sender, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
             let actor = tokio::task::spawn_local(async move {
                 use futures::StreamExt;
                 let mut actor_receiver = actor_receiver;
@@ -810,6 +954,9 @@ mod shutdown_tests {
                 shutdown_concurrent_host(
                     &registry,
                     &mut workers,
+                    &mut retirement_tasks,
+                    &mut retirement_gates,
+                    &retirement_acknowledgements,
                     actor_sender,
                     Some(actor),
                     LiveHostError::Cancelled,
@@ -818,6 +965,56 @@ mod shutdown_tests {
                 Err(LiveHostError::Cancelled)
             );
             assert!(workers.is_empty());
+        });
+    }
+
+    #[test]
+    fn shutdown_drains_queued_retirement_before_closing_acknowledgements() {
+        run_local(async {
+            let registry = Rc::new(RefCell::new(WorkerRegistry::default()));
+            let mut workers = tokio::task::JoinSet::new();
+            let mut retirement_tasks = tokio::task::JoinSet::new();
+            let (completion, gate) = futures::channel::oneshot::channel();
+            let (acknowledgements, mut acknowledgement_receiver) =
+                futures::channel::mpsc::unbounded();
+            let (observed_sender, observed) = futures::channel::oneshot::channel();
+            let (actor_sender, _actor_receiver) = futures::channel::mpsc::unbounded();
+            let actor = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                match acknowledgement_receiver.next().await {
+                    Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                        assert_eq!(attachment, [17; 16]);
+                        assert!(reply.send(true).is_ok());
+                        assert!(observed_sender.send(()).is_ok());
+                    }
+                    _ => panic!("shutdown must retain the actor acknowledgement path"),
+                }
+            });
+            let (retirement_gate_sender, mut retirement_gates) =
+                futures::channel::mpsc::unbounded();
+            retirement_gate_sender
+                .unbounded_send(vec![RetirementGate {
+                    attachment: [17; 16],
+                    completion: gate,
+                }])
+                .unwrap();
+            completion.send(Ok(())).unwrap();
+
+            assert_eq!(
+                shutdown_concurrent_host(
+                    &registry,
+                    &mut workers,
+                    &mut retirement_tasks,
+                    &mut retirement_gates,
+                    &acknowledgements,
+                    actor_sender,
+                    Some(actor),
+                    LiveHostError::Cancelled,
+                )
+                .await,
+                Err(LiveHostError::Cancelled)
+            );
+            assert_eq!(observed.await, Ok(()));
         });
     }
 
@@ -840,7 +1037,8 @@ mod shutdown_tests {
                 .take_retired(vec![attachment])
                 .unwrap()
                 .pop()
-                .unwrap();
+                .unwrap()
+                .completion;
             assert!(acknowledgement_is_pending(&mut acknowledgement).await);
 
             let joined = workers.join_next_with_id().await.unwrap();
@@ -869,7 +1067,19 @@ mod shutdown_tests {
             let retirement = capture_retirement_gates(&registry, vec![attachment]).unwrap();
             let joined = workers.join_next_with_id().await.unwrap();
             assert!(!acknowledge_worker_join(&registry, joined));
-            assert_eq!(retire_and_join(retirement).await, Ok(()));
+            let (acknowledgements, mut commands) = futures::channel::mpsc::unbounded();
+            let acknowledgement = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                match commands.next().await {
+                    Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                        assert_eq!(attachment, [13; 16]);
+                        assert!(reply.send(true).is_ok());
+                    }
+                    _ => panic!("retirement join must be acknowledged by the actor"),
+                }
+            });
+            assert_eq!(retire_and_join(&acknowledgements, retirement).await, Ok(()));
+            acknowledgement.await.unwrap();
         });
     }
 
@@ -878,11 +1088,25 @@ mod shutdown_tests {
         let mut registry = WorkerRegistry::default();
         let (worker_id, _cancellation) = registry.register();
         let attachment = [14; 16];
-        registry.attach(attachment, worker_id);
+        assert!(registry.attach(attachment, worker_id));
         registry.unregister_candidate(attachment, worker_id);
         assert!(
             capture_retirement_gates(&Rc::new(RefCell::new(registry)), vec![attachment]).is_err()
         );
+    }
+
+    #[test]
+    fn rejected_candidate_cannot_unregister_an_incumbent_attachment() {
+        let mut registry = WorkerRegistry::default();
+        let (incumbent, _incumbent_cancellation) = registry.register();
+        let (candidate, _candidate_cancellation) = registry.register();
+        let attachment = [16; 16];
+
+        assert!(registry.attach(attachment, incumbent));
+        assert!(!registry.attach(attachment, candidate));
+        registry.unregister_candidate(attachment, candidate);
+
+        assert_eq!(registry.attachments.get(&attachment), Some(&incumbent));
     }
 
     #[test]
@@ -904,7 +1128,8 @@ mod shutdown_tests {
                 .take_retired(vec![attachment])
                 .unwrap()
                 .pop()
-                .unwrap();
+                .unwrap()
+                .completion;
             let joined = workers.join_next_with_id().await.unwrap();
             assert!(acknowledge_worker_join(&registry, joined));
             assert_eq!(acknowledgement.now_or_never(), Some(Ok(Err(()))));
@@ -928,7 +1153,67 @@ mod shutdown_tests {
             let retirement = capture_retirement_gates(&registry, vec![attachment]).unwrap();
             let joined = workers.join_next_with_id().await.unwrap();
             assert!(!acknowledge_worker_join(&registry, joined));
-            assert_eq!(retire_and_join(retirement).await, Ok(()));
+            let (acknowledgements, mut commands) = futures::channel::mpsc::unbounded();
+            let acknowledgement = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                match commands.next().await {
+                    Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                        assert_eq!(attachment, [5; 16]);
+                        assert!(reply.send(true).is_ok());
+                    }
+                    _ => panic!("retirement join must be acknowledged by the actor"),
+                }
+            });
+            assert_eq!(retire_and_join(&acknowledgements, retirement).await, Ok(()));
+            acknowledgement.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn supervisor_owned_abort_expiry_and_replacement_gate_acknowledges_only_after_join() {
+        run_local(async {
+            let (acknowledgements, mut commands) = futures::channel::mpsc::unbounded();
+            let (completion, gate) = futures::channel::oneshot::channel();
+            let supervisor = tokio::task::spawn_local(supervise_retirement_gates(
+                acknowledgements,
+                vec![RetirementGate {
+                    // Abort, expiry, and replacement all use this same
+                    // unobserved gate path in the actor.
+                    attachment: [8; 16],
+                    completion: gate,
+                }],
+            ));
+            use futures::StreamExt;
+            assert!(commands.next().now_or_never().is_none());
+
+            completion.send(Ok(())).unwrap();
+            match commands.next().await {
+                Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                    assert_eq!(attachment, [8; 16]);
+                    assert!(reply.send(true).is_ok());
+                }
+                _ => panic!("successful supervisor join must reach the actor"),
+            }
+            supervisor.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn failed_supervisor_join_never_acknowledges_a_retired_attachment() {
+        run_local(async {
+            let (acknowledgements, mut commands) = futures::channel::mpsc::unbounded();
+            let (completion, gate) = futures::channel::oneshot::channel();
+            let supervisor = tokio::task::spawn_local(supervise_retirement_gates(
+                acknowledgements,
+                vec![RetirementGate {
+                    attachment: [9; 16],
+                    completion: gate,
+                }],
+            ));
+            completion.send(Err(())).unwrap();
+            supervisor.await.unwrap();
+            use futures::StreamExt;
+            assert!(commands.next().now_or_never().is_none());
         });
     }
 
@@ -973,7 +1258,11 @@ mod shutdown_tests {
 
             assert_eq!(
                 write_http_after_retirement(
-                    vec![acknowledgement],
+                    &futures::channel::mpsc::unbounded::<RetirementAcknowledgement>().0,
+                    vec![RetirementGate {
+                        attachment: [15; 16],
+                        completion: acknowledgement,
+                    }],
                     vec![b"HTTP/1.1 200 OK\r\n\r\n".to_vec()],
                     &mut writer,
                     &mut cancellation,
@@ -1041,8 +1330,16 @@ impl WorkerRegistry {
         failed
     }
 
-    fn attach(&mut self, attachment: [u8; 16], id: u64) {
+    /// Records a candidate only when it cannot replace another worker's
+    /// attachment ownership. The transport remains the source of truth for
+    /// protocol admission; this map prevents a rejected candidate from
+    /// orphaning an already-owned worker.
+    fn attach(&mut self, attachment: [u8; 16], id: u64) -> bool {
+        if !self.workers.contains_key(&id) || self.attachments.contains_key(&attachment) {
+            return false;
+        }
         self.attachments.insert(attachment, id);
+        true
     }
 
     fn detach(&mut self, attachment: [u8; 16], id: u64) {
@@ -1069,10 +1366,7 @@ impl WorkerRegistry {
         }
     }
 
-    fn take_retired(
-        &mut self,
-        attachments: Vec<[u8; 16]>,
-    ) -> Result<Vec<futures::channel::oneshot::Receiver<Result<(), ()>>>, ()> {
+    fn take_retired(&mut self, attachments: Vec<[u8; 16]>) -> Result<RetirementGates, ()> {
         let mut terminations = Vec::with_capacity(attachments.len());
         for attachment in attachments {
             let Some(id) = self.attachments.get(&attachment).copied() else {
@@ -1082,7 +1376,10 @@ impl WorkerRegistry {
                 return Err(());
             };
             let _ = slot.cancellation.send(());
-            terminations.push(slot.termination);
+            terminations.push(RetirementGate {
+                attachment,
+                completion: slot.termination,
+            });
         }
         Ok(terminations)
     }
@@ -1109,8 +1406,9 @@ fn acknowledge_worker_join(
 }
 
 /// Captures supervisor-owned retirement gates in the same actor turn that
-/// removes attachments from transport state. The requester only awaits these
-/// gates; it never obtains a JoinSet handle or a worker task.
+/// removes attachments from transport state. The attachment identity remains
+/// paired with its completion receiver so only the actor can release its
+/// transport fence after the real worker supervisor joins it.
 fn capture_retirement_gates(
     registry: &Rc<RefCell<WorkerRegistry>>,
     attachments: Vec<[u8; 16]>,
@@ -1118,11 +1416,81 @@ fn capture_retirement_gates(
     registry.borrow_mut().take_retired(attachments)
 }
 
-async fn retire_and_join(retirement: RetirementGates) -> Result<(), ()> {
-    for receiver in retirement {
-        receiver.await.map_err(|_| ())??;
+async fn retire_and_join(
+    acknowledgements: &futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
+    retirement: RetirementGates,
+) -> Result<(), ()> {
+    let mut failed = false;
+    for RetirementGate {
+        attachment,
+        completion,
+    } in retirement
+    {
+        match completion.await {
+            Ok(Ok(())) => {
+                if acknowledge_retired_attachment(acknowledgements, attachment)
+                    .await
+                    .is_err()
+                {
+                    failed = true;
+                }
+            }
+            Ok(Err(())) | Err(_) => failed = true,
+        }
     }
-    Ok(())
+    if failed { Err(()) } else { Ok(()) }
+}
+
+/// Owns retirement that has no requesting connection to wait for it (for
+/// example a pending-upgrade abort or expiry). The outer host supervisor owns
+/// and joins this future. Completion is still produced only by the outer
+/// WorkerRegistry/JoinSet supervisor. A failed or dropped join deliberately
+/// leaves the transport identity fenced.
+async fn supervise_retirement_gates(
+    acknowledgements: futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
+    retirement: RetirementGates,
+) {
+    let _ = futures::future::join_all(retirement.into_iter().map(
+        |RetirementGate {
+             attachment,
+             completion,
+         }| {
+            let acknowledgements = acknowledgements.clone();
+            async move {
+                if matches!(completion.await, Ok(Ok(()))) {
+                    let _ = acknowledge_retired_attachment(&acknowledgements, attachment).await;
+                }
+            }
+        },
+    ))
+    .await;
+}
+
+/// The live protocol's declared temporary-unavailable response. This is kept
+/// byte-for-byte aligned with the transport's existing public wire shape so a
+/// server-local worker-index collision does not introduce a new JSON protocol.
+fn temporary_unavailable_response() -> orna_live_v1::WireResponse {
+    orna_live_v1::WireResponse {
+        status: 503,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: br#"{"code":"live.unavailable","message":"request rejected"}"#.to_vec(),
+    }
+}
+
+/// Serializes retirement-fence release through the host actor. The sender is
+/// called only after a gate received a successful supervisor-side join.
+async fn acknowledge_retired_attachment(
+    acknowledgements: &futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
+    attachment: [u8; 16],
+) -> Result<(), ()> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    acknowledgements
+        .unbounded_send(RetirementAcknowledgement::Acknowledge {
+            attachment,
+            reply: sender,
+        })
+        .map_err(|_| ())?;
+    receiver.await.map_err(|_| ())?.then_some(()).ok_or(())
 }
 
 async fn await_actor_response<T, C>(
@@ -1149,6 +1517,7 @@ where
 async fn serve_socket_worker(
     stream: tokio::net::TcpStream,
     actor: futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    retirement_acknowledgements: futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
     registry: Rc<RefCell<WorkerRegistry>>,
     worker_id: u64,
     cancellation_receiver: futures::channel::oneshot::Receiver<()>,
@@ -1173,13 +1542,22 @@ async fn serve_socket_worker(
                 writer,
                 initial,
                 actor,
+                retirement_acknowledgements,
                 registry,
                 worker_id,
                 &mut cancellation,
             )
             .await;
         } else {
-            serve_http_worker(reader, writer, initial, actor, &mut cancellation).await;
+            serve_http_worker(
+                reader,
+                writer,
+                initial,
+                actor,
+                retirement_acknowledgements,
+                &mut cancellation,
+            )
+            .await;
         }
     }
 }
@@ -1189,14 +1567,22 @@ async fn serve_http_worker<C>(
     mut writer: TokioWriter,
     initial: Vec<u8>,
     actor: futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    retirement_acknowledgements: futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
     cancellation: &mut C,
 ) where
     C: Future<Output = ()> + Unpin,
 {
     let mut connection = HttpConnection::new(TransportLimits::default());
-    if serve_http_bytes(&mut connection, &initial, &actor, &mut writer, cancellation)
-        .await
-        .is_err()
+    if serve_http_bytes(
+        &mut connection,
+        &initial,
+        &actor,
+        &retirement_acknowledgements,
+        &mut writer,
+        cancellation,
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -1213,6 +1599,7 @@ async fn serve_http_worker<C>(
             &mut connection,
             &chunk[..count],
             &actor,
+            &retirement_acknowledgements,
             &mut writer,
             cancellation,
         )
@@ -1228,6 +1615,9 @@ async fn serve_http_bytes<C>(
     connection: &mut HttpConnection,
     bytes: &[u8],
     actor: &futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    retirement_acknowledgements: &futures::channel::mpsc::UnboundedSender<
+        RetirementAcknowledgement,
+    >,
     writer: &mut TokioWriter,
     cancellation: &mut C,
 ) -> Result<(), ()>
@@ -1237,10 +1627,20 @@ where
     let (returned, responses, retirement) =
         actor_http(actor, connection.clone(), bytes, cancellation).await?;
     *connection = returned;
-    write_http_after_retirement(retirement, responses, writer, cancellation).await
+    write_http_after_retirement(
+        retirement_acknowledgements,
+        retirement,
+        responses,
+        writer,
+        cancellation,
+    )
+    .await
 }
 
 async fn write_http_after_retirement<W, C>(
+    retirement_acknowledgements: &futures::channel::mpsc::UnboundedSender<
+        RetirementAcknowledgement,
+    >,
     retirement: RetirementGates,
     responses: Vec<Vec<u8>>,
     writer: &mut W,
@@ -1250,7 +1650,7 @@ where
     W: futures::io::AsyncWrite + Unpin,
     C: Future<Output = ()> + Unpin,
 {
-    retire_and_join(retirement).await?;
+    retire_and_join(retirement_acknowledgements, retirement).await?;
     for response in responses {
         await_socket_io(writer.write_all(&response), cancellation).await?;
         await_socket_io(writer.flush(), cancellation).await?;
@@ -1283,6 +1683,7 @@ async fn serve_websocket_worker<C>(
     mut writer: TokioWriter,
     initial: Vec<u8>,
     actor: futures::channel::mpsc::UnboundedSender<ActorCommand>,
+    retirement_acknowledgements: futures::channel::mpsc::UnboundedSender<RetirementAcknowledgement>,
     registry: Rc<RefCell<WorkerRegistry>>,
     worker_id: u64,
     cancellation: &mut C,
@@ -1343,7 +1744,10 @@ async fn serve_websocket_worker<C>(
             return;
         }
     };
-    if retire_and_join(retirement).await.is_err() {
+    if retire_and_join(&retirement_acknowledgements, retirement)
+        .await
+        .is_err()
+    {
         close_worker_attachment(&actor, &registry, attachment, worker_id, cancellation).await;
         return;
     }
