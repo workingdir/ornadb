@@ -1659,7 +1659,7 @@ struct ListStreamBridge {
     consumer_principal: String,
     consumer_root: String,
     consumer_binding: String,
-    partition: String,
+    partition: Option<String>,
     table: String,
     key_fields: Vec<String>,
     parameter: String,
@@ -1682,7 +1682,7 @@ impl ListStreamBridge {
             source_format: component("orna-stream-v1")?,
             source: component(&self.source_identity)?,
             partition_format: component("literal-list")?,
-            partition: component(&self.partition)?,
+            partition: self.partition.as_deref().map(component).transpose()?,
             position_format: component("ordinal")?,
         })
     }
@@ -1826,7 +1826,7 @@ fn admit_list_stream_source(
         consumer_principal: "conformance".into(),
         consumer_root: unit.source_id.clone(),
         consumer_binding: "from_list".into(),
-        partition: "default".into(),
+        partition: None,
         table: table_name,
         key_fields,
         parameter,
@@ -1949,7 +1949,7 @@ fn admit_project_list_stream(
         consumer_principal: format!("database:{database}"),
         consumer_root: "public-function".into(),
         consumer_binding: "arguments:[]".into(),
-        partition: "null".into(),
+        partition: None,
         table,
         key_fields: keys.clone(),
         parameter,
@@ -4957,7 +4957,7 @@ mod list_stream_tests {
             source_format: component("orna-stream-v1"),
             source: component("fixture:failure"),
             partition_format: component("literal-list"),
-            partition: component("default"),
+            partition: None,
             position_format: component("ordinal"),
         }
     }
