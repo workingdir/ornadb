@@ -854,6 +854,25 @@ fn table_assertion_rejects_authoritative_std_net_effect() {
 }
 
 #[test]
+fn table_assertion_rejects_standard_filesystem_effect_before_admission() {
+    let result = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        "pub table User(id: Uuid) { name: Str, assert std.io.fs.read_text(\"private-input\") == \"ok\"; }",
+    )]);
+
+    assert!(has(&result, DIAG_ASSERTION_EFFECT));
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code() == DIAG_ASSERTION_EFFECT
+            && diagnostic.message() == "declaration assertion uses forbidden filesystem effect"
+    }));
+    assert!(
+        !serde_json::to_string(&result.diagnostics)
+            .expect("diagnostics encode")
+            .contains("private-input")
+    );
+}
+
+#[test]
 fn table_assertion_rejects_owner_type_mismatch() {
     let result = analyze(&[ModuleInput::new(
         "books.orna",
