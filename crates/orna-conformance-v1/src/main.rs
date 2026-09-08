@@ -86,6 +86,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if pipeline_insertion_contract(scenario) {
             return self.bounded.run_scenario(scenario);
         }
+        if pipeline_precedence_contract(scenario) {
+            return self.bounded.run_scenario(scenario);
+        }
         StageOutcome::Skipped {
             reason: "scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution".into(),
         }
@@ -103,6 +106,20 @@ fn pipeline_insertion_contract(scenario: &Scenario) -> bool {
                 "no special pipe-function declaration is required",
             ]
         && scenario.requirements == ["ORNA-PIPE-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
+}
+
+fn pipeline_precedence_contract(scenario: &Scenario) -> bool {
+    scenario.id == "PIPE-002"
+        && scenario.title == "Pipeline precedence is stable"
+        && scenario.given == ["`1 + 2 | square`, `values | count > 0`, and `(values | count) + 1`"]
+        && scenario.when == ["parse and evaluate"]
+        && scenario.then
+            == [
+                "arithmetic binds above the pipe",
+                "comparison binds below the pipe",
+                "parentheses allow arithmetic on a pipeline result",
+            ]
+        && scenario.requirements == ["ORNA-OP-001", "ORNA-PIPE-002", "ORNA-PIPE-003"]
 }
 
 fn repl_preview_contract(scenario: &Scenario) -> bool {
@@ -699,6 +716,7 @@ fn main() {
             .collect(),
             executed_scenario_contracts: vec![
                 "PIPE-001".into(),
+                "PIPE-002".into(),
                 "REPL-001".into(),
                 "TXN-001".into(),
                 "TXN-002".into(),
