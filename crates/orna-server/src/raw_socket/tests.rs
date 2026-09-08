@@ -999,6 +999,7 @@ struct TestDispatch {
     cancelled: Arc<AtomicBool>,
     polled: Arc<AtomicBool>,
     first_poll_saw_cancellation: Arc<AtomicBool>,
+    sealed_finalizations: Arc<Mutex<Vec<(InvocationId, SealedInvocationLifecycleFinalization)>>>,
 }
 
 impl TestDispatch {
@@ -1008,6 +1009,7 @@ impl TestDispatch {
             cancelled: Arc::new(AtomicBool::new(false)),
             polled: Arc::new(AtomicBool::new(false)),
             first_poll_saw_cancellation: Arc::new(AtomicBool::new(false)),
+            sealed_finalizations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -1061,6 +1063,138 @@ impl DispatchService for TestDispatch {
     fn cancelled(&self, _stream: u64) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
+
+    fn finalize_sealed_invocation_lifecycle(
+        &self,
+        invocation: InvocationId,
+        finalization: SealedInvocationLifecycleFinalization,
+    ) -> SealedLifecycleFinalizationFuture {
+        let finalizations = Arc::clone(&self.sealed_finalizations);
+        Box::pin(async move {
+            finalizations
+                .lock()
+                .expect("sealed finalization lock")
+                .push((invocation, finalization));
+            Ok(())
+        })
+    }
+}
+
+fn sealed_producer_completion(
+    stream: u64,
+    invocation: InvocationId,
+    cancellation: ResourceCancellation,
+) -> DispatchCompletion {
+    DispatchCompletion {
+        actions: VecDeque::new(),
+        cancellation: ServerAction::InvokeCancelled { stream },
+        cancellation_token: Some(cancellation),
+        sealed_producer: None,
+        sealed_invocation: Some(invocation),
+        sealed_next_event_sequence: 1,
+        sealed_next_outer_sequence: 2,
+        start_gate: None,
+        start_delivered: true,
+        terminal_delivered: false,
+        terminal_claimed: false,
+        worker_completed: true,
+        _guards: None,
+    }
+}
+
+#[tokio::test]
+async fn sealed_producer_terminals_finalize_before_queuing_protocol_actions() {
+    let dispatcher = TestDispatch::new(Vec::new());
+    let invocation = InvocationId::from_bytes([0xa7; 16]);
+    let stream = 27;
+
+    for (event, finalization) in [
+        (
+            AuthenticatedServerResourceEvent::Completed {
+                final_batch_sequence: 0,
+                total_items: 0,
+                total_bytes: 0,
+            },
+            SealedInvocationLifecycleFinalization::Completed,
+        ),
+        (
+            AuthenticatedServerResourceEvent::Failed {
+                failure: CallFailure::TargetUnavailable,
+            },
+            SealedInvocationLifecycleFinalization::Failed {
+                target_unavailable: true,
+            },
+        ),
+        (
+            AuthenticatedServerResourceEvent::Cancelled,
+            SealedInvocationLifecycleFinalization::Cancelled,
+        ),
+    ] {
+        let mut completion =
+            sealed_producer_completion(stream, invocation, ResourceCancellation::new());
+        let mut waiting_bytes = BTreeMap::new();
+        handle_sealed_producer_event(
+            &dispatcher,
+            stream,
+            &mut completion,
+            &mut waiting_bytes,
+            Ok(event),
+        )
+        .await
+        .expect("sealed terminal finalizes");
+
+        assert_eq!(
+            dispatcher
+                .sealed_finalizations
+                .lock()
+                .expect("sealed finalization lock")
+                .last()
+                .copied(),
+            Some((invocation, finalization))
+        );
+        assert!(
+            !completion.actions.is_empty(),
+            "protocol actions queue only after lifecycle finalization"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sealed_producer_cancellation_wins_before_completed_protocol_action() {
+    let dispatcher = TestDispatch::new(Vec::new());
+    let invocation = InvocationId::from_bytes([0xa8; 16]);
+    let stream = 28;
+    let cancellation = ResourceCancellation::new();
+    assert!(cancellation.request_cancel());
+    let mut completion = sealed_producer_completion(stream, invocation, cancellation);
+
+    handle_sealed_producer_event(
+        &dispatcher,
+        stream,
+        &mut completion,
+        &mut BTreeMap::new(),
+        Ok(AuthenticatedServerResourceEvent::Completed {
+            final_batch_sequence: 0,
+            total_items: 0,
+            total_bytes: 0,
+        }),
+    )
+    .await
+    .expect("cancelled terminal finalizes");
+
+    assert_eq!(
+        dispatcher
+            .sealed_finalizations
+            .lock()
+            .expect("sealed finalization lock")
+            .last()
+            .copied(),
+        Some((invocation, SealedInvocationLifecycleFinalization::Cancelled,))
+    );
+    assert_eq!(
+        completion.actions,
+        cancellation_actions(stream, ServerAction::InvokeCancelled { stream })
+    );
 }
 
 #[derive(Clone)]
