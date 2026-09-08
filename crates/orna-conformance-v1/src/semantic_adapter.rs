@@ -2711,10 +2711,11 @@ impl TableEffectHandler<'_, '_> {
                     .map_err(|error| transaction_error(table_error_code(error)))?
                     .cloned()
                     .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-MISSING"))?;
-                let [key_field] = key_fields.as_slice() else {
+                let new_components = table_key_components(new_key.as_slice(), key_fields.len())?;
+                if key_fields.is_empty() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
-                };
-                let row = replace_record_field(&existing, key_field, new_key.clone())?;
+                }
+                let row = replace_record_fields(&existing, key_fields, &new_components)?;
                 self.activation
                     .delete(table.clone(), old_key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
@@ -3672,26 +3673,41 @@ fn merge_upsert_row(
     merge_row(existing, &patch, key_fields)
 }
 
-fn replace_record_field(
+fn table_key_components(encoded: &[u8], arity: usize) -> Result<Vec<Value>, EvaluationError> {
+    let key = Value::decode(encoded).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?;
+    match (arity, key.raw()) {
+        (1, _) => Ok(vec![key]),
+        (_, OvbRaw::Array(values)) if values.len() == arity => values
+            .iter()
+            .cloned()
+            .map(|value| Value::new(value).map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY")))
+            .collect(),
+        _ => Err(transaction_error("ORNA-EVAL-TABLE-KEY")),
+    }
+}
+
+fn replace_record_fields(
     row: &Value,
-    field: &str,
-    replacement: Vec<u8>,
+    key_fields: &[String],
+    replacements: &[Value],
 ) -> Result<Value, EvaluationError> {
+    if key_fields.len() != replacements.len() || key_fields.is_empty() {
+        return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+    }
     let OvbRaw::Map(entries) = row.raw() else {
         return Err(transaction_error("ORNA-EVAL-TABLE-ROW"));
     };
-    let mut fields = entries.clone();
-    let Some((_, value)) = fields
-        .iter_mut()
-        .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
-    else {
-        return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
-    };
-    *value = Value::decode(&replacement)
-        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-KEY"))?
-        .raw()
-        .clone();
-    Value::new(OvbRaw::Map(fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
+    let mut row_fields = entries.clone();
+    for (field, replacement) in key_fields.iter().zip(replacements) {
+        let Some((_, value)) = row_fields
+            .iter_mut()
+            .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+        else {
+            return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
+        };
+        *value = replacement.raw().clone();
+    }
+    Value::new(OvbRaw::Map(row_fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
 }
 
 fn transaction_error(code: &'static str) -> EvaluationError {
