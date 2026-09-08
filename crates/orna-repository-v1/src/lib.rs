@@ -2138,6 +2138,14 @@ impl Repository {
                 "-z".into(),
                 "--".into(),
             ],
+            vec![
+                "ls-files".into(),
+                "--others".into(),
+                "--ignored".into(),
+                "--exclude-standard".into(),
+                "-z".into(),
+                "--".into(),
+            ],
         ] {
             local_paths.extend(self.git_nul_paths(&arguments)?);
         }
