@@ -3195,6 +3195,17 @@ impl RuntimeState {
             }
         };
         let StreamSourcePoll::Item(item) = poll else {
+            // A provider poll is outside the activation transaction and may
+            // finish after the owner requests cancellation. Re-check at that
+            // boundary before reporting a finite source as exhausted (or an
+            // unbounded one as closed): cancellation owns the terminal run
+            // classification and must not be turned into source completion.
+            if control.cancelled() {
+                self.complete_stream_observation(writer, key, StreamObservationStatus::Cancelled)
+                    .await
+                    .map_err(StreamStepError::Runtime)?;
+                return Ok(StreamStep::Cancelled { checkpoint });
+            }
             return Ok(match poll {
                 StreamSourcePoll::Waiting => StreamStep::Waiting,
                 StreamSourcePoll::Exhausted => StreamStep::Exhausted,
@@ -10784,6 +10795,36 @@ mod tests {
         ));
         assert_eq!(raced_source.polls, 1);
         assert_eq!(raced_handler.calls, 0);
+
+        let mut exhaustion_race_source = SequenceSource {
+            key: key.clone(),
+            descriptor: StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            },
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::new(),
+        };
+        let mut exhaustion_race_handler = CommitHandler { calls: 0 };
+        assert!(matches!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut exhaustion_race_source,
+                    &mut exhaustion_race_handler,
+                    &CancelAfterPoll(Cell::new(0)),
+                )
+                .await
+                .unwrap(),
+            StreamRunOutcome::Cancelled {
+                delivered: 0,
+                checkpoint: StreamCheckpoint { version: 2, .. },
+            }
+        ));
+        assert_eq!(exhaustion_race_source.polls, 1);
+        assert_eq!(exhaustion_race_handler.calls, 0);
     }
 
     #[tokio::test]
