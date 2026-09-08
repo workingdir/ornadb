@@ -1582,6 +1582,63 @@ fn numeric_methods_and_relation_count_use_closed_intrinsic_shapes() {
 }
 
 #[test]
+fn relation_windows_admit_the_standard_size_and_step_contract() {
+    let valid = analyze(&[ModuleInput::new(
+        "windows.orna",
+        r#"
+            pub table Note { text: Str, }
+            pub fn default_step() = Note | window(2);
+            pub fn named_step() = Note | window(size: 2, step: 3);
+            pub fn direct() = window(Note, 2, step: 3);
+            pub fn dynamic(size: Int, step: Int) = Note | window(size, step);
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let module = valid
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "windows")
+        .unwrap();
+    for name in ["default_step", "named_step", "direct", "dynamic"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref()
+                    == &Type::Relation(Box::new(Type::List(Box::new(Type::Named("Note".into())))))
+        ));
+    }
+
+    for (body, expected) in [
+        (
+            "Note | window()",
+            "window arguments do not match its static signature",
+        ),
+        (
+            "Note | window(2, 3, 4)",
+            "window arguments do not match its static signature",
+        ),
+        ("Note | window(\"two\")", "window size must be an Int"),
+        ("Note | window(2, \"three\")", "window step must be an Int"),
+        ("Note | window(0)", "window size must be positive"),
+        ("Note | window(-1)", "window size must be positive"),
+        ("Note | window(2, step: 0)", "window step must be positive"),
+    ] {
+        let result = analyze(&[ModuleInput::new(
+            "invalid-window.orna",
+            format!("pub table Note {{ text: Str, }} fn invalid() = {body};"),
+        )]);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message() == expected),
+            "{body}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(

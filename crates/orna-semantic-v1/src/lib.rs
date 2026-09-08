@@ -4180,23 +4180,43 @@ fn infer_relation_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let Some("exists") = core_relation_call_name(callee) else {
+    let name = core_relation_call_name(callee)?;
+    if !matches!(name, "exists" | "window") {
         return None;
-    };
-    if arguments.len() != 2 {
+    }
+    if name == "window" && !matches!(callee, Expr::Name { .. }) {
         return None;
+    }
+    if name == "exists" && arguments.len() != 2 {
+        return None;
+    }
+    if name == "window" && arguments.is_empty() {
+        diagnostics.push(diag(DIAG_TYPE, "window requires a relation and a size"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
     }
     let relation = infer(&arguments[0].value, scope, local, diagnostics);
     let Type::Relation(element) = relation.ty else {
         diagnostics.push(diag(
             DIAG_TYPE,
-            "exists requires a relation as its first argument",
+            format!("{name} requires a relation as its first argument"),
         ));
         return Some(Inferred {
             ty: Type::Error,
             effects: relation.effects,
         });
     };
+    if name == "window" {
+        let window = infer_relation_window(&arguments[1..], *element, scope, local, diagnostics);
+        let mut effects = relation.effects;
+        effects.join(&window.effects);
+        return Some(Inferred {
+            ty: window.ty,
+            effects,
+        });
+    }
     let callback = infer_callback(
         &arguments[1].value,
         *element,
@@ -4211,6 +4231,111 @@ fn infer_relation_call(
         ty: Type::Bool,
         effects,
     })
+}
+
+/// Admits the positional relation-window signature without claiming that a
+/// dynamic `Int` is positive. The runtime remains responsible for values that
+/// are not statically provable constants.
+fn infer_relation_window(
+    arguments: &[orna_syntax_v1::Argument],
+    element: Type,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let values = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics))
+        .collect::<Vec<_>>();
+    let mut effects = EffectSummary::default();
+    for value in &values {
+        effects.join(&value.effects);
+    }
+
+    let mut slots = [None, None];
+    let mut positional = 0usize;
+    let mut named_started = false;
+    let mut malformed = !(1..=2).contains(&arguments.len());
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("size") => {
+                named_started = true;
+                0
+            }
+            Some("step") => {
+                named_started = true;
+                1
+            }
+            Some(_) => {
+                malformed = true;
+                continue;
+            }
+            None if named_started || positional >= slots.len() => {
+                malformed = true;
+                continue;
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                slot
+            }
+        };
+        if slots[slot].replace(index).is_some() {
+            malformed = true;
+        }
+    }
+    if slots[0].is_none() {
+        malformed = true;
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "window arguments do not match its static signature",
+        ));
+    }
+
+    let mut valid = !malformed;
+    for (slot, label) in [(0, "size"), (1, "step")] {
+        let Some(index) = slots[slot] else {
+            continue;
+        };
+        let value = &values[index];
+        if value.ty != Type::Int && value.ty != Type::Error {
+            diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be an Int")));
+            valid = false;
+        }
+        if is_non_positive_integer_constant(&arguments[index].value) {
+            diagnostics.push(diag(DIAG_TYPE, format!("window {label} must be positive")));
+            valid = false;
+        }
+    }
+    Inferred {
+        ty: if valid {
+            Type::Relation(Box::new(Type::List(Box::new(element))))
+        } else {
+            Type::Error
+        },
+        effects,
+    }
+}
+
+fn is_non_positive_integer_constant(expression: &Expr) -> bool {
+    match expression {
+        Expr::Literal {
+            text,
+            kind: LiteralKind::Integer,
+            ..
+        } => text == "0",
+        Expr::Unary { op, rhs, .. } if op == "-" => matches!(
+            rhs.as_ref(),
+            Expr::Literal {
+                kind: LiteralKind::Integer,
+                ..
+            }
+        ),
+        Expr::Group { inner, .. } => is_non_positive_integer_constant(inner),
+        _ => false,
+    }
 }
 
 /// The frozen parser represents `!exists(rows, predicate)` as a call whose
@@ -4266,6 +4391,27 @@ fn infer_success_pipeline(
         effects.join(&callback.effects);
         return Inferred {
             ty: Type::Relation(element.clone()),
+            effects,
+        };
+    }
+    if let Type::Relation(element) = &input.ty
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Expr::Name { text, .. } = callee.as_ref()
+        && text == "window"
+    {
+        let window = infer_relation_window(
+            arguments,
+            element.as_ref().clone(),
+            scope,
+            local,
+            diagnostics,
+        );
+        let mut effects = input.effects;
+        effects.join(&window.effects);
+        return Inferred {
+            ty: window.ty,
             effects,
         };
     }
