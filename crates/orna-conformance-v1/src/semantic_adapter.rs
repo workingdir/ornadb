@@ -1159,6 +1159,35 @@ impl DurableTransactionalEvaluator {
         fingerprint: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
+        self.execute_source_request_with_success_terminal(
+            repository,
+            identity,
+            owner_id,
+            initial_digest,
+            request,
+            fingerprint,
+            unit,
+            None,
+        )
+        .await
+    }
+
+    /// Executes a request-bound source activation while retaining a caller's
+    /// already validated protocol success response atomically with table
+    /// mutations. The caller owns the response encoding; this adapter only
+    /// accepts it at the runtime's owner-fenced commit boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_source_request_with_success_terminal(
+        &self,
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        owner_id: [u8; 16],
+        initial_digest: [u8; 32],
+        request: RequestIdentity,
+        fingerprint: [u8; 32],
+        unit: &SourceUnit,
+        success_terminal: Option<TerminalOutcome>,
+    ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let state = RuntimeState::open(repository, identity, initial_digest).await?;
         let registration = RunObservationRegistration {
             request,
@@ -1274,7 +1303,7 @@ impl DurableTransactionalEvaluator {
                 context,
                 &mutations,
                 next_digest,
-                request_terminal(&StageOutcome::Passed)?,
+                success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
                 &NoFault,
             )
             .await?;
@@ -1944,7 +1973,7 @@ fn admit_project_list_stream(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(ListStreamBridge {
-        source_identity,
+        source_identity: list_source_identity(&source_identity, &payloads),
         entry: root_entry.into(),
         consumer_principal: format!("database:{database}"),
         consumer_root: "public-function".into(),
@@ -4673,7 +4702,7 @@ mod list_stream_tests {
             identity(),
         )
         .expect("authoritative stream admission");
-        assert_eq!(bridge.source_identity, "example:sensors:v1");
+        assert!(bridge.source_identity.starts_with("example:sensors:v1:"));
         assert_eq!(bridge.key_fields, ["sensor", "sequence"]);
         let sample = Value::decode(&bridge.payloads[0]).expect("nominal sample payload");
         assert!(matches!(
@@ -4710,6 +4739,75 @@ mod list_stream_tests {
             .await
             .expect("checkpoint");
         assert_eq!(checkpoint.committed.unwrap().token.as_str(), "3");
+    }
+
+    #[tokio::test]
+    async fn project_list_stream_changed_contents_select_a_fresh_checkpoint() {
+        let (_temp, repository) = repository();
+        let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+        let first = authoritative_sensor_project();
+
+        assert!(matches!(
+            evaluator
+                .execute_project_stream(
+                    &repository,
+                    identity(),
+                    [23; 16],
+                    [24; 32],
+                    &first,
+                    "sensors.ingest",
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+
+        let first_bridge = admit_project_list_stream(
+            &first,
+            admit_transaction_project(&first, Limits::default(), "sensors.ingest")
+                .expect("first project admission"),
+            "sensors.ingest",
+            identity(),
+        )
+        .expect("first stream admission");
+
+        let mut changed = authoritative_sensor_project();
+        changed.modules[0].source = changed.modules[0]
+            .source
+            .replace("sequence: 0", "sequence: 3")
+            .replace("sequence: 1", "sequence: 4")
+            .replace("sequence: 2", "sequence: 5");
+        assert!(matches!(
+            evaluator
+                .execute_project_stream(
+                    &repository,
+                    identity(),
+                    [23; 16],
+                    [24; 32],
+                    &changed,
+                    "sensors.ingest",
+                )
+                .await,
+            Ok(StageOutcome::Passed)
+        ));
+
+        let changed_bridge = admit_project_list_stream(
+            &changed,
+            admit_transaction_project(&changed, Limits::default(), "sensors.ingest")
+                .expect("changed project admission"),
+            "sensors.ingest",
+            identity(),
+        )
+        .expect("changed stream admission");
+        assert_ne!(first_bridge.source_identity, changed_bridge.source_identity);
+
+        let state = RuntimeState::open(&repository, identity(), [24; 32])
+            .await
+            .expect("reopened runtime");
+        assert_eq!(
+            state.committed_table_rows("Reading").await.unwrap().len(),
+            6,
+            "changed literal contents must not resume the predecessor checkpoint"
+        );
     }
 
     #[tokio::test]
