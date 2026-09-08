@@ -57,6 +57,8 @@ mod sealed_dispatch;
 mod sealed_events;
 #[path = "security/sealed_invocation.rs"]
 mod sealed_invocation;
+#[path = "security/sealed_lifecycle_finalization.rs"]
+mod sealed_lifecycle_finalization;
 #[path = "security/sealed_server_contract.rs"]
 mod sealed_server_contract;
 #[path = "security/sealed_server_execution.rs"]
@@ -123,6 +125,7 @@ pub use sealed_invocation::{
     SealedInvocationContinuation, SealedInvocationExecution, SealedInvocationOperation,
     SealedInvocationPreflight, SealedInvocationResult,
 };
+pub use sealed_lifecycle_finalization::SealedInvocationLifecycleFinalization;
 #[cfg(test)]
 use sealed_server_contract::{
     bind_authenticated_resource_arguments, classify_sealed_server_error,
