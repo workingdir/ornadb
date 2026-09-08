@@ -1329,7 +1329,9 @@ impl Context<'_, '_> {
         // including its declared argument names. The fallback remains only
         // for the standalone evaluator surface, which has no admitted module
         // environment.
-        if math_name(callee).is_none() || self.resolve_function_name(callee, scope).is_some() {
+        if math_name(callee).is_none() && bits_name(callee).is_none()
+            || self.resolve_function_name(callee, scope).is_some()
+        {
             if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
                 self.items(arguments.len() + usize::from(input.is_some()))?;
                 let mut values = input.clone().into_iter().collect::<Vec<_>>();
@@ -1437,7 +1439,11 @@ impl Context<'_, '_> {
             self.repl_bindings = previous_repl_bindings;
             return result;
         }
-        let name = math_name(callee).ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let math = math_name(callee);
+        let bits = bits_name(callee);
+        let name = math
+            .or(bits)
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
         let mut values = input.into_iter().collect::<Vec<_>>();
@@ -1446,7 +1452,12 @@ impl Context<'_, '_> {
             .map(|argument| self.evaluate(&argument.value, scope, depth + 1))
             .collect::<Result<Vec<_>, _>>()?;
         values.extend(explicit);
-        self.math(name, named_arguments(name, arguments, values, implicit)?)
+        let values = named_arguments(name, arguments, values, implicit)?;
+        if math.is_some() {
+            self.math(name, values)
+        } else {
+            self.bits(name, values)
+        }
     }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
         let name = function_name(expression)?;
@@ -1542,6 +1553,60 @@ impl Context<'_, '_> {
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
+    }
+    fn bits(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("bit_or", [Value::Int(left), Value::Int(right)]) => {
+                Ok(Value::Int(self.integer(left | right)?))
+            }
+            ("bit_and", [Value::Int(left), Value::Int(right)]) => {
+                Ok(Value::Int(self.integer(left & right)?))
+            }
+            ("bit_xor", [Value::Int(left), Value::Int(right)]) => {
+                Ok(Value::Int(self.integer(left ^ right)?))
+            }
+            ("bit_not", [Value::Int(value)]) => {
+                Ok(Value::Int(self.integer(-value - BigInt::from(1))?))
+            }
+            ("shift_left", [Value::Int(value), Value::Int(count)]) => self.shift_left(value, count),
+            ("shift_right", [Value::Int(value), Value::Int(count)]) => {
+                self.shift_right(value, count)
+            }
+            ("bit_or" | "bit_and" | "bit_xor" | "bit_not" | "shift_left" | "shift_right", _)
+                if values.iter().any(|value| !matches!(value, Value::Int(_))) =>
+            {
+                Err(error("ORNA-EVAL-TYPE"))
+            }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn shift_left(&self, value: &BigInt, count: &BigInt) -> Result<Value, EvaluationError> {
+        if count.is_negative() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if value.is_zero() {
+            return Ok(Value::Int(BigInt::ZERO));
+        }
+        let max_bits = self.limits.max_integer_digits.saturating_mul(4);
+        if BigInt::from(value.bits()) + count > BigInt::from(max_bits) {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        Ok(Value::Int(self.integer(value << count)?))
+    }
+    fn shift_right(&self, value: &BigInt, count: &BigInt) -> Result<Value, EvaluationError> {
+        if count.is_negative() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        if count >= &BigInt::from(value.bits()) {
+            return Ok(Value::Int(if value.is_negative() {
+                BigInt::from(-1)
+            } else {
+                BigInt::ZERO
+            }));
+        }
+        let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        Ok(Value::Int(self.integer(value >> count)?))
     }
 }
 
@@ -1799,11 +1864,21 @@ fn named_arguments(
         .collect()
 }
 fn math_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "math")
+}
+
+fn bits_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "bits")
+}
+
+fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
     let Expr::Field { base, name, .. } = expression else {
         return None;
     };
     let Expr::Field {
-        base, name: module, ..
+        base,
+        name: selected_module,
+        ..
     } = base.as_ref()
     else {
         return None;
@@ -1811,7 +1886,7 @@ fn math_name(expression: &Expr) -> Option<&str> {
     let Expr::Name { text, .. } = base.as_ref() else {
         return None;
     };
-    (text == "std" && module == "math").then_some(name.as_str())
+    (text == "std" && selected_module == module).then_some(name.as_str())
 }
 
 fn function_name(expression: &Expr) -> Option<String> {
