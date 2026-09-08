@@ -2121,6 +2121,78 @@ fn recovery_resumes_after_ref_and_index_boundaries() {
 }
 
 #[test]
+fn recovery_after_ref_advance_preserves_unrelated_partial_staging() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(
+        root.path().join("ordinary.txt"),
+        "staged ordinary\nunstaged ordinary\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
+    let unstaged_before = git(root.path(), &["diff", "--binary"]);
+
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [29; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert_eq!(
+        git(root.path(), &["diff", "--cached", "--binary"]),
+        staged_before
+    );
+    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+    assert_eq!(
+        fs::read(root.path().join(managed.as_path())).unwrap(),
+        b"candidate row\n"
+    );
+    assert_eq!(
+        git(root.path(), &["show", ":generated/row.orna"]),
+        "candidate row"
+    );
+
+    let mut journal = repo.read_publication_journal().unwrap().unwrap();
+    repo.mark_runtime_complete([29; 16], &mut journal).unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+#[test]
 fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
