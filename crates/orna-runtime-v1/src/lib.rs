@@ -12557,6 +12557,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reopen_recovers_interrupted_retry_without_advancing_or_rekeying_failure() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let delivery = stream_delivery("retry-reopen", "retry-reopen-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let retrying = {
+            let mut stream = state.stream_backend(writer);
+            let lease = match stream
+                .apply_async(CommitIntent::Acquire {
+                    delivery: delivery.clone(),
+                    expected: expected.clone(),
+                    purpose: LeasePurpose::Deliver,
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::Acquired { lease } => lease,
+                other => panic!("unexpected stream acquire result: {other:?}"),
+            };
+            let failed = match stream
+                .fail_async(
+                    lease,
+                    SafeDiagnostic {
+                        code: DiagnosticCode::DecodeRejected,
+                        class: DiagnosticClass::Permanent,
+                    },
+                    StreamFailurePayload::Plaintext(vec![1, 2, 3]),
+                )
+                .await
+                .unwrap()
+            {
+                CommitResult::Failed { failure } => failure,
+                other => panic!("unexpected stream failure result: {other:?}"),
+            };
+            match stream
+                .apply_async(CommitIntent::Retry {
+                    failure: failed.identity,
+                    expected_version: failed.version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap()
+            {
+                CommitResult::RetryScheduled { failure } => failure,
+                other => panic!("unexpected stream retry result: {other:?}"),
+            }
+        };
+        let stale_version = retrying.version;
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let replacement = reopened.recover_abandoned(id(4), id(5)).await.unwrap();
+        let mut stream = reopened.stream_backend(replacement);
+        let recovered = stream
+            .failure_async(&retrying.identity)
+            .await
+            .unwrap()
+            .expect("recovered failure");
+        assert_eq!(recovered.identity, retrying.identity);
+        assert_eq!(recovered.status, FailureStatus::Failed);
+        assert_eq!(recovered.version, stale_version + 1);
+        assert_eq!(recovered.attempts, retrying.attempts);
+        assert_eq!(
+            stream
+                .checkpoint_async(&delivery.checkpoint_key())
+                .await
+                .unwrap(),
+            StreamCheckpoint {
+                key: delivery.checkpoint_key(),
+                version: expected.version,
+                committed: expected.committed.clone(),
+            }
+        );
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: recovered.identity.clone(),
+                    expected_version: stale_version,
+                    expected: expected.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        assert!(matches!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: recovered.identity,
+                    expected_version: recovered.version,
+                    expected,
+                })
+                .await
+                .unwrap(),
+            CommitResult::RetryScheduled { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn cancelled_retry_keeps_the_stable_failure_blocking_and_checkpoint_unadvanced() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
