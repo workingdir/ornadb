@@ -196,6 +196,35 @@ impl SealedInvocationObservationStatus {
 }
 
 impl PostgresKernel {
+    /// Loads the checked durable subset of one retained `sys.Invocation` row.
+    ///
+    /// This is a read-only historical observation: it uses the persisted
+    /// admission capture and never starts, resumes, or otherwise mutates the
+    /// invocation. Rows without coherent persisted admission evidence are
+    /// excluded fail-closed. This does not make a `sys.rt` membership claim.
+    pub async fn load_durable_sys_invocation_observation(
+        &self,
+        invocation: InvocationId,
+    ) -> Result<Option<DurableSysInvocationObservation>, PostgresKernelError> {
+        self.load_retained_sealed_invocation_observation(invocation)
+            .await
+            .map(|observation| observation.map(|observation| observation.durable_sys_projection()))
+    }
+
+    /// Loads the checked durable subset of retained `sys.Invocation` rows in
+    /// stable durable order.
+    ///
+    /// This collection is read-only and retains the loader's fail-closed
+    /// treatment of legacy or malformed admission evidence. It intentionally
+    /// does not filter for current-runtime membership.
+    pub async fn load_durable_sys_invocation_observations(
+        &self,
+    ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
+        self.load_retained_sealed_invocation_observation_collection()
+            .await
+            .map(project_durable_sys_invocation_collection)
+    }
+
     /// Loads one durable observation without starting, resuming, or otherwise
     /// mutating its invocation. The returned source, catalogue, and target
     /// coordinates are pinned at admission, not the database's current active
@@ -205,6 +234,14 @@ impl PostgresKernel {
     pub async fn load_sealed_invocation_observation(
         &self,
         _caller_capture: &CwdCapture,
+        invocation: InvocationId,
+    ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
+        self.load_retained_sealed_invocation_observation(invocation)
+            .await
+    }
+
+    async fn load_retained_sealed_invocation_observation(
+        &self,
         invocation: InvocationId,
     ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
@@ -304,6 +341,15 @@ impl PostgresKernel {
         .await;
         finish_observation_session(operation, session.shutdown().await)
     }
+}
+
+fn project_durable_sys_invocation_collection(
+    observations: Vec<SealedInvocationObservation>,
+) -> Vec<DurableSysInvocationObservation> {
+    observations
+        .into_iter()
+        .map(|observation| observation.durable_sys_projection())
+        .collect()
 }
 
 #[cfg(test)]
@@ -907,6 +953,24 @@ mod tests {
             digest: _,
             redacted: _,
         } = &arguments[0];
+    }
+
+    #[test]
+    fn durable_sys_projection_collection_preserves_retained_order_without_mutation() {
+        let retained = vec![
+            observation(&capture(1), 3, SealedInvocationObservationStatus::Running),
+            observation(&capture(1), 2, SealedInvocationObservationStatus::Succeeded),
+        ];
+        let original = retained.clone();
+
+        let projected = project_durable_sys_invocation_collection(retained);
+
+        assert_eq!(original[0].invocation, InvocationId::from_bytes([3; 16]));
+        assert_eq!(original[1].invocation, InvocationId::from_bytes([2; 16]));
+        assert_eq!(projected[0].id, original[0].invocation);
+        assert_eq!(projected[1].id, original[1].invocation);
+        assert_eq!(projected[0].status, InvocationStatus::Running);
+        assert_eq!(projected[1].status, InvocationStatus::Succeeded);
     }
 
     #[test]

@@ -70,6 +70,7 @@ pub use inspect::AuthenticatedInspectSnapshot;
 pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use recovery::RevisionPairHistoryEntry;
 pub use sealed_invocation_observation::{
+    DurableSysInvocationArgumentObservation, DurableSysInvocationObservation,
     SealedInvocationArgumentObservation, SealedInvocationArgumentTypeKind,
     SealedInvocationObservation, SealedInvocationObservationStatus,
 };
