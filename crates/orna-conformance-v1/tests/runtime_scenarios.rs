@@ -327,7 +327,9 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         .collect::<Vec<_>>();
     assert_eq!(
         declared,
-        ["REPL-001", "TXN-001", "TXN-002", "LIVE-001", "LIVE-003"]
+        [
+            "REPL-001", "TXN-001", "TXN-002", "LIVE-001", "LIVE-002", "LIVE-003"
+        ]
     );
     let scenarios = report["scenarios"]
         .as_array()
@@ -336,7 +338,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("REPL-001" | "TXN-001" | "TXN-002" | "LIVE-001" | "LIVE-003")
+            Some("REPL-001" | "TXN-001" | "TXN-002" | "LIVE-001" | "LIVE-002" | "LIVE-003")
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(
@@ -369,6 +371,15 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         serde_json::json!(["ORNA-LIVE-001", "ORNA-LIVE-003"])
     );
     assert_eq!(live_keyed_update["status"], "passed");
+    let live_unkeyed_update = scenarios
+        .iter()
+        .find(|result| result["scenario"] == "LIVE-002")
+        .expect("LIVE-002 result is present");
+    assert_eq!(
+        live_unkeyed_update["requirements"],
+        serde_json::json!(["ORNA-LIVE-002"])
+    );
+    assert_eq!(live_unkeyed_update["status"], "passed");
     let live_resync = scenarios
         .iter()
         .find(|result| result["scenario"] == "LIVE-003")

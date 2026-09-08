@@ -86,6 +86,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if live_keyed_update_contract(scenario) {
             return run_live_keyed_update_scenario(scenario);
         }
+        if live_unkeyed_update_contract(scenario) {
+            return run_live_unkeyed_update_scenario(scenario);
+        }
         if live_resync_contract(scenario) {
             return run_live_resync_scenario(scenario);
         }
@@ -426,7 +429,6 @@ fn run_live_keyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnosti
     StageOutcome::Passed
 }
 
-#[cfg(test)]
 fn live_unkeyed_update_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-002"
         && scenario.title == "Unkeyed value still updates"
@@ -436,7 +438,6 @@ fn live_unkeyed_update_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-002"]
 }
 
-#[cfg(test)]
 fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_unkeyed_update_contract(scenario) {
         return StageOutcome::Skipped {
@@ -733,7 +734,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update and LIVE-003 serving resynchronization contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, and LIVE-003 serving resynchronization contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
@@ -743,6 +744,7 @@ fn main() {
                 "TXN-001".into(),
                 "TXN-002".into(),
                 "LIVE-001".into(),
+                "LIVE-002".into(),
                 "LIVE-003".into(),
             ],
         })
