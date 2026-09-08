@@ -1869,7 +1869,7 @@ fn check_item(
     item: &Item,
     symbols: &mut BTreeMap<String, Symbol>,
     scope: &Scope,
-    table_rows: &BTreeMap<String, Type>,
+    _table_rows: &BTreeMap<String, Type>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
@@ -1911,8 +1911,15 @@ fn check_item(
             }
         }
         Declaration::Assertion { value } => {
-            let inferred = infer_module_assertion(value, table_rows, scope, diagnostics);
-            assertion(AssertionOwner::Module, value, inferred, plans, diagnostics);
+            let inferred = infer_module_assertion(value, &scope.table_rows, scope, diagnostics);
+            assertion(
+                AssertionOwner::Module,
+                value,
+                inferred,
+                Some(&scope.table_rows),
+                plans,
+                diagnostics,
+            );
         }
         Declaration::Table {
             name,
@@ -1966,6 +1973,7 @@ fn check_item(
                             AssertionOwner::Table(name.clone()),
                             value,
                             inferred,
+                            None,
                             plans,
                             diagnostics,
                         );
@@ -2009,6 +2017,7 @@ fn check_item(
                         AssertionOwner::RefinedType(name.clone()),
                         value,
                         inferred,
+                        None,
                         plans,
                         diagnostics,
                     );
@@ -5864,10 +5873,11 @@ fn assertion(
     owner: AssertionOwner,
     value: &Expr,
     inferred: Inferred,
+    resolved_tables: Option<&BTreeMap<String, Type>>,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let dependencies = tables_referenced(value);
+    let dependencies = tables_referenced(value, resolved_tables);
     if inferred.ty != Type::Bool {
         let message = match &owner {
             AssertionOwner::Table(name) => {
@@ -6248,7 +6258,10 @@ fn enum_variant_types(
     enums
 }
 
-fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
+fn tables_referenced(
+    expr: &Expr,
+    resolved_tables: Option<&BTreeMap<String, Type>>,
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     fn visit(e: &Expr, names: &mut BTreeSet<String>) {
         match e {
@@ -6319,7 +6332,13 @@ fn tables_referenced(expr: &Expr) -> BTreeSet<String> {
         }
     }
     visit(expr, &mut names);
-    names
+    match resolved_tables {
+        Some(tables) => names
+            .into_iter()
+            .filter(|name| tables.contains_key(name))
+            .collect(),
+        None => names,
+    }
 }
 fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
