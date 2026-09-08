@@ -617,11 +617,46 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
     if changed == 1 {
         return Ok(());
     }
+    let existing = transaction
+        .query_opt(
+            "SELECT status, diagnostic_code, diagnostic_class \
+             FROM _orna_kernel.sealed_invocation_lifecycle \
+             WHERE invocation_id = $1",
+            &[&invocation],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if let Some(existing) = existing {
+        let persisted = (
+            existing
+                .try_get::<_, String>("status")
+                .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, Option<i16>>("diagnostic_code")
+                .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, Option<i16>>("diagnostic_class")
+                .map_err(PostgresKernelError::Database)?,
+        );
+        if sealed_invocation_terminal_matches(
+            (&persisted.0, persisted.1, persisted.2),
+            (status, diagnostic_code, diagnostic_class),
+        ) {
+            return Ok(());
+        }
+    }
     Err(PostgresKernelError::DurableInvariant {
         relation: "_orna_kernel.sealed_invocation_lifecycle",
         record,
         rule: "sealed invocation terminal transition requires one active lifecycle row",
     })
+}
+
+fn sealed_invocation_terminal_matches(
+    persisted: (&str, Option<i16>, Option<i16>),
+    requested: (&str, Option<i16>, Option<i16>),
+) -> bool {
+    persisted == requested
 }
 
 impl SealedInvocationPreparedOutcome {
@@ -1540,6 +1575,23 @@ mod lifecycle_tests {
             )
             .fields(),
             ("failed", Some(3), Some(2))
+        );
+    }
+
+    #[test]
+    fn terminal_retries_only_match_the_same_durable_outcome() {
+        let cancelled = SealedInvocationLifecycleTerminal::Cancelled.fields();
+        let failed =
+            SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Internal)
+                .fields();
+
+        assert!(sealed_invocation_terminal_matches(
+            cancelled,
+            SealedInvocationLifecycleTerminal::Cancelled.fields(),
+        ));
+        assert!(
+            !sealed_invocation_terminal_matches(cancelled, failed),
+            "a retry must never turn a cancelled invocation into an ordinary failure"
         );
     }
 }
