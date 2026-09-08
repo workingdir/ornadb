@@ -23,10 +23,11 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{
-    CanonicalSnapshot, CheckpointRef, CwdCapture, FailureRef, OvbRaw, RowRef, RunRef,
-    SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, SnapshotRef, StreamRef, Value,
-    checkpoint_reference, failure_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_run_reference, validate_stream_reference,
+    CanonicalSnapshot, CheckpointRef, CwdCapture, FailureRef, InvocationRef, OvbRaw, RowRef,
+    RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, SnapshotRef, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
@@ -713,6 +714,24 @@ impl RunObservation {
         validate_run_reference(reference, &self.snapshot)
             .map_err(|_| RuntimeError::InvalidObservationReference)
     }
+
+    /// Reconstructs this retained observation's checked `sys.InvocationRef`
+    /// from the invocation identity admitted with this run and that same
+    /// admission-pinned CWD capture.
+    ///
+    /// This is coordinate validation only. It neither proves that the
+    /// invocation observation is retained nor grants authority to observe it.
+    pub fn invocation_reference(&self) -> Result<InvocationRef, RuntimeError> {
+        validate_id(self.invocation_id)?;
+        let reference = invocation_reference(
+            self.snapshot.database_id(),
+            self.snapshot.snapshot().clone(),
+            self.invocation_id,
+        )
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        validate_invocation_reference(reference.into_row_ref(), &self.snapshot)
+            .map_err(|_| RuntimeError::InvalidObservationReference)
+    }
 }
 
 /// Durable `sys.Stream` projection. `live` is derived from its parent run.
@@ -810,10 +829,10 @@ impl StreamObservation {
 /// Checked, durable-field-only shape of one `sys.Run` observation.
 ///
 /// This is deliberately a partial relation DTO: the runtime retains no
-/// physical `FunctionRef` or `InvocationRef` coordinates, so those schema
-/// fields are not represented here. `snapshot` is reconstructed only from
-/// the durable run capture and its database identity; it cannot be rebound to
-/// the caller's later CWD.
+/// physical `FunctionRef` coordinates, so that schema field is not represented
+/// here. `snapshot` and `invocation` are reconstructed only from the durable
+/// run capture and admission identity; they cannot be rebound to the caller's
+/// later CWD.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysRunProjection {
     pub reference: RunRef,
@@ -821,6 +840,7 @@ pub struct SysRunProjection {
     pub consumer_identity: ConsumerIdentity,
     pub source_identity: Option<String>,
     pub snapshot: SnapshotRef,
+    pub invocation: InvocationRef,
     pub started: SystemTime,
     pub ended: Option<SystemTime>,
     pub status_at_snapshot: RunObservationStatus,
@@ -838,6 +858,7 @@ impl TryFrom<&RunObservation> for SysRunProjection {
 
     fn try_from(observation: &RunObservation) -> Result<Self, Self::Error> {
         let reference = observation.reference()?;
+        let invocation = observation.invocation_reference()?;
         let snapshot = snapshot_reference(
             observation.snapshot.database_id(),
             observation.snapshot.snapshot().clone(),
@@ -863,6 +884,7 @@ impl TryFrom<&RunObservation> for SysRunProjection {
             consumer_identity: observation.consumer_identity.clone(),
             source_identity: observation.source_identity.clone(),
             snapshot,
+            invocation,
             started,
             ended,
             status_at_snapshot: observation.status,
@@ -16524,6 +16546,51 @@ mod tests {
         assert_eq!(restored.ended_ms, Some(restored.observed_ms));
         assert!(restored.observed_ms >= restored.started_ms);
         assert!(!restored.live);
+    }
+
+    #[tokio::test]
+    async fn run_projection_binds_invocation_to_its_admission_capture() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(143, 144);
+        let invocation_id = id(145);
+        state.reserve_request(request, digest(146)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: stream_delivery("run", "invocation").consumer,
+                function: "pkg.run".into(),
+                source_identity: None,
+                invocation_id,
+            })
+            .await
+            .unwrap();
+
+        let projection = SysRunProjection::try_from(&run).unwrap();
+        let expected = invocation_reference(
+            run.snapshot.database_id(),
+            run.snapshot.snapshot().clone(),
+            invocation_id,
+        )
+        .unwrap();
+        assert_eq!(projection.invocation, expected);
+        assert_eq!(
+            projection.invocation.as_row_ref().snapshot,
+            *run.snapshot.snapshot()
+        );
+
+        let mut mismatched_runtime = run.clone();
+        mismatched_runtime.runtime_id = id(147);
+        assert_eq!(
+            SysRunProjection::try_from(&mismatched_runtime),
+            Err(RuntimeError::InvalidObservationReference)
+        );
+        let mut invalid_invocation = run;
+        invalid_invocation.invocation_id = [0; 16];
+        assert_eq!(
+            SysRunProjection::try_from(&invalid_invocation),
+            Err(RuntimeError::InvalidIdentity)
+        );
     }
 
     #[tokio::test]
