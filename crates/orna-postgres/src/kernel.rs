@@ -78,8 +78,9 @@ pub use security::{
     AuthenticatedServerResourceEvent, AuthenticatedServerResourceKind,
     AuthenticatedServerResourceProducer, AuthenticatedServerResourceResult,
     AuthenticatedServerResourceStart, RecordArgumentPreflight, ResourceCancellation,
-    ResourceCredit, SealedInvocationContinuation, SealedInvocationExecution,
-    SealedInvocationOperation, SealedInvocationPreflight, SealedInvocationResult,
+    ResourceCredit, SealedInvocationAdmissionContext, SealedInvocationContinuation,
+    SealedInvocationExecution, SealedInvocationOperation, SealedInvocationPreflight,
+    SealedInvocationResult,
 };
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
