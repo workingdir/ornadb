@@ -169,6 +169,20 @@ impl SealedInvocationObservation {
                 "persisted admission capture cannot construct a snapshot reference",
             )
         })?;
+        for argument in &self.arguments {
+            let expected = invocation_argument_observation_reference(
+                &self.admission_capture,
+                self.invocation,
+                argument.position,
+                &record,
+            )?;
+            if argument.reference != expected {
+                return Err(observation_invariant(
+                    &record,
+                    "argument reference disagrees with persisted admission capture",
+                ));
+            }
+        }
         Ok(DurableSysInvocationObservation {
             reference: self.reference.clone(),
             id: self.invocation,
@@ -1045,6 +1059,29 @@ mod tests {
             .unwrap(),
         );
 
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_argument_reference_outside_admission_identity() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].reference = invocation_argument_observation_reference(
+            &admitted,
+            InvocationId::from_bytes([3; 16]),
+            internal.arguments[0].position,
+            "test",
+        )
+        .unwrap();
+        assert!(internal.durable_sys_projection().is_err());
+
+        internal.arguments[0].reference = invocation_argument_observation_reference(
+            &admitted,
+            internal.invocation,
+            internal.arguments[0].position + 1,
+            "test",
+        )
+        .unwrap();
         assert!(internal.durable_sys_projection().is_err());
     }
 
