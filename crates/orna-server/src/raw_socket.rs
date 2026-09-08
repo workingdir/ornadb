@@ -52,7 +52,7 @@ use orna_postgres::{
     AuthenticatedServerResourceKind, AuthenticatedServerResourceProducer,
     AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError, ResourceCancellation,
     ResourceCredit, SealedInvocationContinuation, SealedInvocationExecution,
-    SealedInvocationPreflight, SealedInvocationResult,
+    SealedInvocationLifecycleFinalization, SealedInvocationPreflight, SealedInvocationResult,
 };
 #[cfg(test)]
 use orna_protocol::encode_constructed_value;
@@ -119,6 +119,8 @@ type SealedPullTaskResult = (
     AuthenticatedServerResourceProducer,
     Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
 );
+type SealedLifecycleFinalizationFuture =
+    Pin<Box<dyn Future<Output = Result<(), PostgresKernelError>> + Send>>;
 const SEALED_CONNECTION_PROTOCOL_MAJOR: u16 = 5;
 
 #[derive(Clone, Default)]
@@ -414,6 +416,11 @@ pub enum LocalRawSocketError {
         /// The protected cancellation-audit failure.
         source: Box<PostgresKernelError>,
     },
+    /// Finalizing an accepted sealed invocation lifecycle failed.
+    SealedLifecycleFinalization {
+        /// The protected lifecycle-finalization failure.
+        source: Box<PostgresKernelError>,
+    },
     /// One protected dispatch task failed outside its typed result.
     DispatchTask {
         /// The unexpected task failure.
@@ -448,6 +455,9 @@ impl fmt::Display for LocalRawSocketError {
             Self::ResourceCancellationAudit { .. } => {
                 "local raw socket resource cancellation audit failed"
             }
+            Self::SealedLifecycleFinalization { .. } => {
+                "local raw socket sealed lifecycle finalization failed"
+            }
             Self::DispatchTask { .. } => "local raw socket dispatch task failed",
             Self::ConnectionTask { .. } => "local raw socket connection task failed",
         })
@@ -468,6 +478,7 @@ impl Error for LocalRawSocketError {
             Self::Connection { source } => Some(source),
             Self::ResourceConnection { source } => Some(source),
             Self::ResourceCancellationAudit { source } => Some(source),
+            Self::SealedLifecycleFinalization { source } => Some(source),
             Self::DispatchTask { source } => Some(source),
             Self::ConnectionTask { source } => Some(source),
             Self::HandshakeTimeout
@@ -1495,6 +1506,17 @@ trait DispatchService: Clone + Send + Sync + 'static {
     ) {
     }
 
+    /// Finalizes an accepted sealed producer before its terminal action is
+    /// visible on the raw protocol. Compatibility and test dispatchers do not
+    /// own a durable sealed lifecycle, so they retain a no-op default.
+    fn finalize_sealed_invocation_lifecycle(
+        &self,
+        _invocation: InvocationId,
+        _finalization: SealedInvocationLifecycleFinalization,
+    ) -> SealedLifecycleFinalizationFuture {
+        Box::pin(async { Ok(()) })
+    }
+
     fn cancelled(&self, _stream: u64) {}
 
     fn session_bridge(&self) -> Option<Arc<crate::invoke::SessionBridge>> {
@@ -1550,6 +1572,19 @@ impl DispatchService for RawDispatchService {
         if let Some(bridge) = self.session_bridge() {
             bridge.cancel_stream(stream);
         }
+    }
+
+    fn finalize_sealed_invocation_lifecycle(
+        &self,
+        invocation: InvocationId,
+        finalization: SealedInvocationLifecycleFinalization,
+    ) -> SealedLifecycleFinalizationFuture {
+        let kernel = self.kernel.clone();
+        Box::pin(async move {
+            kernel
+                .finalize_sealed_invocation_lifecycle(invocation, finalization)
+                .await
+        })
     }
 
     fn start(&self, session: AuthenticatedSession, stream: u64, call: RawCall) -> StartedDispatch {
@@ -2871,11 +2906,14 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::SealedPull(Some(result)) => {
                 if let Err(error) = merge_sealed_pull_result(
                     result,
+                    &dispatcher,
                     &mut pending,
                     &mut sealed_pull_in_flight,
                     &mut sealed_pull_waiting_bytes,
                     &mut producer_shutdown,
-                ) {
+                )
+                .await
+                {
                     break Err(error);
                 }
             }
@@ -3070,11 +3108,14 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
         while let Some(result) = sealed_pull_tasks.join_next().await {
             if let Err(error) = merge_sealed_pull_result(
                 result,
+                &dispatcher,
                 &mut pending,
                 &mut sealed_pull_in_flight,
                 &mut sealed_pull_waiting_bytes,
                 &mut producer_shutdown,
-            ) {
+            )
+            .await
+            {
                 drain_failure.get_or_insert(error);
             }
         }
@@ -3953,12 +3994,13 @@ fn sealed_pull_credit(result_credit: u64, waiting_bytes: Option<u64>) -> Option<
     ResourceCredit::new(1, byte_credit)
 }
 
-fn handle_sealed_producer_event(
+async fn handle_sealed_producer_event<D: DispatchService>(
+    dispatcher: &D,
     stream: u64,
     completion: &mut DispatchCompletion,
     waiting_bytes: &mut BTreeMap<u64, u64>,
     event: Result<AuthenticatedServerResourceEvent, PostgresKernelError>,
-) {
+) -> Result<(), PostgresKernelError> {
     let invocation = completion
         .sealed_invocation
         .expect("sealed producer retains root invocation identity");
@@ -3971,11 +4013,19 @@ fn handle_sealed_producer_event(
         Ok(AuthenticatedServerResourceEvent::Values { values, .. }) => {
             waiting_bytes.remove(&stream);
             if cancellation_requested {
-                return;
+                return Ok(());
             }
             let [value] = match values.try_into() {
                 Ok(values) => values,
                 Err(_) => {
+                    dispatcher
+                        .finalize_sealed_invocation_lifecycle(
+                            invocation,
+                            SealedInvocationLifecycleFinalization::Failed {
+                                target_unavailable: false,
+                            },
+                        )
+                        .await?;
                     queue_sealed_terminal_failure(
                         stream,
                         completion,
@@ -3985,13 +4035,21 @@ fn handle_sealed_producer_event(
                         "invocation could not complete",
                         InvocationRetryability::Unknown,
                     );
-                    return;
+                    return Ok(());
                 }
             };
             let value = match InvokeValue::new(value) {
                 Ok(value) => value,
                 Err(source) => {
                     report_private_dispatch_source(&PostgresKernelError::InvocationCarrier(source));
+                    dispatcher
+                        .finalize_sealed_invocation_lifecycle(
+                            invocation,
+                            SealedInvocationLifecycleFinalization::Failed {
+                                target_unavailable: false,
+                            },
+                        )
+                        .await?;
                     queue_sealed_terminal_failure(
                         stream,
                         completion,
@@ -4001,7 +4059,7 @@ fn handle_sealed_producer_event(
                         "invocation could not complete",
                         InvocationRetryability::Unknown,
                     );
-                    return;
+                    return Ok(());
                 }
             };
             let event = match InvokeEvent::new(
@@ -4015,6 +4073,14 @@ fn handle_sealed_producer_event(
                 Ok(event) => event,
                 Err(source) => {
                     report_private_dispatch_source(&PostgresKernelError::InvocationCarrier(source));
+                    dispatcher
+                        .finalize_sealed_invocation_lifecycle(
+                            invocation,
+                            SealedInvocationLifecycleFinalization::Failed {
+                                target_unavailable: false,
+                            },
+                        )
+                        .await?;
                     queue_sealed_terminal_failure(
                         stream,
                         completion,
@@ -4024,7 +4090,7 @@ fn handle_sealed_producer_event(
                         "invocation could not complete",
                         InvocationRetryability::Unknown,
                     );
-                    return;
+                    return Ok(());
                 }
             };
             completion.sealed_next_event_sequence += 1;
@@ -4040,9 +4106,18 @@ fn handle_sealed_producer_event(
         }
         Ok(AuthenticatedServerResourceEvent::Completed { .. }) => {
             waiting_bytes.remove(&stream);
+            let finalization = if cancellation_requested {
+                SealedInvocationLifecycleFinalization::Cancelled
+            } else {
+                SealedInvocationLifecycleFinalization::Completed
+            };
+            dispatcher
+                .finalize_sealed_invocation_lifecycle(invocation, finalization)
+                .await?;
             completion.sealed_producer.take();
             if cancellation_requested {
-                completion.actions.clear();
+                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
+                return Ok(());
             }
             let event = InvokeEvent::new(
                 invocation,
@@ -4068,8 +4143,23 @@ fn handle_sealed_producer_event(
         Ok(AuthenticatedServerResourceEvent::Failed { failure }) => {
             waiting_bytes.remove(&stream);
             if cancellation_requested {
-                completion.actions.clear();
+                dispatcher
+                    .finalize_sealed_invocation_lifecycle(
+                        invocation,
+                        SealedInvocationLifecycleFinalization::Cancelled,
+                    )
+                    .await?;
+                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
+                return Ok(());
             }
+            dispatcher
+                .finalize_sealed_invocation_lifecycle(
+                    invocation,
+                    SealedInvocationLifecycleFinalization::Failed {
+                        target_unavailable: failure == CallFailure::TargetUnavailable,
+                    },
+                )
+                .await?;
             let (phase, code, message, retryability) = match failure {
                 CallFailure::TargetUnavailable => (
                     InvocationFailurePhase::Target,
@@ -4096,6 +4186,12 @@ fn handle_sealed_producer_event(
         }
         Ok(AuthenticatedServerResourceEvent::Cancelled) => {
             waiting_bytes.remove(&stream);
+            dispatcher
+                .finalize_sealed_invocation_lifecycle(
+                    invocation,
+                    SealedInvocationLifecycleFinalization::Cancelled,
+                )
+                .await?;
             completion.sealed_producer.take();
             completion.actions = cancellation_actions(stream, completion.cancellation.clone());
         }
@@ -4106,8 +4202,23 @@ fn handle_sealed_producer_event(
             waiting_bytes.remove(&stream);
             report_private_dispatch_source(&source);
             if cancellation_requested {
-                completion.actions.clear();
+                dispatcher
+                    .finalize_sealed_invocation_lifecycle(
+                        invocation,
+                        SealedInvocationLifecycleFinalization::Cancelled,
+                    )
+                    .await?;
+                completion.actions = cancellation_actions(stream, completion.cancellation.clone());
+                return Ok(());
             }
+            dispatcher
+                .finalize_sealed_invocation_lifecycle(
+                    invocation,
+                    SealedInvocationLifecycleFinalization::Failed {
+                        target_unavailable: false,
+                    },
+                )
+                .await?;
             queue_sealed_terminal_failure(
                 stream,
                 completion,
@@ -4119,10 +4230,12 @@ fn handle_sealed_producer_event(
             );
         }
     }
+    Ok(())
 }
 
-fn merge_sealed_pull_result(
+async fn merge_sealed_pull_result<D: DispatchService>(
     result: Result<SealedPullTaskResult, JoinError>,
+    dispatcher: &D,
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     sealed_pull_in_flight: &mut BTreeSet<u64>,
     sealed_pull_waiting_bytes: &mut BTreeMap<u64, u64>,
@@ -4133,7 +4246,17 @@ fn merge_sealed_pull_result(
     sealed_pull_in_flight.remove(&stream);
     if let Some(completion) = pending.get_mut(&stream) {
         completion.sealed_producer = Some(producer);
-        handle_sealed_producer_event(stream, completion, sealed_pull_waiting_bytes, event);
+        handle_sealed_producer_event(
+            dispatcher,
+            stream,
+            completion,
+            sealed_pull_waiting_bytes,
+            event,
+        )
+        .await
+        .map_err(|source| LocalRawSocketError::SealedLifecycleFinalization {
+            source: Box::new(source),
+        })?;
     } else {
         // CALL_CANCEL or terminal delivery may have removed the completion while
         // this pull was in flight. The returned producer still owns a live
