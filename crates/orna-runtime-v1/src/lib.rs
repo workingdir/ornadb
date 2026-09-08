@@ -24,9 +24,9 @@ use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{
     CanonicalSnapshot, CheckpointRef, CwdCapture, FailureRef, OvbRaw, RowRef, RunRef,
-    SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, StreamRef, Value, checkpoint_reference,
-    failure_reference, validate_checkpoint_reference, validate_failure_reference,
-    validate_run_reference, validate_stream_reference,
+    SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, SnapshotRef, StreamRef, Value,
+    checkpoint_reference, failure_reference, snapshot_reference, validate_checkpoint_reference,
+    validate_failure_reference, validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
@@ -780,17 +780,17 @@ impl StreamObservation {
 /// Checked, durable-field-only shape of one `sys.Run` observation.
 ///
 /// This is deliberately a partial relation DTO: the runtime retains no
-/// physical `FunctionRef`, `SnapshotRef`, or `InvocationRef` coordinates, so
-/// those schema fields are not represented here. `snapshot` is the pinned,
-/// checked capture from which a later public `SnapshotRef` projection must be
-/// constructed by the authoritative catalogue layer.
+/// physical `FunctionRef` or `InvocationRef` coordinates, so those schema
+/// fields are not represented here. `snapshot` is reconstructed only from
+/// the durable run capture and its database identity; it cannot be rebound to
+/// the caller's later CWD.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysRunProjection {
     pub reference: RunRef,
     pub id: [u8; 16],
     pub consumer_identity: ConsumerIdentity,
     pub source_identity: Option<String>,
-    pub snapshot: CwdCapture,
+    pub snapshot: SnapshotRef,
     pub started: SystemTime,
     pub ended: Option<SystemTime>,
     pub status_at_snapshot: RunObservationStatus,
@@ -805,6 +805,11 @@ impl TryFrom<&RunObservation> for SysRunProjection {
 
     fn try_from(observation: &RunObservation) -> Result<Self, Self::Error> {
         let reference = observation.reference()?;
+        let snapshot = snapshot_reference(
+            observation.snapshot.database_id(),
+            observation.snapshot.snapshot().clone(),
+        )
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let started = observation_instant(observation.started_ms)?;
         let observed_at = observation_instant(observation.observed_ms)?;
         if observed_at < started {
@@ -821,7 +826,7 @@ impl TryFrom<&RunObservation> for SysRunProjection {
             id: observation.id.0,
             consumer_identity: observation.consumer_identity.clone(),
             source_identity: observation.source_identity.clone(),
-            snapshot: observation.snapshot.clone(),
+            snapshot,
             started,
             ended,
             status_at_snapshot: observation.status,
@@ -15813,11 +15818,30 @@ mod tests {
             mismatched_generation.reference(),
             Err(RuntimeError::InvalidObservationReference)
         );
+        assert_eq!(
+            SysRunProjection::try_from(&mismatched_generation),
+            Err(RuntimeError::InvalidObservationReference)
+        );
+        let mut mismatched_runtime = runs[0].clone();
+        mismatched_runtime.runtime_id = id(177);
+        assert_eq!(
+            SysRunProjection::try_from(&mismatched_runtime),
+            Err(RuntimeError::InvalidObservationReference)
+        );
         let stream_reference = first.reference(&runs[0]).unwrap();
         let run_projection = SysRunProjection::try_from(&runs[0]).unwrap();
         assert_eq!(run_projection.reference, run_reference);
         assert_eq!(run_projection.id, runs[0].id.as_bytes());
-        assert_eq!(run_projection.snapshot, runs[0].snapshot);
+        let expected_snapshot = snapshot_reference(
+            runs[0].snapshot.database_id(),
+            runs[0].snapshot.snapshot().clone(),
+        )
+        .unwrap();
+        assert_eq!(run_projection.snapshot, expected_snapshot);
+        assert_eq!(
+            run_projection.snapshot.as_row_ref().snapshot,
+            *runs[0].snapshot.snapshot()
+        );
         assert_eq!(
             run_projection.status_at_snapshot,
             RunObservationStatus::Starting
@@ -15955,6 +15979,21 @@ mod tests {
             1
         );
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+        let later_capture = CwdCapture::new(
+            Snapshot::cwd(
+                runs[0].snapshot.database_id(),
+                runs[0].snapshot.runtime_id(),
+                BigInt::from(1),
+            )
+            .unwrap(),
+            digest(180),
+        )
+        .unwrap();
+        assert_ne!(later_capture, runs[0].snapshot);
+        assert_eq!(
+            SysRunProjection::try_from(&runs[0]).unwrap().snapshot,
+            expected_snapshot
+        );
     }
 
     #[tokio::test]
