@@ -328,7 +328,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     assert_eq!(
         declared,
         [
-            "REPL-001", "TXN-001", "TXN-002", "LIVE-001", "LIVE-002", "LIVE-003"
+            "REPL-001", "TXN-001", "TXN-002", "LIVE-001", "LIVE-002", "LIVE-003", "LIVE-004"
         ]
     );
     let scenarios = report["scenarios"]
@@ -338,7 +338,15 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("REPL-001" | "TXN-001" | "TXN-002" | "LIVE-001" | "LIVE-002" | "LIVE-003")
+            Some(
+                "REPL-001"
+                    | "TXN-001"
+                    | "TXN-002"
+                    | "LIVE-001"
+                    | "LIVE-002"
+                    | "LIVE-003"
+                    | "LIVE-004"
+            )
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(
@@ -389,4 +397,18 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         serde_json::json!(["ORNA-LIVE-004"])
     );
     assert_eq!(live_resync["status"], "passed");
+    let live_fallback = scenarios
+        .iter()
+        .find(|result| result["scenario"] == "LIVE-004")
+        .expect("LIVE-004 result is present");
+    assert_eq!(
+        live_fallback["requirements"],
+        serde_json::json!([
+            "ORNA-LIVE-002",
+            "ORNA-LIVE-004",
+            "ORNA-WIRE-001",
+            "ORNA-WIRE-002"
+        ])
+    );
+    assert_eq!(live_fallback["status"], "passed");
 }

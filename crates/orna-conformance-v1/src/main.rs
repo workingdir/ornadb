@@ -89,6 +89,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         if live_unkeyed_update_contract(scenario) {
             return run_live_unkeyed_update_scenario(scenario);
         }
+        if live_fallback_contract(scenario) {
+            return run_live_fallback_scenario(scenario);
+        }
         if live_resync_contract(scenario) {
             return run_live_resync_scenario(scenario);
         }
@@ -507,7 +510,6 @@ fn run_live_unkeyed_update_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
     StageOutcome::Passed
 }
 
-#[cfg(test)]
 fn live_fallback_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-004"
         && scenario.title == "Subtree replacement is universal live-update fallback"
@@ -527,7 +529,6 @@ fn live_fallback_contract(scenario: &Scenario) -> bool {
             ]
 }
 
-#[cfg(test)]
 fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_fallback_contract(scenario) {
         return StageOutcome::Skipped {
@@ -734,7 +735,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, and LIVE-003 serving resynchronization contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-001 keyed update, LIVE-002 unkeyed fallback, LIVE-003 serving resynchronization, and LIVE-004 universal subtree-replacement contracts execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
@@ -746,6 +747,7 @@ fn main() {
                 "LIVE-001".into(),
                 "LIVE-002".into(),
                 "LIVE-003".into(),
+                "LIVE-004".into(),
             ],
         })
         .run(&mut adapter);
