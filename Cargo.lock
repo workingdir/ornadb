@@ -1950,6 +1950,7 @@ dependencies = [
  "orna-artifact",
  "orna-client",
  "orna-compiler",
+ "orna-conformance-v1",
  "orna-core",
  "orna-evaluator-v1",
  "orna-foundation-v1",
