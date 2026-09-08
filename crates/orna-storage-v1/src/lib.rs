@@ -433,6 +433,13 @@ impl RuntimePublicationCoordinator {
         if journal.compact_manifest().is_none() {
             return Err(Error::InvalidTransition);
         }
+        // A compact candidate must be a distinct committed snapshot.  If a
+        // malformed journal aliases it to the old snapshot, the candidate
+        // branch below would mask the frozen tail without any snapshot owning
+        // those rows.
+        if journal.old_head() == journal.new_head() {
+            return Err(Error::InvalidTransition);
+        }
         let intent_id = journal
             .runtime_intent_id()
             .ok_or(Error::InvalidTransition)?;
@@ -1423,6 +1430,49 @@ mod tests {
         );
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
         assert!(repository.read_publication_journal().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn compact_reader_visibility_rejects_an_aliased_candidate_snapshot() {
+        let (_temp, repository, runtime, freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        runtime
+            .bind_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+        runtime
+            .complete_compact_publication(&pending, &freeze)
+            .await
+            .unwrap();
+
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let mut forged = PublicationJournal::new_with_runtime_intent(
+            journal.old_head().clone(),
+            journal.old_head().clone(),
+            journal.base_index_tree().unwrap().clone(),
+            journal.runtime_intent_id().unwrap(),
+            journal.entries().to_vec(),
+        )
+        .unwrap()
+        .with_compact_manifest(journal.compact_manifest().unwrap().clone())
+        .unwrap();
+        for stage in [
+            orna_repository_v1::PublicationJournalStage::RefAdvanced,
+            orna_repository_v1::PublicationJournalStage::IndexReconciled,
+            orna_repository_v1::PublicationJournalStage::WorktreeReconciled,
+            orna_repository_v1::PublicationJournalStage::RuntimeCompleted,
+        ] {
+            forged.advance(stage).unwrap();
+        }
+        repository.write_publication_journal(&forged).unwrap();
+
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
+            Err(Error::InvalidTransition)
+        );
     }
 
     #[tokio::test]
