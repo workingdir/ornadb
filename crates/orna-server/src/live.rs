@@ -576,12 +576,11 @@ async fn run_host_actor(
             },
             _ = ticker.tick() => {
                 let now = system_milliseconds();
-                state.transport.expire_pending_websocket_upgrades(now);
-                let mut application = state.application.borrow_mut();
-                let Some(application) = application.as_mut() else {
-                    return;
-                };
-                application.expire(now);
+                let mut children = HostApplicationChildren::new(Rc::clone(&state.application));
+                state
+                    .transport
+                    .expire_sessions_with_children(now, &mut state.deletion, &mut children)
+                    .await;
                 let Ok(retirement) = capture_retirement_gates(
                     &registry,
                     state.transport.take_retired_attachments(),
