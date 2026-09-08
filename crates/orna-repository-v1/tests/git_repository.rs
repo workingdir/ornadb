@@ -10,7 +10,8 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
     CompactSegmentRole, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
-    ManagedPath, Repository, RuntimeGeneration, WorktreeState,
+    ManagedPath, NativeObjectId, OrnaInternalRef, RemoteContinuity, Repository,
+    RequiredInternalRef, RuntimeGeneration, WorktreeState,
 };
 use parquet::{
     basic::{Compression, PageType},
@@ -91,6 +92,22 @@ fn with_remote(root: &Path) {
     );
     let head = git(root, &["rev-parse", "HEAD"]);
     git(root, &["update-ref", "refs/remotes/origin/main", &head]);
+}
+
+fn continuity_remote(root: &Path) -> TempDir {
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare", "."]);
+    let remote_path = remote.path().to_str().unwrap();
+    git(root, &["remote", "add", "origin", remote_path]);
+    git(root, &["push", "origin", "HEAD:refs/heads/main"]);
+    remote
+}
+
+fn required_internal_ref(object_id: &str) -> RequiredInternalRef {
+    RequiredInternalRef::new(
+        OrnaInternalRef::new("refs/orna/ids/0123456789abcdef").unwrap(),
+        NativeObjectId::new(object_id).unwrap(),
+    )
 }
 
 fn with_partial_clone(root: &Path) {
@@ -1428,6 +1445,104 @@ fn observes_an_ordinary_repository_and_materialized_head_without_mutation() {
         }
     ));
     assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn remote_continuity_reports_missing_internal_refs_without_mutation() {
+    let root = repository();
+    let _remote = continuity_remote(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_remote_continuity("origin", &[required_internal_ref(&head)]),
+        RemoteContinuity::Missing
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
+fn remote_continuity_reports_matching_and_stale_internal_refs_without_mutation() {
+    let root = repository();
+    let remote = continuity_remote(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let expected = head.to_ascii_uppercase();
+    let required = required_internal_ref(&expected);
+    git(
+        remote.path(),
+        &["update-ref", "refs/orna/ids/0123456789abcdef", &head],
+    );
+    let before = git_state(&repo, root.path());
+
+    assert_eq!(
+        repo.observe_remote_continuity("origin", std::slice::from_ref(&required)),
+        RemoteContinuity::Continuous
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+    let tree = git(root.path(), &["rev-parse", "HEAD^{tree}"]);
+    let stale = git(
+        root.path(),
+        &["commit-tree", &tree, "-p", &head, "-m", "stale continuity"],
+    );
+    let refspec = format!("{stale}:refs/heads/stale-continuity");
+    git(root.path(), &["push", "origin", &refspec]);
+    git(
+        remote.path(),
+        &["update-ref", "refs/orna/ids/0123456789abcdef", &stale],
+    );
+    let stale_before = git_state(&repo, root.path());
+    assert_eq!(
+        repo.observe_remote_continuity("origin", std::slice::from_ref(&required)),
+        RemoteContinuity::Stale
+    );
+    assert_eq!(git_state(&repo, root.path()), stale_before);
+}
+
+#[test]
+fn remote_continuity_fails_closed_for_invalid_or_ambiguous_input_and_remote_failure() {
+    let root = repository();
+    let remote = continuity_remote(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let required = required_internal_ref(&head);
+    let before = git_state(&repo, root.path());
+
+    assert!(OrnaInternalRef::new("refs/heads/main").is_err());
+    assert!(NativeObjectId::new("not-a-native-object-id").is_err());
+    assert_eq!(
+        repo.observe_remote_continuity("origin", &[]),
+        RemoteContinuity::Unverifiable
+    );
+    assert_eq!(
+        repo.observe_remote_continuity("missing", std::slice::from_ref(&required)),
+        RemoteContinuity::Unverifiable
+    );
+    git(
+        remote.path(),
+        &["update-ref", "refs/orna/unexpected", &head],
+    );
+    assert_eq!(
+        repo.observe_remote_continuity("origin", std::slice::from_ref(&required)),
+        RemoteContinuity::Unverifiable
+    );
+    assert_eq!(git_state(&repo, root.path()), before);
+
+    let unreachable = repository();
+    with_remote(unreachable.path());
+    let unreachable_repo = Repository::discover(unreachable.path()).unwrap();
+    let unreachable_head = git(unreachable.path(), &["rev-parse", "HEAD"]);
+    let unreachable_before = git_state(&unreachable_repo, unreachable.path());
+    assert_eq!(
+        unreachable_repo
+            .observe_remote_continuity("origin", &[required_internal_ref(&unreachable_head)]),
+        RemoteContinuity::Unverifiable
+    );
+    assert_eq!(
+        git_state(&unreachable_repo, unreachable.path()),
+        unreachable_before
+    );
 }
 
 #[test]
