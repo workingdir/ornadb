@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -740,6 +740,149 @@ impl StreamObservation {
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
         validate_stream_reference(reference, &run.snapshot)
             .map_err(|_| RuntimeError::InvalidObservationReference)
+    }
+}
+
+/// Checked, durable-field-only shape of one `sys.Run` observation.
+///
+/// This is deliberately a partial relation DTO: the runtime retains no
+/// physical `FunctionRef`, `SnapshotRef`, or `InvocationRef` coordinates, so
+/// those schema fields are not represented here. `snapshot` is the pinned,
+/// checked capture from which a later public `SnapshotRef` projection must be
+/// constructed by the authoritative catalogue layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SysRunProjection {
+    pub reference: RunRef,
+    pub id: [u8; 16],
+    pub consumer_identity: ConsumerIdentity,
+    pub source_identity: Option<String>,
+    pub snapshot: CwdCapture,
+    pub started: SystemTime,
+    pub ended: Option<SystemTime>,
+    pub status_at_snapshot: RunObservationStatus,
+    pub observed_at: SystemTime,
+    pub runtime_id: Option<[u8; 16]>,
+    pub checkpoint_count: u64,
+    pub failure: Option<SafeDiagnostic>,
+}
+
+impl TryFrom<&RunObservation> for SysRunProjection {
+    type Error = RuntimeError;
+
+    fn try_from(observation: &RunObservation) -> Result<Self, Self::Error> {
+        let reference = observation.reference()?;
+        let started = observation_instant(observation.started_ms)?;
+        let observed_at = observation_instant(observation.observed_ms)?;
+        if observed_at < started {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let ended = observation.ended_ms.map(observation_instant).transpose()?;
+        if observation.status.is_terminal() != ended.is_some()
+            || ended.is_some_and(|ended| ended < started || observed_at < ended)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(Self {
+            reference,
+            id: observation.id.0,
+            consumer_identity: observation.consumer_identity.clone(),
+            source_identity: observation.source_identity.clone(),
+            snapshot: observation.snapshot.clone(),
+            started,
+            ended,
+            status_at_snapshot: observation.status,
+            observed_at,
+            runtime_id: Some(observation.runtime_id),
+            checkpoint_count: observation.checkpoint_count,
+            failure: observation.diagnostic,
+        })
+    }
+}
+
+/// Checked, durable-field-only shape of one `sys.Stream` observation.
+///
+/// `producer` and `consumer` are omitted because the runtime only retains
+/// names, not the physical `ObjectRef`/`FunctionRef` coordinates required by
+/// the contract. This DTO is retained-observation data and does not establish
+/// membership in `sys.rt.streams`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SysStreamProjection {
+    pub reference: StreamRef,
+    pub run: RunRef,
+    pub consumer_identity: ConsumerIdentity,
+    pub source_identity: String,
+    pub partition: Option<String>,
+    pub status_at_snapshot: StreamObservationStatus,
+    pub items_seen: u64,
+    pub items_committed: u64,
+    pub items_failed: u64,
+    pub checkpoint: Option<CheckpointRef>,
+    pub last_item_at: Option<SystemTime>,
+    pub last_failure: Option<FailureRef>,
+    pub last_diagnostic: Option<SafeDiagnostic>,
+    pub observed_at: SystemTime,
+}
+
+impl SysStreamProjection {
+    pub fn try_from_observation(
+        observation: &StreamObservation,
+        run: &RunObservation,
+    ) -> Result<Self, RuntimeError> {
+        let run_reference = run.reference()?;
+        let reference = observation.reference(run)?;
+        validate_checkpoint_reference(
+            observation.checkpoint_reference.as_row_ref().clone(),
+            &run.snapshot,
+        )
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        if let Some(failure) = &observation.last_failure {
+            validate_failure_reference(failure.as_row_ref().clone(), &run.snapshot)
+                .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        }
+        if observation
+            .items_committed
+            .saturating_add(observation.items_failed)
+            > observation.items_seen
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let observed_at = observation_instant(observation.observed_ms)?;
+        let last_item_at = observation
+            .last_item_ms
+            .map(observation_instant)
+            .transpose()?;
+        if last_item_at.is_some_and(|last_item_at| last_item_at > observed_at) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(Self {
+            reference,
+            run: run_reference,
+            consumer_identity: observation.consumer_identity.clone(),
+            source_identity: observation.source_identity.clone(),
+            partition: observation.partition.clone(),
+            status_at_snapshot: observation.status,
+            items_seen: observation.items_seen,
+            items_committed: observation.items_committed,
+            items_failed: observation.items_failed,
+            checkpoint: Some(observation.checkpoint_reference.clone()),
+            last_item_at,
+            last_failure: observation.last_failure.clone(),
+            last_diagnostic: observation.diagnostic,
+            observed_at,
+        })
+    }
+}
+
+fn observation_instant(milliseconds: i64) -> Result<SystemTime, RuntimeError> {
+    let duration = Duration::from_millis(milliseconds.unsigned_abs());
+    if milliseconds >= 0 {
+        UNIX_EPOCH
+            .checked_add(duration)
+            .ok_or(RuntimeError::RecoveryInvalid)
+    } else {
+        UNIX_EPOCH
+            .checked_sub(duration)
+            .ok_or(RuntimeError::RecoveryInvalid)
     }
 }
 
@@ -15528,7 +15671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_references()
+    async fn stream_observation_rejects_cross_run_checkpoint_rebinding_and_projects_checked_sys_dtos()
      {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -15578,6 +15721,24 @@ mod tests {
             Err(RuntimeError::InvalidObservationReference)
         );
         let stream_reference = first.reference(&runs[0]).unwrap();
+        let run_projection = SysRunProjection::try_from(&runs[0]).unwrap();
+        assert_eq!(run_projection.reference, run_reference);
+        assert_eq!(run_projection.id, runs[0].id.as_bytes());
+        assert_eq!(run_projection.snapshot, runs[0].snapshot);
+        assert_eq!(
+            run_projection.status_at_snapshot,
+            RunObservationStatus::Starting
+        );
+        assert_eq!(run_projection.ended, None);
+        let stream_projection =
+            SysStreamProjection::try_from_observation(&first, &runs[0]).unwrap();
+        assert_eq!(stream_projection.reference, stream_reference);
+        assert_eq!(stream_projection.run, run_reference);
+        assert_eq!(
+            stream_projection.checkpoint,
+            Some(first.checkpoint_reference.clone())
+        );
+        assert_eq!(stream_projection.last_failure, None);
         assert_eq!(first.parent_capture, runs[0].snapshot);
         assert_eq!(
             stream_reference.as_row_ref().snapshot,
@@ -16060,7 +16221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_observation_retains_checked_failure_reference_across_retry_and_reopen() {
+    async fn stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(201)).await.unwrap();
@@ -16122,10 +16283,18 @@ mod tests {
             other => panic!("unexpected failure: {other:?}"),
         };
         let failed = state.stream_observation(stream.id).await.unwrap().unwrap();
+        let retained_run = state.run_observation(run.id).await.unwrap().unwrap();
+        let projection = SysStreamProjection::try_from_observation(&failed, &retained_run).unwrap();
+        assert_eq!(projection.partition, None);
+        assert_eq!(
+            projection.checkpoint,
+            Some(failed.checkpoint_reference.clone())
+        );
         let failure_reference = failed
             .last_failure
             .clone()
             .expect("retained failure reference");
+        assert_eq!(projection.last_failure, Some(failure_reference.clone()));
         assert_eq!(
             failed.checkpoint_reference.as_row_ref().table_id,
             SYS_CHECKPOINT_TABLE_ID
