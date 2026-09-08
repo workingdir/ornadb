@@ -1162,13 +1162,16 @@ fn sealed_verified_standard_client_rechecks_active_identity_before_evaluation() 
         math_executable.revision().artifact().version(),
         orna_artifact::client_plan::CONTROL_FLOW_FORMAT_VERSION
     );
-    assert!(matches!(
-        select_checked_standard_artifact_executor(&active, math_executable.revision()),
-        Err(PostgresKernelError::DurableInvariant {
-            rule: "verified standard executable artifact is unsupported",
-            ..
-        })
-    ));
+    let math_authorisation = recheck_verified_standard_client_target(
+        &active,
+        &security,
+        &session,
+        math_definition,
+        math_executable,
+        math_target,
+        &math_authorisation,
+    )
+    .expect("the pinned immutable standard CLIENT plan must re-authorise");
     let result = evaluate_authorised_client_function_with_arguments(
         &active,
         &math_authorisation,
