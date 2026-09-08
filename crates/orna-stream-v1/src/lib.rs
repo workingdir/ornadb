@@ -71,7 +71,9 @@ pub struct DeliveryIdentity {
     pub source_format: Component,
     pub source: Component,
     pub partition_format: Component,
-    pub partition: Component,
+    /// The optional provider partition. `None` is the canonical unpartitioned
+    /// stream identity, not an empty partition name.
+    pub partition: Option<Component>,
     pub position_format: Component,
     /// The opaque provider position that identifies this delivery.
     pub position: Position,
@@ -135,13 +137,18 @@ impl DeliveryIdentity {
     }
 
     pub fn canonical(&self) -> String {
+        let prefix = if self.partition.is_some() {
+            "delivery/v1"
+        } else {
+            "delivery/v1/null"
+        };
         format!(
-            "delivery/v1|{}|{}|{}|{}|{}|{}|{}",
+            "{prefix}|{}|{}|{}|{}|{}|{}|{}",
             self.consumer.canonical(),
             self.source_format.as_str(),
             self.source.as_str(),
             self.partition_format.as_str(),
-            self.partition.as_str(),
+            self.partition.as_ref().map(Component::as_str).unwrap_or(""),
             self.position_format.as_str(),
             self.position.token.as_str(),
         )
@@ -161,7 +168,10 @@ pub struct CheckpointKey {
     pub source_format: Component,
     pub source: Component,
     pub partition_format: Component,
-    pub partition: Component,
+    /// The optional partition component of the durable stream natural key.
+    /// Empty components are invalid, so the empty canonical field unambiguously
+    /// represents `None` while preserving pre-existing non-null encodings.
+    pub partition: Option<Component>,
     pub position_format: Component,
 }
 
@@ -1043,7 +1053,7 @@ mod tests {
             source_format: component("source-format"),
             source: component("source-a"),
             partition_format: component("partition-format"),
-            partition: component("partition-a"),
+            partition: Some(component("partition-a")),
             position_format: component("offset-v1"),
             position: position(token),
             successor: position(successor),
@@ -1112,6 +1122,29 @@ mod tests {
         assert_eq!(first.checkpoint_key(), second.checkpoint_key());
         assert_eq!(first, second);
         assert!(Component::new("bad|identity").is_err());
+    }
+
+    #[test]
+    fn nullable_partition_has_a_distinct_stable_checkpoint_identity() {
+        let partitioned = delivery("receipt:one", "resume:two");
+        let mut unpartitioned = partitioned.clone();
+        unpartitioned.partition = None;
+        assert_ne!(partitioned, unpartitioned);
+        assert_ne!(partitioned.checkpoint_key(), unpartitioned.checkpoint_key());
+        assert_ne!(partitioned.canonical(), unpartitioned.canonical());
+
+        let mut backend = InMemoryCheckpointBackend::default();
+        let expected = expected(&backend, &unpartitioned);
+        let lease = acquire(&mut backend, unpartitioned.clone());
+        assert!(matches!(
+            backend.apply(CommitIntent::Complete { lease, expected }),
+            CommitResult::CheckpointAdvanced { ref checkpoint }
+                if checkpoint.key == unpartitioned.checkpoint_key()
+        ));
+        assert_eq!(
+            backend.checkpoint(&partitioned.checkpoint_key()).committed,
+            None
+        );
     }
 
     #[test]
