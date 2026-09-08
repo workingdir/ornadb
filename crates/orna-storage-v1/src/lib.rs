@@ -452,6 +452,19 @@ impl RuntimePublicationCoordinator {
             == orna_repository_v1::PublicationJournalStage::WorktreeReconciled
             && frozen_prefix.is_empty());
         if candidate_visible {
+            // A durable runtime receipt has removed the frozen prefix from
+            // the ledger, so exposing the old snapshot here would lose rows.
+            // Do not assume the journal candidate is still the selected Git
+            // snapshot: a native writer may have advanced HEAD between the
+            // receipt and journal finalization.
+            if repository
+                .head()
+                .map_err(map_publication_repository_error)?
+                .as_ref()
+                != Some(journal.new_head())
+            {
+                return Err(Error::RefConflict);
+            }
             runtime
                 .validate_recovery()
                 .await
@@ -1474,6 +1487,10 @@ mod tests {
         git(temp.path(), &["add", "ordinary.txt"]);
         git(temp.path(), &["commit", "-m", "native writer"]);
 
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
+            Err(Error::RefConflict)
+        );
         let result = RuntimePublicationCoordinator::recover(&repository, &runtime).await;
         assert_eq!(result, Err(Error::RefConflict));
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
