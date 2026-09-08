@@ -6,6 +6,7 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{Diagnostic, OvbRaw, Value};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use sha2::Digest;
 use std::collections::BTreeMap;
 
 #[test]
@@ -110,7 +111,7 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
 }
 
 #[test]
-fn pure_function_witness_flows_from_compiler_stages_to_bounded_runtime() {
+fn bounded_pure_function_admission_retains_a_digest_bound_executable_namespace() {
     let unit = SourceUnit {
         fixture_id: "pure-function-witness".into(),
         source_id: "main.orna".into(),
@@ -122,9 +123,20 @@ fn pure_function_witness_flows_from_compiler_stages_to_bounded_runtime() {
         Value::new(OvbRaw::Int(41.into())).expect("canonical argument"),
     )]);
 
-    let actual = RuntimeAdapter::new(BoundedEvaluator::default())
-        .compile_and_invoke_pure_function(&unit, "add_one", &arguments)
-        .expect("compiler-admitted pure function executes in the bounded runtime");
+    let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
+    let admission = adapter
+        .admit_pure_function(&unit, "add_one")
+        .expect("pure function is admitted after compiler stages");
+    assert_eq!(admission.source_id(), "main.orna");
+    assert_eq!(admission.function(), "add_one");
+    assert_eq!(
+        admission.source_digest(),
+        <[u8; 32]>::from(sha2::Sha256::digest(unit.source.as_bytes()))
+    );
+
+    let actual = adapter
+        .invoke_admitted_pure_function(admission, &arguments)
+        .expect("admitted namespace executes without source replay");
 
     assert_eq!(
         actual,
