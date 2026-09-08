@@ -614,6 +614,48 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
 }
 
 #[test]
+fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
+    for (expression, expected) in [
+        ("std.bits.bit_or(0b1010, 0b0110)", 14),
+        ("std.bits.bit_and(0b1010, 0b0110)", 2),
+        ("std.bits.bit_xor(0b1010, 0b0110)", 12),
+        ("std.bits.bit_not(0)", -1),
+        ("std.bits.bit_not(-1)", 0),
+        ("1 | std.bits.shift_left(80)", 1_i128 << 80),
+        ("-5 | std.bits.shift_right(1)", -3),
+        ("1 | std.bits.shift_right(100000000000000000000)", 0),
+        ("-1 | std.bits.shift_right(100000000000000000000)", -1),
+    ] {
+        assert_eq!(
+            evaluate(expression),
+            Value::int(expected.into()),
+            "{expression}"
+        );
+    }
+    for (expression, expected) in [
+        ("std.bits.shift_left(1, -1)", "ORNA-EVAL-VALUE"),
+        ("std.bits.shift_right(1, -1)", "ORNA-EVAL-VALUE"),
+        ("std.bits.bit_or(1, true)", "ORNA-EVAL-TYPE"),
+        ("std.bits.bit_not(1, 2)", "ORNA-EVAL-UNSUPPORTED"),
+        ("std.bits.shift_left(1, 999999)", "ORNA-EVAL-LIMIT"),
+        (
+            "std.bits.bit_or(left: 1, right: 2)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default()
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
 fn recursive_calls_terminate_or_hit_shared_limits() {
     let source = "fn factorial(n: Int) = if n == 0 { 1 } else { n * factorial(n - 1) };";
     assert_eq!(
