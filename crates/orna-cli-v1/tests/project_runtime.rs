@@ -148,7 +148,7 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
         source_format: checkpoint_component("orna-stream-v1"),
         source: checkpoint_component("example:sensors:v1"),
         partition_format: checkpoint_component("literal-list"),
-        partition: checkpoint_component("null"),
+        partition: None,
         position_format: checkpoint_component("ordinal"),
     }
 }
