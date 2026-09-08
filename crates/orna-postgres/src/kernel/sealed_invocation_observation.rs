@@ -1,6 +1,6 @@
 use super::{PostgresKernel, PostgresKernelError};
 
-use std::time::SystemTime;
+use std::{collections::BTreeSet, time::SystemTime};
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
@@ -183,6 +183,7 @@ impl SealedInvocationObservation {
             )
         })?;
         validate_argument_order(&self.arguments, &record)?;
+        validate_argument_parameter_identity(&self.arguments, &record)?;
         for argument in &self.arguments {
             let expected = invocation_argument_observation_reference(
                 &self.admission_capture,
@@ -749,6 +750,28 @@ fn validate_argument_order(
     Ok(())
 }
 
+/// The metadata carries each declared parameter identity privately so the
+/// reader can confirm that separate public natural keys do not represent the
+/// same parameter twice.  The public relation cannot expose that identity
+/// without a proven `sys.FunctionRef`, but it must not project contradictory
+/// children while those physical coordinates remain unavailable.
+fn validate_argument_parameter_identity(
+    arguments: &[SealedInvocationArgumentObservation],
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    let mut parameters = BTreeSet::new();
+    if arguments
+        .iter()
+        .any(|argument| !parameters.insert(argument.parameter))
+    {
+        return Err(observation_invariant(
+            record,
+            "argument observations must retain distinct declared parameters",
+        ));
+    }
+    Ok(())
+}
+
 fn observation_id(row: &Row, record: &str, column: &str) -> Result<[u8; 16], PostgresKernelError> {
     let value: Vec<u8> = observation_column(row, record, column)?;
     value
@@ -1131,6 +1154,31 @@ mod tests {
                 value_digest: [3; 32],
             });
         internal.arguments.swap(0, 1);
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_duplicate_declared_parameter_metadata() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        let first = internal.arguments[0].clone();
+        internal
+            .arguments
+            .push(SealedInvocationArgumentObservation {
+                reference: invocation_argument_observation_reference(
+                    &admitted,
+                    internal.invocation,
+                    first.position + 1,
+                    "test",
+                )
+                .unwrap(),
+                position: first.position + 1,
+                parameter: first.parameter,
+                name: "same-parameter".to_owned(),
+                type_kind: first.type_kind,
+                value_digest: [3; 32],
+            });
 
         assert!(internal.durable_sys_projection().is_err());
     }
