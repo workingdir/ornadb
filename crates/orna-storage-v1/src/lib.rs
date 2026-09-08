@@ -322,8 +322,15 @@ pub fn lower_runtime_table_mutations(
     }
     let batch_id = MutationId::new(hex_id(freeze.intent_id))?;
     let mut lowered: BTreeMap<LoosePath, LooseMutation> = BTreeMap::new();
+    let mut identities = BTreeMap::new();
     for mutation in mutations {
         let path = path_for(mutation)?;
+        let identity = (mutation.table().to_owned(), mutation.key().to_vec());
+        if let Some(previous) = identities.insert(path.clone(), identity.clone())
+            && previous != identity
+        {
+            return Err(Error::PathCollision);
+        }
         let next = mutation
             .value()
             .map(|bytes| LooseRow::new(bytes.to_vec()))
@@ -1467,6 +1474,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.journal().entries().len(), 1);
+    }
+
+    #[test]
+    fn runtime_table_prefix_rejects_distinct_row_identities_at_one_loose_path() {
+        let freeze = PublicationFreeze {
+            intent_id: [21; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [22; 32],
+                mutation_sequence: 2,
+            },
+        };
+        let first = TableMutation::new(
+            [23; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"first".to_vec()),
+        )
+        .unwrap();
+        let second = TableMutation::new(
+            [24; 16],
+            "Contact",
+            b"Bob".to_vec(),
+            Some(b"second".to_vec()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lower_runtime_table_mutations(
+                &freeze,
+                &[first, second],
+                |_mutation| LoosePath::for_key("Contact", &["same".into()]),
+                |_path| Ok(None),
+            ),
+            Err(Error::PathCollision)
+        );
     }
 
     #[tokio::test]
