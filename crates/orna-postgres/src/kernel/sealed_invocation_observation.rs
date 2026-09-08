@@ -4,8 +4,9 @@ use std::time::SystemTime;
 
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
-    CwdCapture, InvocationArgumentRef, InvocationRef, invocation_argument_reference,
-    invocation_reference, validate_invocation_argument_reference, validate_invocation_reference,
+    CwdCapture, InvocationArgumentRef, InvocationRef, Snapshot, Value,
+    invocation_argument_reference, invocation_reference, validate_invocation_argument_reference,
+    validate_invocation_reference,
 };
 use tokio_postgres::{IsolationLevel, Row, types::FromSqlOwned};
 
@@ -20,7 +21,7 @@ use crate::kernel::bootstrap::require_current_migrations;
 /// synthetic public target identity through this boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedInvocationObservation {
-    /// Checked `sys.InvocationRef` pinned to the caller's CWD capture.
+    /// Checked `sys.InvocationRef` pinned to the durable admission capture.
     pub reference: InvocationRef,
     /// Exact durable invocation identity.
     pub invocation: InvocationId,
@@ -44,7 +45,7 @@ pub struct SealedInvocationObservation {
 /// One declaration-ordered redaction-safe argument observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedInvocationArgumentObservation {
-    /// Checked `sys.InvocationArgumentRef` pinned to the caller's CWD
+    /// Checked `sys.InvocationArgumentRef` pinned to the durable admission
     /// capture.
     pub reference: InvocationArgumentRef,
     /// Pinned declaration position.
@@ -108,11 +109,12 @@ impl PostgresKernel {
     /// Loads one durable observation without starting, resuming, or otherwise
     /// mutating its invocation. The returned source, catalogue, and target
     /// coordinates are pinned at admission, not the database's current active
-    /// revision. `capture` supplies the canonical snapshot pinned into each
-    /// returned row reference; this lookup never reads or advances CWD state.
+    /// revision. The supplied capture is deliberately not used to construct
+    /// public references: each row is reconstructed from its durable admission
+    /// capture, so a later CWD change cannot rewrite retained identity.
     pub async fn load_sealed_invocation_observation(
         &self,
-        capture: &CwdCapture,
+        _caller_capture: &CwdCapture,
         invocation: InvocationId,
     ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
@@ -126,7 +128,7 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            let result = load_observation_by_id(&transaction, capture, invocation).await?;
+            let result = load_observation_by_id(&transaction, invocation).await?;
             transaction
                 .rollback()
                 .await
@@ -141,24 +143,23 @@ impl PostgresKernel {
     /// order without starting, resuming, or mutating any invocation.
     ///
     /// This retained collection makes no current-runtime membership claim.
-    /// Lifecycle rows do not yet retain the admission evidence needed for a
-    /// current-runtime projection.
+    /// Durable admission evidence pins retained identity, but it does not by
+    /// itself establish current runtime ownership or membership.
     ///
-    /// The supplied capture is the one coherent snapshot used to construct
-    /// every public reference. Rows with incomplete pinned target coordinates
-    /// are intentionally excluded: they are private unresolved-denial
-    /// evidence, not public observations.
+    /// The supplied capture is deliberately ignored for retained rows. Rows
+    /// with incomplete target or admission coordinates are intentionally
+    /// excluded: they are private unresolved-denial or legacy evidence, not
+    /// public observations.
     pub async fn load_sealed_invocation_observations(
         &self,
-        capture: &CwdCapture,
+        _caller_capture: &CwdCapture,
     ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
-        self.load_retained_sealed_invocation_observation_collection(capture)
+        self.load_retained_sealed_invocation_observation_collection()
             .await
     }
 
     async fn load_retained_sealed_invocation_observation_collection(
         &self,
-        capture: &CwdCapture,
     ) -> Result<Vec<SealedInvocationObservation>, PostgresKernelError> {
         let mut session = self.open().await?;
         let operation = async {
@@ -177,6 +178,10 @@ impl PostgresKernel {
                      WHERE source_revision_id IS NOT NULL \
                        AND catalogue_revision_id IS NOT NULL \
                        AND function_id IS NOT NULL \
+                       AND admission_snapshot IS NOT NULL \
+                       AND admission_generation_digest IS NOT NULL \
+                       AND admission_runtime_id IS NOT NULL \
+                       AND admission_runtime_generation IS NOT NULL \
                      ORDER BY started_at ASC, invocation_id ASC",
                     &[],
                 )
@@ -189,7 +194,7 @@ impl PostgresKernel {
                     "sealed invocation observation collection",
                     "invocation_id",
                 )?);
-                let observation = load_observation_by_id(&transaction, capture, invocation)
+                let observation = load_observation_by_id(&transaction, invocation)
                     .await?
                     .ok_or_else(|| {
                         observation_invariant(
@@ -199,7 +204,7 @@ impl PostgresKernel {
                     })?;
                 observations.push(observation);
             }
-            validate_observation_collection_capture(&observations, capture)?;
+            validate_observation_collection_capture(&observations)?;
             transaction
                 .rollback()
                 .await
@@ -211,21 +216,25 @@ impl PostgresKernel {
     }
 }
 
+#[cfg(test)]
 fn validate_observation_collection_capture(
     observations: &[SealedInvocationObservation],
-    capture: &CwdCapture,
 ) -> Result<(), PostgresKernelError> {
     for observation in observations {
         let record = observation.invocation.canonical();
-        validate_invocation_reference(observation.reference.clone().into_row_ref(), capture)
-            .map_err(|_| observation_invariant(&record, "collection contains a mixed capture"))?;
+        let capture =
+            observation_admission_capture_from_reference(&observation.reference, &record)?;
+        validate_invocation_reference(observation.reference.clone().into_row_ref(), &capture)
+            .map_err(|_| {
+                observation_invariant(&record, "collection contains an invalid capture")
+            })?;
         for argument in &observation.arguments {
             validate_invocation_argument_reference(
                 argument.reference.clone().into_row_ref(),
-                capture,
+                &capture,
             )
             .map_err(|_| {
-                observation_invariant(&record, "collection contains a mixed argument capture")
+                observation_invariant(&record, "collection contains an invalid argument capture")
             })?;
         }
     }
@@ -234,19 +243,24 @@ fn validate_observation_collection_capture(
 
 async fn load_observation_by_id(
     transaction: &tokio_postgres::Transaction<'_>,
-    capture: &CwdCapture,
     invocation: InvocationId,
 ) -> Result<Option<SealedInvocationObservation>, PostgresKernelError> {
     let invocation_bytes = invocation.to_bytes().to_vec();
     let row = transaction
         .query_opt(
             "SELECT source_revision_id, catalogue_revision_id, function_id, status, \
-                    started_at, ended_at \
+                    started_at, ended_at, admission_snapshot, \
+                    admission_generation_digest, admission_runtime_id, \
+                    admission_runtime_generation \
              FROM _orna_kernel.sealed_invocation_lifecycle \
              WHERE invocation_id = $1 \
                AND source_revision_id IS NOT NULL \
                AND catalogue_revision_id IS NOT NULL \
-               AND function_id IS NOT NULL",
+               AND function_id IS NOT NULL \
+               AND admission_snapshot IS NOT NULL \
+               AND admission_generation_digest IS NOT NULL \
+               AND admission_runtime_id IS NOT NULL \
+               AND admission_runtime_generation IS NOT NULL",
             &[&invocation_bytes],
         )
         .await
@@ -255,7 +269,8 @@ async fn load_observation_by_id(
         return Ok(None);
     };
     let record = invocation.canonical();
-    let reference = invocation_observation_reference(capture, invocation, &record)?;
+    let capture = decode_admission_capture(&row, &record)?;
+    let reference = invocation_observation_reference(&capture, invocation, &record)?;
     let source_revision =
         SourceRevisionId::from_bytes(observation_id(&row, &record, "source_revision_id")?);
     let catalogue_revision =
@@ -278,7 +293,7 @@ async fn load_observation_by_id(
         .map_err(PostgresKernelError::Database)?;
     let arguments = argument_rows
         .iter()
-        .map(|argument| decode_argument_observation(argument, capture, invocation, &record))
+        .map(|argument| decode_argument_observation(argument, &capture, invocation, &record))
         .collect::<Result<Vec<_>, _>>()?;
     validate_argument_order(&arguments, &record)?;
     Ok(Some(SealedInvocationObservation {
@@ -292,6 +307,85 @@ async fn load_observation_by_id(
         ended,
         arguments,
     }))
+}
+
+fn decode_admission_capture(row: &Row, record: &str) -> Result<CwdCapture, PostgresKernelError> {
+    let encoded_snapshot: Vec<u8> = observation_column(row, record, "admission_snapshot")?;
+    let digest: Vec<u8> = observation_column(row, record, "admission_generation_digest")?;
+    let runtime: Vec<u8> = observation_column(row, record, "admission_runtime_id")?;
+    let generation: i64 = observation_column(row, record, "admission_runtime_generation")?;
+    decode_admission_capture_fields(encoded_snapshot, digest, runtime, generation, record)
+}
+
+fn decode_admission_capture_fields(
+    encoded_snapshot: Vec<u8>,
+    digest: Vec<u8>,
+    runtime: Vec<u8>,
+    generation: i64,
+    record: &str,
+) -> Result<CwdCapture, PostgresKernelError> {
+    if encoded_snapshot.is_empty() {
+        return Err(observation_invariant(
+            record,
+            "admission snapshot must not be empty",
+        ));
+    }
+    let digest: [u8; 32] = digest.try_into().map_err(|_| {
+        observation_invariant(record, "admission generation digest must be 32 bytes")
+    })?;
+    let runtime: [u8; 16] = runtime.try_into().map_err(|_| {
+        observation_invariant(record, "admission runtime identity must be 16 bytes")
+    })?;
+    if generation < 0 {
+        return Err(observation_invariant(
+            record,
+            "admission runtime generation must be nonnegative",
+        ));
+    }
+
+    let value = Value::decode(&encoded_snapshot)
+        .map_err(|_| observation_invariant(record, "admission snapshot is not canonical OVB"))?;
+    let canonical = value.encode().map_err(|_| {
+        observation_invariant(record, "admission snapshot cannot be canonically encoded")
+    })?;
+    if canonical != encoded_snapshot {
+        return Err(observation_invariant(
+            record,
+            "admission snapshot encoding is not canonical",
+        ));
+    }
+    let snapshot = Snapshot::decode(value.raw())
+        .map_err(|_| observation_invariant(record, "admission snapshot is not a CWD snapshot"))?;
+    let capture = CwdCapture::new(snapshot, digest)
+        .map_err(|_| observation_invariant(record, "admission snapshot must be a CWD capture"))?;
+    if capture.runtime_id() != runtime {
+        return Err(observation_invariant(
+            record,
+            "admission runtime identity disagrees with snapshot",
+        ));
+    }
+    let snapshot_generation: i64 = capture.generation().to_string().parse().map_err(|_| {
+        observation_invariant(
+            record,
+            "admission snapshot generation is not a PostgreSQL bigint",
+        )
+    })?;
+    if snapshot_generation != generation {
+        return Err(observation_invariant(
+            record,
+            "admission runtime generation disagrees with snapshot",
+        ));
+    }
+    Ok(capture)
+}
+
+#[cfg(test)]
+fn observation_admission_capture_from_reference(
+    reference: &InvocationRef,
+    record: &str,
+) -> Result<CwdCapture, PostgresKernelError> {
+    CwdCapture::new(reference.as_row_ref().snapshot.clone(), [0; 32])
+        .map_err(|_| observation_invariant(record, "invocation reference must use a CWD snapshot"))
 }
 
 fn decode_observation_timestamps(
@@ -520,8 +614,8 @@ mod tests {
     use super::*;
     use orna_foundation_v1::{
         CanonicalSnapshot, OvbRaw, RowRef, SYS_INVOCATION_ARGUMENT_TABLE_ID,
-        SYS_INVOCATION_TABLE_ID, SystemReferenceError, validate_invocation_argument_reference,
-        validate_invocation_reference,
+        SYS_INVOCATION_TABLE_ID, SystemReferenceError, Value,
+        validate_invocation_argument_reference, validate_invocation_reference,
     };
 
     fn capture(generation: u64) -> CwdCapture {
@@ -530,6 +624,19 @@ mod tests {
             [9; 32],
         )
         .unwrap()
+    }
+
+    fn persisted_capture_fields(capture: &CwdCapture) -> (Vec<u8>, Vec<u8>, Vec<u8>, i64) {
+        let snapshot = Value::new(capture.snapshot().raw())
+            .unwrap()
+            .encode()
+            .unwrap();
+        (
+            snapshot,
+            capture.generation_digest().to_vec(),
+            capture.runtime_id().to_vec(),
+            capture.generation().to_string().parse().unwrap(),
+        )
     }
 
     #[test]
@@ -653,19 +760,101 @@ mod tests {
     }
 
     #[test]
-    fn retained_collection_requires_one_coherent_capture_for_rows_and_arguments() {
+    fn retained_collection_requires_valid_admission_capture_for_rows_and_arguments() {
         let current = capture(1);
         let retained = vec![
             observation(&current, 1, SealedInvocationObservationStatus::Running),
             observation(&current, 2, SealedInvocationObservationStatus::Succeeded),
         ];
-        assert!(validate_observation_collection_capture(&retained, &current).is_ok());
+        assert!(validate_observation_collection_capture(&retained).is_ok());
+    }
 
-        let mixed = vec![
-            observation(&current, 1, SealedInvocationObservationStatus::Running),
-            observation(&capture(2), 2, SealedInvocationObservationStatus::Succeeded),
-        ];
-        assert!(validate_observation_collection_capture(&mixed, &current).is_err());
+    #[test]
+    fn persisted_admission_capture_reconstructs_snapshot_pinned_references() {
+        let admitted = capture(7);
+        let fields = persisted_capture_fields(&admitted);
+        let recovered =
+            decode_admission_capture_fields(fields.0, fields.1, fields.2, fields.3, "test")
+                .unwrap();
+        let invocation = InvocationId::from_bytes([2; 16]);
+        let reference = invocation_observation_reference(&recovered, invocation, "test").unwrap();
+        let argument =
+            invocation_argument_observation_reference(&recovered, invocation, 3, "test").unwrap();
+
+        assert_eq!(recovered, admitted);
+        assert_eq!(reference.as_row_ref().database_id, admitted.database_id());
+        assert_eq!(reference.as_row_ref().snapshot, *admitted.snapshot());
+        assert_eq!(argument.as_row_ref().snapshot, *admitted.snapshot());
+        assert!(validate_invocation_reference(reference.into_row_ref(), &admitted).is_ok());
+        assert!(validate_invocation_argument_reference(argument.into_row_ref(), &admitted).is_ok());
+    }
+
+    #[test]
+    fn persisted_admission_capture_rejects_malformed_or_mismatched_evidence() {
+        let admitted = capture(7);
+        let (snapshot, digest, runtime, generation) = persisted_capture_fields(&admitted);
+        assert!(
+            decode_admission_capture_fields(
+                vec![0xff],
+                digest.clone(),
+                runtime.clone(),
+                generation,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            decode_admission_capture_fields(
+                snapshot.clone(),
+                digest[..31].to_vec(),
+                runtime.clone(),
+                generation,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            decode_admission_capture_fields(
+                snapshot.clone(),
+                digest.clone(),
+                runtime[..15].to_vec(),
+                generation,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            decode_admission_capture_fields(
+                snapshot.clone(),
+                digest.clone(),
+                vec![0; 16],
+                generation,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            decode_admission_capture_fields(snapshot, digest, runtime, generation + 1, "test",)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn persisted_admission_capture_is_stable_when_caller_cwd_changes() {
+        let admitted = capture(7);
+        let (snapshot, digest, runtime, generation) = persisted_capture_fields(&admitted);
+        let recovered =
+            decode_admission_capture_fields(snapshot, digest, runtime, generation, "test").unwrap();
+        let caller_after_change = capture(8);
+        let reference =
+            invocation_observation_reference(&recovered, InvocationId::from_bytes([2; 16]), "test")
+                .unwrap();
+
+        assert_eq!(reference.as_row_ref().snapshot, *admitted.snapshot());
+        assert_eq!(
+            validate_invocation_reference(reference.into_row_ref(), &caller_after_change),
+            Err(SystemReferenceError::SnapshotMismatch)
+        );
     }
 
     #[test]
