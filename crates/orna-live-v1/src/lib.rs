@@ -4036,6 +4036,13 @@ impl LiveTransport {
     /// worker before reporting the failed handoff. It is safe to call after a
     /// prior abort or after commit has consumed the reservation.
     pub fn abort_websocket_upgrade(&mut self, upgrade: &WebSocketUpgrade) -> bool {
+        // A reservation is owned by the transport actor that created it. The
+        // per-actor reservation sequence is intentionally small and may
+        // overlap another actor's sequence, so reject a foreign token before
+        // looking up or retiring any local pending admission.
+        if upgrade.owner != self.owner {
+            return false;
+        }
         let Some(session) = self.pending_upgrades.iter().find_map(|(session, pending)| {
             (pending.reservation == upgrade.reservation).then_some(*session)
         }) else {
