@@ -294,6 +294,25 @@ impl PostgresKernel {
         )
     }
 
+    /// Loads the checked `sys.rt.invocations` subset for the supplied current
+    /// runtime identity.
+    ///
+    /// Unlike the durable canonical relation, this filters retained rows to
+    /// the current database/runtime owner. The CWD generation is deliberately
+    /// not part of membership: a live runtime may advance its CWD after an
+    /// invocation is admitted, but that later advance must not rewrite the
+    /// invocation's admission-pinned reference or snapshot.
+    pub async fn load_current_runtime_sys_invocation_observations(
+        &self,
+        current_capture: &CwdCapture,
+    ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
+        project_current_runtime_sys_invocation_collection(
+            self.load_retained_sealed_invocation_observation_collection()
+                .await?,
+            current_capture,
+        )
+    }
+
     /// Loads the checked durable `sys.InvocationArgument` relation in stable
     /// parent-plus-position order.
     ///
@@ -310,6 +329,23 @@ impl PostgresKernel {
         project_durable_sys_invocation_argument_collection(
             self.load_retained_sealed_invocation_observation_collection()
                 .await?,
+        )
+    }
+
+    /// Loads the checked `sys.rt.invocation_arguments` subset for the
+    /// supplied current runtime identity.
+    ///
+    /// Children are selected only through their admitted parent, so this
+    /// grouped handle cannot expose an argument whose invocation is excluded
+    /// from `sys.rt.invocations`.
+    pub async fn load_current_runtime_sys_invocation_argument_observations(
+        &self,
+        current_capture: &CwdCapture,
+    ) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
+        project_current_runtime_sys_invocation_argument_collection(
+            self.load_retained_sealed_invocation_observation_collection()
+                .await?,
+            current_capture,
         )
     }
 
@@ -440,6 +476,19 @@ fn project_durable_sys_invocation_collection(
         .collect()
 }
 
+/// Projects the current-runtime live subset without resolving retained rows
+/// against the caller's later CWD snapshot.
+fn project_current_runtime_sys_invocation_collection(
+    observations: Vec<SealedInvocationObservation>,
+    current_capture: &CwdCapture,
+) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
+    observations
+        .into_iter()
+        .filter(|observation| observation_belongs_to_current_runtime(observation, current_capture))
+        .map(|observation| observation.durable_sys_projection())
+        .collect()
+}
+
 /// Flattens checked retained parent rows into the public durable
 /// `sys.InvocationArgument` relation without changing their stable parent and
 /// declaration-position order.
@@ -452,6 +501,30 @@ fn project_durable_sys_invocation_argument_collection(
             .flat_map(|observation| observation.arguments)
             .collect()
     })
+}
+
+/// Projects the current-runtime argument relation through the same parent
+/// selection as `sys.rt.invocations`.
+fn project_current_runtime_sys_invocation_argument_collection(
+    observations: Vec<SealedInvocationObservation>,
+    current_capture: &CwdCapture,
+) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
+    project_current_runtime_sys_invocation_collection(observations, current_capture).map(
+        |observations| {
+            observations
+                .into_iter()
+                .flat_map(|observation| observation.arguments)
+                .collect()
+        },
+    )
+}
+
+fn observation_belongs_to_current_runtime(
+    observation: &SealedInvocationObservation,
+    current_capture: &CwdCapture,
+) -> bool {
+    observation.admission_capture.database_id() == current_capture.database_id()
+        && observation.admission_capture.runtime_id() == current_capture.runtime_id()
 }
 
 fn validate_observation_collection_capture(
@@ -893,8 +966,12 @@ mod tests {
     };
 
     fn capture(generation: u64) -> CwdCapture {
+        capture_for_runtime([8; 16], generation)
+    }
+
+    fn capture_for_runtime(runtime: [u8; 16], generation: u64) -> CwdCapture {
         CwdCapture::new(
-            CanonicalSnapshot::cwd([7; 16], [8; 16], generation.into()).unwrap(),
+            CanonicalSnapshot::cwd([7; 16], runtime, generation.into()).unwrap(),
             [9; 32],
         )
         .unwrap()
@@ -1161,6 +1238,49 @@ mod tests {
         assert!(projected.iter().all(|argument| argument.redacted));
         assert_eq!(original[0].arguments.len(), 2);
         assert_eq!(original[1].arguments.len(), 1);
+    }
+
+    #[test]
+    fn current_runtime_relations_exclude_prior_runtime_without_rewriting_pinned_snapshots() {
+        let current_after_cwd_advance = capture_for_runtime([8; 16], 9);
+        let admitted_before_cwd_advance = capture_for_runtime([8; 16], 1);
+        let prior_runtime = capture_for_runtime([10; 16], 3);
+        let retained = vec![
+            observation(
+                &admitted_before_cwd_advance,
+                2,
+                SealedInvocationObservationStatus::Running,
+            ),
+            observation(
+                &prior_runtime,
+                3,
+                SealedInvocationObservationStatus::Succeeded,
+            ),
+        ];
+
+        let invocations = project_current_runtime_sys_invocation_collection(
+            retained.clone(),
+            &current_after_cwd_advance,
+        )
+        .unwrap();
+        let arguments = project_current_runtime_sys_invocation_argument_collection(
+            retained,
+            &current_after_cwd_advance,
+        )
+        .unwrap();
+
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].id, InvocationId::from_bytes([2; 16]));
+        assert_eq!(
+            invocations[0].snapshot.as_row_ref().snapshot,
+            *admitted_before_cwd_advance.snapshot()
+        );
+        assert_ne!(
+            invocations[0].snapshot.as_row_ref().snapshot,
+            *current_after_cwd_advance.snapshot()
+        );
+        assert_eq!(arguments.len(), 1);
+        assert_eq!(arguments[0].invocation, invocations[0].reference);
     }
 
     #[test]
