@@ -451,13 +451,23 @@ impl RuntimePublicationCoordinator {
             .pending_through(&freeze)
             .await
             .map_err(map_compact_runtime_error)?;
-        let candidate_visible = matches!(
+        // The only reader-admissible post-receipt state is the durable
+        // runtime cleanup with the repository journal still at its pending
+        // boundary. `RuntimeCompleted` and `Complete` are repository
+        // finalization markers, not independent evidence that this runtime
+        // consumed this journal's prefix. A crash (or malformed journal) at
+        // either marker must recover through the receipt fence rather than
+        // letting a reader mask a still-pending prefix.
+        let candidate_visible = journal.stage()
+            == orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+            && frozen_prefix.is_empty();
+        if matches!(
             journal.stage(),
             orna_repository_v1::PublicationJournalStage::RuntimeCompleted
                 | orna_repository_v1::PublicationJournalStage::Complete
-        ) || (journal.stage()
-            == orna_repository_v1::PublicationJournalStage::WorktreeReconciled
-            && frozen_prefix.is_empty());
+        ) {
+            return Err(Error::InvalidTransition);
+        }
         if candidate_visible {
             // A durable runtime receipt has removed the frozen prefix from
             // the ledger, so exposing the old snapshot here would lose rows.
@@ -1469,6 +1479,27 @@ mod tests {
         }
         repository.write_publication_journal(&forged).unwrap();
 
+        assert_eq!(
+            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
+            Err(Error::InvalidTransition)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_reader_visibility_does_not_trust_a_finalization_marker_without_cleanup() {
+        let (_temp, repository, runtime, _freeze, plan) =
+            compact_runtime_unpublished_fixture().await;
+        repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+
+        let mut journal = repository.read_publication_journal().unwrap().unwrap();
+        journal
+            .advance(orna_repository_v1::PublicationJournalStage::RuntimeCompleted)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        assert_eq!(runtime.pending().await.unwrap().len(), 2);
         assert_eq!(
             RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
             Err(Error::InvalidTransition)
