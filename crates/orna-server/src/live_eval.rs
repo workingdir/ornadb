@@ -248,11 +248,22 @@ impl PureEvalApplication {
         session: SessionId,
         request: [u8; 16],
         fingerprint: [u8; 32],
-    ) -> Option<Envelope> {
-        self.sessions
+    ) -> Result<Option<Envelope>> {
+        let Some((stored, response)) = self
+            .sessions
             .get(&session)
             .and_then(|state| state.terminal.get(&request))
-            .and_then(|(stored, response)| (*stored == fingerprint).then_some(response.clone()))
+        else {
+            return Ok(None);
+        };
+        if *stored != fingerprint {
+            // Request identity is scoped by the authenticated session and
+            // binds its canonical operation fingerprint. This callback fence
+            // must preserve that rule even if a caller reaches the adapter
+            // without the transport's earlier request-record check.
+            return Err(Error::RequestMismatch);
+        }
+        Ok(Some(response.clone()))
     }
 
     fn retain_terminal(
@@ -442,7 +453,7 @@ impl LiveApplication for PureEvalApplication {
             return Err(Error::InvalidMessage);
         };
         let session_id = SessionId::new(session);
-        if let Some(response) = self.replay(session_id, request, *fingerprint) {
+        if let Some(response) = self.replay(session_id, request, *fingerprint)? {
             // The durable transport normally returns a terminal outcome
             // before reaching this callback. This local fence covers a
             // duplicate callback during the same retained session without
@@ -1409,6 +1420,49 @@ mod tests {
             }
         ));
         assert_eq!(repl_admissions.get(), 1);
+    }
+
+    #[test]
+    fn mismatched_terminal_replay_is_rejected_without_mutating_the_session() {
+        let (mut application, expiries, database_id, _, _, repl_admissions) = application();
+        let session = [54; 16];
+        let request = [55; 16];
+        expiries.borrow_mut().insert(SessionId::new(session), 100);
+
+        application
+            .eval(
+                session,
+                request,
+                &eval_message(database_id, "let answer: Int = 40;", [56; 32]),
+            )
+            .unwrap();
+        assert_eq!(repl_admissions.get(), 1);
+
+        assert_eq!(
+            application.eval(
+                session,
+                request,
+                &eval_message(database_id, "let answer: Int = 0;", [57; 32]),
+            ),
+            Err(Error::RequestMismatch)
+        );
+        assert_eq!(repl_admissions.get(), 1);
+
+        let value = application
+            .eval(
+                session,
+                [58; 16],
+                &eval_message(database_id, "answer + 2", [59; 32]),
+            )
+            .unwrap();
+        assert!(matches!(
+            value.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
