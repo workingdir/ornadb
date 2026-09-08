@@ -10514,6 +10514,29 @@ mod tests {
         }
     }
 
+    struct CancelAfterFirstCommitHandler {
+        calls: usize,
+        control: StreamRunGate,
+    }
+
+    impl StreamHandler for CancelAfterFirstCommitHandler {
+        fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            assert_eq!(
+                self.calls, 1,
+                "cancellation must stop later list deliveries"
+            );
+            assert!(
+                self.control.cancel(),
+                "first committed delivery requests cancellation"
+            );
+            StreamHandlerResult::Commit(StreamMutationBatch {
+                mutations: Vec::new(),
+                next_digest: digest(3),
+            })
+        }
+    }
+
     struct TableCommitHandler {
         calls: usize,
     }
@@ -10935,6 +10958,60 @@ mod tests {
             }
         ));
         assert_eq!(handler.calls, 0);
+    }
+
+    #[tokio::test]
+    async fn list_stream_source_resumes_after_a_committed_cancellation_boundary() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(44)).await.unwrap();
+        let key = stream_delivery("list-cancel:one", "list-cancel:two").checkpoint_key();
+        let payloads = vec![vec![1], vec![2], vec![3]];
+        let gate = StreamRunGate::new();
+        let mut source = ListStreamSource::new(key.clone(), payloads.clone());
+        let mut handler = CancelAfterFirstCommitHandler {
+            calls: 0,
+            control: gate.clone(),
+        };
+
+        let cancelled = state
+            .run_stream(writer, &key, &mut source, &mut handler, &gate)
+            .await
+            .unwrap();
+        let StreamRunOutcome::Cancelled {
+            delivered,
+            checkpoint,
+        } = cancelled
+        else {
+            panic!("first list run must end at its cancellation boundary");
+        };
+        assert_eq!(delivered, 1);
+        assert_eq!(checkpoint.key, key);
+        assert_eq!(checkpoint.version, 1);
+        assert_eq!(checkpoint.committed.unwrap().token.as_str(), "1");
+        assert_eq!(handler.calls, 1);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(44)).await.unwrap();
+        let mut source = ListStreamSource::new(key.clone(), payloads);
+        let mut handler = CommitHandler { calls: 0 };
+        let exhausted = reopened
+            .run_stream(writer, &key, &mut source, &mut handler, &NeverCancelled)
+            .await
+            .unwrap();
+        let StreamRunOutcome::Exhausted {
+            delivered,
+            checkpoint,
+        } = exhausted
+        else {
+            panic!("reopened list run must exhaust after the durable successor");
+        };
+        assert_eq!(delivered, 2);
+        assert_eq!(checkpoint.key, key);
+        assert_eq!(checkpoint.version, 3);
+        assert_eq!(checkpoint.committed.unwrap().token.as_str(), "3");
+        assert_eq!(handler.calls, 2);
     }
 
     #[tokio::test]
