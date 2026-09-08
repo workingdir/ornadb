@@ -910,13 +910,17 @@ impl RequiredInternalRef {
 }
 
 /// Read-only continuity evidence for a configured remote's `refs/orna/*`
-/// namespace.  `Unverifiable` is deliberately fail-closed: callers must not
-/// allocate IDs or claim checkpoint/allocator continuity from it.
+/// namespace. `InvalidEvidence` and `Unverifiable` are deliberately
+/// fail-closed: callers must not allocate IDs or claim checkpoint/allocator
+/// continuity from either outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteContinuity {
     Continuous,
     Missing,
     Stale,
+    /// Caller-supplied required refs cannot form one unambiguous native
+    /// continuity claim, so no remote observation was attempted.
+    InvalidEvidence,
     Unverifiable,
 }
 
@@ -2181,7 +2185,10 @@ impl Repository {
         remote: &str,
         required: &[RequiredInternalRef],
     ) -> RemoteContinuity {
-        if !valid_remote_name(remote) || required.is_empty() {
+        if required.is_empty() {
+            return RemoteContinuity::InvalidEvidence;
+        }
+        if !valid_remote_name(remote) {
             return RemoteContinuity::Unverifiable;
         }
         let native_length = match self.observer_native_object_id_length() {
@@ -2198,7 +2205,7 @@ impl Repository {
                     )
                     .is_some()
             {
-                return RemoteContinuity::Unverifiable;
+                return RemoteContinuity::InvalidEvidence;
             }
         }
         let remotes = match self.observer_remote_names() {
@@ -3796,6 +3803,7 @@ mod tests {
         assert!(RemoteContinuity::Continuous.permits_continuity_claim());
         assert!(!RemoteContinuity::Missing.permits_continuity_claim());
         assert!(!RemoteContinuity::Stale.permits_continuity_claim());
+        assert!(!RemoteContinuity::InvalidEvidence.permits_continuity_claim());
         assert!(!RemoteContinuity::Unverifiable.permits_continuity_claim());
     }
 
