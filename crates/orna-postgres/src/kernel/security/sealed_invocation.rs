@@ -450,6 +450,18 @@ impl SealedInvocationOperation {
             self.invocation,
         )
     }
+
+    /// Whether durable admission left this invocation lifecycle active.
+    ///
+    /// Denied and bind-failure outcomes were terminalized with their prepared
+    /// audit record, so an owner-loss boundary must never rewrite them.
+    #[doc(hidden)]
+    pub fn lifecycle_is_active(&self) -> bool {
+        matches!(
+            self.outcome,
+            SealedInvocationPreparedOutcome::Allowed { .. }
+        )
+    }
 }
 
 #[cfg(test)]
