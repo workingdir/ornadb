@@ -6,15 +6,12 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText, Value};
-#[cfg(test)]
 use orna_protocol_v1::{Envelope, Message, PresentationContext};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 #[cfg(test)]
 use orna_semantic_v1::{ModuleInput, analyze};
-#[cfg(test)]
 use orna_serving_v1::{Credential, Limits as ServingLimits, Origin, Patch, RetainedPin, Serving};
-#[cfg(test)]
 use std::collections::BTreeMap;
 use std::{
     fs,
@@ -85,6 +82,9 @@ impl RuntimeEvaluator for CompositeEvaluator {
         }
         if transaction_contract(scenario) {
             return run_durable_transaction_scenario(scenario);
+        }
+        if live_resync_contract(scenario) {
+            return run_live_resync_scenario(scenario);
         }
         if pipeline_insertion_contract(scenario)
             || pipeline_precedence_contract(scenario)
@@ -301,7 +301,6 @@ fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diag
     ))
 }
 
-#[cfg(test)]
 fn live_resync_contract(scenario: &Scenario) -> bool {
     scenario.id == "LIVE-003"
         && scenario.title == "Missing revision resynchronizes"
@@ -311,7 +310,6 @@ fn live_resync_contract(scenario: &Scenario) -> bool {
         && scenario.requirements == ["ORNA-LIVE-004"]
 }
 
-#[cfg(test)]
 fn scenario_failure(message: &'static str) -> StageOutcome<Diagnostic> {
     StageOutcome::Failed(
         Diagnostic::new(
@@ -598,7 +596,6 @@ fn run_live_fallback_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     StageOutcome::Passed
 }
 
-#[cfg(test)]
 fn run_live_resync_scenario(scenario: &Scenario) -> StageOutcome<Diagnostic> {
     if !live_resync_contract(scenario) {
         return StageOutcome::Skipped {
@@ -735,7 +732,7 @@ fn main() {
                 ),
                 (
                     "runtime-stages".into(),
-                    "pure row/expression units and the authoritative duplicate-key fixture execute; all behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
+                    "pure row/expression units, the authoritative duplicate-key fixture, and the LIVE-003 serving resynchronization contract execute; other behavioral scenarios remain explicit skips until their own authoritative compiler/runtime witnesses exist".into(),
                 ),
             ]
             .into_iter()
@@ -744,6 +741,7 @@ fn main() {
                 "REPL-001".into(),
                 "TXN-001".into(),
                 "TXN-002".into(),
+                "LIVE-003".into(),
             ],
         })
         .run(&mut adapter);
