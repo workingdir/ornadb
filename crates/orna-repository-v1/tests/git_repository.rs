@@ -1191,6 +1191,45 @@ fn divergent_checkout_refuses_to_overwrite_an_untracked_target_path() {
 }
 
 #[test]
+fn divergent_checkout_refuses_to_overwrite_an_ignored_target_path() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::write(root.path().join(".gitignore"), "new.orna\n").unwrap();
+    git(root.path(), &["add", ".gitignore"]);
+    git(root.path(), &["commit", "-m", "ignore local source"]);
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("new.orna"), "target source\n").unwrap();
+    git(root.path(), &["add", "-f", "new.orna"]);
+    git(root.path(), &["commit", "-m", "target source"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("new.orna"), "ignored local\n").unwrap();
+    let before = repo.cwd_generation(RuntimeGeneration::new(38)).unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(38))
+        .unwrap();
+
+    assert_eq!(
+        plan.git().conflicting_paths(),
+        &[ManagedPath::new("new.orna").unwrap()]
+    );
+    assert!(matches!(
+        repo.execute_nonconflicting_git_checkout(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
+    ));
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(38)).unwrap(),
+        before
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(
+        fs::read_to_string(root.path().join("new.orna")).unwrap(),
+        "ignored local\n"
+    );
+}
+
+#[test]
 fn checkout_subplan_classifies_target_and_local_path_sets() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
