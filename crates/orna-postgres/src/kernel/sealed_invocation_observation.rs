@@ -184,6 +184,7 @@ impl SealedInvocationObservation {
         })?;
         validate_argument_order(&self.arguments, &record)?;
         validate_argument_parameter_identity(&self.arguments, &record)?;
+        validate_argument_public_metadata(&self.arguments, &record)?;
         for argument in &self.arguments {
             let expected = invocation_argument_observation_reference(
                 &self.admission_capture,
@@ -285,6 +286,25 @@ impl PostgresKernel {
         &self,
     ) -> Result<Vec<DurableSysInvocationObservation>, PostgresKernelError> {
         project_durable_sys_invocation_collection(
+            self.load_retained_sealed_invocation_observation_collection()
+                .await?,
+        )
+    }
+
+    /// Loads the checked durable `sys.InvocationArgument` relation in stable
+    /// parent-plus-position order.
+    ///
+    /// This is a read-only relation boundary, not a second source of argument
+    /// metadata: every child is first projected through its checked retained
+    /// `sys.Invocation` parent from the same repeatable-read snapshot. That
+    /// keeps the public natural key (`invocation + position`) bound to a
+    /// retained parent and excludes malformed/legacy admissions before any
+    /// child can be exposed. Physical `sys.TypeRef` and recoverable
+    /// `sys.Value` fields remain unavailable rather than being fabricated.
+    pub async fn load_durable_sys_invocation_argument_observations(
+        &self,
+    ) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
+        project_durable_sys_invocation_argument_collection(
             self.load_retained_sealed_invocation_observation_collection()
                 .await?,
         )
@@ -415,6 +435,20 @@ fn project_durable_sys_invocation_collection(
         .into_iter()
         .map(|observation| observation.durable_sys_projection())
         .collect()
+}
+
+/// Flattens checked retained parent rows into the public durable
+/// `sys.InvocationArgument` relation without changing their stable parent and
+/// declaration-position order.
+fn project_durable_sys_invocation_argument_collection(
+    observations: Vec<SealedInvocationObservation>,
+) -> Result<Vec<DurableSysInvocationArgumentObservation>, PostgresKernelError> {
+    project_durable_sys_invocation_collection(observations).map(|observations| {
+        observations
+            .into_iter()
+            .flat_map(|observation| observation.arguments)
+            .collect()
+    })
 }
 
 fn validate_observation_collection_capture(
@@ -772,6 +806,23 @@ fn validate_argument_parameter_identity(
     Ok(())
 }
 
+/// Revalidates metadata that becomes visible in the redacted public argument
+/// projection. The database decoder enforces this too, but public conversion
+/// must fail closed when another retained-observation caller supplies malformed
+/// evidence directly.
+fn validate_argument_public_metadata(
+    arguments: &[SealedInvocationArgumentObservation],
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    if arguments.iter().any(|argument| argument.name.is_empty()) {
+        return Err(observation_invariant(
+            record,
+            "redacted argument observation must retain a nonempty name",
+        ));
+    }
+    Ok(())
+}
+
 fn observation_id(row: &Row, record: &str, column: &str) -> Result<[u8; 16], PostgresKernelError> {
     let value: Vec<u8> = observation_column(row, record, column)?;
     value
@@ -1062,6 +1113,44 @@ mod tests {
     }
 
     #[test]
+    fn durable_sys_argument_relation_preserves_checked_parent_and_position_order() {
+        let admitted = capture(1);
+        let mut first = observation(&admitted, 3, SealedInvocationObservationStatus::Running);
+        first.arguments.push(SealedInvocationArgumentObservation {
+            reference: invocation_argument_observation_reference(
+                &admitted,
+                first.invocation,
+                1,
+                "test",
+            )
+            .unwrap(),
+            position: 1,
+            parameter: orna_core::ParameterId::from_bytes([8; 16]),
+            name: "next".to_owned(),
+            type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
+            value_digest: [9; 32],
+        });
+        let retained = vec![
+            first,
+            observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded),
+        ];
+        let original = retained.clone();
+
+        let projected = project_durable_sys_invocation_argument_collection(retained).unwrap();
+
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0].invocation, original[0].reference);
+        assert_eq!(projected[0].position, 0);
+        assert_eq!(projected[1].invocation, original[0].reference);
+        assert_eq!(projected[1].position, 1);
+        assert_eq!(projected[2].invocation, original[1].reference);
+        assert_eq!(projected[2].position, 0);
+        assert!(projected.iter().all(|argument| argument.redacted));
+        assert_eq!(original[0].arguments.len(), 2);
+        assert_eq!(original[1].arguments.len(), 1);
+    }
+
+    #[test]
     fn durable_sys_projection_snapshot_remains_pinned_after_later_capture_changes() {
         let admitted = capture(1);
         let later = capture(2);
@@ -1179,6 +1268,15 @@ mod tests {
                 type_kind: first.type_kind,
                 value_digest: [3; 32],
             });
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_redacted_argument_without_a_name() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].name.clear();
 
         assert!(internal.durable_sys_projection().is_err());
     }
