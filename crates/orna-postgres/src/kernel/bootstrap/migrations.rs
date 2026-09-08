@@ -329,6 +329,12 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../../migrations/0051_sealed_invocation_argument_metadata.sql"),
         data_step: None,
     },
+    Migration {
+        version: 52,
+        name: "sealed invocation admission capture",
+        sql: include_str!("../../../migrations/0052_sealed_invocation_admission_capture.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
