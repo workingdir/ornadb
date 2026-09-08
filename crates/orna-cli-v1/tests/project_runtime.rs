@@ -6,6 +6,7 @@ use std::{
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
 use orna_runtime_v1::{CheckpointKey, Component, ConsumerIdentity, RuntimeIdentity, RuntimeState};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn reference_project() -> TempDir {
@@ -130,6 +131,52 @@ fn checkpoint_component(value: impl Into<String>) -> Component {
     Component::new(value).expect("checkpoint component")
 }
 
+fn sensors_list_payloads() -> Vec<Vec<u8>> {
+    [
+        (0, decimal(1825, -2)),
+        (1, decimal(1850, -2)),
+        (2, decimal(1875, -2)),
+    ]
+    .into_iter()
+    .map(|(sequence, value)| {
+        let mut fields = vec![
+            ("sensor", OvbRaw::Text("greenhouse".into())),
+            ("sequence", OvbRaw::Int(sequence.into())),
+            ("value", value),
+        ];
+        fields.sort_by_cached_key(|(name, _)| {
+            Value::new(OvbRaw::Text((*name).into()))
+                .expect("canonical field name")
+                .encode()
+                .expect("encoded field name")
+        });
+        Value::new(OvbRaw::Map(
+            fields
+                .into_iter()
+                .map(|(name, value)| (OvbRaw::Text(name.into()), value))
+                .collect(),
+        ))
+        .expect("canonical Sample payload")
+        .encode()
+        .expect("encoded Sample payload")
+    })
+    .collect()
+}
+
+fn list_stream_identity(name: &str, payloads: &[Vec<u8>]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-LIST-STREAM-IDENTITY\0");
+    for payload in payloads {
+        digest.update(
+            u64::try_from(payload.len())
+                .expect("payload length fits u64")
+                .to_be_bytes(),
+        );
+        digest.update(payload);
+    }
+    format!("{name}:{:x}", digest.finalize())
+}
+
 fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
     let database = database_id.iter().fold(
         String::with_capacity(database_id.len() * 2),
@@ -146,7 +193,10 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
             binding: checkpoint_component("arguments:[]"),
         },
         source_format: checkpoint_component("orna-stream-v1"),
-        source: checkpoint_component("example:sensors:v1"),
+        source: checkpoint_component(list_stream_identity(
+            "example:sensors:v1",
+            &sensors_list_payloads(),
+        )),
         partition_format: checkpoint_component("literal-list"),
         partition: None,
         position_format: checkpoint_component("ordinal"),
