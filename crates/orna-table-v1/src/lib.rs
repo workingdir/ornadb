@@ -189,6 +189,13 @@ pub enum CardinalityError {
     Multiple,
 }
 
+/// Invalid positional-window parameters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowError {
+    ZeroSize,
+    ZeroStep,
+}
+
 impl<'a, Item: 'a> Relation<'a, Item> {
     fn new<I>(source: I) -> Self
     where
@@ -312,6 +319,56 @@ impl<'a, Item: 'a> Relation<'a, Item> {
     /// Drops an ordered prefix.
     pub fn drop(self, count: usize) -> Self {
         Self::new(self.source.skip(count))
+    }
+
+    /// Produces complete positional windows in input order.
+    ///
+    /// A window never contains fewer than `size` values. Advancing by `step`
+    /// preserves overlapping values when `step < size`, and skips intervening
+    /// values when `step > size`.
+    pub fn window(self, size: usize, step: usize) -> Result<Relation<'a, Vec<Item>>, WindowError>
+    where
+        Item: Clone,
+    {
+        if size == 0 {
+            return Err(WindowError::ZeroSize);
+        }
+        if step == 0 {
+            return Err(WindowError::ZeroStep);
+        }
+
+        let mut source = self.source;
+        let mut buffer = std::collections::VecDeque::with_capacity(size);
+        let mut first = true;
+        let mut exhausted = false;
+        Ok(Relation::new(std::iter::from_fn(move || {
+            if exhausted {
+                return None;
+            }
+            if first {
+                first = false;
+            } else {
+                let retained = size.saturating_sub(step);
+                while buffer.len() > retained {
+                    buffer.pop_front();
+                }
+                for _ in 0..step.saturating_sub(size) {
+                    if source.next().is_none() {
+                        exhausted = true;
+                        return None;
+                    }
+                }
+            }
+
+            while buffer.len() < size {
+                let Some(item) = source.next() else {
+                    exhausted = true;
+                    return None;
+                };
+                buffer.push_back(item);
+            }
+            Some(buffer.iter().cloned().collect())
+        })))
     }
 
     /// Establishes a stable order by the derived key.
@@ -1149,8 +1206,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime};
-    use std::panic::AssertUnwindSafe;
+    use super::{
+        ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime, WindowError,
+    };
+    use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
 
     #[derive(Debug, Eq, PartialEq)]
     struct PanicOnClone {
@@ -1824,6 +1883,41 @@ mod tests {
             .zip(super::Relation::new(["unused"].into_iter()))
             .collect::<Vec<_>>();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn relation_windows_are_complete_ordered_and_lazy() {
+        let pulls = Rc::new(Cell::new(0));
+        let source_pulls = Rc::clone(&pulls);
+        let source = std::iter::from_fn(move || {
+            let next = source_pulls.get();
+            source_pulls.set(next + 1);
+            (next < 5).then_some(next)
+        });
+        let mut windows = super::Relation::new(source).window(3, 1).unwrap();
+
+        assert_eq!(windows.next(), Some(vec![0, 1, 2]));
+        assert_eq!(pulls.get(), 3);
+        assert_eq!(windows.next(), Some(vec![1, 2, 3]));
+        assert_eq!(pulls.get(), 4);
+        assert_eq!(windows.collect::<Vec<_>>(), vec![vec![2, 3, 4]]);
+    }
+
+    #[test]
+    fn relation_windows_skip_by_step_and_reject_zero_parameters() {
+        let windows = super::Relation::new([0, 1, 2, 3, 4, 5, 6].into_iter())
+            .window(2, 3)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(windows, vec![vec![0, 1], vec![3, 4]]);
+        assert!(matches!(
+            super::Relation::new([1].into_iter()).window(0, 1),
+            Err(WindowError::ZeroSize)
+        ));
+        assert!(matches!(
+            super::Relation::new([1].into_iter()).window(1, 0),
+            Err(WindowError::ZeroStep)
+        ));
     }
 
     #[test]
