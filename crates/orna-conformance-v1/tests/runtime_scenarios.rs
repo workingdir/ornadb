@@ -350,7 +350,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
                 result["scenario"].as_str(),
                 Some("LET-REBIND-091" | "PIPE-001" | "PIPE-002")
             ) {
-                "scenario execution skipped: direct bounded-evaluator regression lacks an authoritative compiler/runtime scenario witness"
+                "scenario execution skipped: no compiler-produced executable artifact crosses the semantic-to-runtime adapter; the bounded evaluator reinterprets source"
             } else {
                 "scenario execution skipped: scenario lacks an authoritative compiler/runtime witness; direct bounded evaluator and table adapter coverage is not Orna-engine execution"
             };

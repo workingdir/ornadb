@@ -27,7 +27,9 @@ use std::{
 /// duplicate-key fixture and exact unsafe row-key repeat admission check use
 /// their owning table/row boundaries. A direct bounded-evaluator scenario is
 /// useful regression evidence, but it is not an authoritative compiler/runtime
-/// scenario witness and therefore remains an explicit corpus skip.
+/// scenario witness: the semantic adapter exposes analysis, not a compiled
+/// executable artifact, and the bounded evaluator reinterprets source.
+/// Such scenarios therefore remain explicit corpus skips.
 #[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
@@ -89,7 +91,7 @@ impl RuntimeEvaluator for CompositeEvaluator {
             || let_rebinding_contract(scenario)
         {
             return StageOutcome::Skipped {
-                reason: "direct bounded-evaluator regression lacks an authoritative compiler/runtime scenario witness".into(),
+                reason: "no compiler-produced executable artifact crosses the semantic-to-runtime adapter; the bounded evaluator reinterprets source".into(),
             };
         }
         StageOutcome::Skipped {
