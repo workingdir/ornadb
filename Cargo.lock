@@ -1840,6 +1840,7 @@ dependencies = [
  "orna-client",
  "orna-compiler",
  "orna-core",
+ "orna-foundation-v1",
  "orna-protocol",
  "orna-standard",
  "orna-storage",
