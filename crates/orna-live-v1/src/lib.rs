@@ -707,7 +707,8 @@ impl LiveHost {
         if self.session_requires_child_drain(request.id).await? {
             return Err(Error::ApplicationDrainRequired);
         }
-        self.delete_after_validation(request, deletion, None).await
+        self.delete_after_validation(request, deletion, None, false)
+            .await
     }
 
     /// Deletes an authenticated session after fencing durable work and joining
@@ -731,7 +732,21 @@ impl LiveHost {
             return Ok(());
         }
         self.validate_delete(&request)?;
-        self.delete_after_validation(request, deletion, Some(children))
+        self.delete_after_validation(request, deletion, Some(children), false)
+            .await
+    }
+
+    /// Terminates an expired session through the same durable drain boundary
+    /// as explicit deletion. Expiry is an owner event, not a credentialed HTTP
+    /// request, so it deliberately bypasses request authentication only after
+    /// the transport has established that the session lease elapsed.
+    async fn expire_with_children(
+        &mut self,
+        request: DeleteRequest<'_>,
+        deletion: &mut impl DeletionAdapter,
+        children: &mut dyn LiveSessionChildren,
+    ) -> Result<()> {
+        self.delete_after_validation(request, deletion, Some(children), true)
             .await
     }
 
@@ -740,6 +755,7 @@ impl LiveHost {
         request: DeleteRequest<'_>,
         deletion: &mut impl DeletionAdapter,
         children: Option<&mut dyn LiveSessionChildren>,
+        retryable_failure: bool,
     ) -> Result<()> {
         // TASK-END-1 starts by blocking new work. Revoking the credential
         // prevents a resumed attachment while removing attachments prevents a
@@ -757,7 +773,9 @@ impl LiveHost {
             let lease = match self.writer_lease().await {
                 Ok(lease) => lease,
                 Err(error) => {
-                    let _ = self.finish_failed_delete(request.id);
+                    if !retryable_failure {
+                        let _ = self.finish_failed_delete(request.id);
+                    }
                     return Err(error);
                 }
             };
@@ -770,7 +788,9 @@ impl LiveHost {
             {
                 Ok(()) => Some(lease),
                 Err(error) => {
-                    let _ = self.finish_failed_delete(request.id);
+                    if !retryable_failure {
+                        let _ = self.finish_failed_delete(request.id);
+                    }
                     return Err(map_runtime(&error));
                 }
             }
@@ -782,7 +802,9 @@ impl LiveHost {
             // A failed join remains fail-closed. Do not invoke durable
             // deletion or manufacture success while child termination is
             // unproven.
-            let _ = self.finish_failed_delete(request.id);
+            if !retryable_failure {
+                let _ = self.finish_failed_delete(request.id);
+            }
             return Err(Error::DeletionFailed);
         }
         if let Some(lease) = deletion_lease {
@@ -793,15 +815,17 @@ impl LiveHost {
                 .finish_session_deletion(request.id, lease)
                 .await;
             if let Err(error) = result {
-                let _ = self.finish_failed_delete(request.id);
+                if !retryable_failure {
+                    let _ = self.finish_failed_delete(request.id);
+                }
                 return Err(map_runtime(&error));
             }
         }
-        let deleted = self
-            .security
-            .delete(session_id(request.id), deletion)
-            .is_ok();
-        self.finish_delete(&request, deleted)
+        match self.security.delete(session_id(request.id), deletion) {
+            Ok(()) => self.finish_delete(&request, true),
+            Err(_) if retryable_failure => Err(Error::DeletionFailed),
+            Err(_) => self.finish_delete(&request, false),
+        }
     }
 
     async fn session_requires_child_drain(&self, session: [u8; 16]) -> Result<bool> {
@@ -3062,6 +3086,7 @@ pub fn encode_websocket_output(
 struct SessionRecord {
     metadata: SessionMetadata,
     credential: SessionCredential,
+    origin: Origin,
 }
 
 struct UpgradeAdmission {
@@ -3251,6 +3276,68 @@ impl LiveTransport {
         }
     }
 
+    /// Drains every session whose advertised lease has elapsed. The executable
+    /// host supplies the same application-child supervisor used by DELETE, so
+    /// expiry cannot merely discard adapter state while durable work or socket
+    /// workers remain alive. Retired attachments are queued even when a drain
+    /// fails: the host remains fail-closed and must cancel/join them before
+    /// their identities can be reused.
+    pub async fn expire_sessions_with_children(
+        &mut self,
+        now: u64,
+        deletion: &mut impl DeletionAdapter,
+        children: &mut dyn LiveSessionChildren,
+    ) -> Result<()> {
+        self.expire_pending_websocket_upgrades(now);
+        let mut failure = None;
+        let expired = self
+            .sessions
+            .iter()
+            .filter_map(|(session, record)| (record.metadata.expires_at <= now).then_some(*session))
+            .collect::<Vec<_>>();
+        for session in expired {
+            let Some(record) = self.sessions.get(&session).cloned() else {
+                continue;
+            };
+            let retired = self
+                .host
+                .attachments
+                .iter()
+                .find_map(|(attachment, owner)| (*owner == session).then_some(*attachment));
+            let pending = self
+                .pending_upgrades
+                .remove(&session)
+                .map(|pending| pending.admission.attachment);
+            let request = DeleteRequest {
+                id: session,
+                origin: &record.origin,
+                credential: &record.credential,
+                now,
+            };
+            let expired = self
+                .host
+                .expire_with_children(request, deletion, children)
+                .await;
+            if let Some(attachment) = retired {
+                self.queue_retired_attachment(session, attachment);
+            }
+            if let Some(attachment) = pending {
+                self.queue_retired_attachment(session, attachment);
+            }
+            // Failed expiry cleanup leaves the expired transport record in
+            // place. Its host security state has already been revoked by the
+            // shared delete path, so it cannot admit new work; retaining the
+            // record lets the periodic owner retry cancellation and join
+            // rather than losing an unfinished durable drain.
+            if expired.is_ok() {
+                self.sessions.remove(&session);
+            } else if failure.is_none() {
+                failure = expired.err();
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     /// Idempotently closes one attachment through the transport-owned host
     /// state. Retired workers may call this after replacement; the inner host
     /// reports [`Error::Closed`] without affecting the replacement.
@@ -3355,7 +3442,7 @@ impl LiveTransport {
                     .create(
                         CreateRequest {
                             id: metadata.session,
-                            origin,
+                            origin: origin.clone(),
                             expires_at: metadata.expires_at,
                             now,
                             subscribe: &metadata.subscribe,
@@ -3373,6 +3460,7 @@ impl LiveTransport {
                 let record = SessionRecord {
                     metadata,
                     credential,
+                    origin: origin.clone(),
                 };
                 let response = session_response(&record.metadata, token, self.limits, 201);
                 self.sessions.insert(record.metadata.session, record);
@@ -4981,6 +5069,42 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ExpiryDeletion {
+        calls: usize,
+        fail: bool,
+    }
+
+    impl SessionDeletionAdapter for ExpiryDeletion {
+        type Error = ();
+
+        fn delete(&mut self, _: SessionId) -> std::result::Result<(), Self::Error> {
+            self.calls += 1;
+            if self.fail { Err(()) } else { Ok(()) }
+        }
+    }
+
+    #[derive(Default)]
+    struct ExpiryChildren {
+        calls: usize,
+        fail: bool,
+    }
+
+    impl LiveSessionChildren for ExpiryChildren {
+        fn cancel_and_join_session<'a>(
+            &'a mut self,
+            _: [u8; 16],
+            _: &'a [RequestIdentity],
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+            self.calls += 1;
+            if self.fail {
+                Box::pin(async { Err(Error::DeletionFailed) })
+            } else {
+                Box::pin(async { Ok(()) })
+            }
+        }
+    }
+
     fn subscribed_host(runtime: Option<RuntimeState>) -> LiveHost {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = match runtime {
@@ -5249,6 +5373,127 @@ mod tests {
     }
 
     #[test]
+    fn expiry_retries_failed_drain_while_fencing_and_retiring_attachment() {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = subscribed_host(None);
+        host.application_sessions.insert([1; 16]);
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential,
+                origin,
+            },
+        );
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren {
+            fail: true,
+            ..ExpiryChildren::default()
+        };
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                10,
+                &mut deletion,
+                &mut children,
+            )),
+            Err(Error::DeletionFailed)
+        );
+
+        assert_eq!(children.calls, 1);
+        assert_eq!(deletion.calls, 0);
+        assert!(transport.sessions.contains_key(&[1; 16]));
+        assert_eq!(transport.take_retired_attachments(), vec![[4; 16]]);
+        assert_eq!(
+            futures::executor::block_on(transport.host.handle_frame([4; 16], 10, Frame::Close)),
+            Err(Error::Closed)
+        );
+
+        children.fail = false;
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                11,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+
+        assert_eq!(children.calls, 2);
+        assert_eq!(deletion.calls, 1);
+        assert!(!transport.sessions.contains_key(&[1; 16]));
+        assert!(transport.take_retired_attachments().is_empty());
+    }
+
+    #[test]
+    fn expiry_retries_failed_durable_deletion_while_fencing_attachment() {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = subscribed_host(None);
+        host.application_sessions.insert([1; 16]);
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential,
+                origin,
+            },
+        );
+        let mut deletion = ExpiryDeletion {
+            fail: true,
+            ..ExpiryDeletion::default()
+        };
+        let mut children = ExpiryChildren::default();
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                10,
+                &mut deletion,
+                &mut children,
+            )),
+            Err(Error::DeletionFailed)
+        );
+        assert_eq!(children.calls, 1);
+        assert_eq!(deletion.calls, 1);
+        assert!(transport.sessions.contains_key(&[1; 16]));
+        assert_eq!(transport.take_retired_attachments(), vec![[4; 16]]);
+
+        deletion.fail = false;
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                11,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert_eq!(children.calls, 2);
+        assert_eq!(deletion.calls, 2);
+        assert!(!transport.sessions.contains_key(&[1; 16]));
+    }
+
+    #[test]
     fn malformed_post_upgrade_frame_closes_its_attachment() {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = LiveHost::new(
@@ -5301,6 +5546,7 @@ mod tests {
                     subscribe,
                 },
                 credential,
+                origin,
             },
         );
         let mut input = format!(
