@@ -3054,7 +3054,11 @@ pub struct LiveTransport {
     pending_upgrades: BTreeMap<[u8; 16], PendingUpgrade>,
     next_upgrade_reservation: u128,
     retired_attachments: VecDeque<[u8; 16]>,
-    retiring_attachments: BTreeSet<[u8; 16]>,
+    // An attachment remains associated with its session until the executable
+    // owner has acknowledged a real cancellation-and-join.  Keeping that
+    // association lets the child-free HTTP seam reject DELETE rather than
+    // claiming orderly termination while a retired worker still exists.
+    retiring_attachments: BTreeMap<[u8; 16], [u8; 16]>,
 }
 
 impl LiveTransport {
@@ -3146,7 +3150,7 @@ impl LiveTransport {
             pending_upgrades: BTreeMap::new(),
             next_upgrade_reservation: 0,
             retired_attachments: VecDeque::new(),
-            retiring_attachments: BTreeSet::new(),
+            retiring_attachments: BTreeMap::new(),
         })
     }
 
@@ -3167,7 +3171,7 @@ impl LiveTransport {
     /// Queue delivery alone is not acknowledgement: the identity remains
     /// fenced until the owner calls this method.
     pub fn acknowledge_retired_attachment(&mut self, attachment: [u8; 16]) -> bool {
-        self.retiring_attachments.remove(&attachment)
+        self.retiring_attachments.remove(&attachment).is_some()
     }
 
     /// Expires handshake reservations whose bounded delivery window has
@@ -3182,7 +3186,7 @@ impl LiveTransport {
             .collect::<Vec<_>>();
         for session in expired {
             if let Some(pending) = self.pending_upgrades.remove(&session) {
-                self.queue_retired_attachment(pending.admission.attachment);
+                self.queue_retired_attachment(session, pending.admission.attachment);
             }
         }
     }
@@ -3347,7 +3351,7 @@ impl LiveTransport {
                 {
                     Ok((credential, retired)) => {
                         if let Some(attachment) = retired {
-                            self.queue_retired_attachment(attachment);
+                            self.queue_retired_attachment(id, attachment);
                         }
                         let Some(replacement) = issuer.last_issued() else {
                             return wire_error(503, "live.unavailable");
@@ -3398,6 +3402,15 @@ impl LiveTransport {
                 if let Err(error) = self.host.validate_delete(&delete_request) {
                     return host_error(error);
                 }
+                // The child-free route has no executable supervisor that can
+                // prove session-owned socket workers have terminated.  Do not
+                // revoke a resumable session and manufacture a 204 while an
+                // active, pending, or previously retired worker remains.
+                // The child-aware executable route captures those retirement
+                // gates and waits for their joins before writing its response.
+                if children.is_none() && self.session_has_transport_cleanup(id) {
+                    return wire_error(503, "live.unavailable");
+                }
                 let retired = self
                     .host
                     .attachments
@@ -3416,10 +3429,10 @@ impl LiveTransport {
                     None => self.host.delete(delete_request, deletion).await,
                 };
                 if let Some(attachment) = retired {
-                    self.queue_retired_attachment(attachment);
+                    self.queue_retired_attachment(id, attachment);
                 }
                 if let Some(attachment) = pending {
-                    self.queue_retired_attachment(attachment);
+                    self.queue_retired_attachment(id, attachment);
                 }
                 match deleted {
                     Ok(()) => {
@@ -3437,8 +3450,23 @@ impl LiveTransport {
         }
     }
 
-    fn queue_retired_attachment(&mut self, attachment: [u8; 16]) {
-        if self.retiring_attachments.insert(attachment) {
+    fn session_has_transport_cleanup(&self, session: [u8; 16]) -> bool {
+        self.host
+            .attachments
+            .values()
+            .any(|owner| *owner == session)
+            || self.pending_upgrades.contains_key(&session)
+            || self
+                .retiring_attachments
+                .values()
+                .any(|owner| *owner == session)
+    }
+
+    fn queue_retired_attachment(&mut self, session: [u8; 16], attachment: [u8; 16]) {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.retiring_attachments.entry(attachment)
+        {
+            entry.insert(session);
             self.retired_attachments.push_back(attachment);
         }
     }
@@ -3961,7 +3989,7 @@ impl LiveTransport {
         // Reject before reserving so a failed candidate cannot disturb either
         // existing attachment.
         if self.host.attachments.contains_key(&attachment)
-            || self.retiring_attachments.contains(&attachment)
+            || self.retiring_attachments.contains_key(&attachment)
             || self
                 .pending_upgrades
                 .values()
@@ -4009,7 +4037,7 @@ impl LiveTransport {
         let Some(pending) = self.pending_upgrades.remove(&session) else {
             return false;
         };
-        self.queue_retired_attachment(pending.admission.attachment);
+        self.queue_retired_attachment(session, pending.admission.attachment);
         true
     }
 
@@ -4053,7 +4081,7 @@ impl LiveTransport {
                 // A failed commit must fence the candidate just like a failed
                 // handshake write. The caller can only report the failure
                 // after it has observed this retirement.
-                self.queue_retired_attachment(attachment);
+                self.queue_retired_attachment(session, attachment);
                 Err(error)
             }
         }
@@ -4173,7 +4201,7 @@ impl LiveTransport {
             })
             .await?;
         if let AttachOutcome::Replaced(previous) = outcome {
-            self.queue_retired_attachment(previous.as_bytes());
+            self.queue_retired_attachment(admission.id, previous.as_bytes());
         }
         Ok(admission.response)
     }
