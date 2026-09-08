@@ -2348,11 +2348,12 @@ fn foreign_upgrade_reservation_cannot_consume_a_local_pending_handshake() {
 }
 
 #[test]
-fn delete_retires_active_and_pending_websocket_candidates() {
+fn child_aware_delete_retires_active_and_pending_websocket_candidates() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
     let mut authority = Authority;
     let mut deletion = Delete(true);
+    let mut children = RecordingChildren::default();
     let created = block_on(transport.handle(
         wire(
             "POST",
@@ -2384,13 +2385,72 @@ fn delete_retires_active_and_pending_websocket_candidates() {
         .headers
         .push(("authorization".into(), format!("Bearer {credential}")));
     assert_eq!(
-        block_on(transport.handle(request, 3, &mut authority, &mut issuer, &mut deletion,)).status,
+        block_on(transport.handle_with_children(
+            request,
+            3,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
         204
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16], [6; 16]]);
     assert_eq!(
         block_on(transport.commit_websocket_upgrade(pending, 3)),
         Err(Error::Closed)
+    );
+}
+
+#[test]
+fn child_free_delete_preserves_session_until_socket_cleanup_can_be_joined() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+    let active = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
+        .unwrap();
+    block_on(transport.commit_websocket_upgrade(active, 1)).unwrap();
+    let pending = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [6; 16], 2)
+        .unwrap();
+    let mut request = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    request
+        .headers
+        .push(("authorization".into(), format!("Bearer {credential}")));
+
+    assert_eq!(
+        block_on(transport.handle(request, 3, &mut authority, &mut issuer, &mut deletion,)).status,
+        503
+    );
+    assert_eq!(deletion.calls, 0);
+    assert!(transport.take_retired_attachments().is_empty());
+    assert_eq!(
+        block_on(transport.commit_websocket_upgrade(pending, 3))
+            .unwrap()
+            .status,
+        101
     );
 }
 
@@ -4533,8 +4593,17 @@ fn live_http_routes_are_exact_origin_checked_and_rotate_scoped_tokens() {
     deleted
         .headers
         .push(("authorization".into(), format!("Bearer {second}")));
+    let mut children = RecordingChildren::default();
     assert_eq!(
-        block_on(transport.handle(deleted, 2, &mut authority, &mut issuer, &mut deletion)).status,
+        block_on(transport.handle_with_children(
+            deleted,
+            2,
+            &mut authority,
+            &mut issuer,
+            &mut deletion,
+            &mut children,
+        ))
+        .status,
         204
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
