@@ -1778,24 +1778,60 @@ impl LiveHost {
         &mut self,
         session: [u8; 16],
         request: [u8; 16],
-        outcome: DispatchOutcome,
+        mut outcome: DispatchOutcome,
     ) -> Result<DispatchOutcome> {
         if self.runtime.is_some() {
             let lease = self.writer_lease().await?;
             let terminal = self.terminal_outcome(&outcome)?;
             let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
-            runtime
-                .complete_observed_request_with_owner(
-                    RequestIdentity {
-                        session_id: session,
-                        request_id: request,
-                    },
-                    self.request_fingerprint(session, request)?,
-                    lease,
-                    terminal,
-                )
+            let identity = RequestIdentity {
+                session_id: session,
+                request_id: request,
+            };
+            let fingerprint = self.request_fingerprint(session, request)?;
+            match runtime
+                .complete_observed_request_with_owner(identity, fingerprint, lease, terminal)
                 .await
-                .map_err(|error| map_runtime(&error))?;
+            {
+                Ok(_) => {}
+                Err(RuntimeError::RequestStateConflict) => {
+                    // A cancellation, recovery, or competing terminal claim
+                    // may win after this callback returns. The conditional
+                    // runtime transition is the claim; this read is only the
+                    // idempotent replay of its durable winner.
+                    let current = runtime
+                        .request_status_for_identity(identity)
+                        .await
+                        .map_err(|error| map_runtime(&error))?
+                        .ok_or(Error::RuntimeUnavailable)?;
+                    if current.fingerprint != fingerprint || !current.state.is_terminal() {
+                        return Err(Error::RuntimeUnavailable);
+                    }
+                    let response = Envelope::decode(
+                        current
+                            .terminal_outcome
+                            .ok_or(Error::RuntimeUnavailable)?
+                            .as_bytes(),
+                        self.limits.protocol,
+                    )
+                    .map_err(|_| Error::RuntimeUnavailable)?;
+                    outcome = DispatchOutcome {
+                        outcome: if matches!(
+                            response.message,
+                            Message::Result {
+                                status: ResultStatus::Cancellation,
+                                ..
+                            }
+                        ) {
+                            FrameOutcome::Cancelled
+                        } else {
+                            FrameOutcome::Accepted
+                        },
+                        response: Some(response),
+                    };
+                }
+                Err(error) => return Err(map_runtime(&error)),
+            }
         }
         self.serving
             .complete_request(session, request)
