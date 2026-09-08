@@ -973,6 +973,34 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
             }
         ));
 
+        let table_write = websocket_eval(
+            address,
+            &session,
+            &token,
+            &database,
+            [18; 16],
+            "table Note(id: Int) { value: Int, } fn main() { Note.insert({ id: 1, value: 2 }); }",
+        );
+        assert!(matches!(
+            table_write.message,
+            Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                diagnostic: Some(_),
+                ..
+            }
+        ));
+        let after_rejection = websocket_eval(address, &session, &token, &database, [19; 16], "$_");
+        let Message::Result {
+            status: ResultStatus::Success,
+            value: Some(after_rejection),
+            ..
+        } = after_rejection.message
+        else {
+            panic!("a rejected effect must not replace the retained pure result");
+        };
+        assert_eq!(after_rejection.encode().unwrap(), forty_three);
+
         let replayed = websocket_eval(address, &session, &token, &database, [13; 16], "$_ + 1");
         let current = websocket_eval(address, &session, &token, &database, [15; 16], "$_");
         for response in [replayed, current] {
@@ -998,7 +1026,7 @@ fn loopback_host_evaluates_pure_source_retains_state_and_replays_terminal_eval()
 }
 
 #[test]
-fn loopback_host_serves_a_permitted_read_only_watch_snapshot() {
+fn loopback_host_rejects_unsupported_watch() {
     let temporary = TemporaryRepository::new();
     let initialized = initialize_repository(temporary.path()).unwrap();
     let database = initialized.metadata().database_id().to_string();
@@ -1018,75 +1046,8 @@ fn loopback_host_serves_a_permitted_read_only_watch_snapshot() {
         create.read_to_end(&mut ignored).unwrap();
 
         let response = websocket_watch(address, &session, &token, &database, [21; 16], "1 + 1");
-        assert!(matches!(
-            response.message,
-            Message::Snapshot { revision: 0, .. }
-        ));
-        let watch_id = response.watch.expect("server-issued watch id");
-        assert_ne!(watch_id, [0; 16]);
-        sender.send(()).unwrap();
-    });
-
-    assert_eq!(
-        host.serve_until_cancellation(receiver.map(|_| ())),
-        Err(LiveHostError::Cancelled)
-    );
-    client.join().unwrap();
-    let _released = TcpListener::bind(address).unwrap();
-}
-
-#[test]
-fn loopback_host_resyncs_a_permitted_read_only_watch() {
-    let temporary = TemporaryRepository::new();
-    let initialized = initialize_repository(temporary.path()).unwrap();
-    let database = initialized.metadata().database_id().to_string();
-    let host = LiveOnceHost::bind(initialized.repository(), 0).unwrap();
-    let address = host.address();
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    let client = std::thread::spawn(move || {
-        let mut create = TcpStream::connect(address).unwrap();
-        create
-            .write_all(request(address, &database).as_bytes())
-            .unwrap();
-        let created = read_response(&mut create);
-        let session = json_field(&created, "session");
-        let token = json_field(&created, "resume_token");
-        create.shutdown(Shutdown::Write).unwrap();
-        let mut ignored = Vec::new();
-        create.read_to_end(&mut ignored).unwrap();
-
-        let mut websocket = websocket_upgrade(address, &session, &token);
-        websocket
-            .write_all(&masked(
-                true,
-                2,
-                &watch_payload([22; 16], uuid_bytes(&database), "1 + 1"),
-            ))
-            .unwrap();
-        let initial = websocket_frame(&mut websocket);
-        let Message::Snapshot { revision: 0, .. } = initial.message else {
-            panic!("watch must establish a complete initial snapshot");
-        };
-        let watch = initial.watch.expect("host-issued watch identity");
-        let resync = Envelope {
-            request: Some([23; 16]),
-            watch: Some(watch),
-            message: Message::Resync,
-            extensions: std::collections::BTreeMap::new(),
-        }
-        .encode(ProtocolLimits::default())
-        .unwrap();
-        websocket.write_all(&masked(true, 2, &resync)).unwrap();
-        let refreshed = websocket_frame(&mut websocket);
-        assert_eq!(refreshed.watch, Some(watch));
-        assert!(matches!(
-            refreshed.message,
-            Message::Snapshot { revision: 1, .. }
-        ));
-        websocket.write_all(&masked(true, 8, b"")).unwrap();
-        websocket.shutdown(Shutdown::Write).unwrap();
-        let mut ignored = Vec::new();
-        websocket.read_to_end(&mut ignored).unwrap();
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+        assert_eq!(response.watch, None);
         sender.send(()).unwrap();
     });
 
