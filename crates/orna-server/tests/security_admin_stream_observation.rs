@@ -1,4 +1,4 @@
-//! Authenticated, read-only current-stream observation coverage.
+//! Authenticated, read-only current-observation coverage.
 
 use std::{
     path::{Path, PathBuf},
@@ -16,7 +16,8 @@ use orna_runtime_v1::{
     RuntimeIdentity, RuntimeState, StreamObservationRegistration,
 };
 use orna_server::security_admin::{
-    AuthenticatedCurrentStreamError, resolve_authenticated_current_stream,
+    AuthenticatedCurrentRun, AuthenticatedCurrentRunError, AuthenticatedCurrentStreamError,
+    resolve_authenticated_current_run, resolve_authenticated_current_stream,
 };
 
 const OWNER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
@@ -97,7 +98,7 @@ fn checkpoint(principal: PrincipalId) -> CheckpointKey {
 }
 
 #[tokio::test]
-async fn resolves_only_the_authenticated_consumers_current_fenced_stream() {
+async fn resolves_only_the_authenticated_consumers_current_fenced_run_and_stream() {
     let repository = TemporaryRepository::new();
     let state = RuntimeState::open(
         &repository.repository(),
@@ -143,6 +144,30 @@ async fn resolves_only_the_authenticated_consumers_current_fenced_stream() {
         .runtime_observation_fence(writer)
         .await
         .expect("current-runtime fence");
+
+    assert_eq!(
+        resolve_authenticated_current_run(
+            &state,
+            &fence,
+            &session(OWNER),
+            &run.reference().expect("run reference")
+        )
+        .await,
+        Ok(AuthenticatedCurrentRun {
+            reference: run.reference().expect("run reference"),
+            observation: run.clone(),
+        }),
+    );
+    assert_eq!(
+        resolve_authenticated_current_run(
+            &state,
+            &fence,
+            &session(OTHER),
+            &run.reference().expect("run reference")
+        )
+        .await,
+        Err(AuthenticatedCurrentRunError::OwnershipDenied),
+    );
 
     assert_eq!(
         resolve_authenticated_current_stream(&state, &fence, &session(OWNER), &reference).await,
