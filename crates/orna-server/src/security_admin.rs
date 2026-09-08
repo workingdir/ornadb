@@ -25,10 +25,10 @@ use orna_core::{
         PrivilegeDecision, PrivilegeGrant, SecuritySnapshot,
     },
 };
-use orna_foundation_v1::StreamRef;
+use orna_foundation_v1::{RunRef, StreamRef};
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_runtime_v1::{
-    CheckpointKey, RuntimeError, RuntimeObservationFence, RuntimeState,
+    CheckpointKey, RunObservation, RuntimeError, RuntimeObservationFence, RuntimeState,
     StreamAdministrationOutcome, WriterLease,
 };
 
@@ -133,6 +133,67 @@ pub async fn run_authenticated_stream_admin(
 
 fn map_stream_runtime_error(_: RuntimeError) -> AuthenticatedStreamAdminError {
     AuthenticatedStreamAdminError::Runtime
+}
+
+/// An authenticated, owner-fenced resolution of a current `sys.Run` row.
+///
+/// The returned observation is the exact durable row retained by the runtime.
+/// It deliberately does not derive physical Function, Object, or Invocation
+/// references from its descriptive fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedCurrentRun {
+    /// The checked, current-runtime run reference that was resolved.
+    pub reference: RunRef,
+    /// The exact retained durable observation for this run.
+    pub observation: RunObservation,
+}
+
+/// A closed failure from current-runtime run observation resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedCurrentRunError {
+    /// The requested descriptive reference is not a current run of this owner
+    /// and generation.
+    NotCurrent,
+    /// The authenticated principal does not own the run consumer identity.
+    OwnershipDenied,
+    /// The runtime could not revalidate the supplied owner/generation fence.
+    Runtime,
+}
+
+/// Resolves one current `sys.RunRef` for an authenticated consumer.
+///
+/// A `sys.RunRef` is descriptive rather than an authorization capability. The
+/// runtime rechecks `fence` in the same read transaction that loads the
+/// current-runtime rows, then this adapter compares the exact checked
+/// reference and consumer principal. The operation performs no lease,
+/// checkpoint, or observation mutation and constructs no Function, Object,
+/// or Invocation references.
+pub async fn resolve_authenticated_current_run(
+    state: &RuntimeState,
+    fence: &RuntimeObservationFence,
+    session: &AuthenticatedSession,
+    reference: &RunRef,
+) -> Result<AuthenticatedCurrentRun, AuthenticatedCurrentRunError> {
+    let view = state
+        .current_runtime_observations(fence)
+        .await
+        .map_err(|_| AuthenticatedCurrentRunError::Runtime)?;
+    for run in view.runs {
+        let observed_reference = run
+            .reference()
+            .map_err(|_| AuthenticatedCurrentRunError::Runtime)?;
+        if &observed_reference != reference {
+            continue;
+        }
+        if run.consumer_identity.principal.as_str() != session.principal().canonical() {
+            return Err(AuthenticatedCurrentRunError::OwnershipDenied);
+        }
+        return Ok(AuthenticatedCurrentRun {
+            reference: observed_reference,
+            observation: run,
+        });
+    }
+    Err(AuthenticatedCurrentRunError::NotCurrent)
 }
 
 /// An authenticated, owner-fenced resolution of a current `sys.Stream` row.
