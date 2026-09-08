@@ -70,7 +70,7 @@ use orna_protocol::{
     encode_server_frame, encode_session_server_frame,
 };
 use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, WriterLease};
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -78,7 +78,9 @@ use tokio::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
+    sync::{
+        Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch,
+    },
     task::{JoinError, JoinHandle, JoinSet},
     time::{Instant, timeout, timeout_at},
 };
@@ -647,8 +649,8 @@ pub fn start_local_raw_socket(
 /// Starts the local raw listener with executable-owned runtime admission.
 ///
 /// The admission provider is consumed only by the authenticated sealed invoke
-/// preflight path. It captures the runtime pin before `CALL_ACCEPTED`; it does
-/// not by itself establish an owner or generation fence.
+/// preflight path. It captures and verifies a runtime pin before
+/// `CALL_ACCEPTED`, then retains its owner fence through lifecycle preparation.
 pub(crate) fn start_local_raw_socket_with_runtime_admission(
     runtime_directory: &Path,
     kernel: PostgresKernel,
@@ -717,15 +719,13 @@ fn start_local_raw_socket_with_admission(
 }
 
 /// Executable-owned source for a sealed invocation's durable CWD capture.
-///
-/// This records representation and repository identity only. Callers that
-/// need membership in a changing live runtime must additionally hold their
-/// owner/generation fence while invoking the raw dispatcher.
 #[derive(Clone)]
 pub(crate) struct RawSocketRuntimeAdmission {
     repository: Repository,
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
+    owner: [u8; 16],
+    gate: Arc<AsyncMutex<()>>,
 }
 
 impl RawSocketRuntimeAdmission {
@@ -733,22 +733,101 @@ impl RawSocketRuntimeAdmission {
         let metadata = inspect_metadata(&repository).map_err(|_| ())?.ok_or(())?;
         let database_id = *metadata.database_id().as_bytes();
         let (identity, initial_digest) = raw_runtime_identity(database_id);
+        let mut owner = [0; 16];
+        getrandom::fill(&mut owner).map_err(|_| ())?;
+        if owner == [0; 16] {
+            return Err(());
+        }
         Ok(Self {
             repository,
             identity,
             initial_digest,
+            owner,
+            gate: Arc::new(AsyncMutex::new(())),
         })
     }
 
-    async fn capture(&self) -> Result<SealedInvocationAdmissionContext, PostgresKernelError> {
+    async fn capture(
+        &self,
+    ) -> Result<
+        (
+            SealedInvocationAdmissionContext,
+            RawSocketRuntimeAdmissionFence,
+        ),
+        PostgresKernelError,
+    > {
+        let gate = Arc::clone(&self.gate).lock_owned().await;
         let state = RuntimeState::open(&self.repository, self.identity, self.initial_digest)
             .await
             .map_err(|_| raw_admission_error("runtime state"))?;
+        let lease = state
+            .acquire_lease(self.owner)
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?;
         let capture = state
             .capture()
             .await
             .map_err(|_| raw_admission_error("runtime capture"))?;
-        SealedInvocationAdmissionContext::from_runtime_capture(capture)
+        if state
+            .current_lease()
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?
+            != Some(lease)
+        {
+            return Err(raw_admission_error("runtime owner fence"));
+        }
+        let context = SealedInvocationAdmissionContext::from_runtime_capture(capture.clone())?;
+        Ok((
+            context,
+            RawSocketRuntimeAdmissionFence {
+                admission: self.clone(),
+                lease,
+                capture,
+                _gate: gate,
+            },
+        ))
+    }
+}
+
+/// Server-owned admission fence retained from capture through lifecycle preparation.
+///
+/// Its writer lease prevents a different runtime owner from advancing the
+/// state, and its private gate serializes this server's raw admissions. This
+/// is not a cross-store transaction: it cannot prove safety against unrelated
+/// code that already possesses this exact owner identity.
+struct RawSocketRuntimeAdmissionFence {
+    admission: RawSocketRuntimeAdmission,
+    lease: WriterLease,
+    capture: orna_foundation_v1::CwdCapture,
+    _gate: OwnedMutexGuard<()>,
+}
+
+impl RawSocketRuntimeAdmissionFence {
+    async fn verify(&self) -> Result<(), PostgresKernelError> {
+        let state = RuntimeState::open(
+            &self.admission.repository,
+            self.admission.identity,
+            self.admission.initial_digest,
+        )
+        .await
+        .map_err(|_| raw_admission_error("runtime state"))?;
+        if state
+            .current_lease()
+            .await
+            .map_err(|_| raw_admission_error("runtime owner fence"))?
+            != Some(self.lease)
+        {
+            return Err(raw_admission_error("runtime owner fence"));
+        }
+        if state
+            .capture()
+            .await
+            .map_err(|_| raw_admission_error("runtime capture"))?
+            != self.capture
+        {
+            return Err(raw_admission_error("runtime generation fence"));
+        }
+        Ok(())
     }
 }
 
@@ -1404,7 +1483,10 @@ struct StartedDispatch {
 
 enum InvokePreflight {
     Rejected(CallFailure),
-    Accepted(Option<SealedInvocationContinuation>),
+    Accepted {
+        continuation: Option<SealedInvocationContinuation>,
+        fence: Option<RawSocketRuntimeAdmissionFence>,
+    },
 }
 
 type InvokePreflightFuture =
@@ -1542,7 +1624,12 @@ trait DispatchService: Clone + Send + Sync + 'static {
         _request: orna_protocol::RetainedInvokeRequest,
         _version: RawProtocolVersion,
     ) -> InvokePreflightFuture {
-        Box::pin(async { Ok(InvokePreflight::Accepted(None)) })
+        Box::pin(async {
+            Ok(InvokePreflight::Accepted {
+                continuation: None,
+                fence: None,
+            })
+        })
     }
 
     fn start_invoke(
@@ -1552,6 +1639,7 @@ trait DispatchService: Clone + Send + Sync + 'static {
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
         _continuation: Option<SealedInvocationContinuation>,
+        _fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
         let invocation = InvocationId::new();
         StartedDispatch {
@@ -1736,7 +1824,7 @@ impl DispatchService for RawDispatchService {
                     Ok(InvokePreflight::Rejected(failure))
                 }
                 preflight @ SealedInvocationPreflight::Accepted(_) => {
-                    let context = admission
+                    let (context, fence) = admission
                         .ok_or_else(|| raw_admission_error("sealed invocation"))?
                         .capture()
                         .await?;
@@ -1745,7 +1833,10 @@ impl DispatchService for RawDispatchService {
                     else {
                         unreachable!("accepted sealed invocation preflight")
                     };
-                    Ok(InvokePreflight::Accepted(Some(continuation)))
+                    Ok(InvokePreflight::Accepted {
+                        continuation: Some(continuation),
+                        fence: Some(fence),
+                    })
                 }
             }
         })
@@ -1758,6 +1849,7 @@ impl DispatchService for RawDispatchService {
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
         continuation: Option<SealedInvocationContinuation>,
+        fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
         let continuation = continuation.expect("sealed invocation preflight continuation");
         let invocation = continuation.invocation();
@@ -1801,6 +1893,30 @@ impl DispatchService for RawDispatchService {
                 }
             }
 
+            if let Some(fence) = fence.as_ref()
+                && let Err(source) = fence.verify().await
+            {
+                report_private_dispatch_source(&source);
+                cancellations
+                    .lock()
+                    .expect("invocation cancellation lock")
+                    .remove(&stream);
+                return DispatchCompletion {
+                    sealed_producer: None,
+                    sealed_invocation: Some(invocation),
+                    sealed_next_event_sequence: 1,
+                    sealed_next_outer_sequence: 2,
+                    actions: sealed_presentation_failure_actions(stream, invocation),
+                    cancellation: ServerAction::InvokeCancelled { stream },
+                    cancellation_token: None,
+                    start_gate: None,
+                    start_delivered: false,
+                    terminal_delivered: false,
+                    terminal_claimed: true,
+                    worker_completed: true,
+                    _guards: None,
+                };
+            }
             let mut operation = match continuation.prepare_sealed_sys_invoke_after_accept().await {
                 Ok(operation) => operation,
                 Err(source) => {
@@ -3958,50 +4074,63 @@ async fn finish_invoke_preflight<D: DispatchService>(
             report_private_dispatch_source(&source);
             Some(CallFailure::InternalFailure)
         }
-        Ok(InvokePreflight::Accepted(continuation)) if cancelled_before_accept => {
+        Ok(InvokePreflight::Accepted {
+            continuation,
+            fence: _,
+        }) if cancelled_before_accept => {
             drop(continuation);
             None
         }
-        Ok(InvokePreflight::Accepted(continuation)) => {
-            let StartedDispatch {
-                accepted,
-                started,
-                start_gate,
-                future,
-            } = dispatcher.start_invoke(session, stream, request, version, continuation);
-            let started = started.expect("sealed invocation start event");
-            let sealed_invocation = match &accepted {
-                ServerAction::Accepted { invocation, .. } => *invocation,
-                _ => unreachable!("sealed invocation dispatch must be accepted"),
-            };
-            pending.insert(
-                stream,
-                DispatchCompletion {
-                    sealed_producer: None,
-                    sealed_invocation: Some(sealed_invocation),
-                    sealed_next_event_sequence: 1,
-                    sealed_next_outer_sequence: 2,
-                    actions: VecDeque::from([started]),
-                    cancellation: ServerAction::InvokeCancelled { stream },
-                    cancellation_token: None,
+        Ok(InvokePreflight::Accepted {
+            continuation,
+            fence,
+        }) => {
+            if let Some(fence) = fence.as_ref()
+                && let Err(source) = fence.verify().await
+            {
+                report_private_dispatch_source(&source);
+                Some(CallFailure::InternalFailure)
+            } else {
+                let StartedDispatch {
+                    accepted,
+                    started,
                     start_gate,
-                    start_delivered: false,
-                    terminal_delivered: false,
-                    terminal_claimed: false,
-                    worker_completed: false,
-                    _guards: Some(guards),
-                },
-            );
-            unstarted.push_back(UnstartedDispatch {
-                stream,
-                future,
-                guards: None,
-                defer_once: true,
-            });
-            let frame = version
-                .apply(connection, accepted)
-                .map_err(|source| LocalRawSocketError::Connection { source })?;
-            return write_server_frame(version, socket, &frame, shutdown).await;
+                    future,
+                } = dispatcher.start_invoke(session, stream, request, version, continuation, fence);
+                let started = started.expect("sealed invocation start event");
+                let sealed_invocation = match &accepted {
+                    ServerAction::Accepted { invocation, .. } => *invocation,
+                    _ => unreachable!("sealed invocation dispatch must be accepted"),
+                };
+                pending.insert(
+                    stream,
+                    DispatchCompletion {
+                        sealed_producer: None,
+                        sealed_invocation: Some(sealed_invocation),
+                        sealed_next_event_sequence: 1,
+                        sealed_next_outer_sequence: 2,
+                        actions: VecDeque::from([started]),
+                        cancellation: ServerAction::InvokeCancelled { stream },
+                        cancellation_token: None,
+                        start_gate,
+                        start_delivered: false,
+                        terminal_delivered: false,
+                        terminal_claimed: false,
+                        worker_completed: false,
+                        _guards: Some(guards),
+                    },
+                );
+                unstarted.push_back(UnstartedDispatch {
+                    stream,
+                    future,
+                    guards: None,
+                    defer_once: true,
+                });
+                let frame = version
+                    .apply(connection, accepted)
+                    .map_err(|source| LocalRawSocketError::Connection { source })?;
+                return write_server_frame(version, socket, &frame, shutdown).await;
+            }
         }
     };
 
@@ -4883,25 +5012,87 @@ fn report_private_dispatch_source(source: &orna_postgres::PostgresKernelError) {
 mod runtime_admission_tests {
     use super::*;
 
-    #[test]
-    fn runtime_admission_captures_the_repository_owned_cwd() {
+    fn repository_admission() -> (tempfile::TempDir, Repository, RawSocketRuntimeAdmission) {
         let directory = tempfile::tempdir().expect("temporary repository");
         let repository = orna_repository_v1::initialize_repository(directory.path())
             .expect("repository")
             .into_repository();
+        let admission = RawSocketRuntimeAdmission::from_repository(repository.clone())
+            .expect("runtime admission provider");
+        (directory, repository, admission)
+    }
+
+    #[tokio::test]
+    async fn runtime_admission_captures_and_verifies_the_repository_owned_cwd() {
+        let (_directory, repository, admission) = repository_admission();
         let metadata = inspect_metadata(&repository)
             .expect("metadata")
             .expect("database metadata");
-        let admission = RawSocketRuntimeAdmission::from_repository(repository)
-            .expect("runtime admission provider");
 
-        let context =
-            futures::executor::block_on(admission.capture()).expect("runtime admission capture");
+        let (context, fence) = admission
+            .capture()
+            .await
+            .expect("runtime admission capture");
 
         assert_eq!(
             context.capture().database_id(),
             *metadata.database_id().as_bytes()
         );
+        fence.verify().await.expect("runtime admission fence");
+    }
+
+    #[tokio::test]
+    async fn runtime_admission_rejects_lost_owner_before_acceptance() {
+        let (_directory, _repository, admission) = repository_admission();
+        let (_context, fence) = admission
+            .capture()
+            .await
+            .expect("runtime admission capture");
+        let state = RuntimeState::open(
+            &admission.repository,
+            admission.identity,
+            admission.initial_digest,
+        )
+        .await
+        .expect("runtime state");
+        state
+            .takeover_lease(fence.lease, [0x44; 16])
+            .await
+            .expect("test owner handover");
+
+        assert!(fence.verify().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_admission_rejects_changed_generation_before_acceptance() {
+        let (_directory, _repository, admission) = repository_admission();
+        let (_context, fence) = admission
+            .capture()
+            .await
+            .expect("runtime admission capture");
+        let state = RuntimeState::open(
+            &admission.repository,
+            admission.identity,
+            admission.initial_digest,
+        )
+        .await
+        .expect("runtime state");
+        state
+            .commit_batch(
+                fence.lease,
+                &fence.capture,
+                &[orna_runtime_v1::Mutation {
+                    id: [0x55; 16],
+                    payload: vec![0x66],
+                    digest: [0x77; 32],
+                }],
+                [0x88; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .expect("test generation advance");
+
+        assert!(fence.verify().await.is_err());
     }
 }
 
@@ -4930,6 +5121,7 @@ mod daemon_session_tests {
         let dispatcher = RawDispatchService {
             kernel: PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent")
                 .expect("kernel config"),
+            admission: None,
             invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             session_broker: SharedInvokeBroker::session_only(),
             resource_broker: None,
