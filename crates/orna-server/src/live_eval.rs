@@ -279,12 +279,7 @@ impl PureEvalApplication {
         // This deliberately narrow production route admits only table-bearing
         // Eval source with the conventional `main` root. Other effectful
         // forms remain rejected until they have an equivalent fenced contract.
-        let unit = SourceUnit {
-            fixture_id: "live.eval".into(),
-            source_id: "live.eval".into(),
-            parse_as: "module_unit".into(),
-            source: source.into(),
-        };
+        let unit = live_eval_source_unit(source);
         let effectful = self.effectful.as_ref().ok_or(Error::ApplicationRejected)?;
         let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
         let identity = RequestIdentity {
@@ -454,7 +449,7 @@ impl LiveApplication for PureEvalApplication {
             // re-admitting or re-executing its source.
             return Ok(response);
         }
-        if source.contains("table ") {
+        if contains_top_level_table_declaration(source) {
             if let Err(code) = self.session(session, database, presentation) {
                 let response = self.failure(request, *fingerprint, code)?;
                 self.retain_terminal(session_id, request, *fingerprint, &response);
@@ -633,6 +628,168 @@ impl LiveApplication for PureEvalApplication {
     }
 }
 
+/// Returns whether source contains a top-level `table` declaration.
+///
+/// This is intentionally only a routing pre-check: the durable evaluator's
+/// syntax and semantic admission remains the authority for accepting a
+/// declaration. It nevertheless follows the lexical parts of the language
+/// needed to ensure comments, string literals, and nested expressions cannot
+/// select the controlled-table path.
+fn contains_top_level_table_declaration(source: &str) -> bool {
+    let mut scanner = TableDeclarationScanner::new(source);
+
+    while let Some(token) = scanner.next_token() {
+        match token {
+            TableDeclarationToken::Identifier(identifier) if scanner.at_top_level() => {
+                if identifier == "table" {
+                    return true;
+                }
+            }
+            TableDeclarationToken::Identifier(_)
+            | TableDeclarationToken::OpenBrace
+            | TableDeclarationToken::CloseBrace
+            | TableDeclarationToken::Other => {}
+        }
+    }
+
+    false
+}
+
+fn live_eval_source_unit(source: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "live.eval".into(),
+        // The semantic adapter accepts only logical Orna module names at this
+        // boundary. This is deliberately an opaque logical identity, not a
+        // host path.
+        source_id: "live_eval.orna".into(),
+        parse_as: "module_unit".into(),
+        source: source.into(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TableDeclarationToken<'a> {
+    Identifier(&'a str),
+    OpenBrace,
+    CloseBrace,
+    Other,
+}
+
+/// A bounded lexical scanner for the routing pre-check above. It models only
+/// comment, string, identifier, and brace behavior needed to recognize a
+/// declaration; malformed syntax is conservatively left to parser admission.
+struct TableDeclarationScanner<'a> {
+    source: &'a str,
+    at: usize,
+    braces: usize,
+}
+
+impl<'a> TableDeclarationScanner<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            at: 0,
+            braces: 0,
+        }
+    }
+
+    fn at_top_level(&self) -> bool {
+        self.braces == 0
+    }
+
+    fn next_token(&mut self) -> Option<TableDeclarationToken<'a>> {
+        while self.at < self.source.len() {
+            let rest = &self.source[self.at..];
+            if rest.starts_with("//") {
+                self.at += 2;
+                while self.at < self.source.len() && !matches!(self.char_at(), Some('\n' | '\r')) {
+                    self.bump();
+                }
+                continue;
+            }
+            if rest.starts_with("/*") {
+                self.skip_block_comment();
+                continue;
+            }
+            let character = self.char_at()?;
+            if character.is_whitespace() {
+                self.bump();
+                continue;
+            }
+            if character == '"' {
+                self.skip_string();
+                continue;
+            }
+            if character == '_' || character.is_alphabetic() {
+                let start = self.at;
+                self.bump();
+                while matches!(self.char_at(), Some('_'))
+                    || self.char_at().is_some_and(char::is_alphanumeric)
+                {
+                    self.bump();
+                }
+                return Some(TableDeclarationToken::Identifier(
+                    &self.source[start..self.at],
+                ));
+            }
+            self.bump();
+            return Some(match character {
+                '{' => {
+                    self.braces = self.braces.saturating_add(1);
+                    TableDeclarationToken::OpenBrace
+                }
+                '}' => {
+                    self.braces = self.braces.saturating_sub(1);
+                    TableDeclarationToken::CloseBrace
+                }
+                _ => TableDeclarationToken::Other,
+            });
+        }
+        None
+    }
+
+    fn skip_block_comment(&mut self) {
+        self.at += 2;
+        let mut depth = 1usize;
+        while self.at < self.source.len() && depth > 0 {
+            let rest = &self.source[self.at..];
+            if rest.starts_with("/*") {
+                self.at += 2;
+                depth = depth.saturating_add(1);
+            } else if rest.starts_with("*/") {
+                self.at += 2;
+                depth -= 1;
+            } else {
+                self.bump();
+            }
+        }
+    }
+
+    fn skip_string(&mut self) {
+        self.bump();
+        while let Some(character) = self.char_at() {
+            self.bump();
+            if character == '\\' {
+                if self.at < self.source.len() {
+                    self.bump();
+                }
+            } else if character == '"' {
+                break;
+            }
+        }
+    }
+
+    fn char_at(&self) -> Option<char> {
+        self.source[self.at..].chars().next()
+    }
+
+    fn bump(&mut self) {
+        if let Some(character) = self.char_at() {
+            self.at += character.len_utf8();
+        }
+    }
+}
+
 fn allocate_watch_id(watches: &BTreeMap<[u8; 16], WatchState>) -> Result<[u8; 16]> {
     for _ in 0..8 {
         let mut watch = [0; 16];
@@ -754,6 +911,35 @@ fn decode_envelope(raw: OvbRaw) -> Result<Envelope> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn table_routing_ignores_comments_strings_and_nested_source() {
+        for source in [
+            "// table Note(id: Int) { value: Int, }\n1 + 1",
+            "/* outer /* table Note(id: Int) { value: Int, } */ */ 1 + 1",
+            "\"table Note(id: Int) { value: Int, }\"",
+            "fn main() { \"table Note(id: Int) { value: Int, }\" }",
+        ] {
+            assert!(!contains_top_level_table_declaration(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn table_routing_accepts_top_level_table_declarations() {
+        assert!(contains_top_level_table_declaration(
+            "table Note(id: Int) { value: Int, } fn main() { Note.count() }"
+        ));
+        assert!(contains_top_level_table_declaration(
+            "pub table Note(id: Int) { value: Int, } fn main() { Note.count() }"
+        ));
+    }
+
+    #[test]
+    fn table_eval_source_uses_a_logical_orna_identity() {
+        let unit = live_eval_source_unit("fn main() { 1 }");
+        assert_eq!(unit.source_id, "live_eval.orna");
+        assert_eq!(unit.parse_as, "module_unit");
+    }
 
     struct TestAdmissionSource {
         capture: Rc<RefCell<CwdCapture>>,

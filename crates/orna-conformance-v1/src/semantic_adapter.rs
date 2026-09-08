@@ -2774,6 +2774,28 @@ fn admit_transaction_source(
         )],
         &Catalogue::authoritative_fixture(),
     );
+    if let Some(summary) = analysis
+        .modules
+        .values()
+        .find_map(|module| module.symbols.get(entry).map(|symbol| &symbol.effects))
+        && !summary
+            .effects
+            .iter()
+            .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+    {
+        return Err(Box::new(StageOutcome::Failed(
+            Diagnostic::new(
+                SafeText::new("ORNA-EVAL-EFFECT").expect("static effect diagnostic code"),
+                DiagnosticSeverity::Error,
+                SafeText::new(
+                    "controlled table activation requires only database read/write effects",
+                )
+                .expect("static effect diagnostic message"),
+            )
+            .expect("valid effect diagnostic")
+            .redacted(),
+        )));
+    }
     if let Some(diagnostic) = analysis.diagnostics.first() {
         return Err(Box::new(StageOutcome::Failed(
             diagnostic.clone().redacted(),
@@ -3863,6 +3885,59 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     }
     fn run_scenario(&mut self, scenario: &Scenario) -> StageOutcome<Diagnostic> {
         self.runtime.run_scenario(scenario)
+    }
+}
+
+#[cfg(test)]
+mod transaction_admission_tests {
+    use super::{SourceUnit, StageOutcome, TransactionalEvaluator};
+    use orna_evaluator_v1::Limits;
+    use orna_foundation_v1::Value;
+
+    fn source(body: &str) -> SourceUnit {
+        SourceUnit {
+            fixture_id: "transaction-effect-admission".into(),
+            source_id: "transaction-effect-admission.orna".into(),
+            parse_as: "module_unit".into(),
+            source: format!("pub table Note(id: Int) {{ text: Str, }} fn main() {{ {body} }}"),
+        }
+    }
+
+    #[test]
+    fn controlled_table_entry_effects_are_admitted() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+
+        assert!(matches!(
+            evaluator.execute_source(&source(r#"Note.insert({ id: 1, text: "admitted" });"#)),
+            StageOutcome::Passed
+        ));
+        assert!(
+            evaluator
+                .committed_row("Note", &Value::int(1.into()))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn external_entry_effect_is_rejected_before_table_writes() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        let unit = SourceUnit {
+            fixture_id: "transaction-effect-admission".into(),
+            source_id: "transaction-effect-admission.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 2, text: \"blocked\" }); std.net.http.get(\"https://example.invalid\"); }".into(),
+        };
+
+        let outcome = evaluator.execute_source(&unit);
+        assert!(
+            matches!(outcome, StageOutcome::Failed(_)),
+            "external effect must be rejected before table writes: {outcome:?}"
+        );
+        assert!(
+            evaluator
+                .committed_row("Note", &Value::int(2.into()))
+                .is_none()
+        );
     }
 }
 
