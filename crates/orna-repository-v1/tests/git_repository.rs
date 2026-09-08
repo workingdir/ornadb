@@ -1938,6 +1938,30 @@ fn distinguishes_sparse_checkout_from_partial_clone() {
 }
 
 #[test]
+fn sparse_checkout_omits_worktree_paths_without_promising_their_objects() {
+    let root = repository();
+    let blob = git(root.path(), &["rev-parse", "HEAD:ordinary.txt"]);
+    git(root.path(), &["sparse-checkout", "init", "--no-cone"]);
+    git(root.path(), &["sparse-checkout", "set", "main.orna"]);
+    assert!(!root.path().join("ordinary.txt").exists());
+
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = git_state(&repo, root.path());
+    assert_eq!(
+        repo.observe_git_capabilities().unwrap().mode(),
+        GitRepositoryMode::SparseCheckout
+    );
+    assert!(matches!(
+        repo.observe_git_object(&blob).unwrap(),
+        GitObjectState::Materialized {
+            kind: GitObjectKind::Blob,
+            size: 1..
+        }
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
 fn observes_a_partial_clone_and_a_promised_object_without_hydrating() {
     let Some((fixture, clone, promised)) = filtered_clone() else {
         // A configuration-only repository never authorizes a Promised result.
