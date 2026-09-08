@@ -1109,8 +1109,19 @@ impl CompactPublicationReconciliation {
     /// Whether a runtime receipt may already have consumed the frozen prefix.
     /// A caller must not create a replacement cleanup receipt in this state.
     pub const fn runtime_completion_may_have_committed(&self) -> bool {
-        matches!(self.stage, PublicationJournalStage::WorktreeReconciled)
+        runtime_completion_may_have_committed(self.stage)
     }
+}
+
+/// A compact journal crosses the runtime boundary only after the receipt has
+/// been durably recorded.  Recovery must therefore retain the frozen prefix
+/// whenever it observes either post-receipt stage, rather than treating the
+/// earlier repository-only stage as runtime completion.
+const fn runtime_completion_may_have_committed(stage: PublicationJournalStage) -> bool {
+    matches!(
+        stage,
+        PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
+    )
 }
 
 /// The safe result of recovering a compact publication boundary.
@@ -2713,5 +2724,32 @@ fn take_fixed<const N: usize>(
 impl fmt::Display for CompactSegmentRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_recovery_marks_only_post_receipt_stages_as_runtime_completed() {
+        assert!(!runtime_completion_may_have_committed(
+            PublicationJournalStage::Prepared
+        ));
+        assert!(!runtime_completion_may_have_committed(
+            PublicationJournalStage::RefAdvanced
+        ));
+        assert!(!runtime_completion_may_have_committed(
+            PublicationJournalStage::IndexReconciled
+        ));
+        assert!(!runtime_completion_may_have_committed(
+            PublicationJournalStage::WorktreeReconciled
+        ));
+        assert!(runtime_completion_may_have_committed(
+            PublicationJournalStage::RuntimeCompleted
+        ));
+        assert!(runtime_completion_may_have_committed(
+            PublicationJournalStage::Complete
+        ));
     }
 }
