@@ -188,7 +188,10 @@ impl DispatchService for GatedInvokePreflightDispatch {
             started.notify_one();
             release.notified().await;
             match outcome {
-                GatedPreflightOutcome::Accepted => Ok(InvokePreflight::Accepted(None)),
+                GatedPreflightOutcome::Accepted => Ok(InvokePreflight::Accepted {
+                    continuation: None,
+                    fence: None,
+                }),
                 GatedPreflightOutcome::RejectedInternalFailure => {
                     Ok(InvokePreflight::Rejected(CallFailure::InternalFailure))
                 }
@@ -208,6 +211,7 @@ impl DispatchService for GatedInvokePreflightDispatch {
         _request: orna_protocol::RetainedInvokeRequest,
         _version: &RawProtocolVersion,
         _continuation: Option<SealedInvocationContinuation>,
+        _fence: Option<RawSocketRuntimeAdmissionFence>,
     ) -> StartedDispatch {
         self.start_invoked.store(true, Ordering::SeqCst);
         StartedDispatch {
