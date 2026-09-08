@@ -66,6 +66,9 @@ pub struct SealedInvocationArgumentObservation {
     /// SHA-256 of the canonical typed value encoding; no value bytes are
     /// retained by this observation.
     pub value_digest: [u8; 32],
+    /// Explicit retained marker proving that this metadata may cross the
+    /// public system-value boundary.
+    redacted: bool,
 }
 
 /// Closed, value-free argument type metadata.
@@ -212,7 +215,7 @@ impl SealedInvocationObservation {
                     name: argument.name.clone(),
                     position: argument.position,
                     digest: argument.value_digest,
-                    redacted: true,
+                    redacted: argument.redacted,
                 })
                 .collect(),
             started: Some(self.started),
@@ -692,6 +695,7 @@ fn decode_argument_observation(
         name,
         type_kind,
         value_digest,
+        redacted,
     })
 }
 
@@ -820,6 +824,12 @@ fn validate_argument_public_metadata(
             "redacted argument observation must retain a nonempty name",
         ));
     }
+    if arguments.iter().any(|argument| !argument.redacted) {
+        return Err(observation_invariant(
+            record,
+            "argument observation must be redacted before public projection",
+        ));
+    }
     Ok(())
 }
 
@@ -927,6 +937,7 @@ mod tests {
             name: "value".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
             value_digest: [0; 32],
+            redacted: true,
         };
         assert!(validate_argument_order(&[argument(0), argument(1)], "test").is_ok());
         assert!(validate_argument_order(&[argument(1), argument(1)], "test").is_err());
@@ -1020,6 +1031,7 @@ mod tests {
                 name: "value".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
                 value_digest: [7; 32],
+                redacted: true,
             }],
         }
     }
@@ -1129,6 +1141,7 @@ mod tests {
             name: "next".to_owned(),
             type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
             value_digest: [9; 32],
+            redacted: true,
         });
         let retained = vec![
             first,
@@ -1241,6 +1254,7 @@ mod tests {
                 name: "later".to_owned(),
                 type_kind: SealedInvocationArgumentTypeKind::Scalar("integer".to_owned()),
                 value_digest: [3; 32],
+                redacted: true,
             });
         internal.arguments.swap(0, 1);
 
@@ -1267,6 +1281,7 @@ mod tests {
                 name: "same-parameter".to_owned(),
                 type_kind: first.type_kind,
                 value_digest: [3; 32],
+                redacted: true,
             });
 
         assert!(internal.durable_sys_projection().is_err());
@@ -1277,6 +1292,15 @@ mod tests {
         let admitted = capture(1);
         let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
         internal.arguments[0].name.clear();
+
+        assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_unredacted_argument_metadata() {
+        let admitted = capture(1);
+        let mut internal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        internal.arguments[0].redacted = false;
 
         assert!(internal.durable_sys_projection().is_err());
     }
