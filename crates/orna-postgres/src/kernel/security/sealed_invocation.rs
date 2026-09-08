@@ -350,6 +350,7 @@ pub(super) enum SealedInvocationPreparedOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SealedInvocationLifecycleTerminal {
+    Succeeded,
     Failed(SealedInvocationFailureClass),
     Cancelled,
 }
@@ -357,6 +358,7 @@ pub(super) enum SealedInvocationLifecycleTerminal {
 impl SealedInvocationLifecycleTerminal {
     pub(super) fn fields(self) -> (&'static str, Option<i16>, Option<i16>) {
         match self {
+            Self::Succeeded => ("succeeded", None, None),
             // These are the bounded, redacted categories already exposed by
             // sealed invocation failure events.  They deliberately do not
             // encode user source, binding values, or database errors.
@@ -366,9 +368,26 @@ impl SealedInvocationLifecycleTerminal {
             Self::Cancelled => ("cancelled", Some(4), Some(3)),
         }
     }
+
+    pub(super) fn for_result(result: &SealedInvocationResult) -> Self {
+        match result {
+            SealedInvocationResult::Completed { .. } => Self::Succeeded,
+            // A bind or target result is terminalized while persisting the
+            // prepared outcome. Reaching this point with a closed failure
+            // result therefore means the execution boundary failed without
+            // exposing any underlying cause.
+            SealedInvocationResult::Failed { .. }
+            | SealedInvocationResult::PresentationFailed { .. } => {
+                Self::Failed(SealedInvocationFailureClass::Internal)
+            }
+            SealedInvocationResult::Denied { .. } => {
+                Self::Failed(SealedInvocationFailureClass::Target)
+            }
+        }
+    }
 }
 
-async fn transition_sealed_invocation_lifecycle(
+pub(super) async fn transition_sealed_invocation_lifecycle(
     transaction: &Transaction<'_>,
     invocation: InvocationId,
     terminal: SealedInvocationLifecycleTerminal,
@@ -1064,6 +1083,14 @@ impl SealedInvocationOperation {
     }
 
     async fn record_pre_execution_cancellation(&self) -> Result<(), PostgresKernelError> {
+        self.record_terminal_lifecycle(SealedInvocationLifecycleTerminal::Cancelled)
+            .await
+    }
+
+    async fn record_terminal_lifecycle(
+        &self,
+        terminal: SealedInvocationLifecycleTerminal,
+    ) -> Result<(), PostgresKernelError> {
         let mut database_session = self.kernel.open().await?;
         let operation = async {
             let transaction = database_session
@@ -1074,12 +1101,7 @@ impl SealedInvocationOperation {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
-            transition_sealed_invocation_lifecycle(
-                &transaction,
-                self.invocation,
-                SealedInvocationLifecycleTerminal::Cancelled,
-            )
-            .await?;
+            transition_sealed_invocation_lifecycle(&transaction, self.invocation, terminal).await?;
             transaction
                 .commit()
                 .await
@@ -1179,10 +1201,16 @@ impl SealedInvocationOperation {
             .await;
             return match producer {
                 Ok(producer) => Ok(SealedInvocationExecution::ServerStream(producer)),
-                Err(failure) => Ok(SealedInvocationExecution::Result(sealed_failure_result(
-                    self.invocation,
-                    failure,
-                )?)),
+                Err(failure) => {
+                    self.record_terminal_lifecycle(SealedInvocationLifecycleTerminal::Failed(
+                        failure,
+                    ))
+                    .await?;
+                    Ok(SealedInvocationExecution::Result(sealed_failure_result(
+                        self.invocation,
+                        failure,
+                    )?))
+                }
             };
         }
 
@@ -1211,10 +1239,42 @@ impl SealedInvocationOperation {
                     source: ClientResourceExecutionError::Cancelled,
                     ..
                 },
-            )) => Ok(SealedInvocationExecution::Cancelled {
-                invocation: self.invocation,
-            }),
-            Err(error) => Err(error),
+            )) => {
+                self.record_terminal_lifecycle(SealedInvocationLifecycleTerminal::Cancelled)
+                    .await?;
+                Ok(SealedInvocationExecution::Cancelled {
+                    invocation: self.invocation,
+                })
+            }
+            Err(error) => {
+                self.record_terminal_lifecycle(SealedInvocationLifecycleTerminal::Failed(
+                    SealedInvocationFailureClass::Internal,
+                ))
+                .await?;
+                Err(error)
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_terminal_results_are_closed_and_redacted() {
+        assert_eq!(
+            SealedInvocationLifecycleTerminal::Succeeded.fields(),
+            ("succeeded", None, None)
+        );
+        assert_eq!(
+            SealedInvocationLifecycleTerminal::for_result(
+                &SealedInvocationResult::PresentationFailed {
+                    invocation: InvocationId::from_bytes([0x31; 16]),
+                }
+            )
+            .fields(),
+            ("failed", Some(3), Some(2))
+        );
     }
 }
