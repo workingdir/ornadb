@@ -13,6 +13,17 @@ fn source(parent_body: &str) -> SourceUnit {
     }
 }
 
+fn composite_source(parent_body: &str) -> SourceUnit {
+    SourceUnit {
+        fixture_id: "txn-source".into(),
+        source_id: "txn-source.orna".into(),
+        parse_as: "module_unit".into(),
+        source: format!(
+            "pub table Stock(location: Str, sku: Str) {{ quantity: Int, }} fn parent() {{ Stock.insert({{ location: \"north\", sku: \"pencil\", quantity: 12 }}); {parent_body} }}"
+        ),
+    }
+}
+
 fn source_with_count_function(count_body: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
@@ -269,6 +280,62 @@ fn parsed_rekey_moves_the_row_atomically() {
     assert!(runtime
         .committed_row("Note", &Value::int(8.into()))
         .is_some());
+}
+
+#[test]
+fn parsed_composite_rekey_moves_every_key_component_in_declaration_order() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&composite_source(
+        r#"Stock.rekey(("north", "pencil"), ("south", "pencil"));"#,
+    ));
+    assert!(matches!(
+        outcome,
+        StageOutcome::Passed
+    ));
+
+    let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
+        orna_foundation_v1::OvbRaw::Text("north".into()),
+        orna_foundation_v1::OvbRaw::Text("pencil".into()),
+    ]))
+    .expect("canonical composite key");
+    let south = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
+        orna_foundation_v1::OvbRaw::Text("south".into()),
+        orna_foundation_v1::OvbRaw::Text("pencil".into()),
+    ]))
+    .expect("canonical composite key");
+    assert_eq!(runtime.committed_row("Stock", &north), None);
+    let row = runtime
+        .committed_row("Stock", &south)
+        .expect("rekeyed composite row");
+    assert!(matches!(
+        row.raw(),
+        orna_foundation_v1::OvbRaw::Map(fields)
+            if fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("location".into())
+                && value == &orna_foundation_v1::OvbRaw::Text("south".into()))
+                && fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("sku".into())
+                    && value == &orna_foundation_v1::OvbRaw::Text("pencil".into()))
+                && fields.iter().any(|(key, value)| key == &orna_foundation_v1::OvbRaw::Text("quantity".into())
+                    && value == &orna_foundation_v1::OvbRaw::Int(12.into()))
+    ));
+}
+
+#[test]
+fn parsed_composite_rekey_rejects_a_non_tuple_target_key_without_publication() {
+    let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
+    let outcome = runtime.execute_source(&composite_source(
+        r#"Stock.rekey(("north", "pencil"), "south");"#,
+    ));
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+    ));
+    let north = Value::new(orna_foundation_v1::OvbRaw::Array(vec![
+        orna_foundation_v1::OvbRaw::Text("north".into()),
+        orna_foundation_v1::OvbRaw::Text("pencil".into()),
+    ]))
+    .expect("canonical composite key");
+    assert_eq!(runtime.committed_row("Stock", &north), None);
 }
 
 #[test]
