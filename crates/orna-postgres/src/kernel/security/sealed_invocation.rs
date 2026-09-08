@@ -559,6 +559,7 @@ pub(super) enum SealedInvocationLifecycleTerminal {
     Succeeded,
     Failed(SealedInvocationFailureClass),
     Cancelled,
+    Orphaned,
 }
 
 impl SealedInvocationLifecycleTerminal {
@@ -572,6 +573,10 @@ impl SealedInvocationLifecycleTerminal {
             Self::Failed(SealedInvocationFailureClass::Target) => ("failed", Some(2), Some(2)),
             Self::Failed(SealedInvocationFailureClass::Internal) => ("failed", Some(3), Some(2)),
             Self::Cancelled => ("cancelled", Some(4), Some(3)),
+            // An owner-loss recovery has no safely reportable user failure.
+            // Keep it distinct from cancellation: cancellation has an active
+            // owner, whereas an orphaned invocation has lost that owner.
+            Self::Orphaned => ("orphaned", None, None),
         }
     }
 
@@ -1592,6 +1597,19 @@ mod lifecycle_tests {
         assert!(
             !sealed_invocation_terminal_matches(cancelled, failed),
             "a retry must never turn a cancelled invocation into an ordinary failure"
+        );
+    }
+
+    #[test]
+    fn orphaned_terminal_is_closed_and_distinct_from_cancellation() {
+        let orphaned = SealedInvocationLifecycleTerminal::Orphaned.fields();
+        let cancelled = SealedInvocationLifecycleTerminal::Cancelled.fields();
+
+        assert_eq!(orphaned, ("orphaned", None, None));
+        assert!(sealed_invocation_terminal_matches(orphaned, orphaned));
+        assert!(
+            !sealed_invocation_terminal_matches(orphaned, cancelled),
+            "owner loss must not be replayed as a cancellation"
         );
     }
 }
