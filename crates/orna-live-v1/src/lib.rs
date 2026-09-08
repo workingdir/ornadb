@@ -16,6 +16,7 @@ use std::{
     io,
     net::{Ipv4Addr, SocketAddr, TcpListener},
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
@@ -38,6 +39,12 @@ use orna_serving_v1::{
 use orna_stream_v1::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
 
 pub const SUBPROTOCOL: &str = "orna.present.v1";
+
+// Upgrade reservations are in-memory capabilities. A process-local owner
+// identity prevents a reservation issued by one transport actor from being
+// committed against another actor which happens to have allocated the same
+// counter value. They do not survive process restart.
+static NEXT_TRANSPORT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -3024,6 +3031,7 @@ struct PendingUpgrade {
 /// if delivery of its handshake response does not succeed.
 #[derive(Debug)]
 pub struct WebSocketUpgrade {
+    owner: u64,
     reservation: u128,
     response: WireResponse,
 }
@@ -3039,6 +3047,7 @@ impl WebSocketUpgrade {
 /// socket, clock, TLS or authentication implementation; those stay at the
 /// executable host edge.
 pub struct LiveTransport {
+    owner: u64,
     host: LiveHost,
     limits: TransportLimits,
     sessions: BTreeMap<[u8; 16], SessionRecord>,
@@ -3124,7 +3133,13 @@ impl LiveTransport {
     ///
     /// Returns [`Error::Limit`] for an invalid transport bound.
     pub fn new(host: LiveHost, limits: TransportLimits) -> Result<Self> {
+        let owner = NEXT_TRANSPORT_OWNER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owner| {
+                owner.checked_add(1)
+            })
+            .map_err(|_| Error::Limit)?;
         Ok(Self {
+            owner,
             limits: limits.validate(host.limits.protocol)?,
             host,
             sessions: BTreeMap::new(),
@@ -3973,6 +3988,7 @@ impl LiveTransport {
             },
         );
         Ok(WebSocketUpgrade {
+            owner: self.owner,
             reservation,
             response,
         })
@@ -4008,6 +4024,13 @@ impl LiveTransport {
         upgrade: WebSocketUpgrade,
         now: u64,
     ) -> Result<WireResponse> {
+        // A reservation is owned by the transport actor that created it. This
+        // check precedes all mutable cleanup so a stale token from another
+        // actor cannot expire, consume, or otherwise disturb this actor's
+        // pending admission.
+        if upgrade.owner != self.owner {
+            return Err(Error::Closed);
+        }
         self.expire_pending_websocket_upgrades(now);
         let session = self
             .pending_upgrades
