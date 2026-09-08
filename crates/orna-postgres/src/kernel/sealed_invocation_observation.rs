@@ -167,6 +167,11 @@ impl SealedInvocationObservation {
                 "invocation reference disagrees with persisted invocation identity",
             ));
         }
+        // The loader validates this shape, but the public conversion must
+        // preserve the invariant itself: a malformed retained value must not
+        // become a contradictory `sys.Invocation` projection through another
+        // internal caller.
+        validate_observation_timestamp_shape(self.status, self.started, self.ended, &record)?;
         let snapshot = snapshot_reference(
             self.admission_capture.database_id(),
             self.admission_capture.snapshot().clone(),
@@ -411,7 +416,6 @@ fn project_durable_sys_invocation_collection(
         .collect()
 }
 
-#[cfg(test)]
 fn validate_observation_collection_capture(
     observations: &[SealedInvocationObservation],
 ) -> Result<(), PostgresKernelError> {
@@ -1129,6 +1133,18 @@ mod tests {
         internal.arguments.swap(0, 1);
 
         assert!(internal.durable_sys_projection().is_err());
+    }
+
+    #[test]
+    fn durable_sys_projection_rejects_contradictory_terminal_timestamps() {
+        let admitted = capture(1);
+        let mut terminal = observation(&admitted, 2, SealedInvocationObservationStatus::Succeeded);
+        terminal.ended = None;
+        assert!(terminal.durable_sys_projection().is_err());
+
+        let mut active = observation(&admitted, 3, SealedInvocationObservationStatus::Running);
+        active.ended = Some(SystemTime::UNIX_EPOCH);
+        assert!(active.durable_sys_projection().is_err());
     }
 
     #[test]
