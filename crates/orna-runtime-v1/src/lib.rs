@@ -13180,6 +13180,30 @@ mod tests {
                 other => panic!("unexpected replay result: {other:?}"),
             };
             assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Replay {
+                        failure: replay.failure.clone(),
+                        expected_version: skipped_failure.version,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StaleFailure)
+            );
+            assert_eq!(
+                stream
+                    .failure_async(&replay.failure)
+                    .await
+                    .unwrap()
+                    .expect("replaying failure"),
+                FailureRecord {
+                    identity: replay.failure.clone(),
+                    version: replay.version,
+                    attempts: skipped_failure.attempts,
+                    status: FailureStatus::Replaying,
+                    diagnostic: skipped_failure.diagnostic,
+                }
+            );
+            assert_eq!(
                 stream.checkpoint_async(&skipped.key).await.unwrap(),
                 skipped
             );
@@ -13233,6 +13257,28 @@ mod tests {
                 other => panic!("unexpected resolve result: {other:?}"),
             };
             assert_eq!(resolved.status, FailureStatus::Resolved);
+            assert_eq!(
+                stream
+                    .apply_async(CommitIntent::Resolve {
+                        failure: resolved.identity.clone(),
+                        expected_version: replayed.version,
+                    })
+                    .await
+                    .unwrap(),
+                CommitResult::Rejected(RejectReason::StaleFailure)
+            );
+            assert_eq!(
+                stream
+                    .failure_async(&resolved.identity)
+                    .await
+                    .unwrap()
+                    .expect("resolved failure"),
+                resolved
+            );
+            assert_eq!(
+                stream.checkpoint_async(&skipped.key).await.unwrap(),
+                skipped
+            );
 
             let stale_delivery = stream_delivery("stale", "stale-next");
             let stale_lease = match stream
