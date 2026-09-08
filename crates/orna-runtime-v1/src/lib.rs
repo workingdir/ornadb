@@ -6843,6 +6843,7 @@ async fn load_run_observation_tx(
         _ => return Err(RuntimeError::RecoveryInvalid),
     };
     let status = decode_run_status(row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let live = snapshot == *capture && !status.is_terminal();
     Ok(Some(RunObservation {
         id,
         request: RequestIdentity {
@@ -6862,9 +6863,7 @@ async fn load_run_observation_tx(
         runtime_generation: generation,
         checkpoint_count: decode_u64(row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         diagnostic,
-        live: runtime_id == capture.runtime_id()
-            && generation == bigint_to_i64(capture.generation())?
-            && !status.is_terminal(),
+        live,
     }))
 }
 
@@ -7009,6 +7008,15 @@ async fn load_stream_observation_tx(
         ),
         None => None,
     };
+    let live = parent_capture == *capture
+        && !run_status.is_terminal()
+        && !matches!(
+            status,
+            StreamObservationStatus::Completed
+                | StreamObservationStatus::Failed
+                | StreamObservationStatus::Cancelled
+                | StreamObservationStatus::Orphaned
+        );
     Ok(Some(StreamObservation {
         id,
         run: parent_run_id,
@@ -7032,16 +7040,7 @@ async fn load_stream_observation_tx(
         last_item_ms: row.get(24).map_err(|_| RuntimeError::RecoveryInvalid)?,
         diagnostic,
         observed_ms: row.get(25).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        live: runtime_id == capture.runtime_id()
-            && generation == bigint_to_i64(capture.generation())?
-            && !run_status.is_terminal()
-            && !matches!(
-                status,
-                StreamObservationStatus::Completed
-                    | StreamObservationStatus::Failed
-                    | StreamObservationStatus::Cancelled
-                    | StreamObservationStatus::Orphaned
-            ),
+        live,
     }))
 }
 
@@ -16842,6 +16841,54 @@ mod tests {
             .unwrap();
         assert!(current_projections.runs.is_empty());
         assert!(current_projections.streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_runtime_view_excludes_same_generation_rows_with_a_different_capture() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(209, 210);
+        let key = stream_delivery("capture", "mismatch").checkpoint_key();
+        state.reserve_request(request, digest(211)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.capture-mismatch".into(),
+                source_identity: None,
+                invocation_id: id(212),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let owner = state.acquire_lease(id(213)).await.unwrap();
+        let fence = state.runtime_observation_fence(owner).await.unwrap();
+
+        state
+            .connection
+            .execute(
+                "UPDATE sys_run_observation SET generation_digest = ?1 WHERE run_id = ?2",
+                params![digest(214).to_vec(), run.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+
+        let view = state.current_runtime_observations(&fence).await.unwrap();
+        assert!(view.runs.is_empty());
+        assert!(view.streams.is_empty());
+        let projections = state.current_runtime_sys_projections(&fence).await.unwrap();
+        assert!(projections.runs.is_empty());
+        assert!(projections.streams.is_empty());
+        assert!(state.run_observation(run.id).await.unwrap().is_some());
+        assert!(state.stream_observation(stream.id).await.unwrap().is_some());
     }
 
     #[tokio::test]
