@@ -71,8 +71,6 @@ pub enum AuthenticatedStreamAdminOutcome {
 pub enum AuthenticatedStreamAdminError {
     /// The authenticated principal does not own the selected stream.
     OwnershipDenied,
-    /// The current host has no durable way to retain the requested reason.
-    AuditUnavailable,
     /// A lease or unresolved delivery state rejects the transition.
     Busy,
     /// A retained blocking failure prevents resume.
@@ -85,8 +83,8 @@ pub enum AuthenticatedStreamAdminError {
 /// durable runtime backend.
 ///
 /// This is a host adapter prerequisite, not the complete public `sys.admin`
-/// entry point. It deliberately refuses a non-null pause reason until the
-/// invocation/audit bridge can retain it with the transition.
+/// entry point. A supplied pause reason is retained by the runtime in the
+/// same writer-fenced transaction that admits the pause.
 pub async fn run_authenticated_stream_admin(
     state: &RuntimeState,
     writer: WriterLease,
@@ -102,9 +100,9 @@ pub async fn run_authenticated_stream_admin(
     }
     let outcome = match request {
         AuthenticatedStreamAdminRequest::Pause {
-            stream: _,
-            reason: Some(_),
-        } => return Err(AuthenticatedStreamAdminError::AuditUnavailable),
+            stream,
+            reason: Some(reason),
+        } => state.pause_stream_with_reason(writer, stream, reason).await,
         AuthenticatedStreamAdminRequest::Pause {
             stream,
             reason: None,
@@ -859,7 +857,7 @@ mod stream_admin_tests {
     }
 
     #[tokio::test]
-    async fn foreign_stream_and_unretained_reason_fail_before_transition() {
+    async fn foreign_stream_is_rejected_and_pause_reason_is_retained() {
         let (path, repository) = repository();
         let state = RuntimeState::open(
             &repository,
@@ -885,18 +883,23 @@ mod stream_admin_tests {
             .await,
             Err(AuthenticatedStreamAdminError::OwnershipDenied),
         );
+        let owned = stream(OWNER);
         assert_eq!(
             run_authenticated_stream_admin(
                 &state,
                 writer,
                 &session(OWNER),
                 AuthenticatedStreamAdminRequest::Pause {
-                    stream: stream(OWNER),
+                    stream: owned.clone(),
                     reason: Some("operator request".into()),
                 },
             )
             .await,
-            Err(AuthenticatedStreamAdminError::AuditUnavailable),
+            Ok(AuthenticatedStreamAdminOutcome::Paused { changed: true }),
+        );
+        assert_eq!(
+            state.stream_pause_reason(&owned).await,
+            Ok(Some("operator request".into())),
         );
         drop(state);
         std::fs::remove_dir_all(path).expect("temporary repository cleanup");
