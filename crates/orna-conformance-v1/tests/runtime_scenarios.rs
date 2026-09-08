@@ -325,7 +325,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
         .iter()
         .map(|value| value.as_str().expect("scenario ID is text"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["REPL-001", "TXN-001", "TXN-002"]);
+    assert_eq!(declared, ["REPL-001", "TXN-001", "TXN-002", "LIVE-003"]);
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
@@ -333,7 +333,7 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
-            Some("REPL-001" | "TXN-001" | "TXN-002")
+            Some("REPL-001" | "TXN-001" | "TXN-002" | "LIVE-003")
         ) {
             assert_eq!(result["status"], "passed", "declared scenario must execute");
             assert_eq!(
@@ -357,4 +357,13 @@ fn published_report_withholds_direct_bounded_scenarios_without_runtime_witnesses
             assert_eq!(result["detail"], expected);
         }
     }
+    let live_resync = scenarios
+        .iter()
+        .find(|result| result["scenario"] == "LIVE-003")
+        .expect("LIVE-003 result is present");
+    assert_eq!(
+        live_resync["requirements"],
+        serde_json::json!(["ORNA-LIVE-004"])
+    );
+    assert_eq!(live_resync["status"], "passed");
 }
