@@ -2033,6 +2033,33 @@ impl Repository {
         }
     }
 
+    /// Rechecks an admitted force-discard capability at the destructive
+    /// execution boundary.
+    ///
+    /// Force admission and checkout execution cannot share a lock across
+    /// arbitrary runtime coordination. A capability is therefore not a
+    /// reusable right to discard: immediately before a journaled executor
+    /// changes Git state, it must prove that the captured target, CWD, exact
+    /// discard set, and canonical force witness still describe this CWD. Any
+    /// intervening ref, index, worktree, or runtime-generation change fails
+    /// closed before mutation.
+    pub fn verify_validated_checkout_discard(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(&discard.preflight)?;
+        if discard.discard_paths != discard.preflight.git.discardable_paths() {
+            return Err(RepositoryError::CheckoutDiscardSetMismatch);
+        }
+        if discard.force_token != discard.preflight.force_token() {
+            return Err(RepositoryError::CheckoutPlanStale);
+        }
+        discard
+            .preflight
+            .authorize_force(true, Some(&discard.force_token))
+    }
+
     /// Explicitly resolves a Git selector to an immutable commit. This is the
     /// repository primitive behind `sys.snapshot(selector)`, not new source
     /// grammar for bare branch expressions.
