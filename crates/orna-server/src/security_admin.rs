@@ -25,9 +25,11 @@ use orna_core::{
         PrivilegeDecision, PrivilegeGrant, SecuritySnapshot,
     },
 };
+use orna_foundation_v1::StreamRef;
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_runtime_v1::{
-    CheckpointKey, RuntimeError, RuntimeState, StreamAdministrationOutcome, WriterLease,
+    CheckpointKey, RuntimeError, RuntimeObservationFence, RuntimeState,
+    StreamAdministrationOutcome, WriterLease,
 };
 
 use crate::{EmbeddedHostError, inspect_current_embedded_host};
@@ -131,6 +133,70 @@ pub async fn run_authenticated_stream_admin(
 
 fn map_stream_runtime_error(_: RuntimeError) -> AuthenticatedStreamAdminError {
     AuthenticatedStreamAdminError::Runtime
+}
+
+/// An authenticated, owner-fenced resolution of a current `sys.Stream` row.
+///
+/// The checkpoint key is returned only to the authenticated host adapter. It
+/// is the exact durable key retained by the runtime, not a key reconstructed
+/// from the descriptive `sys.StreamRef`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedCurrentStream {
+    /// The checked, current-runtime stream reference that was resolved.
+    pub reference: StreamRef,
+    /// The exact retained checkpoint natural key for this stream.
+    pub checkpoint: CheckpointKey,
+}
+
+/// A closed failure from current-runtime stream observation resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedCurrentStreamError {
+    /// The requested descriptive reference is not a current stream of this
+    /// owner and generation.
+    NotCurrent,
+    /// The authenticated principal does not own the stream consumer identity.
+    OwnershipDenied,
+    /// The runtime could not revalidate the supplied owner/generation fence.
+    Runtime,
+}
+
+/// Resolves one current `sys.StreamRef` for an authenticated consumer.
+///
+/// A `sys.StreamRef` is descriptive rather than an authorization capability.
+/// The runtime rechecks `fence` in the same read transaction that loads the
+/// current-runtime rows, then this adapter compares the exact checked
+/// reference and consumer principal. The operation performs no checkpoint,
+/// lease, or observation mutation and constructs no Function, Object, or
+/// Invocation references.
+pub async fn resolve_authenticated_current_stream(
+    state: &RuntimeState,
+    fence: &RuntimeObservationFence,
+    session: &AuthenticatedSession,
+    reference: &StreamRef,
+) -> Result<AuthenticatedCurrentStream, AuthenticatedCurrentStreamError> {
+    let view = state
+        .current_runtime_observations(fence)
+        .await
+        .map_err(|_| AuthenticatedCurrentStreamError::Runtime)?;
+    for stream in view.streams {
+        let Some(run) = view.runs.iter().find(|run| run.id == stream.run) else {
+            return Err(AuthenticatedCurrentStreamError::Runtime);
+        };
+        let observed_reference = stream
+            .reference(run)
+            .map_err(|_| AuthenticatedCurrentStreamError::Runtime)?;
+        if &observed_reference != reference {
+            continue;
+        }
+        if stream.checkpoint.consumer.principal.as_str() != session.principal().canonical() {
+            return Err(AuthenticatedCurrentStreamError::OwnershipDenied);
+        }
+        return Ok(AuthenticatedCurrentStream {
+            reference: observed_reference,
+            checkpoint: stream.checkpoint,
+        });
+    }
+    Err(AuthenticatedCurrentStreamError::NotCurrent)
 }
 
 /// A closed failure from the fixed catalogue-health execution-grant command.
