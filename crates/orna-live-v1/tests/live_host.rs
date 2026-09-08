@@ -1215,7 +1215,7 @@ fn websocket_connection_driver_preserves_a_co_read_frame_after_upgrade() {
 }
 
 #[test]
-fn websocket_connection_driver_cancellation_disconnects_its_attachment() {
+fn websocket_connection_driver_cancellation_after_delivery_commits_then_cleans_attachment() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
     let mut issuer = Issuer(1, None);
     let mut authority = Authority;
@@ -1235,11 +1235,16 @@ fn websocket_connection_driver_cancellation_disconnects_its_attachment() {
         &mut issuer,
         &mut deletion,
     ));
+    let credential = token(&created);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [4; 16], 1)).status,
+        101
+    );
     let input = format!(
         "GET /orna/live/{} HTTP/1.1\r\nHost: app.example\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {}\r\nCookie: orna_session={}\r\n\r\n",
         uuid(1),
         SUBPROTOCOL,
-        token(&created)
+        credential
     );
     let mut reader = PrefixThenPendingReader {
         prefix: Cursor::new(input.into_bytes()),
@@ -1272,6 +1277,20 @@ fn websocket_connection_driver_cancellation_disconnects_its_attachment() {
         )),
         Err(Error::Closed)
     );
+    assert_eq!(
+        block_on(transport.receive(
+            &mut WebSocketState::new([4; 16]),
+            2,
+            &masked(true, 2, &unsubscribe()),
+        )),
+        Err(Error::Closed)
+    );
+    assert!(
+        writer
+            .into_inner()
+            .starts_with(b"HTTP/1.1 101 Switching Protocols\r\n")
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[4; 16]]);
 }
 
 #[test]
