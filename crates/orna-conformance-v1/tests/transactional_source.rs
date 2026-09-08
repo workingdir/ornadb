@@ -94,6 +94,28 @@ fn parsed_duplicate_insert_rolls_back_the_complete_activation() {
 }
 
 #[test]
+fn parsed_repeated_primary_key_declaration_is_rejected_before_transaction_admission() {
+    let mut runtime = TransactionalEvaluator::new("write", Limits::default());
+    let unit = SourceUnit {
+        fixture_id: "transaction-key-schema".into(),
+        source_id: "transaction-key-schema.orna".into(),
+        parse_as: "module_unit".into(),
+        source: "pub table Reading(sensor: Str, sensor: Str) { value: Int, } fn write() { Reading.insert({ sensor: \"north\", value: 1 }); }".into(),
+    };
+
+    let outcome = runtime.execute_source(&unit);
+
+    assert!(matches!(
+        outcome,
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-S013-DUPLICATE"
+            && diagnostic.message() == "duplicate primary-key field"
+    ));
+    let key = Value::new(orna_foundation_v1::OvbRaw::Text("north".into()))
+        .expect("canonical primary key");
+    assert_eq!(runtime.committed_row("Reading", &key), None);
+}
+
+#[test]
 fn parsed_update_patches_only_stored_fields() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     assert!(matches!(

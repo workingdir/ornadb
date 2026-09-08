@@ -1932,7 +1932,13 @@ fn check_item(
             } else if name == "sys" {
                 diagnostics.push(diag(DIAG_TYPE, "`sys` is reserved"));
             }
+            let mut key_names = BTreeSet::new();
             for key in keys {
+                if let Pattern::Name(key_name, _) = &key.pattern
+                    && !key_names.insert(key_name)
+                {
+                    diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
+                }
                 let ty = key.annotation.as_ref().map(type_of).unwrap_or(Type::Error);
                 let is_range = matches!(&ty, Type::Applied { base, .. } if base == "Range");
                 let is_float = matches!(&ty, Type::Float)
