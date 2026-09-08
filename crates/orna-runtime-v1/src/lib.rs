@@ -23,9 +23,13 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{
-    CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
-    Snapshot, StreamRef, Value, validate_run_reference, validate_stream_reference,
+    CanonicalSnapshot, CheckpointRef, CwdCapture, FailureRef, OvbRaw, RowRef, RunRef,
+    SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, Snapshot, StreamRef, Value, checkpoint_reference,
+    failure_reference, validate_checkpoint_reference, validate_failure_reference,
+    validate_run_reference, validate_stream_reference,
 };
+#[cfg(test)]
+use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
 pub use orna_stream_v1::{
     AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, Component,
@@ -253,6 +257,7 @@ CREATE TABLE IF NOT EXISTS sys_stream_observation (
     items_committed INTEGER NOT NULL DEFAULT 0 CHECK (items_committed >= 0),
     items_failed INTEGER NOT NULL DEFAULT 0 CHECK (items_failed >= 0),
     checkpoint_version INTEGER,
+    last_failure_identity TEXT,
     last_item_ms INTEGER,
     diagnostic_code INTEGER,
     diagnostic_class INTEGER,
@@ -668,7 +673,13 @@ pub struct StreamObservation {
     /// It prevents reference projection from accepting a same-ID parent from
     /// another snapshot or runtime generation.
     pub parent_capture: CwdCapture,
+    /// Checked reference to the retained durable checkpoint bound to this
+    /// stream. This is causal metadata, not stream-control authority.
+    pub checkpoint_reference: CheckpointRef,
     pub checkpoint: CheckpointKey,
+    /// The most recent retained delivery failure for this stream, when one
+    /// exists. Cancellation and activation failures do not manufacture it.
+    pub last_failure: Option<FailureRef>,
     pub status: StreamObservationStatus,
     pub items_seen: u64,
     pub items_committed: u64,
@@ -1451,6 +1462,7 @@ impl RuntimeState {
             compact_receipt_signing_key,
         };
         state.migrate_observation_projection_schema().await?;
+        state.migrate_stream_observation_failure_identity().await?;
         state.migrate_request_recovery_evidence().await?;
         state.migrate_stream_failure_payloads().await?;
         state.migrate_nullable_stream_partitions().await?;
@@ -1624,7 +1636,7 @@ impl RuntimeState {
             .as_ref()
             .map(|value| value.as_str().to_owned());
         tx.execute(
-            "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, ?10)",
+            "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?10)",
             params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
                 registration.checkpoint.consumer.canonical(), registration.checkpoint.source.as_str().to_owned(), partition,
                 stream_observation_status_code(StreamObservationStatus::Starting), now_ms()?],
@@ -3163,6 +3175,56 @@ impl RuntimeState {
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('observation-projection-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Adds the causal link from a retained stream observation to its most
+    /// recent durable delivery-failure identity. Existing rows intentionally
+    /// remain null: no historical failure is inferred without exact evidence.
+    async fn migrate_stream_observation_failure_identity(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query("PRAGMA table_info(sys_stream_observation)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut found = false;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            if row
+                .get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                == "last_failure_identity"
+            {
+                found = true;
+            }
+        }
+        if !found {
+            transaction
+                .execute(
+                    "ALTER TABLE sys_stream_observation ADD COLUMN last_failure_identity TEXT",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('stream-observation-failure-identity-v1')",
                 (),
             )
             .await
@@ -6394,7 +6456,7 @@ async fn load_stream_observation_tx(
     id: StreamObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<StreamObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(row) = rows
         .next()
         .await
@@ -6450,6 +6512,30 @@ async fn load_stream_observation_tx(
     if partition != checkpoint_partition {
         return Err(RuntimeError::RecoveryInvalid);
     }
+    let checkpoint_reference = checkpoint_reference(
+        parent_capture.database_id(),
+        parent_capture.snapshot().clone(),
+        checkpoint.consumer.canonical(),
+        checkpoint.source.as_str().to_owned(),
+        checkpoint_partition.clone(),
+    )
+    .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    validate_checkpoint_reference(checkpoint_reference.as_row_ref().clone(), &parent_capture)
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let last_failure_identity: Option<String> =
+        row.get(26).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let last_failure = match last_failure_identity {
+        Some(identity) => Some(
+            load_stream_observation_failure_reference(
+                connection,
+                &checkpoint,
+                &parent_capture,
+                identity,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     Ok(Some(StreamObservation {
         id,
         run: parent_run_id,
@@ -6463,7 +6549,9 @@ async fn load_stream_observation_tx(
             checkpoint: checkpoint_partition,
         },
         parent_capture,
+        checkpoint_reference,
         checkpoint,
+        last_failure,
         status,
         items_seen: decode_u64(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         items_committed: decode_u64(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -6484,127 +6572,214 @@ async fn load_stream_observation_tx(
     }))
 }
 
+async fn load_stream_observation_failure_reference(
+    connection: &Connection,
+    checkpoint: &CheckpointKey,
+    capture: &CwdCapture,
+    identity: String,
+) -> Result<FailureRef, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position FROM stream_failure WHERE identity_id = ?1",
+            params![identity.clone()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    if row_text(&row, 0)? != stream_key_id(checkpoint)
+        || row_text(&row, 1)? != checkpoint.consumer.principal.as_str()
+        || row_text(&row, 2)? != checkpoint.consumer.root.as_str()
+        || row_text(&row, 3)? != checkpoint.consumer.function.as_str()
+        || row_text(&row, 4)? != checkpoint.consumer.binding.as_str()
+        || row_text(&row, 5)? != checkpoint.source_format.as_str()
+        || row_text(&row, 6)? != checkpoint.source.as_str()
+        || row_text(&row, 7)? != checkpoint.partition_format.as_str()
+        || row
+            .get::<Option<String>>(8)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            != checkpoint
+                .partition
+                .as_ref()
+                .map(|value| value.as_str().to_owned())
+        || row_text(&row, 9)? != checkpoint.position_format.as_str()
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let failure = FailureIdentity(DeliveryIdentity {
+        consumer: checkpoint.consumer.clone(),
+        source_format: checkpoint.source_format.clone(),
+        source: checkpoint.source.clone(),
+        partition_format: checkpoint.partition_format.clone(),
+        partition: checkpoint.partition.clone(),
+        position_format: checkpoint.position_format.clone(),
+        position: decode_position(row_text(&row, 10)?)?,
+        successor: decode_position(row_text(&row, 11)?)?,
+    });
+    if stream_identity_id(&failure) != identity {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let reference = failure_reference(
+        capture.database_id(),
+        capture.snapshot().clone(),
+        checkpoint.consumer.canonical(),
+        checkpoint.source.as_str().to_owned(),
+        checkpoint
+            .partition
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        checkpoint.position_format.as_str().to_owned(),
+        failure.0.position.token.as_str().to_owned(),
+    )
+    .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    validate_failure_reference(reference.as_row_ref().clone(), capture)
+        .map_err(|_| RuntimeError::InvalidObservationReference)
+}
+
 async fn sync_stream_observation_tx(
     connection: &Connection,
     result: &CommitResult,
 ) -> Result<(), RuntimeError> {
-    let (key, status, seen, committed, failed, diagnostic, checkpoint, advances_checkpoint) =
-        match result {
-            CommitResult::Acquired { lease } => (
-                lease.delivery.checkpoint_key(),
-                Some(StreamObservationStatus::Running),
-                1_i64,
-                0,
-                0,
-                None,
-                None,
-                false,
-            ),
-            CommitResult::CheckpointAdvanced { checkpoint } => (
-                checkpoint.key.clone(),
-                Some(StreamObservationStatus::Running),
-                0,
-                1,
-                0,
-                None,
-                Some(checkpoint.version),
-                true,
-            ),
-            CommitResult::Failed { failure } => (
-                failure.identity.0.checkpoint_key(),
-                Some(StreamObservationStatus::Failed),
-                0,
-                0,
-                1,
-                Some(failure.diagnostic),
-                None,
-                false,
-            ),
-            CommitResult::RetryScheduled { failure } => (
-                failure.identity.0.checkpoint_key(),
-                Some(StreamObservationStatus::BackingOff),
-                0,
-                0,
-                0,
-                Some(failure.diagnostic),
-                None,
-                false,
-            ),
-            CommitResult::ReplayGranted { grant } => (
-                grant.failure.0.checkpoint_key(),
-                Some(StreamObservationStatus::BackingOff),
-                0,
-                0,
-                0,
-                None,
-                None,
-                false,
-            ),
-            CommitResult::ReplayCompleted { failure } | CommitResult::Resolved { failure } => (
-                failure.identity.0.checkpoint_key(),
-                Some(StreamObservationStatus::Running),
-                0,
-                0,
-                0,
-                None,
-                None,
-                false,
-            ),
-            CommitResult::ReplayFailed { failure } => (
-                failure.identity.0.checkpoint_key(),
-                Some(StreamObservationStatus::Failed),
-                0,
-                0,
-                0,
-                Some(failure.diagnostic),
-                None,
-                false,
-            ),
-            CommitResult::Cancelled { checkpoint, .. } => (
-                checkpoint.key.clone(),
-                Some(StreamObservationStatus::Cancelled),
-                0,
-                0,
-                0,
-                None,
-                Some(checkpoint.version),
-                false,
-            ),
-            CommitResult::CheckpointReset { checkpoint } => (
-                checkpoint.key.clone(),
-                Some(StreamObservationStatus::Running),
-                0,
-                0,
-                0,
-                None,
-                Some(checkpoint.version),
-                false,
-            ),
-            CommitResult::StreamStatusChanged { state, .. } => (
-                state.key.clone(),
-                Some(match state.status {
-                    StreamStatus::Running => StreamObservationStatus::Running,
-                    StreamStatus::Paused => StreamObservationStatus::Paused,
-                }),
-                0,
-                0,
-                0,
-                None,
-                None,
-                false,
-            ),
-            CommitResult::PausePending { state, .. } => (
-                state.key.clone(),
-                Some(StreamObservationStatus::Running),
-                0,
-                0,
-                0,
-                None,
-                None,
-                false,
-            ),
-            _ => return Ok(()),
-        };
+    let (
+        key,
+        status,
+        seen,
+        committed,
+        failed,
+        diagnostic,
+        checkpoint,
+        last_failure,
+        advances_checkpoint,
+    ) = match result {
+        CommitResult::Acquired { lease } => (
+            lease.delivery.checkpoint_key(),
+            Some(StreamObservationStatus::Running),
+            1_i64,
+            0,
+            0,
+            None,
+            None,
+            None,
+            false,
+        ),
+        CommitResult::CheckpointAdvanced { checkpoint } => (
+            checkpoint.key.clone(),
+            Some(StreamObservationStatus::Running),
+            0,
+            1,
+            0,
+            None,
+            Some(checkpoint.version),
+            None,
+            true,
+        ),
+        CommitResult::Failed { failure } => (
+            failure.identity.0.checkpoint_key(),
+            Some(StreamObservationStatus::Failed),
+            0,
+            0,
+            1,
+            Some(failure.diagnostic),
+            None,
+            Some(stream_identity_id(&failure.identity)),
+            false,
+        ),
+        CommitResult::RetryScheduled { failure } => (
+            failure.identity.0.checkpoint_key(),
+            Some(StreamObservationStatus::BackingOff),
+            0,
+            0,
+            0,
+            Some(failure.diagnostic),
+            None,
+            Some(stream_identity_id(&failure.identity)),
+            false,
+        ),
+        CommitResult::ReplayGranted { grant } => (
+            grant.failure.0.checkpoint_key(),
+            Some(StreamObservationStatus::BackingOff),
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(stream_identity_id(&grant.failure)),
+            false,
+        ),
+        CommitResult::ReplayCompleted { failure } | CommitResult::Resolved { failure } => (
+            failure.identity.0.checkpoint_key(),
+            Some(StreamObservationStatus::Running),
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(stream_identity_id(&failure.identity)),
+            false,
+        ),
+        CommitResult::ReplayFailed { failure } => (
+            failure.identity.0.checkpoint_key(),
+            Some(StreamObservationStatus::Failed),
+            0,
+            0,
+            0,
+            Some(failure.diagnostic),
+            None,
+            Some(stream_identity_id(&failure.identity)),
+            false,
+        ),
+        CommitResult::Cancelled { checkpoint, .. } => (
+            checkpoint.key.clone(),
+            Some(StreamObservationStatus::Cancelled),
+            0,
+            0,
+            0,
+            None,
+            Some(checkpoint.version),
+            None,
+            false,
+        ),
+        CommitResult::CheckpointReset { checkpoint } => (
+            checkpoint.key.clone(),
+            Some(StreamObservationStatus::Running),
+            0,
+            0,
+            0,
+            None,
+            Some(checkpoint.version),
+            None,
+            false,
+        ),
+        CommitResult::StreamStatusChanged { state, .. } => (
+            state.key.clone(),
+            Some(match state.status {
+                StreamStatus::Running => StreamObservationStatus::Running,
+                StreamStatus::Paused => StreamObservationStatus::Paused,
+            }),
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            false,
+        ),
+        CommitResult::PausePending { state, .. } => (
+            state.key.clone(),
+            Some(StreamObservationStatus::Running),
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            false,
+        ),
+        _ => return Ok(()),
+    };
     let changed = sync_stream_observation_update_tx(
         connection,
         &key,
@@ -6615,6 +6790,7 @@ async fn sync_stream_observation_tx(
             failed,
             diagnostic,
             checkpoint,
+            last_failure,
         },
     )
     .await?;
@@ -6647,6 +6823,7 @@ async fn sync_stream_observation_event_tx(
             failed: 0,
             diagnostic,
             checkpoint: None,
+            last_failure: None,
         },
     )
     .await?;
@@ -6660,6 +6837,7 @@ struct StreamObservationUpdate {
     failed: i64,
     diagnostic: Option<SafeDiagnostic>,
     checkpoint: Option<u64>,
+    last_failure: Option<String>,
 }
 
 async fn sync_stream_observation_update_tx(
@@ -6669,7 +6847,7 @@ async fn sync_stream_observation_update_tx(
 ) -> Result<u64, RuntimeError> {
     let code = update.diagnostic.map(|value| encode_code(value.code));
     let class = update.diagnostic.map(|value| encode_class(value.class));
-    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?7 ELSE last_item_ms END, diagnostic_code = COALESCE(?8, diagnostic_code), diagnostic_class = COALESCE(?9, diagnostic_class), observed_ms = ?7 WHERE checkpoint_key_id = ?1", params![stream_key_id(key), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, now_ms()?, code, class]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
+    let changed = connection.execute("UPDATE sys_stream_observation SET status = COALESCE(?2, status), items_seen = items_seen + ?3, items_committed = items_committed + ?4, items_failed = items_failed + ?5, checkpoint_version = COALESCE(?6, checkpoint_version), last_failure_identity = COALESCE(?7, last_failure_identity), last_item_ms = CASE WHEN ?3 + ?4 + ?5 > 0 THEN ?8 ELSE last_item_ms END, diagnostic_code = COALESCE(?9, diagnostic_code), diagnostic_class = COALESCE(?10, diagnostic_class), observed_ms = ?8 WHERE checkpoint_key_id = ?1", params![stream_key_id(key), update.status.map(stream_observation_status_code), update.seen, update.committed, update.failed, update.checkpoint.map(|value| i64::try_from(value).map_err(|_| RuntimeError::RecoveryInvalid)).transpose()?, update.last_failure, now_ms()?, code, class]).await.map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(changed)
 }
 
@@ -15879,5 +16057,135 @@ mod tests {
         let completed = state.stream_observation(stream.id).await.unwrap().unwrap();
         assert_eq!(completed.status, StreamObservationStatus::Completed);
         assert!(!completed.live);
+    }
+
+    #[tokio::test]
+    async fn stream_observation_retains_checked_failure_reference_across_retry_and_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(201)).await.unwrap();
+        let request = request(202, 203);
+        state.reserve_request(request, digest(204)).await.unwrap();
+        let mut delivery = stream_delivery("failure-reference:one", "failure-reference:two");
+        delivery.partition = None;
+        let key = delivery.checkpoint_key();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.failure-reference".into(),
+                source_identity: None,
+                invocation_id: id(205),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: None,
+                checkpoint: key.clone(),
+            })
+            .await
+            .unwrap();
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let lease = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Acquire {
+                delivery,
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected acquisition: {other:?}"),
+        };
+        let failure = match state
+            .fail_stream_delivery(
+                writer,
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(vec![1]),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected failure: {other:?}"),
+        };
+        let failed = state.stream_observation(stream.id).await.unwrap().unwrap();
+        let failure_reference = failed
+            .last_failure
+            .clone()
+            .expect("retained failure reference");
+        assert_eq!(
+            failed.checkpoint_reference.as_row_ref().table_id,
+            SYS_CHECKPOINT_TABLE_ID
+        );
+        assert_eq!(
+            failure_reference.as_row_ref().table_id,
+            SYS_FAILURE_TABLE_ID
+        );
+        let retry = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity,
+                expected_version: failure.version,
+                expected,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("unexpected retry: {other:?}"),
+        };
+        assert_eq!(retry.attempts, 2);
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_failure,
+            Some(failure_reference.clone())
+        );
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let restored = reopened
+            .stream_observation(stream.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.partition, None);
+        assert_eq!(restored.last_failure, Some(failure_reference));
+        let mut rows = reopened
+            .connection
+            .query(
+                "SELECT last_failure_identity FROM sys_stream_observation WHERE stream_id = ?1",
+                params![stream.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+        let identity: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        reopened
+            .connection
+            .execute(
+                "UPDATE stream_failure SET key_id = 'cross-stream-evidence' WHERE identity_id = ?1",
+                params![identity],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.stream_observation(stream.id).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
     }
 }
