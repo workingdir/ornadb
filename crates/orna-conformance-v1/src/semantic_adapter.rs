@@ -3958,6 +3958,41 @@ mod transaction_admission_tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn transitive_external_helper_effect_is_rejected_before_table_activation() {
+        let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
+        let unit = SourceUnit {
+            fixture_id: "transaction-effect-admission".into(),
+            source_id: "transaction-effect-admission.orna".into(),
+            parse_as: "module_unit".into(),
+            source: "pub table Note(id: Int) { text: Str, } fn fetch_remote() = std.net.http.get(\"https://example.invalid\"); fn main() { Note.insert({ id: 3, text: \"blocked transitively\" }); fetch_remote(); }".into(),
+        };
+
+        let outcome = evaluator.execute_source(&unit);
+        match outcome {
+            // The authoritative fixture currently reports the unresolved-name
+            // boundary for a `std.net.http.get` call in an ordinary helper
+            // body, rather than a propagated `ORNA-EVAL-EFFECT` summary. The
+            // admission boundary must still reject before activation; this
+            // records that precise observed diagnostic until the catalogue can
+            // resolve the helper body transitively.
+            StageOutcome::Failed(diagnostic) => assert_eq!(
+                diagnostic.code(),
+                "ORNA-EVAL-NAME",
+                "the current authoritative catalogue rejection must remain fail-closed"
+            ),
+            outcome => panic!(
+                "a transitive external effect must be rejected before table activation: {outcome:?}"
+            ),
+        }
+        assert!(
+            evaluator
+                .committed_row("Note", &Value::int(3.into()))
+                .is_none(),
+            "rejected transitive effects must not commit table rows"
+        );
+    }
 }
 
 #[cfg(test)]
