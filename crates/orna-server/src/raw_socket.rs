@@ -51,8 +51,9 @@ use orna_postgres::{
     AuthenticatedServerResourceAccepted, AuthenticatedServerResourceEvent,
     AuthenticatedServerResourceKind, AuthenticatedServerResourceProducer,
     AuthenticatedServerResourceStart, PostgresKernel, PostgresKernelError, ResourceCancellation,
-    ResourceCredit, SealedInvocationContinuation, SealedInvocationExecution,
-    SealedInvocationLifecycleFinalization, SealedInvocationPreflight, SealedInvocationResult,
+    ResourceCredit, SealedInvocationAdmissionContext, SealedInvocationContinuation,
+    SealedInvocationExecution, SealedInvocationLifecycleFinalization, SealedInvocationPreflight,
+    SealedInvocationResult,
 };
 #[cfg(test)]
 use orna_protocol::encode_constructed_value;
@@ -68,6 +69,8 @@ use orna_protocol::{
     encode_constructed_server_frame, encode_registered_server_frame, encode_resource_server_frame,
     encode_server_frame, encode_session_server_frame,
 };
+use orna_repository_v1::{Repository, inspect_metadata};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -638,6 +641,27 @@ pub fn start_local_raw_socket(
     runtime_directory: &Path,
     kernel: PostgresKernel,
 ) -> Result<LocalRawSocketServer, LocalRawSocketServerError> {
+    start_local_raw_socket_with_admission(runtime_directory, kernel, None)
+}
+
+/// Starts the local raw listener with executable-owned runtime admission.
+///
+/// The admission provider is consumed only by the authenticated sealed invoke
+/// preflight path. It captures the runtime pin before `CALL_ACCEPTED`; it does
+/// not by itself establish an owner or generation fence.
+pub(crate) fn start_local_raw_socket_with_runtime_admission(
+    runtime_directory: &Path,
+    kernel: PostgresKernel,
+    admission: RawSocketRuntimeAdmission,
+) -> Result<LocalRawSocketServer, LocalRawSocketServerError> {
+    start_local_raw_socket_with_admission(runtime_directory, kernel, Some(admission))
+}
+
+fn start_local_raw_socket_with_admission(
+    runtime_directory: &Path,
+    kernel: PostgresKernel,
+    admission: Option<RawSocketRuntimeAdmission>,
+) -> Result<LocalRawSocketServer, LocalRawSocketServerError> {
     // SAFETY: these calls only read the current process credentials.
     let uid = unsafe { nix::libc::geteuid() };
     // SAFETY: these calls only read the current process credentials.
@@ -673,6 +697,7 @@ pub fn start_local_raw_socket(
             runtime.block_on(run_listener(
                 listener,
                 kernel,
+                admission,
                 resources,
                 listener_shutdown,
                 shutdown_receiver,
@@ -691,9 +716,76 @@ pub fn start_local_raw_socket(
     })
 }
 
+/// Executable-owned source for a sealed invocation's durable CWD capture.
+///
+/// This records representation and repository identity only. Callers that
+/// need membership in a changing live runtime must additionally hold their
+/// owner/generation fence while invoking the raw dispatcher.
+#[derive(Clone)]
+pub(crate) struct RawSocketRuntimeAdmission {
+    repository: Repository,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+}
+
+impl RawSocketRuntimeAdmission {
+    pub(crate) fn from_repository(repository: Repository) -> Result<Self, ()> {
+        let metadata = inspect_metadata(&repository).map_err(|_| ())?.ok_or(())?;
+        let database_id = *metadata.database_id().as_bytes();
+        let (identity, initial_digest) = raw_runtime_identity(database_id);
+        Ok(Self {
+            repository,
+            identity,
+            initial_digest,
+        })
+    }
+
+    async fn capture(&self) -> Result<SealedInvocationAdmissionContext, PostgresKernelError> {
+        let state = RuntimeState::open(&self.repository, self.identity, self.initial_digest)
+            .await
+            .map_err(|_| raw_admission_error("runtime state"))?;
+        let capture = state
+            .capture()
+            .await
+            .map_err(|_| raw_admission_error("runtime capture"))?;
+        SealedInvocationAdmissionContext::from_runtime_capture(capture)
+    }
+}
+
+fn raw_runtime_identity(database_id: [u8; 16]) -> (RuntimeIdentity, [u8; 32]) {
+    let mut repository_id = database_id;
+    for (index, byte) in repository_id.iter_mut().enumerate() {
+        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
+        let salt = u8::try_from(index).expect("fixed identity length");
+        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
+    }
+    if repository_id == [0; 16] {
+        repository_id[0] = 1;
+    }
+    let mut initial_digest = [0; 32];
+    initial_digest[..16].copy_from_slice(&database_id);
+    initial_digest[16..].copy_from_slice(&repository_id);
+    (
+        RuntimeIdentity {
+            database_id,
+            repository_id,
+        },
+        initial_digest,
+    )
+}
+
+fn raw_admission_error(record: &'static str) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "sealed invocation admission",
+        record: record.to_owned(),
+        rule: "runtime capture provider is unavailable",
+    }
+}
+
 async fn run_listener(
     listener: tokio::net::UnixListener,
     kernel: PostgresKernel,
+    admission: Option<RawSocketRuntimeAdmission>,
     resources: LocalRawSocketResources,
     shutdown_signal: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
@@ -718,6 +810,7 @@ async fn run_listener(
                     Err(source) => break Err(source.into()),
                 };
                 let kernel = kernel.clone();
+                let admission = admission.clone();
                 let resources = resources.clone();
                 let connection_shutdown = shutdown.clone();
                 workers.spawn(async move {
@@ -725,6 +818,7 @@ async fn run_listener(
                     serve_local_raw_stream_until_shutdown(
                         kernel,
                         stream,
+                        admission,
                         resources,
                         connection_shutdown,
                     )
@@ -860,7 +954,7 @@ pub(crate) async fn serve_local_raw_stream_with_broker(
 ) -> Result<(), LocalRawSocketError> {
     let (shutdown_guard, shutdown) = watch::channel(false);
     run_owned_connection_with_shutdown_guard(shutdown_guard, async move {
-        negotiate_and_drive(kernel, stream, resources, shutdown, broker).await
+        negotiate_and_drive(kernel, stream, None, resources, shutdown, broker).await
     })
     .await
 }
@@ -884,6 +978,7 @@ pub async fn serve_local_raw_stream_with_resource_authorizer(
 pub(super) async fn serve_local_raw_stream_until_shutdown(
     kernel: PostgresKernel,
     stream: StandardUnixStream,
+    admission: Option<RawSocketRuntimeAdmission>,
     resources: LocalRawSocketResources,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), LocalRawSocketError> {
@@ -896,7 +991,8 @@ pub(super) async fn serve_local_raw_stream_until_shutdown(
             wait_for_shutdown(&mut socket_shutdown).await;
             let _ = shutdown_stream.shutdown(Shutdown::Both);
         });
-        let result = negotiate_and_drive(kernel, stream, resources, shutdown, None).await;
+        let result =
+            negotiate_and_drive(kernel, stream, admission, resources, shutdown, None).await;
         shutdown_task.abort();
         let _ = shutdown_task.await;
         result
@@ -941,6 +1037,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 async fn negotiate_and_drive(
     kernel: PostgresKernel,
     stream: StandardUnixStream,
+    admission: Option<RawSocketRuntimeAdmission>,
     resources: LocalRawSocketResources,
     mut shutdown: watch::Receiver<bool>,
     broker: Option<SharedInvokeBroker>,
@@ -1022,6 +1119,7 @@ async fn negotiate_and_drive(
     drive_versioned_authenticated_stream_until_shutdown(
         RawDispatchService {
             kernel,
+            admission,
             invoke_cancellations: Arc::new(Mutex::new(BTreeMap::new())),
             session_broker,
             resource_broker: broker,
@@ -1429,6 +1527,7 @@ fn rejected_sealed_dispatch(
 #[derive(Clone)]
 struct RawDispatchService {
     kernel: PostgresKernel,
+    admission: Option<RawSocketRuntimeAdmission>,
     invoke_cancellations: Arc<Mutex<BTreeMap<u64, ResourceCancellation>>>,
     session_broker: SharedInvokeBroker,
     resource_broker: Option<SharedInvokeBroker>,
@@ -1627,6 +1726,7 @@ impl DispatchService for RawDispatchService {
         _version: RawProtocolVersion,
     ) -> InvokePreflightFuture {
         let kernel = self.kernel.clone();
+        let admission = self.admission.clone();
         Box::pin(async move {
             match kernel
                 .validate_sealed_sys_invoke(&session, SEALED_CONNECTION_PROTOCOL_MAJOR, &request)
@@ -1635,7 +1735,16 @@ impl DispatchService for RawDispatchService {
                 SealedInvocationPreflight::Rejected { failure } => {
                     Ok(InvokePreflight::Rejected(failure))
                 }
-                SealedInvocationPreflight::Accepted(continuation) => {
+                preflight @ SealedInvocationPreflight::Accepted(_) => {
+                    let context = admission
+                        .ok_or_else(|| raw_admission_error("sealed invocation"))?
+                        .capture()
+                        .await?;
+                    let SealedInvocationPreflight::Accepted(continuation) =
+                        preflight.bind_admission_context(context)
+                    else {
+                        unreachable!("accepted sealed invocation preflight")
+                    };
                     Ok(InvokePreflight::Accepted(Some(continuation)))
                 }
             }
@@ -4768,6 +4877,32 @@ fn report_private_dispatch_source(source: &orna_postgres::PostgresKernelError) {
         io::stderr().lock(),
         "orna: protected raw client dispatch failed: {source}"
     );
+}
+
+#[cfg(test)]
+mod runtime_admission_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_admission_captures_the_repository_owned_cwd() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        let repository = orna_repository_v1::initialize_repository(directory.path())
+            .expect("repository")
+            .into_repository();
+        let metadata = inspect_metadata(&repository)
+            .expect("metadata")
+            .expect("database metadata");
+        let admission = RawSocketRuntimeAdmission::from_repository(repository)
+            .expect("runtime admission provider");
+
+        let context =
+            futures::executor::block_on(admission.capture()).expect("runtime admission capture");
+
+        assert_eq!(
+            context.capture().database_id(),
+            *metadata.database_id().as_bytes()
+        );
+    }
 }
 
 const fn client_stream(frame: &ClientFrame) -> u64 {
