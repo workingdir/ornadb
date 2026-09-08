@@ -2654,6 +2654,24 @@ impl TableEffectHandler<'_, '_> {
                     .count();
                 Ok(Some(Value::int(BigInt::from(count))))
             }
+            "first" => {
+                if !arguments.is_empty() {
+                    return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+                }
+                let first = self
+                    .activation
+                    .candidate_relation(table)
+                    .map_err(|error| transaction_error(table_error_code(error)))?
+                    .map(|(_, row)| row)
+                    .first();
+                let mut option = vec![OvbRaw::Int(BigInt::from(u8::from(first.is_some())))];
+                if let Some(row) = first {
+                    option.push(row.raw().clone());
+                }
+                Value::new(OvbRaw::Tag(60013, Box::new(OvbRaw::Array(option))))
+                    .map(Some)
+                    .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ARGUMENT"))
+            }
             "lookup" => {
                 if arguments.len() != key_fields.len() {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
