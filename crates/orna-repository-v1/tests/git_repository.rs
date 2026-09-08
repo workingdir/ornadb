@@ -3169,6 +3169,52 @@ fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
 }
 
 #[test]
+fn compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    let plan = compact_plan(
+        &repo,
+        table,
+        [54; 16],
+        &[compact_segment(table, 1, b"compact object\n".to_vec())],
+    );
+    let candidate = plan.candidate_commit().clone();
+    publish_compact_repository_boundary(&repo, plan).unwrap();
+
+    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
+    let manifest = git_bytes(
+        root.path(),
+        &[
+            "show",
+            &format!("{}:{}", candidate, manifest_path.as_path().display()),
+        ],
+    );
+    let unsupported = String::from_utf8(manifest)
+        .unwrap()
+        .replacen("compact-storage-v1", "unsupported-profile-v9", 1)
+        .into_bytes();
+    let malformed = repo
+        .build_private_commit(
+            &candidate,
+            &[orna_repository_v1::ManagedFileChange::new(
+                manifest_path,
+                Some(unsupported),
+            )],
+            "test: commit unsupported compact profile",
+        )
+        .unwrap();
+    repo.advance_current_ref(&candidate, &malformed).unwrap();
+
+    assert!(matches!(
+        repo.recover_compact_publication_boundary(),
+        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(malformed.commit().clone()));
+    assert!(repo.read_publication_journal().unwrap().is_some());
+}
+
+#[test]
 fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_post_ref_boundaries() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
