@@ -1,5 +1,7 @@
 use super::{PostgresKernel, PostgresKernelError};
 
+use std::time::SystemTime;
+
 use orna_core::{CatalogueRevisionId, FunctionId, InvocationId, SourceRevisionId};
 use orna_foundation_v1::{
     CwdCapture, InvocationArgumentRef, InvocationRef, invocation_argument_reference,
@@ -30,6 +32,11 @@ pub struct SealedInvocationObservation {
     pub function: FunctionId,
     /// Closed lifecycle status, with no diagnostic detail.
     pub status: SealedInvocationObservationStatus,
+    /// Durable admission time recorded by the sealed lifecycle relation.
+    pub started: SystemTime,
+    /// Durable terminal-publication time. Active observations never expose an
+    /// end time; every terminal observation must expose one.
+    pub ended: Option<SystemTime>,
     /// Declaration-ordered, redaction-safe argument metadata.
     pub arguments: Vec<SealedInvocationArgumentObservation>,
 }
@@ -74,6 +81,13 @@ pub enum SealedInvocationObservationStatus {
 }
 
 impl SealedInvocationObservationStatus {
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Orphaned
+        )
+    }
+
     fn decode(value: String, record: &str) -> Result<Self, PostgresKernelError> {
         match value.as_str() {
             "queued" => Ok(Self::Queued),
@@ -226,7 +240,8 @@ async fn load_observation_by_id(
     let invocation_bytes = invocation.to_bytes().to_vec();
     let row = transaction
         .query_opt(
-            "SELECT source_revision_id, catalogue_revision_id, function_id, status \
+            "SELECT source_revision_id, catalogue_revision_id, function_id, status, \
+                    started_at, ended_at \
              FROM _orna_kernel.sealed_invocation_lifecycle \
              WHERE invocation_id = $1 \
                AND source_revision_id IS NOT NULL \
@@ -250,6 +265,7 @@ async fn load_observation_by_id(
         observation_column(&row, &record, "status")?,
         &record,
     )?;
+    let (started, ended) = decode_observation_timestamps(&row, &status, &record)?;
     let argument_rows = transaction
         .query(
             "SELECT position, parameter_id, name, type_kind, scalar_type, \
@@ -272,8 +288,45 @@ async fn load_observation_by_id(
         catalogue_revision,
         function,
         status,
+        started,
+        ended,
         arguments,
     }))
+}
+
+fn decode_observation_timestamps(
+    row: &Row,
+    status: &SealedInvocationObservationStatus,
+    record: &str,
+) -> Result<(SystemTime, Option<SystemTime>), PostgresKernelError> {
+    let started: SystemTime = observation_column(row, record, "started_at")?;
+    let ended: Option<SystemTime> = observation_column(row, record, "ended_at")?;
+    validate_observation_timestamp_shape(*status, started, ended, record)?;
+    Ok((started, ended))
+}
+
+fn validate_observation_timestamp_shape(
+    status: SealedInvocationObservationStatus,
+    started: SystemTime,
+    ended: Option<SystemTime>,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    match (status.is_terminal(), ended) {
+        (false, None) => Ok(()),
+        (true, Some(ended)) if ended >= started => Ok(()),
+        (false, Some(_)) => Err(observation_invariant(
+            record,
+            "active lifecycle observation must not have an end time",
+        )),
+        (true, None) => Err(observation_invariant(
+            record,
+            "terminal lifecycle observation must have an end time",
+        )),
+        (true, Some(_)) => Err(observation_invariant(
+            record,
+            "lifecycle end time must not precede its start time",
+        )),
+    }
 }
 
 fn decode_argument_observation(
@@ -583,6 +636,8 @@ mod tests {
             catalogue_revision: CatalogueRevisionId::from_bytes([4; 16]),
             function: FunctionId::from_bytes([5; 16]),
             status,
+            started: SystemTime::UNIX_EPOCH,
+            ended: status.is_terminal().then_some(SystemTime::UNIX_EPOCH),
             arguments: vec![SealedInvocationArgumentObservation {
                 reference: invocation_argument_observation_reference(
                     capture, invocation, 0, "test",
@@ -611,5 +666,67 @@ mod tests {
             observation(&capture(2), 2, SealedInvocationObservationStatus::Succeeded),
         ];
         assert!(validate_observation_collection_capture(&mixed, &current).is_err());
+    }
+
+    #[test]
+    fn timestamp_shape_requires_active_rows_to_be_open_and_terminal_rows_to_be_closed() {
+        let start = SystemTime::UNIX_EPOCH;
+        let end = start + std::time::Duration::from_secs(1);
+
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Queued,
+                start,
+                None,
+                "test",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Running,
+                start,
+                None,
+                "test",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Succeeded,
+                start,
+                Some(end),
+                "test",
+            )
+            .is_ok()
+        );
+
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Running,
+                start,
+                Some(end),
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Failed,
+                start,
+                None,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_observation_timestamp_shape(
+                SealedInvocationObservationStatus::Cancelled,
+                end,
+                Some(start),
+                "test",
+            )
+            .is_err()
+        );
     }
 }
