@@ -1343,6 +1343,54 @@ fn checkout_discard_set_rejects_a_force_plan_after_target_branch_drift() {
 }
 
 #[test]
+fn admitted_force_discard_is_fenced_against_later_target_drift() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(35))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+
+    let target = git(root.path(), &["rev-parse", "experiment"]);
+    let successor = git(
+        root.path(),
+        &[
+            "commit-tree",
+            "experiment^{tree}",
+            "-p",
+            "experiment",
+            "-m",
+            "target branch moved after admission",
+        ],
+    );
+    git(
+        root.path(),
+        &["update-ref", "refs/heads/experiment", &successor, &target],
+    );
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.verify_validated_checkout_discard(&discard),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged local");
+}
+
+#[test]
 fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
