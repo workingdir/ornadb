@@ -3144,6 +3144,35 @@ fn sealed_invocation_lifecycle_terminal_categories_are_closed_and_distinct() {
         ("cancelled", Some(4), Some(3))
     );
 }
+
+#[test]
+fn sealed_invocation_terminal_retry_requires_retained_terminal_evidence() {
+    use super::sealed_invocation::{
+        SealedInvocationFailureClass, SealedInvocationLifecycleTerminal,
+        sealed_invocation_terminal_matches,
+    };
+
+    let cancelled = SealedInvocationLifecycleTerminal::Cancelled.fields();
+    assert!(sealed_invocation_terminal_matches(
+        (cancelled.0, cancelled.1, cancelled.2, true),
+        cancelled,
+    ));
+    assert!(
+        !sealed_invocation_terminal_matches(
+            (cancelled.0, cancelled.1, cancelled.2, false),
+            cancelled,
+        ),
+        "a matching status without a durable end marker is not a terminal replay"
+    );
+    assert!(
+        !sealed_invocation_terminal_matches(
+            (cancelled.0, cancelled.1, cancelled.2, true),
+            SealedInvocationLifecycleTerminal::Failed(SealedInvocationFailureClass::Internal)
+                .fields(),
+        ),
+        "terminal evidence cannot rewrite cancellation as ordinary failure"
+    );
+}
 #[test]
 fn resource_targets_resolve_and_authorize_with_closed_class_pins() {
     use orna_core::{

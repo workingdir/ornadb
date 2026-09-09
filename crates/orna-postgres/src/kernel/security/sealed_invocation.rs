@@ -656,8 +656,11 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
                     ended_at = transaction_timestamp(),
                     diagnostic_code = $3,
                     diagnostic_class = $4
-              WHERE invocation_id = $1
-                AND status IN ('queued', 'running')",
+             WHERE invocation_id = $1
+                AND status IN ('queued', 'running')
+                AND ended_at IS NULL
+                AND diagnostic_code IS NULL
+                AND diagnostic_class IS NULL",
             &[&invocation, &status, &diagnostic_code, &diagnostic_class],
         )
         .await
@@ -667,7 +670,7 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
     }
     let existing = transaction
         .query_opt(
-            "SELECT status, diagnostic_code, diagnostic_class \
+            "SELECT status, diagnostic_code, diagnostic_class, ended_at IS NOT NULL AS terminalized \
              FROM _orna_kernel.sealed_invocation_lifecycle \
              WHERE invocation_id = $1",
             &[&invocation],
@@ -685,9 +688,12 @@ pub(super) async fn transition_sealed_invocation_lifecycle(
             existing
                 .try_get::<_, Option<i16>>("diagnostic_class")
                 .map_err(PostgresKernelError::Database)?,
+            existing
+                .try_get::<_, bool>("terminalized")
+                .map_err(PostgresKernelError::Database)?,
         );
         if sealed_invocation_terminal_matches(
-            (&persisted.0, persisted.1, persisted.2),
+            (&persisted.0, persisted.1, persisted.2, persisted.3),
             (status, diagnostic_code, diagnostic_class),
         ) {
             return Ok(());
@@ -706,11 +712,11 @@ fn sealed_invocation_orphan_recovery_requires_owner_lease(
     terminal == SealedInvocationLifecycleTerminal::Orphaned
 }
 
-fn sealed_invocation_terminal_matches(
-    persisted: (&str, Option<i16>, Option<i16>),
+pub(super) fn sealed_invocation_terminal_matches(
+    persisted: (&str, Option<i16>, Option<i16>, bool),
     requested: (&str, Option<i16>, Option<i16>),
 ) -> bool {
-    persisted == requested
+    persisted.3 && (persisted.0, persisted.1, persisted.2) == requested
 }
 
 impl SealedInvocationPreparedOutcome {
@@ -1660,11 +1666,14 @@ mod lifecycle_tests {
                 .fields();
 
         assert!(sealed_invocation_terminal_matches(
-            cancelled,
+            (cancelled.0, cancelled.1, cancelled.2, true),
             SealedInvocationLifecycleTerminal::Cancelled.fields(),
         ));
         assert!(
-            !sealed_invocation_terminal_matches(cancelled, failed),
+            !sealed_invocation_terminal_matches(
+                (cancelled.0, cancelled.1, cancelled.2, true),
+                failed
+            ),
             "a retry must never turn a cancelled invocation into an ordinary failure"
         );
     }
@@ -1687,7 +1696,13 @@ mod lifecycle_tests {
         for retained in terminals {
             for requested in terminals {
                 assert_eq!(
-                    sealed_invocation_terminal_matches(retained.fields(), requested.fields()),
+                    sealed_invocation_terminal_matches(
+                        {
+                            let fields = retained.fields();
+                            (fields.0, fields.1, fields.2, true)
+                        },
+                        requested.fields(),
+                    ),
                     retained == requested,
                     "a retained terminal disposition must be absorbing"
                 );
@@ -1701,9 +1716,15 @@ mod lifecycle_tests {
         let cancelled = SealedInvocationLifecycleTerminal::Cancelled.fields();
 
         assert_eq!(orphaned, ("orphaned", None, None));
-        assert!(sealed_invocation_terminal_matches(orphaned, orphaned));
+        assert!(sealed_invocation_terminal_matches(
+            (orphaned.0, orphaned.1, orphaned.2, true),
+            orphaned
+        ));
         assert!(
-            !sealed_invocation_terminal_matches(orphaned, cancelled),
+            !sealed_invocation_terminal_matches(
+                (orphaned.0, orphaned.1, orphaned.2, true),
+                cancelled
+            ),
             "owner loss must not be replayed as a cancellation"
         );
     }
