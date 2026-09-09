@@ -2015,6 +2015,7 @@ impl Context<'_, '_> {
                 Ok(Value::List(flattened))
             }
             ("unique", [Value::List(values)]) => self.unique(values),
+            ("count", [Value::List(values)]) => self.count(values),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
             ("partition", [Value::List(values), predicate]) => {
@@ -2045,7 +2046,8 @@ impl Context<'_, '_> {
                 self.windows(values, size, step)
             }
             ("chunk", [_, _])
-            | ("flatten" | "unique" | "pairs", [_])
+            | ("flatten" | "unique" | "pairs" | "count", [_])
+            | ("count", [_, _])
             | ("take", [_, _])
             | ("drop", [_, _])
             | ("partition", [_, _])
@@ -2073,6 +2075,10 @@ impl Context<'_, '_> {
             self.items(unique.len())?;
         }
         Ok(Value::List(unique))
+    }
+    fn count(&self, values: &[Value]) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        Ok(Value::Int(BigInt::from(values.len())))
     }
     fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
@@ -2566,7 +2572,7 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
-        "flatten" | "unique" | "pairs" => &["values"],
+        "flatten" | "unique" | "pairs" | "count" => &["values"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
         "partition" | "split_when" => &["values", "predicate"],
