@@ -1329,7 +1329,7 @@ impl Context<'_, '_> {
         // including its declared argument names. The fallback remains only
         // for the standalone evaluator surface, which has no admitted module
         // environment.
-        if math_name(callee).is_none() && bits_name(callee).is_none()
+        if math_name(callee).is_none() && bits_name(callee).is_none() && text_name(callee).is_none()
             || self.resolve_function_name(callee, scope).is_some()
         {
             if matches!(callee, Expr::Field { .. }) && self.effects.is_some() {
@@ -1441,8 +1441,10 @@ impl Context<'_, '_> {
         }
         let math = math_name(callee);
         let bits = bits_name(callee);
+        let text = text_name(callee);
         let name = math
             .or(bits)
+            .or(text)
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let implicit = usize::from(input.is_some());
         self.items(arguments.len() + implicit)?;
@@ -1455,8 +1457,10 @@ impl Context<'_, '_> {
         let values = named_arguments(name, arguments, values, implicit)?;
         if math.is_some() {
             self.math(name, values)
-        } else {
+        } else if bits.is_some() {
             self.bits(name, values)
+        } else {
+            self.text(name, values)
         }
     }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
@@ -1577,6 +1581,73 @@ impl Context<'_, '_> {
             {
                 Err(error("ORNA-EVAL-TYPE"))
             }
+            _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+    fn text(&self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+        match (name, values.as_slice()) {
+            ("trim", [Value::String(value)]) => {
+                self.string(value.trim().to_owned()).map(Value::String)
+            }
+            ("split", [Value::String(value), Value::String(separator)]) => {
+                let count = if separator.is_empty() {
+                    value.chars().count()
+                } else {
+                    value.split(separator).count()
+                };
+                self.items(count)?;
+                let fields = if separator.is_empty() {
+                    value
+                        .chars()
+                        .map(|scalar| Value::String(scalar.to_string()))
+                        .collect()
+                } else {
+                    value
+                        .split(separator)
+                        .map(|field| Value::String(field.to_owned()))
+                        .collect()
+                };
+                Ok(Value::List(fields))
+            }
+            ("join", [Value::List(values), Value::String(separator)]) => {
+                self.items(values.len())?;
+                let mut output = String::new();
+                for (index, value) in values.iter().enumerate() {
+                    let Value::String(value) = value else {
+                        return Err(error("ORNA-EVAL-TYPE"));
+                    };
+                    if index > 0 {
+                        output.push_str(separator);
+                    }
+                    output.push_str(value);
+                    if output.len() > self.limits.max_string_bytes {
+                        return Err(error("ORNA-EVAL-LIMIT"));
+                    }
+                }
+                Ok(Value::String(output))
+            }
+            ("starts_with", [Value::String(value), Value::String(prefix)]) => {
+                Ok(Value::Bool(value.starts_with(prefix)))
+            }
+            ("ends_with", [Value::String(value), Value::String(suffix)]) => {
+                Ok(Value::Bool(value.ends_with(suffix)))
+            }
+            ("contains", [Value::String(value), Value::String(needle)]) => {
+                Ok(Value::Bool(value.contains(needle)))
+            }
+            ("replace", [Value::String(value), Value::String(from), Value::String(to)]) => {
+                self.string(value.replace(from, to)).map(Value::String)
+            }
+            ("lower", [Value::String(value)]) => {
+                self.string(value.to_lowercase()).map(Value::String)
+            }
+            ("upper", [Value::String(value)]) => {
+                self.string(value.to_uppercase()).map(Value::String)
+            }
+            ("trim" | "lower" | "upper", [_])
+            | ("split" | "starts_with" | "ends_with" | "contains", [_, _])
+            | ("join", [_, _])
+            | ("replace", [_, _, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -1830,6 +1901,13 @@ fn named_arguments(
         "increment" | "decrement" | "is_zero" => &["value"],
         "min" | "max" => &["left", "right"],
         "clamp" => &["value", "min", "max"],
+        "trim" | "lower" | "upper" => &["value"],
+        "split" => &["value", "separator"],
+        "join" => &["values", "separator"],
+        "starts_with" => &["value", "prefix"],
+        "ends_with" => &["value", "suffix"],
+        "contains" => &["value", "needle"],
+        "replace" => &["value", "from", "to"],
         _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
     };
     if values.len() != expected.len() {
@@ -1869,6 +1947,10 @@ fn math_name(expression: &Expr) -> Option<&str> {
 
 fn bits_name(expression: &Expr) -> Option<&str> {
     standard_name(expression, "bits")
+}
+
+fn text_name(expression: &Expr) -> Option<&str> {
+    standard_name(expression, "text")
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
