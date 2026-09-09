@@ -2425,6 +2425,144 @@ fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations()
 }
 
 #[test]
+fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
+    let result = analyze(&[ModuleInput::new(
+        "map.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            fn increment(value: Int) = value + 1;
+            pub fn direct(values: [Int]) = std.collection.map(values, increment);
+            pub fn pipeline(values: [Int]) = values | std.collection.map(transform: value => value + 1);
+            pub fn named(values: [Int]) = std.collection.map(transform: value => value + 1, rows: values);
+            pub fn flattened(values: [Int]) = std.collection.flat_map(rows: values, transform: value => [value, value + 1]);
+            pub fn reads(values: [Int]) = std.collection.map(values, value => Reading.count() + value);
+        "#,
+    )]);
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result.modules.values().next().expect("map module");
+    for name in ["direct", "pipeline", "named", "reads"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::List(Box::new(Type::Int))
+        ));
+    }
+    assert!(matches!(
+        &module.symbols["flattened"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
+    let invalid = analyze(&[
+        ModuleInput::new(
+            "wrong-result.orna",
+            "fn bad(values: [Int]) = std.collection.flat_map(values, value => value + 1);",
+        ),
+        ModuleInput::new(
+            "wrong-arity.orna",
+            "fn bad(values: [Int]) = std.collection.map(values, (left, right) => left + right);",
+        ),
+        ModuleInput::new(
+            "wrong-name.orna",
+            "fn bad(values: [Int]) = std.collection.map(rows: values, callback: value => value);",
+        ),
+        ModuleInput::new(
+            "wrong-collection.orna",
+            "fn bad() = std.collection.map(1, value => value);",
+        ),
+        ModuleInput::new(
+            "pipeline-shape.orna",
+            "fn bad(values: [Int]) = values | std.collection.flat_map(rows: values, transform: value => [value]);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
+
+    let relation = analyze(&[ModuleInput::new(
+        "relation.orna",
+        "table Reading(id: Int) { value: Int, } fn mapped() = Reading | map(reading => reading.value);",
+    )]);
+    assert!(relation.is_ok(), "{:?}", relation.diagnostics);
+    let module = relation.modules.values().next().expect("relation module");
+    assert!(matches!(
+        &module.symbols["mapped"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Relation(Box::new(Type::Int))
+    ));
+}
+
+#[test]
+fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collections() {
+    let valid = analyze(&[ModuleInput::new(
+        "relation-flat-map.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            table Child(id: Int) { value: Int, }
+            pub fn list_inner() = Reading | flat_map(reading => [reading.value]);
+            pub fn relation_inner() = Reading | flat_map(transform: reading => Child | map(child => child.value));
+        "#,
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+    let module = valid
+        .modules
+        .values()
+        .next()
+        .expect("relation flat_map module");
+    for name in ["list_inner", "relation_inner"] {
+        assert!(matches!(
+            &module.symbols[name].ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Relation(Box::new(Type::Int))
+        ));
+    }
+    assert!(
+        module.symbols["relation_inner"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["relation_inner"].effects.may_fail);
+}
+
+#[test]
+fn relation_flat_map_rejects_noncollections_and_keeps_existing_callback_rules() {
+    let invalid = analyze(&[
+        ModuleInput::new(
+            "scalar-inner.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(reading => reading.value);",
+        ),
+        ModuleInput::new(
+            "stream-inner.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(reading => Stream.from_list([reading.value], source_identity: \"reading\"));",
+        ),
+        ModuleInput::new(
+            "wrong-name.orna",
+            "table Reading(id: Int) { value: Int, } fn bad() = Reading | flat_map(predicate: reading => [reading.value]);",
+        ),
+        ModuleInput::new(
+            "wrong-callback.orna",
+            "table Reading(id: Int) { value: Int, } fn project(reading: Reading) = [reading.value]; fn bad() = Reading | flat_map(project);",
+        ),
+        ModuleInput::new(
+            "unrelated-callback.orna",
+            "table Reading(id: Int) { value: Int, } fn project(reading: Reading) = reading.value; fn bad() = Reading | map(project);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
+}
+
+#[test]
 fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
     let result = analyze(&[ModuleInput::new(
         "optional-ranges.orna",
