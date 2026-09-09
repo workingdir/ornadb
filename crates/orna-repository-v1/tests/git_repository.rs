@@ -1681,6 +1681,52 @@ fn restarted_force_discard_recovery_requires_the_recorded_canonical_witness() {
 }
 
 #[test]
+fn force_checkout_execution_without_recoverable_transition_state_fails_closed() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged preserve\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked preserve\n").unwrap();
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(39))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+    let before = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.execute_validated_force_checkout(&discard),
+        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged discard"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("main.orna")).unwrap(),
+        "unstaged preserve\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked preserve\n"
+    );
+}
+
+#[test]
 fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

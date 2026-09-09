@@ -2312,6 +2312,35 @@ impl Repository {
         }
     }
 
+    /// Admits a persisted force-discard intent to the destructive execution
+    /// boundary without performing an unrecoverable Git mutation.
+    ///
+    /// The current journal records the exact preflight and consent, but not
+    /// the complete before-state or a post-mutation recovery phase. It can
+    /// therefore prove only that the caller is attempting to execute the same
+    /// durable intent it admitted. A caller must receive an explicit failure
+    /// until a higher layer supplies recoverable before/after coordination;
+    /// retaining the journal keeps the old CWD authoritative and prevents a
+    /// later checkout from interleaving with that intent.
+    pub fn execute_validated_force_checkout(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let expected = CheckoutRecoveryJournal::from_validated(discard);
+        match self.read_checkout_recovery_journal_locked()? {
+            Some(journal) if journal == expected => {}
+            Some(_) | None => return Err(RepositoryError::CheckoutRecoveryRequired),
+        }
+        self.verify_validated_checkout_discard_locked(discard)?;
+
+        // CHECKOUT-1 requires a durable before/after transition that recovery
+        // can compare after a crash. The pre-execution record above omits that
+        // state by design, so invoking Git here would make a failure after a
+        // visible mutation impossible to resolve safely.
+        Err(RepositoryError::CheckoutExecutionUnsafe)
+    }
+
     /// Resolves a pre-execution force-discard journal after restart.
     ///
     /// This boundary intentionally performs no checkout and does not recreate
