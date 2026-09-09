@@ -263,6 +263,38 @@ fn parsed_keyed_relation_one_observes_candidate_rows_and_absence_rolls_back() {
 }
 
 #[test]
+fn parsed_relation_one_rejects_multiple_candidate_matches_and_rolls_back() {
+    let unit = SourceUnit {
+        fixture_id: "relation-one-multiple".into(),
+        source_id: "relation-one-multiple.orna".into(),
+        parse_as: "module_unit".into(),
+        source: r#"
+            pub table Note(id: Int) { text: Str, }
+            fn find_note(text: Str) = Note | filter(note => note.text == text) | one();
+            fn parent() {
+                Note.insert({ id: 1, text: "duplicate" });
+                Note.insert({ id: 2, text: "duplicate" });
+                find_note("duplicate");
+            }
+        "#
+        .into(),
+    };
+    let mut evaluator = TransactionalEvaluator::new("parent", Limits::default());
+
+    assert!(matches!(
+        evaluator.execute_source(&unit),
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-RELATION-ONE-MULTIPLE"
+    ));
+    for id in [1, 2] {
+        assert_eq!(
+            evaluator.committed_row("Note", &Value::int(id.into())),
+            None,
+            "a multiple-match one() failure must roll back candidate rows"
+        );
+    }
+}
+
+#[test]
 fn parsed_pipeline_count_in_a_direct_function_body_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&source_with_count_function(

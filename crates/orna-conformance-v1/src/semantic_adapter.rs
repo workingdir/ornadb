@@ -2632,6 +2632,39 @@ impl TableEffectHandler<'_, '_> {
                 .count();
             return Ok(Some(Value::int(BigInt::from(count))));
         }
+        if matches!(
+            callee,
+            Expr::Field {
+                base,
+                name,
+                ..
+            } if matches!(base.as_ref(), Expr::ReplBinding { text, .. } if text == "$__orna_relation")
+                && name == "filtered_one"
+        ) {
+            let [table, field, expected] = arguments else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let (OvbRaw::Text(table), OvbRaw::Text(field)) = (table.raw(), field.raw()) else {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            if !self.key_fields.contains_key(table) {
+                return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
+            }
+            let mut matches = self
+                .activation
+                .candidate_relation(table)
+                .map_err(|error| transaction_error(table_error_code(error)))?
+                .filter_map(|(_, row)| {
+                    (record_field(&row, field).as_ref() == Some(expected)).then_some(row)
+                });
+            let Some(row) = matches.next() else {
+                return Err(transaction_error("ORNA-EVAL-RELATION-ONE-ZERO"));
+            };
+            if matches.next().is_some() {
+                return Err(transaction_error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+            }
+            return Ok(Some(row));
+        }
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
@@ -3167,6 +3200,7 @@ fn lower_relation_bindings(functions: &Functions, table_keys: &TableKeys) -> Fun
 fn lower_relation_expression(expression: &mut Expr, table_keys: &TableKeys) {
     if let Some(lowered) = relation_window_count(expression, table_keys)
         .or_else(|| relation_lookup(expression, table_keys))
+        .or_else(|| relation_filtered_one(expression, table_keys))
         .or_else(|| relation_filter_count(expression, table_keys))
         .or_else(|| relation_count(expression, table_keys))
         .or_else(|| relation_window(expression, table_keys))
@@ -3518,20 +3552,123 @@ fn relation_filter_count(expression: &Expr, table_keys: &TableKeys) -> Option<Ex
     })
 }
 
+/// Lowers the one equality-filter form that cannot be replaced by a primary
+/// key lookup.  It retains the candidate relation's canonical order so the
+/// effect boundary can stop after observing a second match and distinguish
+/// zero from multiple cardinality failures.
+fn relation_filtered_one(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
+    let Expr::Binary { lhs, op, rhs, .. } = expression else {
+        return None;
+    };
+    if op != "|" || !relation_one_target(rhs) {
+        return None;
+    }
+    let Expr::Binary {
+        lhs: table,
+        op: filter_op,
+        rhs: filter,
+        ..
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Name {
+        text: table,
+        span: table_span,
+    } = table.as_ref()
+    else {
+        return None;
+    };
+    if filter_op != "|" || !table_keys.contains_key(table) {
+        return None;
+    }
+    let Expr::Call {
+        callee, arguments, ..
+    } = filter.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "filter") {
+        return None;
+    }
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let Expr::Lambda {
+        parameters, body, ..
+    } = &argument.value
+    else {
+        return None;
+    };
+    let [parameter] = parameters.as_slice() else {
+        return None;
+    };
+    let Pattern::Name(binding, _) = &parameter.pattern else {
+        return None;
+    };
+    let Expr::Binary { lhs, op, rhs, .. } = body.as_ref() else {
+        return None;
+    };
+    let Expr::Field { base, name, .. } = lhs.as_ref() else {
+        return None;
+    };
+    if op != "==" || !matches!(base.as_ref(), Expr::Name { text, .. } if text == binding) {
+        return None;
+    }
+    let table = Expr::Literal {
+        text: format!("{table:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: table_span.clone(),
+    };
+    let field = Expr::Literal {
+        text: format!("{name:?}"),
+        kind: orna_syntax_v1::LiteralKind::String,
+        span: lhs.span(),
+    };
+    Some(Expr::Call {
+        callee: Box::new(Expr::Field {
+            base: Box::new(Expr::ReplBinding {
+                text: "$__orna_relation".into(),
+                span: expression.span(),
+            }),
+            name: "filtered_one".into(),
+            span: expression.span(),
+        }),
+        arguments: vec![
+            orna_syntax_v1::Argument {
+                name: None,
+                span: table.span(),
+                value: table,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: field.span(),
+                value: field,
+            },
+            orna_syntax_v1::Argument {
+                name: None,
+                span: rhs.span(),
+                value: rhs.as_ref().clone(),
+            },
+        ],
+        span: expression.span(),
+    })
+}
+
+fn relation_one_target(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Call {
+            callee, arguments, ..
+        } if arguments.is_empty() && matches!(callee.as_ref(), Expr::Name { text, .. } if text == "one")
+    )
+}
+
 fn relation_lookup(expression: &Expr, table_keys: &TableKeys) -> Option<Expr> {
     let Expr::Binary { lhs, op, rhs, .. } = expression else {
         return None;
     };
-    let Expr::Call {
-        callee, arguments, ..
-    } = rhs.as_ref()
-    else {
-        return None;
-    };
-    if op != "|"
-        || !arguments.is_empty()
-        || !matches!(callee.as_ref(), Expr::Name { text, .. } if text == "one")
-    {
+    if op != "|" || !relation_one_target(rhs) {
         return None;
     }
     let Expr::Binary {
