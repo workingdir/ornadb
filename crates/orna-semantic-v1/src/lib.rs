@@ -2089,6 +2089,10 @@ fn expr_has_write(expr: &Expr) -> bool {
         }
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => expr_has_write(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_has_write(lhs) || expr_has_write(rhs),
+        Expr::Range { lower, upper, .. } => {
+            lower.as_deref().is_some_and(expr_has_write)
+                || upper.as_deref().is_some_and(expr_has_write)
+        }
         Expr::Index { base, index, .. } => expr_has_write(base) || expr_has_write(index),
         Expr::Field { base, .. } => expr_has_write(base),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
@@ -2227,6 +2231,14 @@ fn validate_loop_transfers(
         Expr::Binary { lhs, rhs, .. } => {
             validate_loop_transfers(lhs, scope, local, loops, diagnostics);
             validate_loop_transfers(rhs, scope, local, loops, diagnostics);
+        }
+        Expr::Range { lower, upper, .. } => {
+            if let Some(lower) = lower {
+                validate_loop_transfers(lower, scope, local, loops, diagnostics);
+            }
+            if let Some(upper) = upper {
+                validate_loop_transfers(upper, scope, local, loops, diagnostics);
+            }
         }
         Expr::Call {
             callee, arguments, ..
@@ -2451,6 +2463,18 @@ fn infer_contextual(
             let inferred = infer_contextual(element, element_type, scope, local, diagnostics);
             require_same(element_type, &inferred.ty, diagnostics);
             effects.join(&inferred.effects);
+        }
+        return Inferred {
+            ty: expected.clone(),
+            effects,
+        };
+    }
+    if let (Expr::Range { lower, upper, .. }, Type::Range(element_type)) = (expr, expected) {
+        let mut effects = EffectSummary::default();
+        for endpoint in [lower.as_deref(), upper.as_deref()].into_iter().flatten() {
+            let inferred = infer_contextual(endpoint, element_type, scope, local, diagnostics);
+            effects.join(&inferred.effects);
+            require_same(element_type, &inferred.ty, diagnostics);
         }
         return Inferred {
             ty: expected.clone(),
@@ -3061,6 +3085,48 @@ fn infer(
             } else {
                 inferred
             }
+        }
+        Expr::Range { lower, upper, .. } => {
+            let endpoints = [lower.as_deref(), upper.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(|endpoint| infer(endpoint, scope, local, diagnostics))
+                .collect::<Vec<_>>();
+            let mut effects = EffectSummary::default();
+            for endpoint in &endpoints {
+                effects.join(&endpoint.effects);
+            }
+            let ty = match endpoints.as_slice() {
+                [] => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "an untyped range needs at least one endpoint or a range context",
+                    ));
+                    Type::Error
+                }
+                [one] => {
+                    if !is_numeric_range_bound(&one.ty) {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "range endpoints must have one compatible numeric type",
+                        ));
+                        Type::Error
+                    } else {
+                        Type::Range(Box::new(one.ty.clone()))
+                    }
+                }
+                [left, right] if left.ty == right.ty && is_numeric_range_bound(&left.ty) => {
+                    Type::Range(Box::new(left.ty.clone()))
+                }
+                _ => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "range endpoints must have one compatible numeric type",
+                    ));
+                    Type::Error
+                }
+            };
+            Inferred { ty, effects }
         }
         Expr::Binary { lhs, op, rhs, .. } => {
             if op == "|" {
