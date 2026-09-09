@@ -1,7 +1,8 @@
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
-    DIAG_ASSERTION_SCOPE, DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE,
-    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, Type, analyze, analyze_with_catalogue,
+    DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED,
+    DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, StandardDependencyProfile, Type,
+    analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -9,6 +10,23 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code() == code)
+}
+
+fn collection_catalogue() -> Catalogue {
+    let source = r#"
+        pub fn first(rows: [Int]): Int? = null;
+        pub fn one(rows: [Int]): Int = 0;
+        pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
+        pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
+    "#;
+    let profile = StandardDependencyProfile::from_sources(
+        "orna.std/v1-collection",
+        [("std/collection.orna".into(), source.into())],
+    )
+    .expect("collection profile");
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, [("std/collection.orna".into(), source.into())])
+        .expect("verified collection catalogue")
 }
 
 #[test]
@@ -990,6 +1008,42 @@ fn authoritative_core_resolves_nested_operations_through_an_imported_root() {
         &profile,
     );
     assert!(has(&missing, DIAG_UNRESOLVED));
+}
+
+#[test]
+fn qualified_collection_requires_an_admitted_optional_module() {
+    let rejected = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "pub fn first_value(rows: [Int]) = std.collection.first(rows);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&rejected, DIAG_UNRESOLVED),
+        "{:?}",
+        rejected.diagnostics
+    );
+
+    let import_rejected = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std.collection; pub fn first_value(rows: [Int]) = std.collection.first(rows);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&import_rejected, DIAG_IMPORT));
+
+    let bare_core = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        r#"
+            pub fn first_value(rows: [Int]) = first(rows);
+            pub fn one_value(rows: [Int]) = one(rows);
+            pub fn mapped(rows: [Int]) = rows | map(value => value + 1);
+            pub fn flattened(rows: [Int]) = rows | flat_map(value => [value]);
+        "#,
+    )]);
+    assert!(bare_core.is_ok(), "{:?}", bare_core.diagnostics);
 }
 
 #[test]
@@ -2426,9 +2480,10 @@ fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations()
 
 #[test]
 fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
-    let result = analyze(&[ModuleInput::new(
-        "map.orna",
-        r#"
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "map.orna",
+            r#"
             table Reading(id: Int) { value: Int, }
             fn increment(value: Int) = value + 1;
             pub fn direct(values: [Int]) = std.collection.map(values, increment);
@@ -2437,7 +2492,9 @@ fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
             pub fn flattened(values: [Int]) = std.collection.flat_map(rows: values, transform: value => [value, value + 1]);
             pub fn reads(values: [Int]) = std.collection.map(values, value => Reading.count() + value);
         "#,
-    )]);
+        )],
+        &collection_catalogue(),
+    );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result.modules.values().next().expect("map module");
     for name in ["direct", "pipeline", "named", "reads"] {
@@ -2503,9 +2560,10 @@ fn finite_list_map_and_flat_map_reject_invalid_callbacks_and_collections() {
 
 #[test]
 fn finite_list_first_returns_an_optional_element_for_all_supported_call_forms() {
-    let result = analyze(&[ModuleInput::new(
-        "first.orna",
-        r#"
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "first.orna",
+            r#"
             pub fn direct(rows: [Int]) = first(rows);
             pub fn pipeline(rows: [Int]) = rows | first();
             pub fn named(rows: [Int]) = first(rows: rows);
@@ -2513,7 +2571,9 @@ fn finite_list_first_returns_an_optional_element_for_all_supported_call_forms() 
             pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.first();
             pub fn qualified_named(rows: [Int]) = std.collection.first(rows: rows);
         "#,
-    )]);
+        )],
+        &collection_catalogue(),
+    );
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result.modules.values().next().expect("first module");
@@ -2615,9 +2675,10 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
 
 #[test]
 fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effects() {
-    let result = analyze(&[ModuleInput::new(
-        "one.orna",
-        r#"
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "one.orna",
+            r#"
             table Reading(id: Int) { value: Int, }
             fn positive(value: Int) = value > 0;
             fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
@@ -2632,7 +2693,9 @@ fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effec
             pub fn reads(rows: [Int]) = rows | one(predicate: value => Reading.count() > 0 && value > 0);
             pub fn named_reads(rows: [Int]) = one(predicate: reads_predicate, rows: rows);
         "#,
-    )]);
+        )],
+        &collection_catalogue(),
+    );
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let module = result.modules.values().next().expect("one module");

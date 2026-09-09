@@ -4515,17 +4515,27 @@ fn infer_stream_from_list(
     })
 }
 
-fn finite_list_collection_operation(callee: &Expr) -> Option<&str> {
+fn standard_collection_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
+    scope
+        .available_modules
+        .get(&Namespace(vec!["std".into(), "collection".into()]))
+        .is_some_and(|module| {
+            module
+                .exports
+                .get(operation)
+                .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+        })
+}
+
+fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Option<&'a str> {
     let path = qualified_path(callee)?;
     match path.as_slice() {
-        ["first"]
-        | ["one"]
-        | ["map"]
-        | ["flat_map"]
-        | ["std", "collection", "first"]
-        | ["std", "collection", "one"]
-        | ["std", "collection", "map"]
-        | ["std", "collection", "flat_map"] => path.last().copied(),
+        ["first"] | ["one"] | ["map"] | ["flat_map"] => path.last().copied(),
+        ["std", "collection", operation]
+            if standard_collection_operation_is_admitted(operation, scope) =>
+        {
+            Some(*operation)
+        }
         _ => None,
     }
 }
@@ -4541,10 +4551,11 @@ fn infer_finite_list_collection_call(
     let operation = match path.as_slice() {
         ["first"] => "first",
         ["one"] => "one",
-        ["std", "collection", "first"] => "first",
-        ["std", "collection", "one"] => "one",
-        ["std", "collection", "map"] => "map",
-        ["std", "collection", "flat_map"] => "flat_map",
+        ["std", "collection", operation]
+            if standard_collection_operation_is_admitted(operation, scope) =>
+        {
+            operation
+        }
         _ => return None,
     };
     Some(infer_finite_list_collection(
@@ -5239,7 +5250,7 @@ fn infer_success_pipeline(
         && let Expr::Call {
             callee, arguments, ..
         } = rhs
-        && let Some(operation) = finite_list_collection_operation(callee)
+        && let Some(operation) = finite_list_collection_operation(callee, scope)
     {
         return infer_finite_list_collection(
             operation,
