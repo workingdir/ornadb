@@ -19,6 +19,8 @@ fn collection_catalogue() -> Catalogue {
         pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
         pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
         pub fn sum(rows: [Int]): Int = 0;
+        pub fn min(rows: [Int]): Int? = null;
+        pub fn max(rows: [Int]): Int? = null;
         pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
         pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
     "#;
@@ -3038,6 +3040,178 @@ fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_
 }
 
 #[test]
+fn finite_list_integer_min_max_return_optional_int_for_all_call_forms() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "min-max.orna",
+            r#"
+            table Reading(id: Int) { value: Int, }
+            table Other(id: Int) { value: Int, }
+            pub fn direct_min(rows: [Int]): Int? = min(rows);
+            pub fn direct_max(rows: [Int]): Int? = max([3, 1, 2]);
+            pub fn named_min(rows: [Int]): Int? = min(rows: rows);
+            pub fn named_max(rows: [Int]): Int? = max(rows: rows);
+            pub fn bare_pipeline_min(rows: [Int]): Int? = rows | min;
+            pub fn bare_pipeline_max(rows: [Int]): Int? = rows | std.collection.max;
+            pub fn call_pipeline_min(rows: [Int]): Int? = rows | min();
+            pub fn call_pipeline_max(rows: [Int]): Int? = rows | std.collection.max();
+            pub fn qualified_min(rows: [Int]): Int? = std.collection.min(rows);
+            pub fn qualified_max(rows: [Int]): Int? = std.collection.max(rows: rows);
+            pub fn empty_min(): Int? = min([]);
+            pub fn empty_max(): Int? = [] | max;
+            pub fn reads(rows: [Int]): Int? =
+                rows | map(transform: value => Reading.count() + value) | min();
+            assert every(Reading, reading =>
+                exists(Other, other =>
+                    min([reading.value]) == min([other.value])));
+        "#,
+        )],
+        &collection_catalogue(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("direct_min"))
+        .expect("min/max module");
+    for name in [
+        "direct_min",
+        "direct_max",
+        "named_min",
+        "named_max",
+        "bare_pipeline_min",
+        "bare_pipeline_max",
+        "call_pipeline_min",
+        "call_pipeline_max",
+        "qualified_min",
+        "qualified_max",
+        "empty_min",
+        "empty_max",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. }
+                    if result.as_ref() == &Type::Optional(Box::new(Type::Int))
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_behavior() {
+    let invalid = analyze(&[
+        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = min(values);"),
+        ModuleInput::new("float.orna", "fn bad(values: [Float]) = max(values);"),
+        ModuleInput::new("money.orna", "fn bad(values: [Money<GBP>]) = min(values);"),
+        ModuleInput::new("affine.orna", "fn bad(values: [Float<C>]) = max(values);"),
+        ModuleInput::new("wrong-collection.orna", "fn bad() = min(1);"),
+        ModuleInput::new("missing-rows.orna", "fn bad() = max();"),
+        ModuleInput::new(
+            "unknown-name.orna",
+            "fn bad(values: [Int]) = min(values: values, extra: 1);",
+        ),
+        ModuleInput::new(
+            "pipeline-argument.orna",
+            "fn bad(values: [Int]) = values | max(rows: values);",
+        ),
+        ModuleInput::new(
+            "pipeline-extra.orna",
+            "fn bad(values: [Int]) = values | min(1);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "unprofiled.orna",
+            "fn bad(values: [Int]) = std.collection.min(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
+
+    let relation = analyze(&[ModuleInput::new(
+        "relation-min-max.orna",
+        r#"
+            table Reading(id: Int) { value: Int, }
+            pub fn minimum() = Reading | min();
+            pub fn maximum() = Reading | max();
+        "#,
+    )]);
+    assert!(relation.is_ok(), "{:?}", relation.diagnostics);
+    let module = relation.modules.values().next().expect("relation module");
+    for name in ["minimum", "maximum"] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. }
+                    if result.as_ref() == &Type::Optional(Box::new(Type::Named("Reading".into())))
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+}
+
+#[test]
+fn qualified_integer_aggregate_admission_requires_compatible_pinned_exports() {
+    let source = r#"
+        pub fn min(rows: [Decimal]): Decimal? = null;
+        pub fn max(rows: [Float]): Float? = null;
+    "#;
+    let profile = StandardDependencyProfile::from_sources(
+        "orna.std/incompatible-collection",
+        [("std/collection.orna".into(), source.into())],
+    )
+    .expect("incompatible collection profile");
+    let catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(&profile, [("std/collection.orna".into(), source.into())])
+        .expect("verified incompatible collection catalogue");
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            r#"
+                pub fn minimum(rows: [Int]) = std.collection.min(rows);
+                pub fn maximum(rows: [Int]) = std.collection.max(rows);
+            "#,
+        )],
+        &catalogue,
+    );
+
+    assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("minimum"))
+        .expect("consumer module");
+    assert!(matches!(
+        &module.symbols["minimum"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Optional(Box::new(Type::Decimal))
+    ));
+    assert!(matches!(
+        &module.symbols["maximum"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Optional(Box::new(Type::Float))
+    ));
+}
+
+#[test]
 fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collections() {
     let valid = analyze(&[ModuleInput::new(
         "relation-flat-map.orna",
@@ -3110,23 +3284,20 @@ fn optional_numeric_ranges_infer_from_endpoints_or_expected_range_context() {
 }
 
 #[test]
-fn affine_collection_aggregates_preserve_absolute_values_and_reject_sum() {
-    let valid = analyze(&[
+fn affine_collection_aggregates_keep_mean_and_reject_integer_only_extrema() {
+    let valid = analyze(&[ModuleInput::new(
+        "average.orna",
+        "pub fn average_temperature(values: [Float<C>]) = values | mean;",
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let invalid = analyze(&[
         ModuleInput::new(
             "maximum.orna",
             "pub fn hottest(values: [Float<C>]) = values | max;",
         ),
-        ModuleInput::new(
-            "average.orna",
-            "pub fn average_temperature(values: [Float<C>]) = values | mean;",
-        ),
+        ModuleInput::new("sum.orna", "pub fn bad(values: [Float<C>]) = values | sum;"),
     ]);
-    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
-
-    let invalid = analyze(&[ModuleInput::new(
-        "sum.orna",
-        "pub fn bad(values: [Float<C>]) = values | sum;",
-    )]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
 }
