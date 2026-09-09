@@ -1640,6 +1640,12 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
+        if collection_name(callee).is_some()
+            && self.restrict_function_names
+            && self.resolve_function_name(callee, scope).is_none()
+        {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
         // A verified standard-source function takes precedence over the
         // legacy bounded math fallback. This keeps admitted REPL calls on
         // ordinary import/resolution and executes their pinned source body,
