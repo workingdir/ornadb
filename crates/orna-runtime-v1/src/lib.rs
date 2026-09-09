@@ -7056,6 +7056,16 @@ async fn load_run_observation_tx(
         _ => return Err(RuntimeError::RecoveryInvalid),
     };
     let status = decode_run_status(row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let started_ms: i64 = row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let ended_ms: Option<i64> = row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let observed_ms: i64 = row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if observed_ms < started_ms
+        || status.is_terminal() != ended_ms.is_some()
+        || ended_ms.is_some_and(|ended| ended < started_ms || observed_ms < ended)
+        || (status == RunObservationStatus::Failed && diagnostic.is_none())
+    {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let live = snapshot == *capture && !status.is_terminal();
     Ok(Some(RunObservation {
         id,
@@ -7069,9 +7079,9 @@ async fn load_run_observation_tx(
         snapshot,
         runtime_id,
         invocation_id: fixed(row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        started_ms: row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        ended_ms: row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
-        observed_ms: row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        started_ms,
+        ended_ms,
+        observed_ms,
         status,
         runtime_generation: generation,
         checkpoint_count: decode_u64(row.get(14).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
@@ -18366,6 +18376,63 @@ mod tests {
         assert!(projections.streams.is_empty());
         assert!(state.run_observation(run.id).await.unwrap().is_some());
         assert!(state.stream_observation(stream.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_projection_fails_closed_on_persisted_terminal_mismatch() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let request = request(221, 222);
+        state.reserve_request(request, digest(223)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: stream_delivery("malformed", "run").consumer,
+                function: "pkg.malformed".into(),
+                source_identity: None,
+                invocation_id: id(224),
+            })
+            .await
+            .unwrap();
+        let before = state.capture().await.unwrap();
+
+        state
+            .connection
+            .execute(
+                "UPDATE sys_run_observation SET status = ?1, ended_ms = NULL WHERE run_id = ?2",
+                params![
+                    run_status_code(RunObservationStatus::Completed),
+                    run.id.0.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.retained_sys_observation_projections().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        let owner = state.acquire_lease(id(225)).await.unwrap();
+        let fence = state.runtime_observation_fence(owner).await.unwrap();
+        assert_eq!(
+            state.current_runtime_sys_projections(&fence).await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT status, ended_ms FROM sys_run_observation WHERE run_id = ?1",
+                params![run.id.0.to_vec()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            row.get::<i64>(0).unwrap(),
+            run_status_code(RunObservationStatus::Completed)
+        );
+        assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
     }
 
     #[tokio::test]
