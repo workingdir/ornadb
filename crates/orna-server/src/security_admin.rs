@@ -25,11 +25,11 @@ use orna_core::{
         PrivilegeDecision, PrivilegeGrant, SecuritySnapshot,
     },
 };
-use orna_foundation_v1::{RunRef, StreamRef};
+use orna_foundation_v1::{FailureRef, RunRef, StreamRef};
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_runtime_v1::{
-    CheckpointKey, RunObservation, RuntimeError, RuntimeObservationFence, RuntimeState,
-    StreamAdministrationOutcome, WriterLease,
+    CheckpointKey, FailureStatus, RunObservation, RuntimeError, RuntimeObservationFence,
+    RuntimeState, StreamAdministrationOutcome, WriterLease,
 };
 
 use crate::{EmbeddedHostError, inspect_current_embedded_host};
@@ -133,6 +133,68 @@ pub async fn run_authenticated_stream_admin(
 
 fn map_stream_runtime_error(_: RuntimeError) -> AuthenticatedStreamAdminError {
     AuthenticatedStreamAdminError::Runtime
+}
+
+/// A public `sys.FailureRef` administration request after ordinary argument
+/// checking and authenticated-host admission.
+///
+/// This records the exact public function shapes without treating a row
+/// reference as authority. The current host cannot yet resolve a checked
+/// reference into its durable failure record while retaining the required
+/// invocation and same-transaction audit evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthenticatedFailureAdminRequest {
+    /// `sys.admin.retry_failure`.
+    Retry {
+        failure: FailureRef,
+        expected_version: u64,
+        expected_status: FailureStatus,
+    },
+    /// `sys.admin.skip_failure`.
+    Skip {
+        failure: FailureRef,
+        expected_version: u64,
+        expected_status: FailureStatus,
+        reason: String,
+    },
+    /// `sys.admin.replay_failure`.
+    Replay {
+        failure: FailureRef,
+        expected_version: u64,
+        expected_status: FailureStatus,
+    },
+    /// `sys.admin.resolve_failure`.
+    Resolve {
+        failure: FailureRef,
+        expected_version: u64,
+        expected_status: FailureStatus,
+        reason: String,
+    },
+}
+
+/// A fail-closed result for public failure administration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedFailureAdminError {
+    /// No host boundary can yet resolve the public natural-key reference,
+    /// retain the required administrative invocation/audit, and own a retry or
+    /// replay callback as one recoverable operation.
+    Unavailable,
+}
+
+/// Rejects public failure administration until its authenticated host boundary
+/// can provide the complete durable operation required by Orna 1.0.
+///
+/// In particular, this function deliberately accepts neither a writer lease
+/// nor runtime state: possession of `sys.FailureRef` plus an authenticated
+/// session must not be accidentally upgraded into permission to mutate a
+/// stream failure. The eventual implementation must resolve the reference,
+/// check ownership, record its invocation and audit record, and then perform
+/// the matching durable transition as one recoverable operation.
+pub fn run_authenticated_failure_admin(
+    _session: &AuthenticatedSession,
+    _request: AuthenticatedFailureAdminRequest,
+) -> Result<(), AuthenticatedFailureAdminError> {
+    Err(AuthenticatedFailureAdminError::Unavailable)
 }
 
 /// An authenticated, owner-fenced resolution of a current `sys.Run` row.
@@ -864,6 +926,7 @@ pub fn parse_privilege_class(value: &str) -> Option<PrivilegeClass> {
 #[cfg(test)]
 mod stream_admin_tests {
     use super::*;
+    use orna_foundation_v1::{CanonicalSnapshot, failure_reference};
     use std::{
         path::{Path, PathBuf},
         process::Command,
@@ -942,6 +1005,53 @@ mod stream_admin_tests {
             partition_format: Component::new("test").expect("partition format"),
             partition: Component::new("partition").expect("partition"),
             position_format: Component::new("test").expect("position format"),
+        }
+    }
+
+    fn failure() -> FailureRef {
+        failure_reference(
+            [0x61; 16],
+            CanonicalSnapshot::cwd([0x61; 16], [0x62; 16], 1.into()).expect("canonical snapshot"),
+            "owner/root/callback/binding".into(),
+            "source".into(),
+            Some("partition".into()),
+            "test".into(),
+            "position".into(),
+        )
+        .expect("failure reference")
+    }
+
+    #[test]
+    fn public_failure_administration_remains_fail_closed_without_its_durable_host_boundary() {
+        let requests = [
+            AuthenticatedFailureAdminRequest::Retry {
+                failure: failure(),
+                expected_version: 1,
+                expected_status: FailureStatus::Failed,
+            },
+            AuthenticatedFailureAdminRequest::Skip {
+                failure: failure(),
+                expected_version: 1,
+                expected_status: FailureStatus::Failed,
+                reason: "operator review".into(),
+            },
+            AuthenticatedFailureAdminRequest::Replay {
+                failure: failure(),
+                expected_version: 1,
+                expected_status: FailureStatus::Skipped,
+            },
+            AuthenticatedFailureAdminRequest::Resolve {
+                failure: failure(),
+                expected_version: 1,
+                expected_status: FailureStatus::Replayed,
+                reason: "operator review".into(),
+            },
+        ];
+        for request in requests {
+            assert_eq!(
+                run_authenticated_failure_admin(&session(OWNER), request),
+                Err(AuthenticatedFailureAdminError::Unavailable),
+            );
         }
     }
 
