@@ -1255,7 +1255,7 @@ mod shutdown_tests {
     }
 
     #[test]
-    fn failed_retirement_acknowledgement_suppresses_http_response() {
+    fn failed_retirement_join_suppresses_delete_success_response() {
         run_local(async {
             let (sender, acknowledgement) = futures::channel::oneshot::channel();
             sender.send(Err(())).unwrap();
@@ -1269,7 +1269,7 @@ mod shutdown_tests {
                         attachment: [15; 16],
                         completion: acknowledgement,
                     }],
-                    vec![b"HTTP/1.1 200 OK\r\n\r\n".to_vec()],
+                    vec![b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()],
                     &mut writer,
                     &mut cancellation,
                 )
@@ -1277,6 +1277,49 @@ mod shutdown_tests {
                 Err(())
             );
             assert!(writer.get_ref().is_empty());
+        });
+    }
+
+    #[test]
+    fn delete_success_response_waits_for_retired_worker_join() {
+        run_local(async {
+            let (completion_sender, completion) = futures::channel::oneshot::channel();
+            let (acknowledgements, mut commands) = futures::channel::mpsc::unbounded();
+            let acknowledgement = tokio::task::spawn_local(async move {
+                use futures::StreamExt;
+                match commands.next().await {
+                    Some(RetirementAcknowledgement::Acknowledge { attachment, reply }) => {
+                        assert_eq!(attachment, [16; 16]);
+                        assert!(reply.send(true).is_ok());
+                    }
+                    _ => panic!("delete must wait for the worker supervisor"),
+                }
+            });
+            let response = tokio::task::spawn_local(async move {
+                let mut writer = futures::io::Cursor::new(Vec::new());
+                let mut cancellation = futures::future::pending();
+                let result = write_http_after_retirement(
+                    &acknowledgements,
+                    vec![RetirementGate {
+                        attachment: [16; 16],
+                        completion,
+                    }],
+                    vec![b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()],
+                    &mut writer,
+                    &mut cancellation,
+                )
+                .await;
+                (result, writer.into_inner())
+            });
+
+            tokio::task::yield_now().await;
+            assert!(!response.is_finished());
+            completion_sender.send(Ok(())).unwrap();
+            assert_eq!(
+                response.await.unwrap(),
+                (Ok(()), b"HTTP/1.1 204 No Content\r\n\r\n".to_vec())
+            );
+            acknowledgement.await.unwrap();
         });
     }
 }
