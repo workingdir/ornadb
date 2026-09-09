@@ -1045,8 +1045,13 @@ fn loopback_host_rejects_unsupported_watch() {
         let mut ignored = Vec::new();
         create.read_to_end(&mut ignored).unwrap();
 
-        let response = websocket_watch(address, &session, &token, &database, [21; 16], "1 + 1");
-        assert!(matches!(response.message, Message::Diagnostic { .. }));
+        let request = [21; 16];
+        let response = websocket_watch(address, &session, &token, &database, request, "1 + 1");
+        assert_eq!(response.request, Some(request));
+        let Message::Diagnostic { recoverable, .. } = response.message else {
+            panic!("unsupported Watch must produce a correlated diagnostic");
+        };
+        assert_eq!(recoverable, None);
         assert_eq!(response.watch, None);
         sender.send(()).unwrap();
     });
