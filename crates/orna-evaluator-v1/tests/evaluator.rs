@@ -817,6 +817,30 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             .unwrap(),
         ),
         (
+            "std.collection.partition([1, 2, 3, 4], value => value % 2 == 0)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "[1, 2, 3] | std.collection.partition(predicate: value => value > 1)",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                Raw::Array(vec![Raw::Int(1.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
+            "std.collection.partition(predicate: value => value >= 2, values: [1, 2, 3])",
+            Value::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                Raw::Array(vec![Raw::Int(1.into())]),
+            ]))
+            .unwrap(),
+        ),
+        (
             "std.collection.zip([1, 2, 3], [\"a\", \"b\"])",
             Value::new(Raw::Array(vec![
                 Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
@@ -886,6 +910,23 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
         ("std.collection.flatten([1])", "ORNA-EVAL-TYPE"),
         ("std.collection.unique(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.unique([1], 2)", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.collection.partition(1, value => true)",
+            "ORNA-EVAL-TYPE",
+        ),
+        ("std.collection.partition([1], 1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.partition([1], value => 1)",
+            "ORNA-EVAL-TYPE",
+        ),
+        (
+            "std.collection.partition([1], () => true)",
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            "std.collection.partition([1], value => true, extra: value => true)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         ("std.collection.zip_exact([1], [2, 3])", "ORNA-EVAL-VALUE"),
         ("std.collection.pairs(1)", "ORNA-EVAL-TYPE"),
         ("std.collection.window([1, 2], 0)", "ORNA-EVAL-VALUE"),
@@ -923,6 +964,38 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             &Environment::new(),
             Limits {
                 max_collection_items: 1,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
+    let source = "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.partition([1, 2, 3, 4], keep_even);";
+    assert_eq!(
+        call_module(source, "run()", Limits::default()).unwrap(),
+        Value::new(Raw::Array(vec![
+            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
+        ]))
+        .unwrap()
+    );
+    assert_eq!(
+        code(call_module(
+            "fn bad(value: Int, other: Int) = true; fn run() = std.collection.partition([1], bad);",
+            "run()",
+            Limits::default(),
+        )),
+        "ORNA-EVAL-ARGUMENT"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.partition([1, 2, 3], value => true)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
                 ..Limits::default()
             },
         )),
