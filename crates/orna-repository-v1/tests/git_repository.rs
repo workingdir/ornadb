@@ -1818,6 +1818,37 @@ fn remote_continuity_reports_missing_internal_refs_without_mutation() {
 }
 
 #[test]
+fn local_internal_and_tracking_refs_cannot_substitute_remote_continuity() {
+    let root = repository();
+    let _remote = continuity_remote(root.path());
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let required = required_internal_ref(&head);
+
+    // These locally materialized names can be stale after a plain-Git transfer.
+    // They are not evidence that the configured remote retained Orna continuity.
+    git(
+        root.path(),
+        &["update-ref", "refs/orna/ids/0123456789abcdef", &head],
+    );
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/remotes/origin/orna/ids/0123456789abcdef",
+            &head,
+        ],
+    );
+    let before = git_state(&repo, root.path());
+
+    let continuity = repo.observe_remote_continuity("origin", std::slice::from_ref(&required));
+
+    assert_eq!(continuity, RemoteContinuity::Missing);
+    assert!(!continuity.permits_continuity_claim());
+    assert_eq!(git_state(&repo, root.path()), before);
+}
+
+#[test]
 fn remote_continuity_reports_matching_and_stale_internal_refs_without_mutation() {
     let root = repository();
     let remote = continuity_remote(root.path());
