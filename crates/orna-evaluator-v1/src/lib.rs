@@ -2037,6 +2037,8 @@ impl Context<'_, '_> {
             ("union", [Value::List(left), Value::List(right)]) => self.union(left, right),
             ("count", [Value::List(values)]) => self.count(values),
             ("first", [Value::List(values)]) => self.first(values),
+            ("one", [Value::List(values)]) => self.one(values, None, depth),
+            ("one", [Value::List(values), predicate]) => self.one(values, Some(predicate), depth),
             ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("drop", [Value::List(values), Value::Int(count)]) => self.drop(values, count),
             ("map", [Value::List(values), transform]) => self.map(values, transform, depth),
@@ -2073,6 +2075,7 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | ("flatten" | "distinct" | "unique" | "pairs" | "count" | "first", [_])
+            | ("one", [_] | [_, _])
             | ("count", [_, _])
             | ("union", [_, _])
             | ("take", [_, _])
@@ -2165,6 +2168,39 @@ impl Context<'_, '_> {
     }
     fn first(&self, values: &[Value]) -> Result<Value, EvaluationError> {
         Ok(values.first().cloned().unwrap_or(Value::Null))
+    }
+    fn one(
+        &mut self,
+        values: &[Value],
+        predicate: Option<&Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        self.items(values.len())?;
+        let Some(predicate) = predicate else {
+            return match values {
+                [] => Err(error("ORNA-EVAL-RELATION-ONE-ZERO")),
+                [value] => Ok(value.clone()),
+                _ => Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE")),
+            };
+        };
+
+        let mut matching = None;
+        for value in values {
+            match self.invoke_predicate(predicate, value.clone(), depth + 1)? {
+                Value::Bool(true) => {
+                    if matching.is_some() {
+                        // The second matching value is sufficient to classify
+                        // the cardinality failure; do not invoke the callback
+                        // for any later input value.
+                        return Err(error("ORNA-EVAL-RELATION-ONE-MULTIPLE"));
+                    }
+                    matching = Some(value.clone());
+                }
+                Value::Bool(false) => {}
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            }
+        }
+        matching.ok_or_else(|| error("ORNA-EVAL-RELATION-ONE-ZERO"))
     }
     fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
         if count.is_negative() {
@@ -2681,6 +2717,11 @@ fn named_arguments(
         "chunk" => &["values", "size"],
         "flatten" | "distinct" | "unique" | "pairs" | "count" => &["values"],
         "first" => &["rows"],
+        "one" => match values.len() {
+            1 => &["rows"],
+            2 => &["rows", "predicate"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "union" => &["left", "right"],
         "take" => &["values", "count"],
         "drop" => &["values", "count"],
@@ -2746,7 +2787,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
     let Expr::Name { text, .. } = expression else {
         return None;
     };
-    matches!(text.as_str(), "first" | "map" | "flat_map").then_some(text.as_str())
+    matches!(text.as_str(), "first" | "one" | "map" | "flat_map").then_some(text.as_str())
 }
 
 fn standard_name<'a>(expression: &'a Expr, module: &str) -> Option<&'a str> {
