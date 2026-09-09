@@ -316,6 +316,57 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             && text(row, "sku") == "pencil"
             && integer(row, "quantity") == 7
     }));
+
+    let generation_after_exercise = final_state
+        .capture()
+        .await
+        .expect("exercise capture")
+        .generation()
+        .clone();
+    let books_after_exercise = final_state.committed_table_rows("Book").await.unwrap();
+    let loans_after_exercise = final_state.committed_table_rows("Loan").await.unwrap();
+    let stock_after_exercise = final_state.committed_table_rows("Stock").await.unwrap();
+    drop(final_state);
+
+    let duplicate_exercise = invoke(directory.path(), "run", "exercise");
+    assert!(!duplicate_exercise.status.success());
+    let stderr = String::from_utf8_lossy(&duplicate_exercise.stderr);
+    assert!(stderr.contains("error[E2200]"));
+    assert!(stderr.contains("failed atomically"));
+    assert!(!stderr.contains(directory.path().to_string_lossy().as_ref()));
+
+    let after_rejected_exercise = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after rejected duplicate exercise");
+    assert_eq!(
+        after_rejected_exercise
+            .capture()
+            .await
+            .expect("duplicate exercise capture")
+            .generation(),
+        &generation_after_exercise
+    );
+    assert_eq!(
+        after_rejected_exercise
+            .committed_table_rows("Book")
+            .await
+            .unwrap(),
+        books_after_exercise
+    );
+    assert_eq!(
+        after_rejected_exercise
+            .committed_table_rows("Loan")
+            .await
+            .unwrap(),
+        loans_after_exercise
+    );
+    assert_eq!(
+        after_rejected_exercise
+            .committed_table_rows("Stock")
+            .await
+            .unwrap(),
+        stock_after_exercise
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
