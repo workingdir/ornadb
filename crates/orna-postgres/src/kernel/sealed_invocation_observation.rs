@@ -970,8 +970,16 @@ mod tests {
     }
 
     fn capture_for_runtime(runtime: [u8; 16], generation: u64) -> CwdCapture {
+        capture_for_database_and_runtime([7; 16], runtime, generation)
+    }
+
+    fn capture_for_database_and_runtime(
+        database: [u8; 16],
+        runtime: [u8; 16],
+        generation: u64,
+    ) -> CwdCapture {
         CwdCapture::new(
-            CanonicalSnapshot::cwd([7; 16], runtime, generation.into()).unwrap(),
+            CanonicalSnapshot::cwd(database, runtime, generation.into()).unwrap(),
             [9; 32],
         )
         .unwrap()
@@ -1296,6 +1304,35 @@ mod tests {
             invocations[0].snapshot.as_row_ref().snapshot,
             *current_after_cwd_advance.snapshot()
         );
+        assert_eq!(arguments.len(), 1);
+        assert_eq!(arguments[0].invocation, invocations[0].reference);
+    }
+
+    #[test]
+    fn current_runtime_relations_exclude_a_matching_runtime_from_another_database() {
+        let current = capture_for_database_and_runtime([7; 16], [8; 16], 9);
+        let admitted_here = capture_for_database_and_runtime([7; 16], [8; 16], 1);
+        let admitted_elsewhere = capture_for_database_and_runtime([10; 16], [8; 16], 1);
+        let retained = vec![
+            observation(
+                &admitted_here,
+                2,
+                SealedInvocationObservationStatus::Running,
+            ),
+            observation(
+                &admitted_elsewhere,
+                3,
+                SealedInvocationObservationStatus::Succeeded,
+            ),
+        ];
+
+        let invocations =
+            project_current_runtime_sys_invocation_collection(retained.clone(), &current).unwrap();
+        let arguments =
+            project_current_runtime_sys_invocation_argument_collection(retained, &current).unwrap();
+
+        assert_eq!(invocations.len(), 1);
+        assert_eq!(invocations[0].id, InvocationId::from_bytes([2; 16]));
         assert_eq!(arguments.len(), 1);
         assert_eq!(arguments[0].invocation, invocations[0].reference);
     }
