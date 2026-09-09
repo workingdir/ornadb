@@ -3499,6 +3499,18 @@ impl Parser {
             let op = self.current().text.clone();
             self.bump();
             if matches!(op.as_str(), ".." | "..=") {
+                if matches!(lhs, Expr::Range { .. }) {
+                    let span = self.previous().span.clone();
+                    self.errors.push(Diagnostic::error(
+                        "ORNA-PARSE-001",
+                        "range expressions are non-associative",
+                        span,
+                    ));
+                    if self.can_start_expression() {
+                        let _ = self.recurse(|parser| parser.pratt(prec + 1));
+                    }
+                    break;
+                }
                 let rhs = if self.can_start_expression() {
                     self.recurse(|parser| parser.pratt(prec + 1))
                 } else {
