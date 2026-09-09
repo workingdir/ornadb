@@ -955,6 +955,34 @@ fn checkout_preflight_revalidation_rejects_index_head_and_branch_tip_drift() {
 }
 
 #[test]
+fn checkout_preflight_rejects_same_commit_detached_attachment_drift_without_mutation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(24))
+        .unwrap();
+
+    let target = git(root.path(), &["rev-parse", "HEAD"]);
+    git(root.path(), &["switch", "--detach", &target]);
+    let before_verification = repo.cwd_generation(RuntimeGeneration::new(24)).unwrap();
+
+    // CHECKOUT-1 steps 1 and 6 / ORNA-BRANCH-002: attachment is part of
+    // the state-bound preflight even where the selected commit is unchanged.
+    assert!(matches!(
+        repo.verify_checkout_preflight(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
+    ));
+
+    assert_eq!(
+        repo.cwd_generation(RuntimeGeneration::new(24)).unwrap(),
+        before_verification
+    );
+    assert!(git(root.path(), &["branch", "--show-current"]).is_empty());
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]), target);
+}
+
+#[test]
 fn checkout_force_authorization_is_canonical_and_stale_state_is_rejected() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
