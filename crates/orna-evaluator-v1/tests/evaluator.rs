@@ -1104,6 +1104,17 @@ fn std_collection_fallback_rejects_invalid_arguments_and_enforces_limits() {
             "std.collection.partition([1], value => true, extra: value => true)",
             "ORNA-EVAL-UNSUPPORTED",
         ),
+        ("std.collection.filter(1, value => true)", "ORNA-EVAL-TYPE"),
+        ("std.collection.filter([1], 1)", "ORNA-EVAL-TYPE"),
+        ("std.collection.filter([1], value => 1)", "ORNA-EVAL-TYPE"),
+        (
+            "std.collection.filter([1], () => true)",
+            "ORNA-EVAL-ARGUMENT",
+        ),
+        (
+            "std.collection.filter([1], value => true, extra: value => true)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
         (
             "std.collection.split_when(1, value => true)",
             "ORNA-EVAL-TYPE",
@@ -1288,6 +1299,62 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
     assert_eq!(
         code(evaluate_expression(
             "std.collection.partition([1, 2, 3], value => true)",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+#[test]
+fn std_collection_filter_accepts_direct_pipeline_and_named_calls() {
+    let expected = Value::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])).unwrap();
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.filter([1, 2, 3, 4], value => value % 2 == 0)",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        evaluate_expression(
+            "[1, 2, 3, 4] | std.collection.filter(predicate: value => value % 2 == 0)",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        evaluate_expression(
+            "std.collection.filter(predicate: value => value % 2 == 0, values: [1, 2, 3, 4])",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        call_module(
+            "fn keep_even(value: Int) = value % 2 == 0; fn run() = std.collection.filter([1, 2, 3, 4], keep_even);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_filter_enforces_limits() {
+    assert_eq!(
+        code(evaluate_expression(
+            "std.collection.filter([1, 2, 3], value => true)",
             &Environment::new(),
             Limits {
                 max_collection_items: 2,
