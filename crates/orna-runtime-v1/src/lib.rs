@@ -934,7 +934,6 @@ impl SysStreamProjection {
                 || matches!(
                     observation.status,
                     StreamObservationStatus::Completed
-                        | StreamObservationStatus::Failed
                         | StreamObservationStatus::Cancelled
                         | StreamObservationStatus::Orphaned
                 ))
@@ -7227,7 +7226,6 @@ async fn load_stream_observation_tx(
         && !matches!(
             status,
             StreamObservationStatus::Completed
-                | StreamObservationStatus::Failed
                 | StreamObservationStatus::Cancelled
                 | StreamObservationStatus::Orphaned
         );
@@ -18831,6 +18829,18 @@ mod tests {
         assert_eq!(
             failure_reference.as_row_ref().table_id,
             SYS_FAILURE_TABLE_ID
+        );
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        let current = state.current_runtime_sys_projections(&fence).await.unwrap();
+        assert_eq!(current.runs.len(), 1);
+        assert_eq!(current.streams.len(), 1);
+        assert_eq!(
+            current.streams[0].status_at_snapshot,
+            StreamObservationStatus::Failed
+        );
+        assert_eq!(
+            current.streams[0].last_failure,
+            Some(failure_reference.clone())
         );
         let retry = match state
             .stream_backend(writer)
