@@ -2357,9 +2357,10 @@ fn validate_loop_transfers(
             let enters_loop = loop_context.is_some();
             let mut body_locals = local.clone();
             if let (ControlKind::For, Some(binding), Some(iterable)) = (kind, binding, condition)
-                && let Type::List(element) = infer(iterable, scope, local, &mut Vec::new()).ty
+                && let Some(element) =
+                    finite_for_element_type(&infer(iterable, scope, local, &mut Vec::new()).ty)
             {
-                bind_pattern(binding, *element, &mut body_locals, &mut Vec::new());
+                bind_pattern(binding, element, &mut body_locals, &mut Vec::new());
             }
             if let Some(loop_context) = loop_context {
                 loops.push(loop_context);
@@ -3789,11 +3790,11 @@ fn infer_for(
     }
 
     let iterable = infer(iterable, scope, local, diagnostics);
-    let Type::List(element) = iterable.ty else {
+    let Some(element) = finite_for_element_type(&iterable.ty) else {
         if !matches!(iterable.ty, Type::Error) {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
-                "for control supports only list iteration in this semantic slice",
+                "for control supports only finite lists and integer ranges in this semantic slice",
             ));
         }
         return Inferred {
@@ -3802,13 +3803,24 @@ fn infer_for(
         };
     };
     let mut body_locals = local.clone();
-    bind_pattern(binding, *element, &mut body_locals, diagnostics);
+    bind_pattern(binding, element, &mut body_locals, diagnostics);
     let body = infer(body, scope, &body_locals, diagnostics);
     let mut effects = iterable.effects;
     effects.join(&body.effects);
     Inferred {
         ty: Type::Null,
         effects,
+    }
+}
+
+/// The runtime has a finite numeric-range contract only for canonical integer
+/// ranges. Keep all other `Iterable` forms fail-closed until their iteration
+/// and element-binding contracts are implemented.
+fn finite_for_element_type(iterable: &Type) -> Option<Type> {
+    match iterable {
+        Type::List(element) => Some((**element).clone()),
+        Type::Range(element) if element.as_ref() == &Type::Int => Some(Type::Int),
+        _ => None,
     }
 }
 
