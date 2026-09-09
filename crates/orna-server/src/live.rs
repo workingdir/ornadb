@@ -752,7 +752,17 @@ async fn run_host_actor(
                     .receive_with_application(&mut socket, now, &bytes, &mut application)
                     .await;
                 state.application.borrow_mut().replace(application);
-                let result = result.map(|outputs| (socket, outputs));
+                let result = match result {
+                    Ok(outputs) => Ok((socket, outputs)),
+                    // A canonical server-direction envelope, malformed CBOR,
+                    // or another invalid envelope is a protocol failure, not
+                    // an application diagnostic. Send RFC 6455 1002 before
+                    // this worker retires the attachment.
+                    Err(orna_live_v1::Error::InvalidMessage) => {
+                        Ok((socket, vec![WebSocketOutput::Close { code: Some(1002) }]))
+                    }
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(result);
             }
             ActorCommand::Close {
@@ -1972,7 +1982,7 @@ where
         .map_err(|_| ())?;
     *socket = returned;
     for output in outputs {
-        let closing = matches!(output, WebSocketOutput::Close);
+        let closing = matches!(output, WebSocketOutput::Close { .. });
         let Some(frame) =
             encode_websocket_output(&output, TransportLimits::default()).map_err(|_| ())?
         else {
