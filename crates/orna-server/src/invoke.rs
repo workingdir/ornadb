@@ -5086,4 +5086,98 @@ mod daemon_session_tests {
             RuntimeValue::Opaque(value) if value.opaque_type() == orna_standard::STD_UI_TYPE_ID
         ));
     }
+
+    #[test]
+    fn installed_cli_repl_closes_on_eof_or_malformed_terminal_input() {
+        for error in ["client.input_eof", "terminal.input_invalid_utf8"] {
+            let (active, standard) = active_and_standard();
+            let repl = standard
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| function.id() == orna_standard::STD_CLI_REPL_FUNCTION_ID)
+                .expect("the retained standard exposes std.cli.repl");
+            let principal = PrincipalId::from_bytes([0x98; 16]);
+            let security = SecuritySnapshot::new_with_function_targets(
+                active.pair(),
+                vec![SecurityFunctionTarget::verified_standard(
+                    repl.id(),
+                    standard.revision(),
+                    repl.current_revision(),
+                )],
+                vec![Principal::new(
+                    principal,
+                    PrincipalKind::User,
+                    PrincipalStatus::Active,
+                )],
+                Vec::new(),
+                vec![ExecuteGrant::new(principal, repl.id())],
+            )
+            .expect("standard security snapshot");
+            let session = security
+                .bind_authenticated_session(principal, Vec::new())
+                .expect("authenticated session");
+            let authorisation = match security
+                .authorise_execute(&session, InvocationTarget::new(repl.id(), active.pair()))
+            {
+                orna_core::security::ExecuteDecision::Allowed(authorisation) => authorisation,
+                decision => panic!("repl must authorise: {decision:?}"),
+            };
+            let root = InvocationId::from_bytes([0x98; 16]);
+            let broker = SharedInvokeBroker::session_only();
+            let bridge = broker
+                .install_session_bridge(root, 20)
+                .expect("session bridge installs");
+            broker.bind_dynamic_context(active.clone(), security, session.clone(), root);
+            let mut executor = InstalledClientResourceExecutor::new_with_broker(
+                PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent")
+                    .expect("kernel config"),
+                session,
+                active.clone(),
+                broker,
+                ResourceCancellation::new(),
+            );
+            executor.bind_current_invocation(root);
+
+            let worker = thread::spawn(move || {
+                orna_client::evaluate_client_function_with_executor(
+                    &active,
+                    &authorisation,
+                    &mut executor,
+                )
+            });
+            let request = loop {
+                if let Some(SessionServerFrame::InputRequested(request)) =
+                    bridge.try_take_outbound()
+                {
+                    break request;
+                }
+                thread::yield_now();
+            };
+            let response = if error == "client.input_eof" {
+                SessionClientFrame::InputEof {
+                    root_invocation_id: root,
+                    call_stream: 20,
+                    request_invocation_id: request.request_invocation_id,
+                }
+            } else {
+                SessionClientFrame::InputFailed {
+                    root_invocation_id: root,
+                    call_stream: 20,
+                    request_invocation_id: request.request_invocation_id,
+                    error: error.to_owned(),
+                }
+            };
+            bridge
+                .accept_response(response)
+                .expect("terminal response accepted");
+            assert!(matches!(
+                worker.join().expect("repl worker joins"),
+                Err(orna_client::ClientExecutionError::ExpressionEvaluation {
+                    source: orna_client::ClientExpressionError::InputUnavailable,
+                    ..
+                })
+            ));
+        }
+    }
 }
