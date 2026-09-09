@@ -197,6 +197,44 @@ fn incomplete_join_keeps_owner_nonterminal_and_prevents_publication() {
 }
 
 #[test]
+fn cancelled_owner_retries_child_join_without_regaining_publication() {
+    let (mut coordinator, owner) = active();
+    let child = coordinator.spawn_child(owner).unwrap();
+    let mut supervisor = Supervisor {
+        fail_join_once: Some(child),
+        ..Supervisor::default()
+    };
+
+    assert_eq!(
+        coordinator.cancel_with_children(owner, &mut supervisor),
+        Err(orna_execution_v1::CoordinationError::ChildOutstanding)
+    );
+    assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
+
+    // The same pre-cancellation lease may complete the already-requested
+    // structured cleanup, but it remains unable to publish afterwards.
+    coordinator
+        .cancel_with_children(owner, &mut supervisor)
+        .unwrap();
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert_eq!(
+        supervisor.events,
+        vec![('c', child), ('j', child), ('c', child), ('j', child)]
+    );
+
+    let mut provider = Provider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+    assert_eq!(
+        coordinator.execute(owner, &mut provider, &mut store, checkpoint(), &mut faults),
+        Outcome::RolledBack {
+            reason: RollbackReason::Cancelled,
+        }
+    );
+    assert_eq!(store.commits, 0);
+}
+
+#[test]
 fn transient_partial_join_failure_retries_normal_completion_without_publication() {
     let (mut coordinator, owner) = active();
     let first = coordinator.spawn_child(owner).unwrap();

@@ -323,10 +323,18 @@ impl ActivationCoordinator {
         Ok(self.activate_unchecked(activation))
     }
     pub fn cancel(&mut self, owner: OwnerLease) -> Result<(), CoordinationError> {
-        self.require_current(owner)?;
+        // A cancellation request revokes the live capability by advancing the
+        // current cancellation epoch.  Child cleanup can fail transiently, so
+        // the original owner must still be able to repeat that request and
+        // finish joining the same recorded children.  Requiring the complete
+        // lease here would turn the first cancellation into a stale-owner
+        // error on retry, leaving structured termination unfinishable.
+        self.require_owner_identity(owner)?;
         self.ending = true;
         let current = self.owner.as_mut().expect("checked");
-        current.cancellation_epoch += 1;
+        if current.cancellation_epoch == 0 {
+            current.cancellation_epoch += 1;
+        }
         self.phase = if self.children.values().any(|joined| !joined) {
             TransactionPhase::ChildrenJoining
         } else {
