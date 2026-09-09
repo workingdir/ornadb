@@ -1776,6 +1776,53 @@ fn interrupted_force_checkout_recovers_only_the_recorded_applied_generation() {
 }
 
 #[test]
+fn malformed_applied_checkout_journal_attachment_fails_before_recovery_mutation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "beta"]);
+    git(root.path(), &["switch", "beta"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("beta", RuntimeGeneration::new(41))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let mut interrupt = || Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired);
+    assert!(matches!(
+        repo.execute_validated_force_checkout_with_test_hook(&discard, &mut interrupt),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+
+    let journal_path = repo.runtime_paths().root().join("checkout-journal.bin");
+    let mut journal = fs::read(&journal_path).unwrap();
+    let applied_branch = journal
+        .windows(b"beta".len())
+        .rposition(|window| window == b"beta")
+        .expect("applied branch is journalled");
+    journal[applied_branch..applied_branch + b"beta".len()].copy_from_slice(b"main");
+    fs::write(&journal_path, &journal).unwrap();
+
+    let restarted = Repository::discover(root.path()).unwrap();
+    let before = git_state(&restarted, root.path());
+    assert!(matches!(
+        restarted.recover_pre_execution_checkout(),
+        Err(orna_repository_v1::RepositoryError::InvalidCheckoutJournal)
+    ));
+    assert_eq!(git_state(&restarted, root.path()), before);
+    assert_eq!(fs::read(&journal_path).unwrap(), journal);
+}
+
+#[test]
 fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

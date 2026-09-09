@@ -652,6 +652,38 @@ impl CheckoutRecoveryJournal {
         Ok(())
     }
 
+    /// Ensures every journalled generation belongs to the transition it
+    /// claims to record. Recovery must not treat independently decodable CWD
+    /// snapshots as interchangeable: the discard boundary retains the old
+    /// attachment, while the applied boundary must carry the selected target
+    /// attachment. This is deliberately checked before recovery can clear a
+    /// journal or invoke Git.
+    fn validate_generation_transition(&self) -> Result<(), RepositoryError> {
+        match (
+            self.phase,
+            self.before.as_ref(),
+            self.discarded.as_ref(),
+            self.after.as_ref(),
+        ) {
+            (CheckoutRecoveryPhase::Prepared, None, None, None) => Ok(()),
+            (CheckoutRecoveryPhase::Prepared, Some(_), None, None) => Ok(()),
+            (CheckoutRecoveryPhase::Discarded, Some(before), Some(discarded), None)
+                if discarded.head == before.head && discarded.branch == before.branch =>
+            {
+                Ok(())
+            }
+            (CheckoutRecoveryPhase::Applied, Some(before), Some(discarded), Some(after))
+                if discarded.head == before.head
+                    && discarded.branch == before.branch
+                    && after.head.as_ref() == Some(self.target.commit())
+                    && after.branch.as_deref() == self.target.branch_name() =>
+            {
+                Ok(())
+            }
+            _ => Err(RepositoryError::InvalidCheckoutJournal),
+        }
+    }
+
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECKOUT_JOURNAL_MAGIC);
@@ -691,14 +723,7 @@ impl CheckoutRecoveryJournal {
         )?;
         encode_optional_checkout_cwd(&mut bytes, self.discarded.as_ref())?;
         encode_optional_checkout_cwd(&mut bytes, self.after.as_ref())?;
-        match self.phase {
-            CheckoutRecoveryPhase::Prepared if self.discarded.is_none() && self.after.is_none() => {
-            }
-            CheckoutRecoveryPhase::Discarded
-                if self.discarded.is_some() && self.after.is_none() => {}
-            CheckoutRecoveryPhase::Applied if self.discarded.is_some() && self.after.is_some() => {}
-            _ => return Err(RepositoryError::InvalidCheckoutJournal),
-        }
+        self.validate_generation_transition()?;
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
@@ -782,13 +807,7 @@ impl CheckoutRecoveryJournal {
         {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
-        match phase {
-            CheckoutRecoveryPhase::Prepared if discarded.is_none() && after.is_none() => {}
-            CheckoutRecoveryPhase::Discarded if discarded.is_some() && after.is_none() => {}
-            CheckoutRecoveryPhase::Applied if discarded.is_some() && after.is_some() => {}
-            _ => return Err(RepositoryError::InvalidCheckoutJournal),
-        }
-        Ok(Self {
+        let journal = Self {
             target,
             runtime,
             force_token,
@@ -797,7 +816,9 @@ impl CheckoutRecoveryJournal {
             before,
             discarded,
             after,
-        })
+        };
+        journal.validate_generation_transition()?;
+        Ok(journal)
     }
 }
 
