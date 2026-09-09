@@ -468,6 +468,30 @@ mod tests {
     }
 
     #[test]
+    fn unprofiled_qualified_collection_fallbacks_are_rejected_without_state_change() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        assert_eq!(session.submit("let answer: Int = 40;"), Ok(None));
+        assert_eq!(
+            session.submit("answer + 2"),
+            Ok(Some(Value::int(42.into())))
+        );
+
+        for source in [
+            "std.collection.first([1, 2, 3])",
+            "std.collection.map([1, 2, 3], value => value)",
+        ] {
+            assert_eq!(
+                session.submit(source).unwrap_err().code(),
+                "ORNA-S012-UNRESOLVED",
+                "{source}"
+            );
+        }
+
+        assert_eq!(session.submit("answer"), Ok(Some(Value::int(40.into()))));
+        assert_eq!(session.submit("$_"), Ok(Some(Value::int(40.into()))));
+    }
+
+    #[test]
     fn repl_can_import_verified_standard_modules_absent_from_project_source() {
         let standard = "pub fn increment(value: Int): Int = value + 1;";
         let profile = StandardDependencyProfile::from_sources(
