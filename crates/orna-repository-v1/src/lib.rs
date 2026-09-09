@@ -594,6 +594,22 @@ struct CheckoutRecoveryJournal {
     runtime: RuntimeGeneration,
     force_token: CheckoutPlanToken,
     discard_paths: Vec<ManagedPath>,
+    phase: CheckoutRecoveryPhase,
+    before: Option<CwdGeneration>,
+    discarded: Option<CwdGeneration>,
+    after: Option<CwdGeneration>,
+}
+
+/// Durable Git-visible boundaries of one force-discard transition.
+///
+/// Each state is written only after the preceding Git operation has reached a
+/// fully observable CWD generation. Recovery therefore either recognizes an
+/// exact recorded generation or stops without applying a broad reset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CheckoutRecoveryPhase {
+    Prepared,
+    Discarded,
+    Applied,
 }
 
 impl CheckoutRecoveryJournal {
@@ -603,13 +619,43 @@ impl CheckoutRecoveryJournal {
             runtime: discard.preflight.cwd.runtime,
             force_token: discard.force_token,
             discard_paths: discard.discard_paths.clone(),
+            phase: CheckoutRecoveryPhase::Prepared,
+            before: Some(discard.preflight.cwd.clone()),
+            discarded: None,
+            after: None,
         }
+    }
+
+    fn matches_validated(&self, discard: &ValidatedCheckoutDiscard) -> bool {
+        self.target == discard.preflight.target
+            && self.runtime == discard.preflight.cwd.runtime
+            && self.force_token == discard.force_token
+            && self.discard_paths == discard.discard_paths
+            && self.before.as_ref() == Some(&discard.preflight.cwd)
+    }
+
+    fn record_discarded(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
+        if self.phase != CheckoutRecoveryPhase::Prepared || self.discarded.is_some() {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        self.phase = CheckoutRecoveryPhase::Discarded;
+        self.discarded = Some(cwd);
+        Ok(())
+    }
+
+    fn record_applied(&mut self, cwd: CwdGeneration) -> Result<(), RepositoryError> {
+        if self.phase != CheckoutRecoveryPhase::Discarded || self.after.is_some() {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        self.phase = CheckoutRecoveryPhase::Applied;
+        self.after = Some(cwd);
+        Ok(())
     }
 
     fn encode(&self) -> Result<Vec<u8>, RepositoryError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECKOUT_JOURNAL_MAGIC);
-        bytes.push(1);
+        bytes.push(2);
         bytes.extend_from_slice(&self.runtime.get().to_be_bytes());
         match &self.target {
             CheckoutTarget::Branch { name, commit } => {
@@ -632,6 +678,27 @@ impl CheckoutRecoveryJournal {
                     .ok_or(RepositoryError::InvalidCheckoutJournal)?,
             )?;
         }
+        bytes.push(match self.phase {
+            CheckoutRecoveryPhase::Prepared => 1,
+            CheckoutRecoveryPhase::Discarded => 2,
+            CheckoutRecoveryPhase::Applied => 3,
+        });
+        encode_checkout_cwd(
+            &mut bytes,
+            self.before
+                .as_ref()
+                .ok_or(RepositoryError::InvalidCheckoutJournal)?,
+        )?;
+        encode_optional_checkout_cwd(&mut bytes, self.discarded.as_ref())?;
+        encode_optional_checkout_cwd(&mut bytes, self.after.as_ref())?;
+        match self.phase {
+            CheckoutRecoveryPhase::Prepared if self.discarded.is_none() && self.after.is_none() => {
+            }
+            CheckoutRecoveryPhase::Discarded
+                if self.discarded.is_some() && self.after.is_none() => {}
+            CheckoutRecoveryPhase::Applied if self.discarded.is_some() && self.after.is_some() => {}
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        }
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
@@ -643,7 +710,8 @@ impl CheckoutRecoveryJournal {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
         let mut cursor = CHECKOUT_JOURNAL_MAGIC.len();
-        if take_byte(bytes, &mut cursor)? != 1 {
+        let version = take_byte(bytes, &mut cursor)?;
+        if version != 1 && version != 2 {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
         let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(
@@ -676,19 +744,59 @@ impl CheckoutRecoveryJournal {
         for _ in 0..count {
             discard_paths.push(ManagedPath::new(take_string(bytes, &mut cursor)?)?);
         }
-        if cursor != bytes.len()
-            || discard_paths.is_empty()
+        if discard_paths.is_empty()
             || discard_paths
                 .windows(2)
                 .any(|paths| paths[0].as_path() >= paths[1].as_path())
         {
             return Err(RepositoryError::InvalidCheckoutJournal);
         }
+        if version == 1 {
+            if cursor != bytes.len() {
+                return Err(RepositoryError::InvalidCheckoutJournal);
+            }
+            return Ok(Self {
+                target,
+                runtime,
+                force_token,
+                discard_paths,
+                phase: CheckoutRecoveryPhase::Prepared,
+                before: None,
+                discarded: None,
+                after: None,
+            });
+        }
+        let phase = match take_byte(bytes, &mut cursor)? {
+            1 => CheckoutRecoveryPhase::Prepared,
+            2 => CheckoutRecoveryPhase::Discarded,
+            3 => CheckoutRecoveryPhase::Applied,
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        };
+        let before = Some(decode_checkout_cwd(bytes, &mut cursor, object_id_length)?);
+        let discarded = decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length)?;
+        let after = decode_optional_checkout_cwd(bytes, &mut cursor, object_id_length)?;
+        if cursor != bytes.len()
+            || before.as_ref().is_none_or(|cwd| cwd.runtime != runtime)
+            || discarded.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
+            || after.as_ref().is_some_and(|cwd| cwd.runtime != runtime)
+        {
+            return Err(RepositoryError::InvalidCheckoutJournal);
+        }
+        match phase {
+            CheckoutRecoveryPhase::Prepared if discarded.is_none() && after.is_none() => {}
+            CheckoutRecoveryPhase::Discarded if discarded.is_some() && after.is_none() => {}
+            CheckoutRecoveryPhase::Applied if discarded.is_some() && after.is_some() => {}
+            _ => return Err(RepositoryError::InvalidCheckoutJournal),
+        }
         Ok(Self {
             target,
             runtime,
             force_token,
             discard_paths,
+            phase,
+            before,
+            discarded,
+            after,
         })
     }
 }
@@ -2081,6 +2189,7 @@ impl Repository {
             }
         }
         self.run(command)
+            .map(|_| ())
             .map_err(CheckoutExecutionError::Repository)?;
         if self
             .head()
@@ -2306,52 +2415,153 @@ impl Repository {
         self.verify_validated_checkout_discard_locked(discard)?;
         let journal = CheckoutRecoveryJournal::from_validated(discard);
         match self.read_checkout_recovery_journal_locked()? {
-            Some(existing) if existing != journal => Err(RepositoryError::CheckoutRecoveryRequired),
+            Some(existing) if !existing.matches_validated(discard) => {
+                Err(RepositoryError::CheckoutRecoveryRequired)
+            }
             Some(_) => Ok(()),
             None => self.write_checkout_recovery_journal_locked(&journal),
         }
     }
 
-    /// Admits a persisted force-discard intent to the destructive execution
-    /// boundary without performing an unrecoverable Git mutation.
+    /// Executes an admitted force-discard checkout through durable,
+    /// repository-local recovery boundaries.
     ///
-    /// The current journal records the exact preflight and consent, but not
-    /// the complete before-state or a post-mutation recovery phase. It can
-    /// therefore prove only that the caller is attempting to execute the same
-    /// durable intent it admitted. A caller must receive an explicit failure
-    /// until a higher layer supplies recoverable before/after coordination;
-    /// retaining the journal keeps the old CWD authoritative and prevents a
-    /// later checkout from interleaving with that intent.
+    /// Only the exact consented paths are restored from the selected target;
+    /// the subsequent ordinary `git switch` carries unrelated staged,
+    /// unstaged, and untracked state using Git's normal compatibility rules.
+    /// Before the scoped discard, after it, and after selection are each
+    /// journalled as complete CWD generations. Recovery consequently never
+    /// uses a blind reset after an interruption.
     pub fn execute_validated_force_checkout(
         &self,
         discard: &ValidatedCheckoutDiscard,
     ) -> Result<(), RepositoryError> {
-        let _lock = self.acquire_coordination_lock()?;
-        let expected = CheckoutRecoveryJournal::from_validated(discard);
-        match self.read_checkout_recovery_journal_locked()? {
-            Some(journal) if journal == expected => {}
-            Some(_) | None => return Err(RepositoryError::CheckoutRecoveryRequired),
-        }
-        self.verify_validated_checkout_discard_locked(discard)?;
-
-        // CHECKOUT-1 requires a durable before/after transition that recovery
-        // can compare after a crash. The pre-execution record above omits that
-        // state by design, so invoking Git here would make a failure after a
-        // visible mutation impossible to resolve safely.
-        Err(RepositoryError::CheckoutExecutionUnsafe)
+        self.execute_validated_force_checkout_impl(discard, None)
     }
 
-    /// Resolves a pre-execution force-discard journal after restart.
+    /// Test-only interruption seam for the post-selection durable boundary.
     ///
-    /// This boundary intentionally performs no checkout and does not recreate
-    /// a capability. It clears the durable intent only when a fresh preflight
-    /// exactly recreates its target, canonical force witness, and discard set.
-    /// Any drift leaves the journal retained for explicit operator recovery.
+    /// Production callers must use [`Self::execute_validated_force_checkout`].
+    /// The hook runs after the selected CWD generation has been durably
+    /// journalled and before journal completion, which lets real-Git tests
+    /// exercise restart recovery without weakening the production boundary.
+    pub fn execute_validated_force_checkout_with_test_hook(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+        hook: &mut dyn FnMut() -> Result<(), RepositoryError>,
+    ) -> Result<(), RepositoryError> {
+        self.execute_validated_force_checkout_impl(discard, Some(hook))
+    }
+
+    fn execute_validated_force_checkout_impl(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+        mut after_applied: Option<&mut dyn FnMut() -> Result<(), RepositoryError>>,
+    ) -> Result<(), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let mut journal = match self.read_checkout_recovery_journal_locked()? {
+            Some(journal)
+                if journal.matches_validated(discard)
+                    && journal.phase == CheckoutRecoveryPhase::Prepared =>
+            {
+                journal
+            }
+            Some(_) | None => return Err(RepositoryError::CheckoutRecoveryRequired),
+        };
+        self.verify_validated_checkout_discard_locked(discard)?;
+        if journal.before.as_ref() != Some(&discard.preflight.cwd) {
+            return Err(RepositoryError::CheckoutRecoveryRequired);
+        }
+
+        self.restore_checkout_discard_paths(discard)?;
+        journal.record_discarded(self.cwd_generation_locked(discard.preflight.cwd.runtime)?)?;
+        self.write_checkout_recovery_journal_locked(&journal)?;
+
+        self.switch_checkout_target(discard.preflight.target())?;
+        let after = self.cwd_generation_locked(discard.preflight.cwd.runtime)?;
+        if after.head.as_ref() != Some(discard.preflight.target.commit())
+            || after.branch.as_deref() != discard.preflight.target.branch_name()
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        journal.record_applied(after)?;
+        self.write_checkout_recovery_journal_locked(&journal)?;
+        if let Some(hook) = after_applied.as_mut() {
+            hook()?;
+        }
+        self.clear_checkout_recovery_journal_locked()
+    }
+
+    fn restore_checkout_discard_paths(
+        &self,
+        discard: &ValidatedCheckoutDiscard,
+    ) -> Result<(), RepositoryError> {
+        let mut command = self.command();
+        command
+            .args(["restore", "--source"])
+            .arg(discard.preflight.target.commit().as_str())
+            .args(["--staged", "--worktree", "--"]);
+        for path in &discard.discard_paths {
+            command.arg(path.as_path());
+        }
+        self.run(command).map(|_| ())
+    }
+
+    fn switch_checkout_target(&self, target: &CheckoutTarget) -> Result<(), RepositoryError> {
+        let mut command = self.command();
+        match target {
+            CheckoutTarget::Branch { name, .. } => {
+                command.args(["switch", "--"]).arg(name);
+            }
+            CheckoutTarget::Detached { commit } => {
+                command
+                    .args(["switch", "--detach", "--"])
+                    .arg(commit.as_str());
+            }
+        }
+        self.run(command).map(|_| ())
+    }
+
+    /// Resolves a force-discard journal after restart.
+    ///
+    /// A prepared transition preserves the recorded old CWD. A journalled
+    /// post-selection CWD completes by releasing the journal. A partial or
+    /// externally changed transition is retained and reported instead of
+    /// resetting files that no longer match its recorded generations.
     pub fn recover_pre_execution_checkout(&self) -> Result<(), RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
-        let Some(journal) = self.read_checkout_recovery_journal_locked()? else {
+        let Some(mut journal) = self.read_checkout_recovery_journal_locked()? else {
             return Ok(());
         };
+        if let Some(before) = journal.before.as_ref() {
+            let current = self.cwd_generation_locked(journal.runtime)?;
+            return match journal.phase {
+                CheckoutRecoveryPhase::Prepared if &current == before => {
+                    self.clear_checkout_recovery_journal_locked()
+                }
+                CheckoutRecoveryPhase::Applied if journal.after.as_ref() == Some(&current) => {
+                    self.clear_checkout_recovery_journal_locked()
+                }
+                CheckoutRecoveryPhase::Discarded
+                    if journal.discarded.as_ref() == Some(&current) =>
+                {
+                    self.switch_checkout_target(&journal.target)?;
+                    let after = self.cwd_generation_locked(journal.runtime)?;
+                    if after.head.as_ref() != Some(journal.target.commit())
+                        || after.branch.as_deref() != journal.target.branch_name()
+                    {
+                        return Err(RepositoryError::GitOperationFailed);
+                    }
+                    journal.record_applied(after)?;
+                    self.write_checkout_recovery_journal_locked(&journal)?;
+                    self.clear_checkout_recovery_journal_locked()
+                }
+                _ => Err(RepositoryError::CheckoutRecoveryRequired),
+            };
+        }
+        // Version-one journals did not contain enough state to recognize a
+        // post-mutation CWD. Retain their historical no-mutation recovery
+        // behavior rather than assuming a destructive transition completed.
         let selector = journal.target.branch_name().map_or_else(
             || journal.target.commit().as_str().to_owned(),
             str::to_owned,
@@ -3614,6 +3824,102 @@ fn take_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, RepositoryError> {
             .try_into()
             .map_err(|_| RepositoryError::InvalidPublicationJournal)?,
     ))
+}
+
+fn checkout_journal_optional_string(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<String>, RepositoryError> {
+    take_optional_string(bytes, cursor).map_err(|_| RepositoryError::InvalidCheckoutJournal)
+}
+
+fn checkout_journal_optional_bytes(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<Vec<u8>>, RepositoryError> {
+    take_optional_bytes(bytes, cursor).map_err(|_| RepositoryError::InvalidCheckoutJournal)
+}
+
+fn encode_checkout_cwd(bytes: &mut Vec<u8>, cwd: &CwdGeneration) -> Result<(), RepositoryError> {
+    put_optional_string(bytes, cwd.head.as_ref().map(GitCommitRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.branch.as_deref())
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.index.head.as_ref().map(GitCommitRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_string(bytes, cwd.index.tree.as_ref().map(IndexTreeRef::as_str))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    put_optional_bytes(bytes, Some(cwd.worktree.as_porcelain_v2_z()))
+        .map_err(|_| RepositoryError::InvalidCheckoutJournal)?;
+    bytes.extend_from_slice(&cwd.runtime.get().to_be_bytes());
+    Ok(())
+}
+
+fn encode_optional_checkout_cwd(
+    bytes: &mut Vec<u8>,
+    cwd: Option<&CwdGeneration>,
+) -> Result<(), RepositoryError> {
+    match cwd {
+        Some(cwd) => {
+            bytes.push(1);
+            encode_checkout_cwd(bytes, cwd)
+        }
+        None => {
+            bytes.push(0);
+            Ok(())
+        }
+    }
+}
+
+fn decode_checkout_cwd(
+    bytes: &[u8],
+    cursor: &mut usize,
+    object_id_length: usize,
+) -> Result<CwdGeneration, RepositoryError> {
+    let head = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| GitCommitRef::from_verified_commit(value, object_id_length))
+        .transpose()?;
+    let branch = checkout_journal_optional_string(bytes, cursor)?;
+    if branch
+        .as_deref()
+        .is_some_and(|branch| !valid_branch_name(branch))
+    {
+        return Err(RepositoryError::InvalidCheckoutJournal);
+    }
+    let index_head = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| GitCommitRef::from_verified_commit(value, object_id_length))
+        .transpose()?;
+    let index_tree = checkout_journal_optional_string(bytes, cursor)?
+        .map(|value| IndexTreeRef::from_verified_tree(value, object_id_length))
+        .transpose()?;
+    let worktree = checkout_journal_optional_bytes(bytes, cursor)?
+        .ok_or(RepositoryError::InvalidCheckoutJournal)?;
+    let runtime = RuntimeGeneration::new(u64::from_be_bytes(take_fixed_array::<8>(bytes, cursor)?));
+    if head != index_head {
+        return Err(RepositoryError::InvalidCheckoutJournal);
+    }
+    Ok(CwdGeneration {
+        head,
+        branch,
+        index: IndexGeneration {
+            head: index_head,
+            tree: index_tree,
+        },
+        worktree: WorktreeState(worktree),
+        runtime,
+    })
+}
+
+fn decode_optional_checkout_cwd(
+    bytes: &[u8],
+    cursor: &mut usize,
+    object_id_length: usize,
+) -> Result<Option<CwdGeneration>, RepositoryError> {
+    match take_byte(bytes, cursor)? {
+        0 => Ok(None),
+        1 => decode_checkout_cwd(bytes, cursor, object_id_length).map(Some),
+        _ => Err(RepositoryError::InvalidCheckoutJournal),
+    }
 }
 
 fn take_string(bytes: &[u8], cursor: &mut usize) -> Result<String, RepositoryError> {
