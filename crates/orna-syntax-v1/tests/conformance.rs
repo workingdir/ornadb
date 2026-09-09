@@ -37,6 +37,31 @@ fn range_token_wins_over_numeric_dot() {
     assert_eq!(t[1].text, "..=");
 }
 #[test]
+fn parses_bounded_and_optional_ranges_without_placeholder_endpoints() {
+    for (source, lower, upper, operator) in [
+        ("1..5", true, true, ".."),
+        ("1..", true, false, ".."),
+        ("..5", false, true, ".."),
+        ("1..=5", true, true, "..="),
+    ] {
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source:?}: {:?}", parsed.diagnostics);
+        match parsed.value {
+            Expr::Range {
+                lower: actual_lower,
+                operator: actual_operator,
+                upper: actual_upper,
+                ..
+            } => {
+                assert_eq!(actual_lower.is_some(), lower, "{source}");
+                assert_eq!(actual_upper.is_some(), upper, "{source}");
+                assert_eq!(actual_operator, operator, "{source}");
+            }
+            other => panic!("expected range for {source}, got {other:?}"),
+        }
+    }
+}
+#[test]
 fn unicode_nfc_comments_and_literals() {
     let t = lex("/* one /* two */ one */ fn cafe\u{301}() = 2026-09-05T12:30:00Z;").unwrap();
     let ident = t
