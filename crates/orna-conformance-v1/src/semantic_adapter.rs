@@ -25,7 +25,10 @@ use orna_runtime_v1::{
     RuntimeState, StreamHandler, StreamHandlerResult, StreamItem, StreamRunOutcome,
     StreamTableMutationBatch, TableMutation, TerminalOutcome, WriterLease,
 };
-use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, EffectSummary, ModuleInput, Namespace, StandardDependencyProfile,
+    analyze_with_catalogue,
+};
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
     CheckpointKey, Component, ConsumerIdentity, DiagnosticClass, DiagnosticCode, SafeDiagnostic,
@@ -2869,23 +2872,11 @@ fn admit_transaction_source(
         .modules
         .values()
         .find_map(|module| module.symbols.get(entry).map(|symbol| &symbol.effects))
-        && !summary
-            .effects
-            .iter()
-            .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+        && !controlled_table_effects(summary)
     {
-        return Err(Box::new(StageOutcome::Failed(
-            Diagnostic::new(
-                SafeText::new("ORNA-EVAL-EFFECT").expect("static effect diagnostic code"),
-                DiagnosticSeverity::Error,
-                SafeText::new(
-                    "controlled table activation requires only database read/write effects",
-                )
-                .expect("static effect diagnostic message"),
-            )
-            .expect("valid effect diagnostic")
-            .redacted(),
-        )));
+        return Err(Box::new(
+            StageOutcome::Failed(effect_admission_diagnostic()),
+        ));
     }
     if let Some(diagnostic) = analysis.diagnostics.first() {
         return Err(Box::new(StageOutcome::Failed(
@@ -2936,6 +2927,13 @@ fn admit_transaction_project(
             diagnostic.clone().redacted(),
         )));
     }
+    if let Some(summary) = project_entry_effects(&analysis, project, entry)
+        && !controlled_table_effects(summary)
+    {
+        return Err(Box::new(
+            StageOutcome::Failed(effect_admission_diagnostic()),
+        ));
+    }
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
     let mut table_assertions = TableAssertions::new();
@@ -2984,6 +2982,59 @@ fn admit_transaction_project(
         }));
     }
     Ok((functions, key_fields, table_assertions, module_assertions))
+}
+
+fn controlled_table_effects(summary: &EffectSummary) -> bool {
+    summary
+        .effects
+        .iter()
+        .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+}
+
+fn effect_admission_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-EVAL-EFFECT").expect("static effect diagnostic code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("controlled table activation requires only database read/write effects")
+            .expect("static effect diagnostic message"),
+    )
+    .expect("valid effect diagnostic")
+    .redacted()
+}
+
+fn project_entry_effects<'a>(
+    analysis: &'a orna_semantic_v1::Analysis,
+    project: &ProjectUnit,
+    entry: &str,
+) -> Option<&'a EffectSummary> {
+    let (entry_namespace, function) = entry.rsplit_once('.')?;
+    let unit = project.modules.iter().find(|unit| {
+        project_transaction_namespace(project, unit).ok().as_deref() == Some(entry_namespace)
+    })?;
+    let namespace = project_semantic_namespace(project, unit)?;
+    analysis
+        .modules
+        .get(&namespace)?
+        .symbols
+        .get(function)
+        .map(|symbol| &symbol.effects)
+}
+
+fn project_semantic_namespace(project: &ProjectUnit, unit: &SourceUnit) -> Option<Namespace> {
+    let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+    let path = unit
+        .source_id
+        .strip_prefix(&prefix)
+        .unwrap_or(&unit.source_id);
+    let stem = path.strip_suffix(".orna")?;
+    let mut components = stem.split('/').map(str::to_owned).collect::<Vec<_>>();
+    if components
+        .last()
+        .is_some_and(|component| component == "main")
+    {
+        components.pop();
+    }
+    Some(Namespace(components))
 }
 
 fn project_transaction_namespace(
@@ -4192,7 +4243,8 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 
 #[cfg(test)]
 mod transaction_admission_tests {
-    use super::{SourceUnit, StageOutcome, TransactionalEvaluator};
+    use super::{SourceUnit, StageOutcome, TransactionalEvaluator, admit_transaction_project};
+    use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
     use orna_foundation_v1::Value;
 
@@ -4275,6 +4327,40 @@ mod transaction_admission_tests {
                 .is_none(),
             "rejected transitive effects must not commit table rows"
         );
+    }
+
+    #[test]
+    fn project_entry_effect_is_rejected_before_retaining_transaction_modules() {
+        let project = ProjectUnit {
+            fixture_id: "project-effect-admission".into(),
+            project_id: "project-effect-admission".into(),
+            environment_id: None,
+            modules: vec![SourceUnit {
+                fixture_id: "project-effect-admission".into(),
+                source_id: "project-effect-admission/main.orna".into(),
+                parse_as: "module_unit".into(),
+                source: "pub table Note(id: Int) { text: Str, } fn seed() { Note.insert({ id: 4, text: \"blocked\" }); std.net.http.get(\"https://example.invalid\"); }".into(),
+            }],
+            loose_rows: Vec::new(),
+            expectations: ProjectExpectations {
+                environment: ProjectEnvironment {
+                    network: false,
+                    credentials: false,
+                    intrinsics: "Orna 1.0.0 core".into(),
+                    stdlib: None,
+                    initial_tables: "empty".into(),
+                },
+                steps: Vec::new(),
+            },
+        };
+
+        match admit_transaction_project(&project, Limits::default(), "main.seed") {
+            Err(outcome) => assert!(matches!(
+                *outcome,
+                StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-EFFECT"
+            )),
+            Ok(_) => panic!("external project entry effect reached transaction retention"),
+        }
     }
 }
 
