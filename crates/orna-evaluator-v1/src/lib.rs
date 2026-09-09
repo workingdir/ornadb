@@ -2015,6 +2015,7 @@ impl Context<'_, '_> {
                 Ok(Value::List(flattened))
             }
             ("unique", [Value::List(values)]) => self.unique(values),
+            ("take", [Value::List(values), Value::Int(count)]) => self.take(values, count),
             ("partition", [Value::List(values), predicate]) => {
                 self.partition(values, predicate, depth)
             }
@@ -2044,6 +2045,7 @@ impl Context<'_, '_> {
             }
             ("chunk", [_, _])
             | ("flatten" | "unique" | "pairs", [_])
+            | ("take", [_, _])
             | ("partition", [_, _])
             | ("split_when", [_, _])
             | ("group_by", [_, _])
@@ -2069,6 +2071,18 @@ impl Context<'_, '_> {
             self.items(unique.len())?;
         }
         Ok(Value::List(unique))
+    }
+    fn take(&self, values: &[Value], count: &BigInt) -> Result<Value, EvaluationError> {
+        if count.is_negative() {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let end = if count >= &BigInt::from(values.len()) {
+            values.len()
+        } else {
+            count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?
+        };
+        self.items(end)?;
+        Ok(Value::List(values[..end].to_vec()))
     }
     fn partition(
         &mut self,
@@ -2539,6 +2553,7 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "chunk" => &["values", "size"],
         "flatten" | "unique" | "pairs" => &["values"],
+        "take" => &["values", "count"],
         "partition" | "split_when" => &["values", "predicate"],
         "group_by" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
