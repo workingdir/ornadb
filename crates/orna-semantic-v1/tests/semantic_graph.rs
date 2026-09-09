@@ -2265,12 +2265,13 @@ fn stream_from_list_requires_the_closed_named_identity_argument() {
 }
 
 #[test]
-fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_take() {
+fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_slices() {
     let result = analyze(&[ModuleInput::new(
         "ranges.orna",
         r#"
             pub fn inside(value: Int) = value in 1..=5;
             pub fn first_ten(values: [Int]) = values | take(10);
+            pub fn after_ten(values: [Int]) = values | drop(10);
         "#,
     )]);
 
@@ -2285,6 +2286,11 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_take
         Type::Function { result, .. }
             if result.as_ref() == &Type::List(Box::new(Type::Int))
     ));
+    assert!(matches!(
+        &module.symbols["after_ten"].ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::List(Box::new(Type::Int))
+    ));
 
     let invalid = analyze(&[
         ModuleInput::new("text-range.orna", "fn bad() = \"a\"..\"z\";"),
@@ -2294,6 +2300,8 @@ fn authoritative_ranges_fixture_accepts_numeric_membership_and_integer_list_take
         ),
         ModuleInput::new("range-take.orna", "fn bad() = [1, 2, 3] | take(0..10);"),
         ModuleInput::new("negative-take.orna", "fn bad() = [1, 2, 3] | take(-1);"),
+        ModuleInput::new("range-drop.orna", "fn bad() = [1, 2, 3] | drop(0..10);"),
+        ModuleInput::new("negative-drop.orna", "fn bad() = [1, 2, 3] | drop(-1);"),
     ]);
     assert!(has(&invalid, DIAG_TYPE));
     assert!(has(&invalid, DIAG_UNSUPPORTED));
