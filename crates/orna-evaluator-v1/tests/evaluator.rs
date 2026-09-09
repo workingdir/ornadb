@@ -1129,6 +1129,238 @@ fn std_collection_first_is_callback_free_and_bounded() {
 }
 
 #[test]
+fn std_collection_one_accepts_predicate_free_direct_pipeline_named_and_function_calls() {
+    let expected = Value::int(7.into());
+    for expression in [
+        "one([7])",
+        "std.collection.one([7])",
+        "[7] | one()",
+        "[7] | std.collection.one()",
+        "one(rows: [7])",
+        "std.collection.one(rows: [7])",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn pick(rows: [Int]) = one(rows);",
+            "pick([7])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_one_accepts_predicate_overloads_in_input_order() {
+    let expected = Value::int(2.into());
+    for expression in [
+        "one([1, 2, 3], value => value == 2)",
+        "std.collection.one([1, 2, 3], value => value == 2)",
+        "[1, 2, 3] | one(predicate: value => value == 2)",
+        "[1, 2, 3] | std.collection.one(predicate: value => value == 2)",
+        "one(rows: [1, 2, 3], predicate: value => value == 2)",
+        "std.collection.one(predicate: value => value == 2, rows: [1, 2, 3])",
+        "one([1, 2, 3], predicate: value => value == 2)",
+    ] {
+        assert_eq!(
+            evaluate_expression(expression, &Environment::new(), Limits::default()).unwrap(),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        call_module(
+            "fn is_two(value: Int) = value == 2; fn pick(rows: [Int]) = one(rows, is_two);",
+            "pick([1, 2, 3])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+    assert_eq!(
+        call_module(
+            "fn is_two(value: Int) = value == 2; fn pick(rows: [Int]) = one(predicate: is_two, rows: rows);",
+            "pick([1, 2, 3])",
+            Limits::default(),
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn std_collection_one_distinguishes_zero_and_multiple_matches() {
+    for expression in [
+        "one([])",
+        "std.collection.one([])",
+        "[] | one()",
+        "one(rows: [])",
+        "one([1, 2], value => value > 3)",
+        "[1, 2] | std.collection.one(predicate: value => value > 3)",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-RELATION-ONE-ZERO",
+            "{expression}"
+        );
+    }
+    for expression in [
+        "one([1, 2])",
+        "std.collection.one([1, 2])",
+        "[1, 2] | one()",
+        "one(rows: [1, 2])",
+        "one([1, 2], value => value > 0)",
+        "std.collection.one(predicate: value => value > 0, rows: [1, 2])",
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            "ORNA-EVAL-RELATION-ONE-MULTIPLE",
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match() {
+    assert_eq!(
+        code(evaluate_expression(
+            "one([0, 2, 3], value => if value == 0 { 1 / 0 == 0 } else { value > 1 })",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "one([1, 0, 2], value => 1 / value == 1)",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "one([1, 2, 3], value => if value < 3 { true } else { 1 / 0 == 0 })",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-RELATION-ONE-MULTIPLE"
+    );
+}
+
+#[test]
+fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_keeps_limits() {
+    for (expression, expected) in [
+        ("one()", "ORNA-EVAL-UNSUPPORTED"),
+        ("one(1)", "ORNA-EVAL-TYPE"),
+        ("one([1], 1)", "ORNA-EVAL-TYPE"),
+        ("one([1], value => 1)", "ORNA-EVAL-TYPE"),
+        ("one([1], () => true)", "ORNA-EVAL-ARGUMENT"),
+        (
+            "one([1], value => value, value => value)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        ("one(values: [1])", "ORNA-EVAL-UNSUPPORTED"),
+        ("one(rows: [1], rows: [2])", "ORNA-EVAL-UNSUPPORTED"),
+        ("[1] | one(1)", "ORNA-EVAL-TYPE"),
+        ("[1] | one(rows: [2])", "ORNA-EVAL-UNSUPPORTED"),
+        (
+            "std.collection.one(predicate: value => true)",
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            "one([1, 0], value => 1 / value == 1)",
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+        ),
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                expression,
+                &Environment::new(),
+                Limits::default(),
+            )),
+            expected,
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        evaluate_expression(
+            "one([13])",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+        Value::int(13.into())
+    );
+    for limits in [
+        Limits {
+            max_collection_items: 2,
+            ..Limits::default()
+        },
+        Limits {
+            max_steps: 1,
+            ..Limits::default()
+        },
+    ] {
+        assert_eq!(
+            code(evaluate_expression(
+                "one([1, 2, 3])",
+                &Environment::new(),
+                limits
+            )),
+            "ORNA-EVAL-LIMIT"
+        );
+    }
+}
+
+#[test]
+fn root_one_remains_shadowable_and_does_not_change_relation_member_behavior() {
+    assert_eq!(
+        call_module(
+            "fn one(value: Int) = value + 100; fn run() = one(1);",
+            "run()",
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        evaluate_expression(
+            "if true { let one = value => value + 100; one(1) } else { 0 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap(),
+        Value::int(101.into())
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "Note.one()",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-NAME"
+    );
+}
+
+#[test]
 fn root_first_dispatch_respects_local_function_and_relation_shadowing() {
     assert_eq!(
         call_module(
