@@ -994,6 +994,28 @@ impl Context<'_, '_> {
                 }
                 self.unary(op, value)
             }
+            Expr::Range {
+                lower,
+                operator,
+                upper,
+                ..
+            } => {
+                let lower = lower
+                    .as_deref()
+                    .map(|value| self.evaluate(value, scope, depth + 1))
+                    .transpose()?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
+                let upper = upper
+                    .as_deref()
+                    .map(|value| self.evaluate(value, scope, depth + 1))
+                    .transpose()?;
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
+                self.integer_range_optional(lower, upper, operator == "..=")
+            }
             Expr::Binary { lhs, op, rhs, .. } => self.binary(op, lhs, rhs, scope, depth),
             Expr::List { elements, .. } => self.sequence(elements, scope, depth).map(Value::List),
             Expr::Tuple { elements, .. } => self.sequence(elements, scope, depth).map(Value::Tuple),
@@ -1446,6 +1468,33 @@ impl Context<'_, '_> {
         Ok(Value::Range {
             lower: Some(lower),
             upper: Some(upper),
+            upper_inclusive,
+        })
+    }
+    fn integer_range_optional(
+        &self,
+        lower: Option<Value>,
+        upper: Option<Value>,
+        upper_inclusive: bool,
+    ) -> Result<Value, EvaluationError> {
+        let lower = lower
+            .map(|value| match value {
+                Value::Int(value) => Ok(value),
+                _ => Err(error("ORNA-EVAL-TYPE")),
+            })
+            .transpose()?;
+        let upper = upper
+            .map(|value| match value {
+                Value::Int(value) => Ok(value),
+                _ => Err(error("ORNA-EVAL-TYPE")),
+            })
+            .transpose()?;
+        if lower.is_none() && upper.is_none() {
+            return Err(error("ORNA-EVAL-TYPE"));
+        }
+        Ok(Value::Range {
+            lower,
+            upper,
             upper_inclusive,
         })
     }
