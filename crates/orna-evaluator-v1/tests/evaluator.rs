@@ -1445,6 +1445,118 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
     );
 }
 
+#[test]
+fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
+    let half_open = Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())])),
+            ),
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(5.into())])),
+            ),
+            Raw::Bool(false),
+        ])),
+    ))
+    .unwrap();
+    assert_eq!(evaluate("1..5"), half_open);
+    assert_eq!(evaluate("1 in 1..5"), Value::new(Raw::Bool(true)).unwrap());
+    assert_eq!(evaluate("5 in 1..5"), Value::new(Raw::Bool(false)).unwrap());
+    assert_eq!(evaluate("5 in 1..=5"), Value::new(Raw::Bool(true)).unwrap());
+    assert_eq!(
+        evaluate("5..1"),
+        Value::new(Raw::Tag(
+            60019,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60013,
+                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(5.into())])),
+                ),
+                Raw::Tag(
+                    60013,
+                    Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(1.into())])),
+                ),
+                Raw::Bool(false),
+            ])),
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        evaluate("if true { let total = 0; for value in 1..5 { total += value; }; total }"),
+        Value::int(10.into())
+    );
+    assert_eq!(
+        evaluate("if true { let total = 0; for value in 1..=5 { total += value; }; total }"),
+        Value::int(15.into())
+    );
+    assert_eq!(
+        evaluate("if true { let total = 0; for value in 5..1 { total += value; }; total }"),
+        Value::int(0.into())
+    );
+}
+
+#[test]
+fn integer_ranges_reject_unsupported_forms_and_obey_finite_limits() {
+    for source in ["1.0..5.0", "1 in 1.0..5.0", "1 in 1..5.0"] {
+        assert_eq!(
+            code(evaluate_expression(
+                source,
+                &Environment::new(),
+                Limits::default()
+            )),
+            "ORNA-EVAL-TYPE",
+            "{source}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for value in 0..3 { value }; 0 }",
+            &Environment::new(),
+            Limits {
+                max_collection_items: 2,
+                ..Limits::default()
+            },
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+    let unbounded = Value::new(Raw::Tag(
+        60019,
+        Box::new(Raw::Array(vec![
+            Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(5.into())])),
+            ),
+            Raw::Bool(false),
+        ])),
+    ))
+    .unwrap();
+    let environment = Environment::from([("range".into(), unbounded)]);
+    assert_eq!(
+        evaluate_expression("-1 in range", &environment, Limits::default()).unwrap(),
+        Value::new(Raw::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "if true { for value in range { value }; 0 }",
+            &environment,
+            Limits::default(),
+        )),
+        "ORNA-EVAL-TYPE"
+    );
+    assert_eq!(
+        code(evaluate_expression(
+            "..5",
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-PARSE"
+    );
+}
+
 fn object_id(byte: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
 }
