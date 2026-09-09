@@ -4530,7 +4530,7 @@ fn standard_collection_operation_is_admitted(operation: &str, scope: &Scope) -> 
 fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Option<&'a str> {
     let path = qualified_path(callee)?;
     match path.as_slice() {
-        ["every"] | ["exists"] | ["first"] | ["one"] | ["map"] | ["flat_map"] => {
+        ["every"] | ["exists"] | ["first"] | ["one"] | ["map"] | ["flat_map"] | ["sum"] => {
             path.last().copied()
         }
         ["std", "collection", operation]
@@ -4539,6 +4539,16 @@ fn finite_list_collection_operation<'a>(callee: &'a Expr, scope: &Scope) -> Opti
             Some(*operation)
         }
         _ => None,
+    }
+}
+
+fn is_finite_list_sum_pipeline_stage(expression: &Expr, scope: &Scope) -> bool {
+    match expression {
+        Expr::Call { callee, .. } => finite_list_collection_operation(callee, scope) == Some("sum"),
+        Expr::Name { .. } | Expr::Field { .. } => {
+            finite_list_collection_operation(expression, scope) == Some("sum")
+        }
+        _ => false,
     }
 }
 
@@ -4564,6 +4574,7 @@ fn infer_finite_list_collection_call(
         ["exists"] => "exists",
         ["first"] => "first",
         ["one"] => "one",
+        ["sum"] => "sum",
         ["std", "collection", operation]
             if standard_collection_operation_is_admitted(operation, scope) =>
         {
@@ -4597,6 +4608,9 @@ fn infer_finite_list_collection(
     }
     if operation == "one" {
         return infer_finite_list_one(arguments, input, scope, local, diagnostics);
+    }
+    if operation == "sum" {
+        return infer_finite_list_sum(arguments, input, scope, local, diagnostics);
     }
     if matches!(operation, "every" | "exists") {
         return infer_finite_list_every_exists(
@@ -4728,6 +4742,138 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+/// Checks the finite-list `sum(rows)` signature. This semantic slice admits
+/// only exact integer accumulation; empty lists are contextually represented
+/// as `List<Int>` so the runtime can supply additive zero without inventing a
+/// dynamic element type. Effects from the input expression are retained.
+fn infer_finite_list_sum(
+    arguments: &[orna_syntax_v1::Argument],
+    input: Option<Inferred>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let mut row_slot = None;
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some("rows") => {
+                named_started = true;
+                Some(0)
+            }
+            Some(_) => {
+                named_started = true;
+                malformed = true;
+                None
+            }
+            None if named_started || positional >= 1 => {
+                malformed = true;
+                None
+            }
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 {
+                malformed = true;
+            } else if row_slot.replace(index).is_some() {
+                malformed = true;
+            }
+        }
+    }
+    if pipeline {
+        if row_slot.is_some() {
+            malformed = true;
+        }
+    } else if row_slot.is_none() {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let values = arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let value = if row_slot == Some(index) {
+                infer_finite_list_sum_rows(&argument.value, scope, local, diagnostics)
+            } else {
+                infer(&argument.value, scope, local, diagnostics)
+            };
+            effects.join(&value.effects);
+            value.ty
+        })
+        .collect::<Vec<_>>();
+    let rows = input
+        .map(|input| input.ty)
+        .or_else(|| row_slot.and_then(|index| values.get(index).cloned()))
+        .unwrap_or(Type::Error);
+
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "finite-list sum arguments do not match its static signature",
+        ));
+    }
+    if rows != Type::List(Box::new(Type::Int)) {
+        if matches!(&rows, Type::List(element) if is_absolute_affine_temperature(element)) {
+            diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+        } else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "finite-list sum requires a finite list of Int values",
+            ));
+        }
+    }
+    Inferred {
+        ty: if !malformed && rows == Type::List(Box::new(Type::Int)) {
+            Type::Int
+        } else {
+            Type::Error
+        },
+        effects,
+    }
+}
+
+fn infer_finite_list_sum_rows(
+    expression: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    if let Expr::Group { inner, .. } = expression
+        && is_empty_list_literal(expression)
+    {
+        return infer_finite_list_sum_rows(inner, scope, local, diagnostics);
+    }
+    if is_empty_list_literal(expression) {
+        return infer_contextual(
+            expression,
+            &Type::List(Box::new(Type::Int)),
+            scope,
+            local,
+            diagnostics,
+        );
+    }
+    infer(expression, scope, local, diagnostics)
+}
+
+fn is_empty_list_literal(expression: &Expr) -> bool {
+    match expression {
+        Expr::List { elements, .. } => elements.is_empty(),
+        Expr::Group { inner, .. } => is_empty_list_literal(inner),
+        _ => false,
+    }
 }
 
 /// Checks the finite-list `first(rows)` signature. The result is optional
@@ -5326,7 +5472,11 @@ fn infer_success_pipeline(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    let input = infer(lhs, scope, local, diagnostics);
+    let input = if is_finite_list_sum_pipeline_stage(rhs, scope) {
+        infer_finite_list_sum_rows(lhs, scope, local, diagnostics)
+    } else {
+        infer(lhs, scope, local, diagnostics)
+    };
     if diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
             == "a durable consumer function may own only one checkpointed source root"
@@ -5569,6 +5719,11 @@ fn infer_success_pipeline(
             }
         };
         return Inferred { ty, effects };
+    }
+    if let Type::List(_) = &input.ty
+        && finite_list_collection_operation(rhs, scope) == Some("sum")
+    {
+        return infer_finite_list_collection("sum", Some(input), &[], scope, local, diagnostics);
     }
     if let Expr::Name { text, .. } = rhs
         && let Type::List(element) = &input.ty

@@ -18,6 +18,7 @@ fn collection_catalogue() -> Catalogue {
         pub fn one(rows: [Int]): Int = 0;
         pub fn every(rows: [Int], predicate: fn(Int): Bool): Bool = true;
         pub fn exists(rows: [Int], predicate: fn(Int): Bool): Bool = false;
+        pub fn sum(rows: [Int]): Int = 0;
         pub fn map(rows: [Int], transform: fn(Int): Int): [Int] = rows;
         pub fn flat_map(rows: [Int], transform: fn(Int): [Int]): [Int] = rows;
     "#;
@@ -2939,6 +2940,101 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
         "#,
     )]);
     assert!(assertions.is_ok(), "{:?}", assertions.diagnostics);
+}
+
+#[test]
+fn finite_list_sum_returns_exact_int_for_supported_forms_and_preserves_effects() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "sum.orna",
+            r#"
+            table Reading(id: Int) { value: Int, }
+            table Other(id: Int) { value: Int, }
+            pub fn direct(rows: [Int]): Int = sum(rows);
+            pub fn direct_literal(): Int = sum([1, 2, 3]);
+            pub fn direct_empty(): Int = sum([]);
+            pub fn named(rows: [Int]): Int = sum(rows: rows);
+            pub fn pipeline(rows: [Int]): Int = rows | sum();
+            pub fn pipeline_empty(): Int = [] | sum();
+            pub fn qualified(rows: [Int]): Int = std.collection.sum(rows: rows);
+            pub fn qualified_pipeline(rows: [Int]): Int = rows | std.collection.sum();
+            pub fn reads(rows: [Int]): Int =
+                rows | map(transform: value => Reading.count() + value) | sum();
+            assert every(Reading, reading =>
+                exists(Other, other => sum([reading.value]) >= 0));
+        "#,
+        )],
+        &collection_catalogue(),
+    );
+
+    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.symbols.contains_key("direct"))
+        .expect("sum module");
+    for name in [
+        "direct",
+        "direct_literal",
+        "direct_empty",
+        "named",
+        "pipeline",
+        "pipeline_empty",
+        "qualified",
+        "qualified_pipeline",
+        "reads",
+    ] {
+        assert!(
+            matches!(
+                &module.symbols[name].ty,
+                Type::Function { result, .. } if result.as_ref() == &Type::Int
+            ),
+            "{name}: {:?}",
+            module.symbols[name].ty
+        );
+    }
+    assert!(
+        module.symbols["reads"]
+            .effects
+            .effects
+            .contains("database read")
+    );
+    assert!(module.symbols["reads"].effects.may_fail);
+}
+
+#[test]
+fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_names() {
+    let invalid = analyze(&[
+        ModuleInput::new("decimal.orna", "fn bad(values: [Decimal]) = sum(values);"),
+        ModuleInput::new("float.orna", "fn bad(values: [Float]) = sum(values);"),
+        ModuleInput::new("money.orna", "fn bad(values: [Money<GBP>]) = sum(values);"),
+        ModuleInput::new("affine.orna", "fn bad(values: [Float<C>]) = sum(values);"),
+        ModuleInput::new("wrong-collection.orna", "fn bad() = sum(1);"),
+        ModuleInput::new("missing-rows.orna", "fn bad() = sum();"),
+        ModuleInput::new(
+            "unknown-name.orna",
+            "fn bad(values: [Int]) = sum(values: values, extra: 1);",
+        ),
+        ModuleInput::new(
+            "pipeline-argument.orna",
+            "fn bad(values: [Int]) = values | sum(rows: values);",
+        ),
+    ]);
+    assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
+    assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
+
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "unprofiled.orna",
+            "fn bad(values: [Int]) = std.collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 }
 
 #[test]
