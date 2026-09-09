@@ -370,6 +370,147 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_without_publication() {
+    let directory = reference_project();
+    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["init", directory.path().to_str().expect("UTF-8 path")])
+        .output()
+        .expect("CLI process");
+    assert!(init.status.success());
+
+    let seed = invoke(directory.path(), "run", "seed");
+    assert!(seed.status.success(), "seed stderr: {:?}", seed.stderr);
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let seeded = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after seed");
+    let generation_after_seed = seeded
+        .capture()
+        .await
+        .expect("seed capture")
+        .generation()
+        .clone();
+    let books_after_seed = seeded.committed_table_rows("Book").await.unwrap();
+    drop(seeded);
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "library.lend",
+            "missing-book",
+            "reader-2",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!missing.status.success());
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(missing_stderr.contains("error[E2200]"));
+    assert!(missing_stderr.contains("failed atomically"));
+    assert!(!missing_stderr.contains("missing-book"));
+    assert!(!missing_stderr.contains("reader-2"));
+    assert!(!missing_stderr.contains(directory.path().to_string_lossy().as_ref()));
+
+    let after_missing = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after missing-book loan");
+    assert_eq!(
+        after_missing
+            .capture()
+            .await
+            .expect("missing capture")
+            .generation(),
+        &generation_after_seed
+    );
+    assert_eq!(
+        after_missing.committed_table_rows("Book").await.unwrap(),
+        books_after_seed
+    );
+    assert!(
+        after_missing
+            .committed_table_rows("Loan")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(after_missing);
+
+    let first_lend = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "library.lend",
+            "book-1",
+            "reader-1",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        first_lend.status.success(),
+        "lend stderr: {:?}",
+        first_lend.stderr
+    );
+
+    let lent = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after first loan");
+    let generation_after_lend = lent
+        .capture()
+        .await
+        .expect("lend capture")
+        .generation()
+        .clone();
+    let loans_after_lend = lent.committed_table_rows("Loan").await.unwrap();
+    assert_eq!(loans_after_lend.len(), 1);
+    assert_eq!(text(&loans_after_lend[0].1, "book_id"), "book-1");
+    assert_eq!(text(&loans_after_lend[0].1, "borrower"), "reader-1");
+    drop(lent);
+
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "library.lend",
+            "book-1",
+            "reader-2",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!duplicate.status.success());
+    let duplicate_stderr = String::from_utf8_lossy(&duplicate.stderr);
+    assert!(duplicate_stderr.contains("error[E2200]"));
+    assert!(duplicate_stderr.contains("failed atomically"));
+    assert!(!duplicate_stderr.contains("book-1"));
+    assert!(!duplicate_stderr.contains("reader-2"));
+    assert!(!duplicate_stderr.contains(directory.path().to_string_lossy().as_ref()));
+
+    let after_duplicate = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("reopen runtime after duplicate loan");
+    assert_eq!(
+        after_duplicate
+            .capture()
+            .await
+            .expect("duplicate capture")
+            .generation(),
+        &generation_after_lend
+    );
+    assert_eq!(
+        after_duplicate.committed_table_rows("Loan").await.unwrap(),
+        loans_after_lend
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
     let directory = reference_project();
