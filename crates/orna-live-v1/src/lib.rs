@@ -1254,7 +1254,7 @@ impl LiveHost {
                                 .and_then(|response| response.watch)
                                 .ok_or(Error::ApplicationRejected)?;
                             self.open_watch(session, watch, &outcome)?;
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Resync => {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
@@ -1271,6 +1271,7 @@ impl LiveHost {
                             self.complete(
                                 session,
                                 request,
+                                &envelope,
                                 DispatchOutcome {
                                     outcome: FrameOutcome::Resync { revisions },
                                     response: outcome.response,
@@ -1300,7 +1301,7 @@ impl LiveHost {
                                 .close_watch(session, watch)
                                 .map_err(map_serving)?;
                             self.watches.remove(&(session, watch));
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Event { .. } => {
                             let response =
@@ -1311,7 +1312,7 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Eval { .. } => {
                             let response = application.eval(session, request, &envelope.message)?;
@@ -1321,7 +1322,7 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Watch { .. } => {
                             let response =
@@ -1343,7 +1344,7 @@ impl LiveHost {
                                     .ok_or(Error::ApplicationRejected)?;
                                 self.open_watch(session, watch, &outcome)?;
                             }
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Cancel {
                             target_kind,
@@ -1401,6 +1402,7 @@ impl LiveHost {
                             self.complete(
                                 session,
                                 request,
+                                &envelope,
                                 DispatchOutcome {
                                     outcome: FrameOutcome::Cancelled,
                                     response: outcome.response,
@@ -1500,7 +1502,7 @@ impl LiveHost {
                                     extensions: BTreeMap::new(),
                                 }),
                             };
-                            self.complete(session, request, outcome).await
+                            self.complete(session, request, &envelope, outcome).await
                         }
                         Message::Snapshot { .. }
                         | Message::Delta { .. }
@@ -1891,6 +1893,7 @@ impl LiveHost {
         &mut self,
         session: [u8; 16],
         request: [u8; 16],
+        envelope: &Envelope,
         mut outcome: DispatchOutcome,
     ) -> Result<DispatchOutcome> {
         if self.runtime.is_some() {
@@ -1923,11 +1926,20 @@ impl LiveHost {
                     let response = Envelope::decode(
                         current
                             .terminal_outcome
+                            .as_ref()
                             .ok_or(Error::RuntimeUnavailable)?
                             .as_bytes(),
                         self.limits.protocol,
                     )
                     .map_err(|_| Error::RuntimeUnavailable)?;
+                    // A competing terminal claim is replayed exactly as
+                    // retained, but it still has to be a response that this
+                    // original request could have produced. Without this
+                    // check, a corrupt or mismatched winner could cross the
+                    // completion race as a protocol response.
+                    self.validate_recovered_response(&current, &response)
+                        .await?;
+                    self.validate_retained_response(fingerprint, envelope, &response)?;
                     outcome = DispatchOutcome {
                         outcome: if matches!(
                             response.message,
