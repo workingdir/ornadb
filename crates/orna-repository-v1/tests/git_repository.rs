@@ -9,9 +9,9 @@ use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CompactManifest, CompactRuntimeReceipt, CompactSegment,
-    CompactSegmentRole, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
-    ManagedPath, NativeObjectId, OrnaInternalRef, RemoteContinuity, Repository,
-    RequiredInternalRef, RuntimeGeneration, WorktreeState,
+    CompactSegmentRole, GitDeclaredObjectSetState, GitObjectKind, GitObjectState,
+    GitRepositoryMode, IndexGeneration, ManagedPath, NativeObjectId, OrnaInternalRef,
+    RemoteContinuity, Repository, RequiredInternalRef, RuntimeGeneration, WorktreeState,
 };
 use parquet::{
     basic::{Compression, PageType},
@@ -2225,6 +2225,56 @@ fn filtered_clone_keeps_promised_unavailable_and_materialized_objects_distinct_w
         git(
             &origin,
             &["for-each-ref", "--format=%(refname) %(objectname)"]
+        ),
+        origin_refs_before
+    );
+    assert_eq!(
+        git(&origin, &["count-objects", "-v"]),
+        origin_objects_before
+    );
+    drop(fixture);
+}
+
+#[test]
+fn declared_object_set_requires_every_object_to_be_materialized_or_proven_promised() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        // The fixture requires file-protocol filtering support. A
+        // configuration-only repository cannot prove a missing object is
+        // promised, so it is not evidence for declared-set completeness.
+        return;
+    };
+    let repo = Repository::discover(&clone).unwrap();
+    let before = git_state(&repo, &clone);
+    let origin = fixture.path().join("origin.git");
+    let origin_refs_before = git(
+        &origin,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let origin_objects_before = git(&origin, &["count-objects", "-v"]);
+    let materialized = git(&clone, &["rev-parse", "HEAD"]);
+    let unavailable = "0".repeat(materialized.len());
+
+    assert_eq!(
+        repo.observe_declared_git_object_set(&[&materialized, &promised])
+            .unwrap(),
+        GitDeclaredObjectSetState::Complete
+    );
+    assert_eq!(
+        repo.observe_declared_git_object_set(&[&materialized, &unavailable])
+            .unwrap(),
+        GitDeclaredObjectSetState::Incomplete
+    );
+    assert_eq!(
+        repo.observe_declared_git_object_set(&["not-a-native-object-id"])
+            .unwrap(),
+        GitDeclaredObjectSetState::Malformed
+    );
+
+    assert_eq!(git_state(&repo, &clone), before);
+    assert_eq!(
+        git(
+            &origin,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
         ),
         origin_refs_before
     );
