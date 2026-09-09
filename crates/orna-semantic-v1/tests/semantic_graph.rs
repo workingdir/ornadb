@@ -2657,6 +2657,58 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
 }
 
 #[test]
+fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
+    let valid = analyze(&[ModuleInput::new(
+        "integer-range-for.orna",
+        r#"
+            pub table Reading(id: Int) { value: Int, }
+
+            pub fn sum_to(limit: Int): Int {
+                let total = 0;
+                for value in 0..limit {
+                    total += value;
+                }
+                total
+            }
+
+            pub fn populate() {
+                for value in 0..2 {
+                    Reading.insert({ id: value, value: value });
+                }
+            }
+        "#,
+    )]);
+    let module = valid.modules.values().next().unwrap();
+    assert!(matches!(
+        &module.symbols["sum_to"].ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+    let populate = &module.symbols["populate"];
+    assert!(populate.effects.effects.contains("database write"));
+    assert!(populate.effects.may_fail);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
+
+    let typed_break = analyze(&[ModuleInput::new(
+        "integer-range-break.orna",
+        "fn invalid() { for value in 0..2 { break value; } }",
+    )]);
+    assert!(has(&typed_break, DIAG_TYPE));
+    assert!(!has(&typed_break, DIAG_UNSUPPORTED));
+
+    let decimal_range = analyze(&[ModuleInput::new(
+        "decimal-range-for.orna",
+        "fn invalid() { for value in 0.0..1.0 { value } }",
+    )]);
+    assert!(has(&decimal_range, DIAG_UNSUPPORTED));
+
+    let generic_range = analyze(&[ModuleInput::new(
+        "generic-range-for.orna",
+        "fn invalid(values: Range<Int>) { for value in values { value } }",
+    )]);
+    assert!(has(&generic_range, DIAG_UNSUPPORTED));
+}
+
+#[test]
 fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_transfers() {
     let valid = analyze(&[ModuleInput::new(
         "while.orna",
